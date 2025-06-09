@@ -27,19 +27,10 @@ func NewBlockStorage(db *mongo.Database) *BlockStorage {
 
 // Store stores a new block
 func (bs *BlockStorage) Store(ctx context.Context, block *models.Block) error {
-	// Check if block already exists to provide better error message
-	existing, err := bs.GetByNumber(ctx, block.Index)
-	if err != nil {
-		return fmt.Errorf("failed to check existing block: %w", err)
-	}
-	if existing != nil {
-		return fmt.Errorf("block with index %s already exists", block.Index.String())
-	}
-	
 	// Convert to BSON format for storage
 	blockBSON := block.ToBSON()
 	
-	_, err = bs.collection.InsertOne(ctx, blockBSON)
+	_, err := bs.collection.InsertOne(ctx, blockBSON)
 	if err != nil {
 		return fmt.Errorf("failed to store block: %w", err)
 	}
@@ -86,27 +77,40 @@ func (bs *BlockStorage) GetLatest(ctx context.Context) (*models.Block, error) {
 
 // GetLatestNumber retrieves the latest block number
 func (bs *BlockStorage) GetLatestNumber(ctx context.Context) (*models.BigInt, error) {
-	opts := options.FindOne().
-		SetSort(bson.M{"index": -1}).
-		SetProjection(bson.M{"index": 1})
-	
-	var result struct {
-		Index string `bson:"index"`
-	}
-	
-	err := bs.collection.FindOne(ctx, bson.M{}, opts).Decode(&result)
+	// Get all block indices and find the maximum numerically
+	opts := options.Find().SetProjection(bson.M{"index": 1})
+	cursor, err := bs.collection.Find(ctx, bson.M{}, opts)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			return nil, nil // Return nil if no blocks exist
+		return nil, fmt.Errorf("failed to find blocks: %w", err)
+	}
+	defer cursor.Close(ctx)
+	
+	var maxBlockNumber *models.BigInt
+	
+	for cursor.Next(ctx) {
+		var result struct {
+			Index string `bson:"index"`
 		}
-		return nil, fmt.Errorf("failed to get latest block number: %w", err)
+		
+		if err := cursor.Decode(&result); err != nil {
+			return nil, fmt.Errorf("failed to decode block: %w", err)
+		}
+		
+		blockNumber, err := models.NewBigIntFromString(result.Index)
+		if err != nil {
+			continue // Skip invalid block numbers
+		}
+		
+		if maxBlockNumber == nil || blockNumber.Cmp(maxBlockNumber.Int) > 0 {
+			maxBlockNumber = blockNumber
+		}
 	}
 	
-	bigInt, err := models.NewBigIntFromString(result.Index)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse block number: %w", err)
+	if err := cursor.Err(); err != nil {
+		return nil, fmt.Errorf("cursor error: %w", err)
 	}
-	return bigInt, nil
+	
+	return maxBlockNumber, nil
 }
 
 // Count returns the total number of blocks
