@@ -87,6 +87,14 @@ func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfac
 func (rm *RoundManager) Start(ctx context.Context) error {
 	rm.logger.WithContext(ctx).Info("Starting Round Manager")
 
+	// Ensure any previous timers are stopped
+	rm.roundMutex.Lock()
+	if rm.roundTimer != nil {
+		rm.roundTimer.Stop()
+		rm.roundTimer = nil
+	}
+	rm.roundMutex.Unlock()
+
 	// Get latest block number to determine starting round
 	latestBlockNumber, err := rm.storage.BlockStorage().GetLatestNumber(ctx)
 	if err != nil {
@@ -108,6 +116,27 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 		nextRoundNumber.SetInt64(1)
 		rm.logger.WithContext(ctx).Info("No existing blocks found, starting from block 1")
 	}
+	
+	// Keep checking until we find a block number that doesn't exist
+	for {
+		existingBlock, err := rm.storage.BlockStorage().GetByNumber(ctx, nextRoundNumber)
+		if err != nil {
+			return fmt.Errorf("failed to check if block %s exists: %w", nextRoundNumber.String(), err)
+		}
+		if existingBlock == nil {
+			// Found a gap - this is our next block number
+			break
+		}
+		
+		rm.logger.WithContext(ctx).
+			WithField("blockNumber", nextRoundNumber.String()).
+			Debug("Block already exists, incrementing to find next available number")
+		nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
+	}
+	
+	rm.logger.WithContext(ctx).
+		WithField("finalRoundNumber", nextRoundNumber.String()).
+		Info("Found next available block number for new round")
 	
 	if err := rm.startNewRound(ctx, nextRoundNumber); err != nil {
 		return fmt.Errorf("failed to start initial round: %w", err)
@@ -220,6 +249,11 @@ func (rm *RoundManager) startNewRound(ctx context.Context, roundNumber *models.B
 	rm.roundMutex.Lock()
 	defer rm.roundMutex.Unlock()
 
+	// Stop any existing timer
+	if rm.roundTimer != nil {
+		rm.roundTimer.Stop()
+	}
+
 	rm.currentRound = &Round{
 		Number:      roundNumber,
 		StartTime:   time.Now(),
@@ -248,6 +282,16 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	if rm.currentRound == nil {
 		rm.roundMutex.Unlock()
 		return fmt.Errorf("no current round to process")
+	}
+
+	// Check if round is already being processed
+	if rm.currentRound.State != RoundStateCollecting {
+		rm.roundMutex.Unlock()
+		rm.logger.WithContext(ctx).
+			WithField("roundNumber", rm.currentRound.Number.String()).
+			WithField("state", rm.currentRound.State.String()).
+			Debug("Round already being processed, skipping")
+		return nil
 	}
 
 	// Change state to processing
