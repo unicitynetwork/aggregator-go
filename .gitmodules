@@ -1,0 +1,3 @@
+[submodule "aggregator-ts"]
+	path = aggregator-ts
+	url = https://github.com/unicitynetwork/aggregators_net.git
