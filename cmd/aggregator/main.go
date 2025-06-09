@@ -56,6 +56,11 @@ func main() {
 	// Initialize service
 	aggregatorService := service.NewAggregatorService(cfg, log, storage)
 
+	// Start the aggregator service
+	if err := aggregatorService.Start(context.Background()); err != nil {
+		log.WithComponent("main").WithError(err).Fatal("Failed to start aggregator service")
+	}
+
 	// Initialize gateway server
 	server := gateway.NewServer(cfg, log, storage, aggregatorService)
 
@@ -84,6 +89,11 @@ func main() {
 	// Stop server
 	if err := server.Stop(shutdownCtx); err != nil {
 		log.WithComponent("main").WithError(err).Error("Failed to stop server gracefully")
+	}
+
+	// Stop aggregator service
+	if err := aggregatorService.Stop(shutdownCtx); err != nil {
+		log.WithComponent("main").WithError(err).Error("Failed to stop aggregator service gracefully")
 	}
 
 	// Close storage

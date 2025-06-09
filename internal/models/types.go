@@ -65,6 +65,14 @@ func (b *BigInt) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("invalid big int: must be string or number")
 }
 
+// String returns the string representation for BSON compatibility
+func (b *BigInt) String() string {
+	if b.Int == nil {
+		return "0"
+	}
+	return b.Int.String()
+}
+
 // HexBytes represents byte array that serializes to/from hex string
 type HexBytes []byte
 
@@ -112,6 +120,7 @@ func (h HexBytes) String() string {
 	return hex.EncodeToString(h)
 }
 
+
 // Timestamp wraps time.Time for consistent JSON serialization
 type Timestamp struct {
 	time.Time
@@ -149,6 +158,7 @@ func (t *Timestamp) UnmarshalJSON(data []byte) error {
 	t.Time = time.UnixMilli(millis)
 	return nil
 }
+
 
 // RequestID represents a 68-character hex request ID (4 chars algorithm + 64 chars hash)
 type RequestID string

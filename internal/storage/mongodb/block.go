@@ -27,7 +27,19 @@ func NewBlockStorage(db *mongo.Database) *BlockStorage {
 
 // Store stores a new block
 func (bs *BlockStorage) Store(ctx context.Context, block *models.Block) error {
-	_, err := bs.collection.InsertOne(ctx, block)
+	// Check if block already exists to provide better error message
+	existing, err := bs.GetByNumber(ctx, block.Index)
+	if err != nil {
+		return fmt.Errorf("failed to check existing block: %w", err)
+	}
+	if existing != nil {
+		return fmt.Errorf("block with index %s already exists", block.Index.String())
+	}
+	
+	// Convert to BSON format for storage
+	blockBSON := block.ToBSON()
+	
+	_, err = bs.collection.InsertOne(ctx, blockBSON)
 	if err != nil {
 		return fmt.Errorf("failed to store block: %w", err)
 	}
@@ -36,30 +48,40 @@ func (bs *BlockStorage) Store(ctx context.Context, block *models.Block) error {
 
 // GetByNumber retrieves a block by number
 func (bs *BlockStorage) GetByNumber(ctx context.Context, blockNumber *models.BigInt) (*models.Block, error) {
-	var block models.Block
-	err := bs.collection.FindOne(ctx, bson.M{"index": blockNumber.String()}).Decode(&block)
+	var blockBSON models.BlockBSON
+	err := bs.collection.FindOne(ctx, bson.M{"index": blockNumber.String()}).Decode(&blockBSON)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get block by number: %w", err)
 	}
-	return &block, nil
+	
+	block, err := blockBSON.FromBSON()
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+	}
+	return block, nil
 }
 
 // GetLatest retrieves the latest block
 func (bs *BlockStorage) GetLatest(ctx context.Context) (*models.Block, error) {
 	opts := options.FindOne().SetSort(bson.M{"index": -1})
 	
-	var block models.Block
-	err := bs.collection.FindOne(ctx, bson.M{}, opts).Decode(&block)
+	var blockBSON models.BlockBSON
+	err := bs.collection.FindOne(ctx, bson.M{}, opts).Decode(&blockBSON)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get latest block: %w", err)
 	}
-	return &block, nil
+	
+	block, err := blockBSON.FromBSON()
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+	}
+	return block, nil
 }
 
 // GetLatestNumber retrieves the latest block number
@@ -69,17 +91,22 @@ func (bs *BlockStorage) GetLatestNumber(ctx context.Context) (*models.BigInt, er
 		SetProjection(bson.M{"index": 1})
 	
 	var result struct {
-		Index *models.BigInt `bson:"index"`
+		Index string `bson:"index"`
 	}
 	
 	err := bs.collection.FindOne(ctx, bson.M{}, opts).Decode(&result)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
-			return models.NewBigInt(nil), nil // Return 0 if no blocks exist
+			return nil, nil // Return nil if no blocks exist
 		}
 		return nil, fmt.Errorf("failed to get latest block number: %w", err)
 	}
-	return result.Index, nil
+	
+	bigInt, err := models.NewBigIntFromString(result.Index)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse block number: %w", err)
+	}
+	return bigInt, nil
 }
 
 // Count returns the total number of blocks
@@ -109,11 +136,16 @@ func (bs *BlockStorage) GetRange(ctx context.Context, fromBlock, toBlock *models
 
 	var blocks []*models.Block
 	for cursor.Next(ctx) {
-		var block models.Block
-		if err := cursor.Decode(&block); err != nil {
+		var blockBSON models.BlockBSON
+		if err := cursor.Decode(&blockBSON); err != nil {
 			return nil, fmt.Errorf("failed to decode block: %w", err)
 		}
-		blocks = append(blocks, &block)
+		
+		block, err := blockBSON.FromBSON()
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+		}
+		blocks = append(blocks, block)
 	}
 
 	if err := cursor.Err(); err != nil {

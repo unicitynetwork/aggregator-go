@@ -9,23 +9,55 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
 // AggregatorService implements the business logic for the aggregator
 type AggregatorService struct {
-	config  *config.Config
-	logger  *logger.Logger
-	storage interfaces.Storage
+	config       *config.Config
+	logger       *logger.Logger
+	storage      interfaces.Storage
+	roundManager *round.RoundManager
 }
 
 // NewAggregatorService creates a new aggregator service
 func NewAggregatorService(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) *AggregatorService {
+	roundManager := round.NewRoundManager(cfg, logger, storage)
+	
 	return &AggregatorService{
-		config:  cfg,
-		logger:  logger,
-		storage: storage,
+		config:       cfg,
+		logger:       logger,
+		storage:      storage,
+		roundManager: roundManager,
 	}
+}
+
+// Start starts the aggregator service and round manager
+func (as *AggregatorService) Start(ctx context.Context) error {
+	as.logger.WithContext(ctx).Info("Starting Aggregator Service")
+	
+	// Start the round manager
+	if err := as.roundManager.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start round manager: %w", err)
+	}
+	
+	as.logger.WithContext(ctx).Info("Aggregator Service started successfully")
+	return nil
+}
+
+// Stop stops the aggregator service and round manager
+func (as *AggregatorService) Stop(ctx context.Context) error {
+	as.logger.WithContext(ctx).Info("Stopping Aggregator Service")
+	
+	// Stop the round manager
+	if err := as.roundManager.Stop(ctx); err != nil {
+		as.logger.WithContext(ctx).WithError(err).Error("Failed to stop round manager")
+		return fmt.Errorf("failed to stop round manager: %w", err)
+	}
+	
+	as.logger.WithContext(ctx).Info("Aggregator Service stopped successfully")
+	return nil
 }
 
 // SubmitCommitment handles commitment submission
@@ -37,7 +69,9 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *gateway.
 	}
 	
 	if existing != nil {
-		return nil, fmt.Errorf("commitment with requestId %s already exists", req.RequestID)
+		return &gateway.SubmitCommitmentResponse{
+			Status: "REQUEST_ID_EXISTS",
+		}, nil
 	}
 
 	// Create commitment
@@ -48,10 +82,19 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *gateway.
 		return nil, fmt.Errorf("failed to store commitment: %w", err)
 	}
 
+	// Add commitment to current round for processing
+	if err := as.roundManager.AddCommitment(ctx, commitment); err != nil {
+		as.logger.WithContext(ctx).
+			WithField("requestId", req.RequestID).
+			WithError(err).
+			Warn("Failed to add commitment to round - will be processed in next round")
+		// Don't fail the request, the commitment is stored and will be picked up
+	}
+
 	as.logger.WithContext(ctx).WithField("requestId", req.RequestID).Info("Commitment submitted successfully")
 
 	response := &gateway.SubmitCommitmentResponse{
-		Status: "success",
+		Status: "SUCCESS",
 	}
 
 	// Generate receipt if requested
@@ -59,7 +102,7 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *gateway.
 		// TODO: Implement receipt generation with actual signing
 		receipt := models.NewReceipt(
 			commitment,
-			"ed25519",
+			"secp256k1",
 			models.HexBytes("mock_public_key"),
 			models.HexBytes("mock_signature"),
 		)
@@ -93,19 +136,20 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *gateway
 		return &gateway.GetInclusionProofResponse{InclusionProof: proof}, nil
 	}
 
-	// TODO: Generate actual inclusion proof from SMT
-	// For now, return a mock proof indicating inclusion
+	// TODO: Generate actual inclusion proof from SMT when available
+	// For now, return a basic proof indicating inclusion
 	proof := models.NewInclusionProof(
 		req.RequestID,
 		record.BlockNumber,
 		record.LeafIndex,
 		[]models.ProofNode{}, // TODO: Generate real proof path
-		models.HexBytes("mock_root_hash"),
+		models.NewHexBytes([]byte(as.roundManager.GetSMT().GetRootHash())),
 		true,
 	)
 
 	return &gateway.GetInclusionProofResponse{InclusionProof: proof}, nil
 }
+
 
 // GetNoDeletionProof retrieves the global no-deletion proof
 func (as *AggregatorService) GetNoDeletionProof(ctx context.Context) (*gateway.GetNoDeletionProofResponse, error) {
