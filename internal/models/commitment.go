@@ -2,11 +2,10 @@ package models
 
 // Authenticator represents the authentication data for a commitment
 type Authenticator struct {
-	StateHash HexBytes `json:"stateHash" bson:"stateHash"`
+	Algorithm string   `json:"algorithm" bson:"algorithm"`
 	PublicKey HexBytes `json:"publicKey" bson:"publicKey"`
 	Signature HexBytes `json:"signature" bson:"signature"`
-	SignAlg   string   `json:"signAlg" bson:"signAlg"`
-	HashAlg   string   `json:"hashAlg" bson:"hashAlg"`
+	StateHash HexBytes `json:"stateHash" bson:"stateHash"`
 }
 
 // Commitment represents a state transition request
@@ -83,4 +82,26 @@ func NewReceipt(commitment *Commitment, algorithm string, publicKey, signature H
 			StateHash:       commitment.Authenticator.StateHash,
 		},
 	}
+}
+
+// API-compatible types for external communication
+
+// APIInclusionProof represents a proof for external API (TypeScript compatible)
+type APIInclusionProof struct {
+	MerkleTreePath  *MerkleTreePath `json:"merkleTreePath"`
+	Authenticator   *Authenticator  `json:"authenticator"`
+	TransactionHash *HexBytes       `json:"transactionHash"`
+}
+
+// MerkleTreeStep represents a single step in a Merkle tree path
+type MerkleTreeStep struct {
+	Branch  []string `json:"branch"`
+	Path    string   `json:"path"`
+	Sibling *string  `json:"sibling"`
+}
+
+// MerkleTreePath represents the path to verify inclusion in a Merkle tree
+type MerkleTreePath struct {
+	Root  string           `json:"root"`
+	Steps []MerkleTreeStep `json:"steps"`
 }

@@ -15,7 +15,7 @@ type SubmitCommitmentRequest struct {
 	RequestID       models.RequestID       `json:"requestId"`
 	TransactionHash models.TransactionHash `json:"transactionHash"`
 	Authenticator   models.Authenticator   `json:"authenticator"`
-	Receipt         bool                   `json:"receipt,omitempty"`
+	Receipt         *bool                  `json:"receipt,omitempty"`
 }
 
 // SubmitCommitmentResponse represents the submit_commitment response
