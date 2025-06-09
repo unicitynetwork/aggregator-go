@@ -27,7 +27,8 @@ func NewAggregatorRecordStorage(db *mongo.Database) *AggregatorRecordStorage {
 
 // Store stores a new aggregator record
 func (ars *AggregatorRecordStorage) Store(ctx context.Context, record *models.AggregatorRecord) error {
-	_, err := ars.collection.InsertOne(ctx, record)
+	recordBSON := record.ToBSON()
+	_, err := ars.collection.InsertOne(ctx, recordBSON)
 	if err != nil {
 		return fmt.Errorf("failed to store aggregator record: %w", err)
 	}
@@ -42,7 +43,7 @@ func (ars *AggregatorRecordStorage) StoreBatch(ctx context.Context, records []*m
 
 	docs := make([]interface{}, len(records))
 	for i, record := range records {
-		docs[i] = record
+		docs[i] = record.ToBSON()
 	}
 
 	_, err := ars.collection.InsertMany(ctx, docs)
@@ -54,15 +55,20 @@ func (ars *AggregatorRecordStorage) StoreBatch(ctx context.Context, records []*m
 
 // GetByRequestID retrieves an aggregator record by request ID
 func (ars *AggregatorRecordStorage) GetByRequestID(ctx context.Context, requestID models.RequestID) (*models.AggregatorRecord, error) {
-	var record models.AggregatorRecord
-	err := ars.collection.FindOne(ctx, bson.M{"requestId": requestID}).Decode(&record)
+	var recordBSON models.AggregatorRecordBSON
+	err := ars.collection.FindOne(ctx, bson.M{"requestId": string(requestID)}).Decode(&recordBSON)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get aggregator record by request ID: %w", err)
 	}
-	return &record, nil
+	
+	record, err := recordBSON.FromBSON()
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+	}
+	return record, nil
 }
 
 // GetByBlockNumber retrieves all records for a specific block
@@ -76,11 +82,16 @@ func (ars *AggregatorRecordStorage) GetByBlockNumber(ctx context.Context, blockN
 
 	var records []*models.AggregatorRecord
 	for cursor.Next(ctx) {
-		var record models.AggregatorRecord
-		if err := cursor.Decode(&record); err != nil {
+		var recordBSON models.AggregatorRecordBSON
+		if err := cursor.Decode(&recordBSON); err != nil {
 			return nil, fmt.Errorf("failed to decode aggregator record: %w", err)
 		}
-		records = append(records, &record)
+		
+		record, err := recordBSON.FromBSON()
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+		}
+		records = append(records, record)
 	}
 
 	if err := cursor.Err(); err != nil {
@@ -113,11 +124,16 @@ func (ars *AggregatorRecordStorage) GetLatest(ctx context.Context, limit int) ([
 
 	var records []*models.AggregatorRecord
 	for cursor.Next(ctx) {
-		var record models.AggregatorRecord
-		if err := cursor.Decode(&record); err != nil {
+		var recordBSON models.AggregatorRecordBSON
+		if err := cursor.Decode(&recordBSON); err != nil {
 			return nil, fmt.Errorf("failed to decode aggregator record: %w", err)
 		}
-		records = append(records, &record)
+		
+		record, err := recordBSON.FromBSON()
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+		}
+		records = append(records, record)
 	}
 
 	if err := cursor.Err(); err != nil {
