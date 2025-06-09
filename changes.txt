@@ -1,4 +1,4 @@
-CHANGELOG ENTRY - 09 January 2025 at 15:30 CET
+CHANGELOG ENTRY - 09 June 2025 at 15:30 CET
 
 ## Foundation Implementation Complete
 
@@ -47,7 +47,7 @@ This completes the foundational phase of the Go rewrite, providing a solid, scal
 
 ---
 
-CHANGELOG ENTRY - 09 January 2025 at 15:35 CET
+CHANGELOG ENTRY - 09 June 2025 at 15:35 CET
 
 ## Go Version Update
 
@@ -65,3 +65,63 @@ CHANGELOG ENTRY - 09 January 2025 at 15:35 CET
 - Build successful with Go 1.24
 - No breaking changes in dependencies
 - Service maintains full functionality
+
+---
+
+CHANGELOG ENTRY - 09 June 2025 at 15:40 CET
+
+## Docker Compose and Containerization
+
+### What was implemented:
+- **Docker Compose configuration** with MongoDB and Aggregator services
+- **Multi-stage Dockerfile** for optimized Go binary builds
+- **MongoDB initialization script** with database setup and indexing
+- **Docker development workflow** integrated into Makefile
+- **Updated documentation** with Docker quick start guide
+
+### Technical details:
+- **docker-compose.yml**: MongoDB on localhost:27017, Aggregator on localhost:3333
+- **MongoDB setup**: mongo:7.0 image with admin credentials (admin/password)
+- **Database initialization**: Automated collection creation and index setup via mongo-init.js
+- **Aggregator container**: Alpine-based with non-root user, health checks, and proper dependencies
+- **Networking**: Bridge network for inter-service communication
+- **Volumes**: Persistent MongoDB data storage
+- **Health checks**: Both services include health monitoring
+
+### Docker services configuration:
+- **MongoDB**: 
+  - Port mapping: 27017:27017
+  - Credentials: admin/password
+  - Database: aggregator (auto-created)
+  - Health check: mongosh ping command
+- **Aggregator**: 
+  - Port mapping: 3333:3000
+  - Environment: Full configuration for production use
+  - Dependencies: Waits for MongoDB health check
+  - Health check: wget to /health endpoint
+
+### Makefile additions:
+- `make docker-build`: Build Docker image
+- `make docker-up`: Start services
+- `make docker-down`: Stop services  
+- `make docker-logs`: View logs
+- `make docker-restart`: Restart services
+- `make docker-rebuild`: Rebuild and restart
+- `make docker-clean`: Clean up resources
+
+### Files created:
+- `docker-compose.yml`: Service orchestration
+- `Dockerfile`: Multi-stage Go build
+- `scripts/mongo-init.js`: Database initialization
+- `.dockerignore`: Build optimization
+
+### Documentation updates:
+- Added "Quick Start with Docker" section
+- Updated development workflow with Docker commands
+- Documented service endpoints and credentials
+
+### Ready for use:
+- Run `make docker-up` to start both services
+- MongoDB accessible at localhost:27017
+- Aggregator accessible at localhost:3333
+- Full API functionality with persistent database
