@@ -1,5 +1,11 @@
 package models
 
+import (
+	"fmt"
+	"strconv"
+	"time"
+)
+
 // Block represents a blockchain block
 type Block struct {
 	Index               *BigInt    `json:"index" bson:"index"`
@@ -11,6 +17,90 @@ type Block struct {
 	PreviousBlockHash   HexBytes   `json:"previousBlockHash" bson:"previousBlockHash"`
 	NoDeletionProofHash *HexBytes  `json:"noDeletionProofHash" bson:"noDeletionProofHash,omitempty"`
 	CreatedAt           *Timestamp `json:"createdAt" bson:"createdAt"`
+}
+
+// BlockBSON represents the BSON version of Block for MongoDB storage
+type BlockBSON struct {
+	Index               string `bson:"index"`
+	ChainID             string `bson:"chainId"`
+	Version             string `bson:"version"`
+	ForkID              string `bson:"forkId"`
+	Timestamp           string `bson:"timestamp"`
+	RootHash            string `bson:"rootHash"`
+	PreviousBlockHash   string `bson:"previousBlockHash"`
+	NoDeletionProofHash string `bson:"noDeletionProofHash,omitempty"`
+	CreatedAt           string `bson:"createdAt"`
+}
+
+// ToBSON converts Block to BlockBSON for MongoDB storage
+func (b *Block) ToBSON() *BlockBSON {
+	blockBSON := &BlockBSON{
+		Index:             b.Index.String(),
+		ChainID:           b.ChainID,
+		Version:           b.Version,
+		ForkID:            b.ForkID,
+		Timestamp:         strconv.FormatInt(b.Timestamp.UnixMilli(), 10),
+		RootHash:          b.RootHash.String(),
+		PreviousBlockHash: b.PreviousBlockHash.String(),
+		CreatedAt:         strconv.FormatInt(b.CreatedAt.UnixMilli(), 10),
+	}
+	
+	if b.NoDeletionProofHash != nil {
+		blockBSON.NoDeletionProofHash = b.NoDeletionProofHash.String()
+	}
+	
+	return blockBSON
+}
+
+// FromBSON converts BlockBSON back to Block
+func (bb *BlockBSON) FromBSON() (*Block, error) {
+	index, err := NewBigIntFromString(bb.Index)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse index: %w", err)
+	}
+	
+	timestampMillis, err := strconv.ParseInt(bb.Timestamp, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse timestamp: %w", err)
+	}
+	timestamp := &Timestamp{Time: time.UnixMilli(timestampMillis)}
+	
+	createdAtMillis, err := strconv.ParseInt(bb.CreatedAt, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse createdAt: %w", err)
+	}
+	createdAt := &Timestamp{Time: time.UnixMilli(createdAtMillis)}
+	
+	rootHash, err := NewHexBytesFromString(bb.RootHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse rootHash: %w", err)
+	}
+	
+	previousBlockHash, err := NewHexBytesFromString(bb.PreviousBlockHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse previousBlockHash: %w", err)
+	}
+	
+	block := &Block{
+		Index:             index,
+		ChainID:           bb.ChainID,
+		Version:           bb.Version,
+		ForkID:            bb.ForkID,
+		Timestamp:         timestamp,
+		RootHash:          rootHash,
+		PreviousBlockHash: previousBlockHash,
+		CreatedAt:         createdAt,
+	}
+	
+	if bb.NoDeletionProofHash != "" {
+		noDeletionProofHash, err := NewHexBytesFromString(bb.NoDeletionProofHash)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse noDeletionProofHash: %w", err)
+		}
+		block.NoDeletionProofHash = &noDeletionProofHash
+	}
+	
+	return block, nil
 }
 
 // NewBlock creates a new block
