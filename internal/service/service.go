@@ -55,7 +55,7 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *gateway.
 	}
 
 	// Generate receipt if requested
-	if req.Receipt {
+	if req.Receipt != nil && *req.Receipt {
 		// TODO: Implement receipt generation with actual signing
 		receipt := models.NewReceipt(
 			commitment,

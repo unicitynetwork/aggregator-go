@@ -41,17 +41,28 @@ func (b *BigInt) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements json.Unmarshaler
 func (b *BigInt) UnmarshalJSON(data []byte) error {
+	// Try to unmarshal as string first
 	var s string
-	if err := json.Unmarshal(data, &s); err != nil {
-		return err
+	if err := json.Unmarshal(data, &s); err == nil {
+		i, ok := new(big.Int).SetString(s, 10)
+		if !ok {
+			return fmt.Errorf("invalid big int string: %s", s)
+		}
+		b.Int = i
+		return nil
 	}
 	
-	i, ok := new(big.Int).SetString(s, 10)
-	if !ok {
-		return fmt.Errorf("invalid big int: %s", s)
+	// Try to unmarshal as number
+	var n float64
+	if err := json.Unmarshal(data, &n); err == nil {
+		if n != float64(int64(n)) {
+			return fmt.Errorf("big int cannot be a decimal: %f", n)
+		}
+		b.Int = big.NewInt(int64(n))
+		return nil
 	}
-	b.Int = i
-	return nil
+	
+	return fmt.Errorf("invalid big int: must be string or number")
 }
 
 // HexBytes represents byte array that serializes to/from hex string
@@ -139,13 +150,13 @@ func (t *Timestamp) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// RequestID represents a 64-character hex request ID
+// RequestID represents a 68-character hex request ID (4 chars algorithm + 64 chars hash)
 type RequestID string
 
 // NewRequestID creates a RequestID with validation
 func NewRequestID(id string) (RequestID, error) {
-	if len(id) != 64 {
-		return "", fmt.Errorf("request ID must be 64 characters, got %d", len(id))
+	if len(id) != 68 {
+		return "", fmt.Errorf("request ID must be 68 characters, got %d", len(id))
 	}
 	
 	// Validate hex
@@ -186,13 +197,13 @@ func (r *RequestID) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// TransactionHash represents a 64-character hex transaction hash
+// TransactionHash represents a 68-character hex transaction hash (4 chars algorithm + 64 chars hash)
 type TransactionHash string
 
 // NewTransactionHash creates a TransactionHash with validation
 func NewTransactionHash(hash string) (TransactionHash, error) {
-	if len(hash) != 64 {
-		return "", fmt.Errorf("transaction hash must be 64 characters, got %d", len(hash))
+	if len(hash) != 68 { // 68 chars for algorithm imprint (4) + hash (64)
+		return "", fmt.Errorf("transaction hash must be 68 characters, got %d", len(hash))
 	}
 	
 	// Validate hex
@@ -201,6 +212,17 @@ func NewTransactionHash(hash string) (TransactionHash, error) {
 	}
 	
 	return TransactionHash(hash), nil
+}
+
+// NewTransactionHashFromBytes creates a TransactionHash from byte array (must be 34 bytes)
+func NewTransactionHashFromBytes(data []byte) (TransactionHash, error) {
+	if len(data) != 34 {
+		return "", fmt.Errorf("transaction hash data must be 34 bytes, got %d", len(data))
+	}
+	
+	// Convert to hex string (DataHash format with algorithm imprint)
+	hexStr := fmt.Sprintf("%x", data)
+	return TransactionHash(hexStr), nil
 }
 
 // String returns the string representation
@@ -238,8 +260,8 @@ type StateHash string
 
 // NewStateHash creates a StateHash with validation
 func NewStateHash(hash string) (StateHash, error) {
-	if len(hash) != 64 {
-		return "", fmt.Errorf("state hash must be 64 characters, got %d", len(hash))
+	if len(hash) != 68 { // 68 chars for algorithm imprint (4) + hash (64)
+		return "", fmt.Errorf("state hash must be 68 characters, got %d", len(hash))
 	}
 	
 	// Validate hex
@@ -248,6 +270,17 @@ func NewStateHash(hash string) (StateHash, error) {
 	}
 	
 	return StateHash(hash), nil
+}
+
+// NewStateHashFromBytes creates a StateHash from byte array (must be 34 bytes)
+func NewStateHashFromBytes(data []byte) (StateHash, error) {
+	if len(data) != 34 {
+		return "", fmt.Errorf("state hash data must be 34 bytes, got %d", len(data))
+	}
+	
+	// Convert to hex string (DataHash format with algorithm imprint)
+	hexStr := fmt.Sprintf("%x", data)
+	return StateHash(hexStr), nil
 }
 
 // String returns the string representation

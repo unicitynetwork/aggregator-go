@@ -176,14 +176,13 @@ func GenerateDocsHTML() string {
                     <div class="params-section">
                         <h3>Request Parameters</h3>
                         <textarea id="submit_commitment_params">{
-  "requestId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "transactionHash": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+  "requestId": "00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "transactionHash": "0000fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
   "authenticator": {
-    "stateHash": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-    "publicKey": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
-    "signature": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-    "signAlg": "ed25519",
-    "hashAlg": "SHA256"
+    "algorithm": "secp256k1",
+    "publicKey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+    "signature": "a0b37f8fba683cc68f6574cd43b39f0343a50008bf6ccea9d13231d9e7e2e1e411edc8d307254296264aebfc3dc76cd8b668373a072fd64665b50000e9fcce5201",
+    "stateHash": "00001234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
   },
   "receipt": true
 }</textarea>
@@ -212,7 +211,7 @@ func GenerateDocsHTML() string {
                     <div class="params-section">
                         <h3>Request Parameters</h3>
                         <textarea id="get_inclusion_proof_params">{
-  "requestId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  "requestId": "00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 }</textarea>
                         <div class="button-group">
                             <button onclick="sendRequest('get_inclusion_proof')">🚀 Send Request</button>
