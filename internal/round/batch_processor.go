@@ -63,6 +63,19 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 
 	// Store aggregator records
 	for _, record := range records {
+		// Check if record already exists to prevent duplicate key errors
+		existing, err := rm.storage.AggregatorRecordStorage().GetByRequestID(ctx, record.RequestID)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to check existing aggregator record for %s: %w", record.RequestID, err)
+		}
+		
+		if existing != nil {
+			rm.logger.WithContext(ctx).
+				WithField("requestId", record.RequestID.String()).
+				Debug("Aggregator record already exists, skipping")
+			continue
+		}
+		
 		if err := rm.storage.AggregatorRecordStorage().Store(ctx, record); err != nil {
 			return "", nil, fmt.Errorf("failed to store aggregator record for %s: %w", record.RequestID, err)
 		}
