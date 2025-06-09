@@ -1,4 +1,4 @@
-.PHONY: build test clean run lint fmt vet
+.PHONY: build test clean run lint fmt vet performance-test
 
 # Build variables
 BINARY_NAME=aggregator
@@ -30,6 +30,14 @@ test-race:
 benchmark:
 	@echo "Running benchmarks..."
 	@go test -bench=. -benchmem ./...
+
+# Build and run performance test
+performance-test:
+	@echo "Building performance test..."
+	@mkdir -p $(BUILD_DIR)
+	@go build -o $(BUILD_DIR)/performance-test ./cmd/performance-test
+	@echo "Starting performance test (make sure aggregator is running on localhost:3000)..."
+	@./$(BUILD_DIR)/performance-test
 
 # Format code
 fmt:

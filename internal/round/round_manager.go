@@ -305,14 +305,42 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 		WithField("commitmentCount", len(commitments)).
 		Info("Processing round")
 
+	// Get any unprocessed commitments from storage in addition to round commitments
+	const batchLimit = 1000 // Limit to prevent memory issues
+	unprocessedCommitments, err := rm.storage.CommitmentStorage().GetUnprocessedBatch(ctx, batchLimit)
+	if err != nil {
+		rm.logger.WithContext(ctx).WithError(err).Warn("Failed to get unprocessed commitments")
+		unprocessedCommitments = []*models.Commitment{}
+	}
+	
+	// Combine round commitments with unprocessed commitments
+	allCommitments := append(commitments, unprocessedCommitments...)
+	
+	rm.logger.WithContext(ctx).
+		WithField("roundCommitments", len(commitments)).
+		WithField("unprocessedCommitments", len(unprocessedCommitments)).
+		WithField("totalCommitments", len(allCommitments)).
+		Info("Processing commitments batch")
+
 	// Process commitments in batch
 	var rootHash string
 	var records []*models.AggregatorRecord
-	var err error
 
-	if len(commitments) > 0 {
-		rootHash, records, err = rm.processBatch(ctx, commitments, roundNumber)
+	if len(allCommitments) > 0 {
+		// Mark commitments as processed FIRST to prevent duplicate processing
+		requestIDs := make([]models.RequestID, len(allCommitments))
+		for i, commitment := range allCommitments {
+			requestIDs[i] = commitment.RequestID
+		}
+		
+		if err := rm.storage.CommitmentStorage().MarkProcessed(ctx, requestIDs); err != nil {
+			rm.logger.WithContext(ctx).WithError(err).Error("Failed to mark commitments as processed")
+			return fmt.Errorf("failed to mark commitments as processed: %w", err)
+		}
+		
+		rootHash, records, err = rm.processBatch(ctx, allCommitments, roundNumber)
 		if err != nil {
+			rm.logger.WithContext(ctx).WithError(err).Error("Failed to process batch, but commitments are already marked as processed")
 			return fmt.Errorf("failed to process batch: %w", err)
 		}
 	} else {
@@ -328,7 +356,7 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 
 	// Update stats
 	rm.totalRounds++
-	rm.totalCommitments += int64(len(commitments))
+	rm.totalCommitments += int64(len(allCommitments))
 
 	// Start next round
 	nextRoundNumber := models.NewBigInt(nil)
