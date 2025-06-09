@@ -321,7 +321,16 @@ Returns the health status and role of the service.
 ```
 
 #### `GET /docs`
-Returns HTML API documentation page (if `ENABLE_DOCS=true`).
+Returns **executable** interactive HTML API documentation page with live testing capabilities (if `ENABLE_DOCS=true`).
+
+The documentation includes:
+- **🚀 Live API testing** - Execute requests directly from the browser
+- **📋 cURL export** - Copy commands for terminal use
+- **⌨️ Keyboard shortcuts** - Ctrl+Enter to send requests
+- **🎯 Status indicators** - Response times and success/error status
+- **↻ Reset functionality** - Restore original examples
+- **📱 Responsive design** - Works on desktop and mobile
+- **💾 Real-time responses** - JSON formatted with syntax highlighting
 
 ## Development
 

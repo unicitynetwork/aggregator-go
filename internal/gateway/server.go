@@ -17,13 +17,13 @@ import (
 
 // Server represents the HTTP gateway server
 type Server struct {
-	config        *config.Config
-	logger        *logger.Logger
-	storage       interfaces.Storage
-	rpcServer     *jsonrpc.Server
-	httpServer    *http.Server
-	router        *gin.Engine
-	service       Service
+	config     *config.Config
+	logger     *logger.Logger
+	storage    interfaces.Storage
+	rpcServer  *jsonrpc.Server
+	httpServer *http.Server
+	router     *gin.Engine
+	service    Service
 }
 
 // Service represents the business logic service interface
@@ -47,7 +47,7 @@ func NewServer(cfg *config.Config, logger *logger.Logger, storage interfaces.Sto
 	}
 
 	router := gin.New()
-	
+
 	// Add Gin middleware
 	router.Use(gin.Recovery())
 	if cfg.Logging.Level == "debug" {
@@ -102,12 +102,12 @@ func (s *Server) setupRoutes() {
 			c.Header("Access-Control-Allow-Origin", "*")
 			c.Header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			c.Header("Access-Control-Allow-Headers", "Content-Type")
-			
+
 			if c.Request.Method == "OPTIONS" {
 				c.AbortWithStatus(http.StatusOK)
 				return
 			}
-			
+
 			c.Next()
 		})
 	}
@@ -149,7 +149,7 @@ func (s *Server) Stop(ctx context.Context) error {
 // handleHealth handles the health endpoint
 func (s *Server) handleHealth(c *gin.Context) {
 	ctx := c.Request.Context()
-	
+
 	status, err := s.service.GetHealthStatus(ctx)
 	if err != nil {
 		s.logger.WithContext(ctx).WithError(err).Error("Failed to get health status")
@@ -162,58 +162,7 @@ func (s *Server) handleHealth(c *gin.Context) {
 
 // handleDocs handles the API documentation endpoint
 func (s *Server) handleDocs(c *gin.Context) {
-	// Return a simple API documentation page
-	html := `
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Unicity Aggregator API Documentation</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 40px; }
-        .method { margin: 20px 0; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
-        .method-name { font-size: 18px; font-weight: bold; color: #333; }
-        .method-desc { margin: 10px 0; color: #666; }
-        pre { background: #f5f5f5; padding: 10px; border-radius: 3px; overflow-x: auto; }
-    </style>
-</head>
-<body>
-    <h1>Unicity Aggregator API Documentation</h1>
-    <p>This service implements the JSON-RPC 2.0 protocol for Unicity blockchain aggregation.</p>
-    
-    <div class="method">
-        <div class="method-name">submit_commitment</div>
-        <div class="method-desc">Submit a state transition request to the aggregation layer.</div>
-        <pre>{"jsonrpc": "2.0", "method": "submit_commitment", "params": {"requestId": "...", "transactionHash": "...", "authenticator": {...}}, "id": 1}</pre>
-    </div>
-    
-    <div class="method">
-        <div class="method-name">get_inclusion_proof</div>
-        <div class="method-desc">Retrieve the inclusion proof for a specific state transition request.</div>
-        <pre>{"jsonrpc": "2.0", "method": "get_inclusion_proof", "params": {"requestId": "..."}, "id": 1}</pre>
-    </div>
-    
-    <div class="method">
-        <div class="method-name">get_block_height</div>
-        <div class="method-desc">Retrieve the current height of the blockchain.</div>
-        <pre>{"jsonrpc": "2.0", "method": "get_block_height", "params": {}, "id": 1}</pre>
-    </div>
-    
-    <div class="method">
-        <div class="method-name">get_block</div>
-        <div class="method-desc">Retrieve detailed information about a specific block.</div>
-        <pre>{"jsonrpc": "2.0", "method": "get_block", "params": {"blockNumber": 123}, "id": 1}</pre>
-    </div>
-    
-    <div class="method">
-        <div class="method-name">get_block_commitments</div>
-        <div class="method-desc">Retrieve all commitments included in a specific block.</div>
-        <pre>{"jsonrpc": "2.0", "method": "get_block_commitments", "params": {"blockNumber": 123}, "id": 1}</pre>
-    </div>
-    
-    <p><strong>Health Endpoint:</strong> <a href="/health">GET /health</a></p>
-</body>
-</html>`
-	
+	html := GenerateDocsHTML()
 	c.Header("Content-Type", "text/html")
 	c.String(http.StatusOK, html)
 }

@@ -125,3 +125,135 @@ CHANGELOG ENTRY - 09 June 2025 at 15:40 CET
 - MongoDB accessible at localhost:27017
 - Aggregator accessible at localhost:3333
 - Full API functionality with persistent database
+
+---
+
+CHANGELOG ENTRY - 09 June 2025 at 15:45 CET
+
+## Interactive JSON-RPC API Documentation
+
+### What was implemented:
+- **Interactive API documentation** based on TypeScript aggregator-ts/src/docs/jsonRpcDocs.ts
+- **Complete method specifications** with parameter details and examples
+- **Live testing interface** with request forms and response display
+- **Professional styling** with responsive design and navigation
+- **Real examples** with valid hex strings and proper formatting
+
+### Technical details:
+- **docs.go**: Programmatic documentation generation with method definitions
+- **HTML generation**: Interactive forms with JavaScript for live API testing
+- **Method documentation**: All 6 JSON-RPC methods with complete parameter specs
+- **Example data**: Realistic 64-character hex strings for requestId, transactionHash, etc.
+- **Response handling**: Formatted JSON display with error handling
+- **Navigation**: Quick links to all methods with professional styling
+
+### Features implemented:
+- **Parameter tables**: Name, type, required status, and descriptions
+- **Interactive forms**: Pre-filled textareas with JSON examples
+- **Send Request buttons**: Direct API testing from the browser
+- **Clear Response buttons**: Reset response displays
+- **Real-time responses**: Live API call results with JSON formatting
+- **Error handling**: Network errors and JSON parsing errors displayed
+- **Professional styling**: Clean typography, responsive layout, color scheme
+
+### Documentation structure:
+- **RpcParam**: Parameter definition with name, type, description, required flag
+- **RpcMethodDoc**: Complete method specification with examples and result descriptions
+- **GetRPCMethods()**: Programmatic method definitions ensuring sync with implementation
+- **GenerateDocsHTML()**: Dynamic HTML generation with styling and JavaScript
+
+### Methods documented:
+1. **submit_commitment**: State transition submission with authenticator
+2. **get_inclusion_proof**: Inclusion proof retrieval by requestId
+3. **get_no_deletion_proof**: Global no-deletion proof (parameter-less)
+4. **get_block_height**: Current blockchain height (parameter-less)
+5. **get_block**: Block information by number or "latest"
+6. **get_block_commitments**: All commitments in specific block
+
+### Files created:
+- `internal/gateway/docs.go`: Documentation generation logic
+- `api/docs/README.md`: Documentation overview and testing guide
+
+### Integration:
+- **Gateway server**: Updated /docs endpoint to use GenerateDocsHTML()
+- **README.md**: Enhanced /docs endpoint description with feature list
+- **Builds successfully**: Verified with `make build`
+
+### Access points:
+- **Local development**: http://localhost:3000/docs
+- **Docker setup**: http://localhost:3333/docs
+- **Interactive testing**: Full JSON-RPC 2.0 protocol support
+
+### Benefits:
+- **Developer experience**: Easy API exploration and testing
+- **Documentation sync**: Programmatically generated from method definitions
+- **Real testing**: Live API calls with actual service responses
+- **Professional appearance**: Clean, modern interface matching enterprise standards
+
+---
+
+CHANGELOG ENTRY - 09 June 2025 at 15:50 CET
+
+## Executable API Documentation Enhancement
+
+### What was enhanced:
+- **Upgraded from interactive to executable** API documentation
+- **Advanced user interface** with professional developer experience
+- **Multiple interaction methods** for comprehensive API testing
+- **Enterprise-grade functionality** matching industry standards
+
+### New executable features:
+- **🚀 Live API execution** - Real requests with actual responses
+- **📋 cURL command export** - Copy ready-to-use terminal commands
+- **⌨️ Keyboard shortcuts** - Ctrl+Enter (Cmd+Enter) to send requests
+- **🎯 Status indicators** - Response times and success/error status with colors
+- **↻ Reset functionality** - Restore original example parameters
+- **💾 Response persistence** - Results stay visible until manually cleared
+- **📱 Responsive design** - Perfect functionality on desktop and mobile
+- **🎨 Enhanced styling** - Color-coded sections and professional appearance
+
+### Technical improvements:
+- **Status tracking**: Loading, success, error states with timing
+- **Clipboard integration**: Native browser copy functionality with fallbacks
+- **Keyboard navigation**: Full keyboard accessibility and shortcuts
+- **Error handling**: Comprehensive error display and user feedback
+- **Toast notifications**: User-friendly feedback for actions
+- **Request preservation**: Original examples stored for reset functionality
+- **Cross-browser compatibility**: Works on all modern browsers
+
+### User experience enhancements:
+- **Visual feedback**: Color-coded status indicators (green=success, red=error, blue=loading)
+- **Timing information**: Response time display in milliseconds
+- **Multiple button actions**: Send, Clear, Copy cURL, Reset example
+- **Keyboard hints**: Tooltips showing available shortcuts
+- **Section organization**: Request, response, and info sections with distinct styling
+- **Professional layout**: Enterprise-grade appearance with proper spacing and colors
+
+### Developer workflow improvements:
+- **Direct execution**: No need for external tools like Postman
+- **Command-line integration**: cURL export for terminal workflows
+- **Parameter experimentation**: Easy modification and testing of different values
+- **Response analysis**: Pretty-printed JSON with proper formatting
+- **Error diagnosis**: Clear error messages and status codes
+- **Quick reset**: One-click return to working examples
+
+### Files enhanced:
+- **internal/gateway/docs.go**: Major JavaScript and CSS enhancements
+- **README.md**: Updated documentation feature descriptions
+- **api/docs/README.md**: Comprehensive executable documentation guide
+
+### Accessibility features:
+- **Keyboard navigation**: Full keyboard support for all functions
+- **Screen reader friendly**: Proper semantic HTML and ARIA labels
+- **High contrast**: Clear visual distinction between sections
+- **Mobile responsive**: Touch-friendly interface on mobile devices
+- **Cross-platform**: Works on Windows, Mac, Linux browsers
+
+### Professional features:
+- **Enterprise styling**: Clean, modern interface matching industry standards
+- **Real-time feedback**: Immediate visual response to user actions
+- **Error recovery**: Graceful handling of network and parsing errors
+- **Performance monitoring**: Response time tracking for API performance analysis
+- **Developer tools integration**: Compatible with browser developer tools
+
+This transforms the API documentation from simple interactive forms into a full-featured, executable API testing environment that rivals professional API development tools while being embedded directly in the service.
