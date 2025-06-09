@@ -14,7 +14,7 @@ CHANGELOG ENTRY - 09 January 2025 at 15:30 CET
 - **Comprehensive documentation** including README.md with API examples and configuration
 
 ### Technical details:
-- Built with Go 1.22, Gin web framework, MongoDB driver, and Logrus logging
+- Built with Go 1.24, Gin web framework, MongoDB driver, and Logrus logging
 - Implements all JSON-RPC methods from TypeScript version with API compatibility
 - MongoDB collections with proper indexing: commitments, aggregator_records, blocks, smt_nodes, block_records, leadership
 - Environment-based configuration supporting all TypeScript variables plus Go-specific optimizations
@@ -44,3 +44,24 @@ CHANGELOG ENTRY - 09 January 2025 at 15:30 CET
 - All configuration via environment variables for containerization
 
 This completes the foundational phase of the Go rewrite, providing a solid, scalable base for the remaining aggregator functionality while maintaining full API compatibility with the TypeScript implementation.
+
+---
+
+CHANGELOG ENTRY - 09 January 2025 at 15:35 CET
+
+## Go Version Update
+
+### What was changed:
+- **Updated Go version** from 1.22 to 1.24 in go.mod
+- **Updated README.md** to reflect Go 1.24 requirement in prerequisites
+
+### Technical details:
+- Changed go.mod to specify `go 1.24`
+- Updated documentation to require Go 1.24 or later
+- Verified build compatibility with `make build`
+- All dependencies remain compatible with Go 1.24
+
+### Verification:
+- Build successful with Go 1.24
+- No breaking changes in dependencies
+- Service maintains full functionality
