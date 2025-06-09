@@ -70,19 +70,19 @@ docker-build:
 
 docker-up:
 	@echo "Starting services with Docker Compose..."
-	@docker-compose up -d
+	@docker compose up -d
 
 docker-down:
 	@echo "Stopping services..."
-	@docker-compose down
+	@docker compose down
 
 docker-logs:
 	@echo "Showing logs..."
-	@docker-compose logs -f
+	@docker compose logs -f
 
 docker-restart:
 	@echo "Restarting services..."
-	@docker-compose restart
+	@docker compose restart
 
 # Combined commands
 docker-rebuild: docker-down docker-build docker-up
@@ -90,5 +90,5 @@ docker-rebuild: docker-down docker-build docker-up
 
 docker-clean:
 	@echo "Cleaning up Docker resources..."
-	@docker-compose down -v
+	@docker compose down -v
 	@docker image rm unicity-aggregator 2>/dev/null || true
