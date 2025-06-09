@@ -49,10 +49,29 @@ make build
 go build -o bin/aggregator ./cmd/aggregator
 ```
 
-### Basic Usage
+### Quick Start with Docker
+
+The easiest way to get started is using Docker Compose:
 
 ```bash
-# Start MongoDB (if not running)
+# Start both MongoDB and Aggregator services
+make docker-up
+
+# View logs
+make docker-logs
+
+# Stop services
+make docker-down
+```
+
+This will start:
+- **MongoDB** on `localhost:27017` with admin credentials
+- **Aggregator** on `localhost:3333` with full functionality
+
+### Basic Usage (Local Development)
+
+```bash
+# Start MongoDB (if not using Docker)
 mongod --dbpath /your/db/path
 
 # Run with default configuration
@@ -65,7 +84,7 @@ export LOG_LEVEL="debug"
 ./bin/aggregator
 ```
 
-The service will start on `http://localhost:3000` by default.
+The service will start on `http://localhost:3000` by default (or `localhost:3333` with Docker).
 
 ## Configuration
 
@@ -329,6 +348,31 @@ make lint
 
 # Clean build artifacts
 make clean
+```
+
+### Docker Development
+
+```bash
+# Build Docker image
+make docker-build
+
+# Start services (MongoDB + Aggregator)
+make docker-up
+
+# View service logs
+make docker-logs
+
+# Restart services
+make docker-restart
+
+# Rebuild and restart services
+make docker-rebuild
+
+# Stop services
+make docker-down
+
+# Clean up Docker resources
+make docker-clean
 ```
 
 ### Project Structure
