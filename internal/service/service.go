@@ -10,26 +10,30 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
+	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
 // AggregatorService implements the business logic for the aggregator
 type AggregatorService struct {
-	config       *config.Config
-	logger       *logger.Logger
-	storage      interfaces.Storage
-	roundManager *round.RoundManager
+	config              *config.Config
+	logger              *logger.Logger
+	storage             interfaces.Storage
+	roundManager        *round.RoundManager
+	commitmentValidator *signing.CommitmentValidator
 }
 
 // NewAggregatorService creates a new aggregator service
 func NewAggregatorService(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) *AggregatorService {
 	roundManager := round.NewRoundManager(cfg, logger, storage)
+	commitmentValidator := signing.NewCommitmentValidator()
 	
 	return &AggregatorService{
-		config:       cfg,
-		logger:       logger,
-		storage:      storage,
-		roundManager: roundManager,
+		config:              cfg,
+		logger:              logger,
+		storage:             storage,
+		roundManager:        roundManager,
+		commitmentValidator: commitmentValidator,
 	}
 }
 
@@ -62,6 +66,23 @@ func (as *AggregatorService) Stop(ctx context.Context) error {
 
 // SubmitCommitment handles commitment submission
 func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *gateway.SubmitCommitmentRequest) (*gateway.SubmitCommitmentResponse, error) {
+	// Create commitment for validation
+	commitment := models.NewCommitment(req.RequestID, req.TransactionHash, req.Authenticator)
+
+	// Validate commitment signature and request ID
+	validationResult := as.commitmentValidator.ValidateCommitment(commitment)
+	if validationResult.Status != signing.ValidationStatusSuccess {
+		as.logger.WithContext(ctx).
+			WithField("requestId", req.RequestID).
+			WithField("validationStatus", validationResult.Status.String()).
+			WithError(validationResult.Error).
+			Warn("Commitment validation failed")
+		
+		return &gateway.SubmitCommitmentResponse{
+			Status: validationResult.Status.String(),
+		}, nil
+	}
+
 	// Check if commitment already exists
 	existing, err := as.storage.CommitmentStorage().GetByRequestID(ctx, req.RequestID)
 	if err != nil {
@@ -73,9 +94,6 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *gateway.
 			Status: "REQUEST_ID_EXISTS",
 		}, nil
 	}
-
-	// Create commitment
-	commitment := models.NewCommitment(req.RequestID, req.TransactionHash, req.Authenticator)
 
 	// Store commitment
 	if err := as.storage.CommitmentStorage().Store(ctx, commitment); err != nil {

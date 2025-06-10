@@ -160,7 +160,7 @@ func GenerateDocsHTML() string {
         <h1>🚀 Unicity Aggregator API - Interactive Documentation</h1>
         
         <div class="info-box">
-            <p><strong>Base URL:</strong> <code>http://localhost:3333/</code></p>
+            <p><strong>Base URL:</strong> <code>http://localhost:3000/</code></p>
             <p><strong>Protocol:</strong> JSON-RPC 2.0 via HTTP POST</p>
             <p><strong>Content-Type:</strong> <code>application/json</code></p>
             <p><strong>💡 How to use:</strong> Edit the JSON parameters below and click "Send Request" to test the API live!</p>
@@ -170,19 +170,19 @@ func GenerateDocsHTML() string {
         <div class="method-section">
             <div class="method-header">submit_commitment</div>
             <div class="method-content">
-                <div class="description">Submit a state transition commitment to the aggregator.</div>
+                <div class="description">Submit a state transition commitment to the aggregator. The example below uses a real secp256k1 signature that will pass validation. Note: All hash fields (requestId, transactionHash, stateHash) start with "0000" (SHA256 algorithm prefix).</div>
                 
                 <div class="params-container">
                     <div class="params-section">
                         <h3>Request Parameters</h3>
                         <textarea id="submit_commitment_params">{
-  "requestId": "00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "transactionHash": "0000fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+  "requestId": "00004d1b938134c52340952357dd89c4c270b9b0b523bd69c03c1774fed907f1ebb5",
+  "transactionHash": "0000d89cdfd6716717577adeb4149e22646cca3b4daf76632d35e97bd19642f8478a",
   "authenticator": {
     "algorithm": "secp256k1",
-    "publicKey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-    "signature": "a0b37f8fba683cc68f6574cd43b39f0343a50008bf6ccea9d13231d9e7e2e1e411edc8d307254296264aebfc3dc76cd8b668373a072fd64665b50000e9fcce5201",
-    "stateHash": "00001234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+    "publicKey": "033cf8de37cec427b5e3d782e5fc516dcc43f8e9c7bc03530833879f6ee7987d4e",
+    "signature": "2061590eeaf9c3fc3e894454b43410d0410f37ab17e5104a08db3d018d072880f9715dc3b60989cf9cc4589850edecac344702594aa264b2789792bb855a30f39c",
+    "stateHash": "0000026581b5546639dc5110634df8cbbdf4150f3583fc54a0db98ef413574396dd0"
   },
   "receipt": true
 }</textarea>
@@ -211,7 +211,7 @@ func GenerateDocsHTML() string {
                     <div class="params-section">
                         <h3>Request Parameters</h3>
                         <textarea id="get_inclusion_proof_params">{
-  "requestId": "00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  "requestId": "00004d1b938134c52340952357dd89c4c270b9b0b523bd69c03c1774fed907f1ebb5"
 }</textarea>
                         <div class="button-group">
                             <button onclick="sendRequest('get_inclusion_proof')">🚀 Send Request</button>
