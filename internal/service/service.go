@@ -23,6 +23,98 @@ type AggregatorService struct {
 	commitmentValidator *signing.CommitmentValidator
 }
 
+// Conversion functions between API and internal model types
+
+func apiToModelCommitment(apiCommitment *api.Commitment) *models.Commitment {
+	return &models.Commitment{
+		RequestID:       models.RequestID(apiCommitment.RequestID),
+		TransactionHash: models.TransactionHash(apiCommitment.TransactionHash),
+		Authenticator: models.Authenticator{
+			Algorithm: apiCommitment.Authenticator.Algorithm,
+			PublicKey: models.HexBytes(apiCommitment.Authenticator.PublicKey),
+			Signature: models.HexBytes(apiCommitment.Authenticator.Signature),
+			StateHash: models.HexBytes(apiCommitment.Authenticator.StateHash),
+		},
+		CreatedAt:   (*models.Timestamp)(apiCommitment.CreatedAt),
+		ProcessedAt: (*models.Timestamp)(apiCommitment.ProcessedAt),
+	}
+}
+
+func modelToAPICommitment(modelCommitment *models.Commitment) *api.Commitment {
+	return &api.Commitment{
+		RequestID:       api.RequestID(modelCommitment.RequestID),
+		TransactionHash: api.TransactionHash(modelCommitment.TransactionHash),
+		Authenticator: api.Authenticator{
+			Algorithm: modelCommitment.Authenticator.Algorithm,
+			PublicKey: api.HexBytes(modelCommitment.Authenticator.PublicKey),
+			Signature: api.HexBytes(modelCommitment.Authenticator.Signature),
+			StateHash: api.HexBytes(modelCommitment.Authenticator.StateHash),
+		},
+		CreatedAt:   (*api.Timestamp)(modelCommitment.CreatedAt),
+		ProcessedAt: (*api.Timestamp)(modelCommitment.ProcessedAt),
+	}
+}
+
+func modelToAPIBigInt(modelBigInt *models.BigInt) *api.BigInt {
+	if modelBigInt == nil {
+		return nil
+	}
+	return &api.BigInt{Int: modelBigInt.Int}
+}
+
+func apiToModelBigInt(apiBigInt *api.BigInt) *models.BigInt {
+	if apiBigInt == nil {
+		return nil
+	}
+	return &models.BigInt{Int: apiBigInt.Int}
+}
+
+func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.AggregatorRecord {
+	return &api.AggregatorRecord{
+		RequestID:       api.RequestID(modelRecord.RequestID),
+		TransactionHash: api.TransactionHash(modelRecord.TransactionHash),
+		Authenticator: api.Authenticator{
+			Algorithm: modelRecord.Authenticator.Algorithm,
+			PublicKey: api.HexBytes(modelRecord.Authenticator.PublicKey),
+			Signature: api.HexBytes(modelRecord.Authenticator.Signature),
+			StateHash: api.HexBytes(modelRecord.Authenticator.StateHash),
+		},
+		BlockNumber: modelToAPIBigInt(modelRecord.BlockNumber),
+		LeafIndex:   modelToAPIBigInt(modelRecord.LeafIndex),
+		CreatedAt:   (*api.Timestamp)(modelRecord.CreatedAt),
+		FinalizedAt: (*api.Timestamp)(modelRecord.FinalizedAt),
+	}
+}
+
+func modelToAPIBlock(modelBlock *models.Block) *api.Block {
+	var noDeletionProofHash *api.HexBytes
+	if modelBlock.NoDeletionProofHash != nil {
+		converted := api.HexBytes(*modelBlock.NoDeletionProofHash)
+		noDeletionProofHash = &converted
+	}
+	
+	return &api.Block{
+		Index:               modelToAPIBigInt(modelBlock.Index),
+		ChainID:             modelBlock.ChainID,
+		Version:             modelBlock.Version,
+		ForkID:              modelBlock.ForkID,
+		Timestamp:           (*api.Timestamp)(modelBlock.Timestamp),
+		RootHash:            api.HexBytes(modelBlock.RootHash),
+		PreviousBlockHash:   api.HexBytes(modelBlock.PreviousBlockHash),
+		NoDeletionProofHash: noDeletionProofHash,
+		CreatedAt:           (*api.Timestamp)(modelBlock.CreatedAt),
+	}
+}
+
+func modelToAPIHealthStatus(modelHealth *models.HealthStatus) *api.HealthStatus {
+	return &api.HealthStatus{
+		Status:   modelHealth.Status,
+		Role:     modelHealth.Role,
+		ServerID: modelHealth.ServerID,
+		Details:  modelHealth.Details,
+	}
+}
+
 // NewAggregatorService creates a new aggregator service
 func NewAggregatorService(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) *AggregatorService {
 	roundManager := round.NewRoundManager(cfg, logger, storage)
@@ -67,7 +159,12 @@ func (as *AggregatorService) Stop(ctx context.Context) error {
 // SubmitCommitment handles commitment submission
 func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error) {
 	// Create commitment for validation
-	commitment := models.NewCommitment(req.RequestID, req.TransactionHash, req.Authenticator)
+	commitment := models.NewCommitment(models.RequestID(req.RequestID), models.TransactionHash(req.TransactionHash), models.Authenticator{
+		Algorithm: req.Authenticator.Algorithm,
+		PublicKey: models.HexBytes(req.Authenticator.PublicKey),
+		Signature: models.HexBytes(req.Authenticator.Signature),
+		StateHash: models.HexBytes(req.Authenticator.StateHash),
+	})
 
 	// Validate commitment signature and request ID
 	validationResult := as.commitmentValidator.ValidateCommitment(commitment)
@@ -84,7 +181,7 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 	}
 
 	// Check if commitment already exists
-	existing, err := as.storage.CommitmentStorage().GetByRequestID(ctx, req.RequestID)
+	existing, err := as.storage.CommitmentStorage().GetByRequestID(ctx, models.RequestID(req.RequestID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to check existing commitment: %w", err)
 	}
@@ -124,7 +221,19 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 			models.HexBytes("mock_public_key"),
 			models.HexBytes("mock_signature"),
 		)
-		response.Receipt = receipt
+		// Convert to API receipt
+		response.Receipt = &api.Receipt{
+			Algorithm: receipt.Algorithm,
+			PublicKey: api.HexBytes(receipt.PublicKey),
+			Signature: api.HexBytes(receipt.Signature),
+			Request: api.ReceiptRequest{
+				Service:         receipt.Request.Service,
+				Method:          receipt.Request.Method,
+				RequestID:       api.RequestID(receipt.Request.RequestID),
+				TransactionHash: api.TransactionHash(receipt.Request.TransactionHash),
+				StateHash:       api.HexBytes(receipt.Request.StateHash),
+			},
+		}
 	}
 
 	return response, nil
@@ -133,14 +242,14 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 // GetInclusionProof retrieves inclusion proof for a commitment
 func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error) {
 	// First check if commitment exists in aggregator records (finalized)
-	record, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, req.RequestID)
+	record, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, models.RequestID(req.RequestID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get aggregator record: %w", err)
 	}
 
 	if record == nil {
 		// Check if commitment exists but not yet processed
-		commitment, err := as.storage.CommitmentStorage().GetByRequestID(ctx, req.RequestID)
+		commitment, err := as.storage.CommitmentStorage().GetByRequestID(ctx, models.RequestID(req.RequestID))
 		if err != nil {
 			return nil, fmt.Errorf("failed to get commitment: %w", err)
 		}
@@ -150,18 +259,18 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		}
 
 		// Commitment exists but not yet finalized
-		proof := models.NewInclusionProof(req.RequestID, nil, nil, []models.ProofNode{}, models.HexBytes{}, false)
+		proof := api.NewInclusionProof(req.RequestID, nil, nil, []api.ProofNode{}, api.HexBytes{}, false)
 		return &api.GetInclusionProofResponse{InclusionProof: proof}, nil
 	}
 
 	// TODO: Generate actual inclusion proof from SMT when available
 	// For now, return a basic proof indicating inclusion
-	proof := models.NewInclusionProof(
+	proof := api.NewInclusionProof(
 		req.RequestID,
-		record.BlockNumber,
-		record.LeafIndex,
-		[]models.ProofNode{}, // TODO: Generate real proof path
-		models.NewHexBytes([]byte(as.roundManager.GetSMT().GetRootHash())),
+		modelToAPIBigInt(record.BlockNumber),
+		modelToAPIBigInt(record.LeafIndex),
+		[]api.ProofNode{}, // TODO: Generate real proof path
+		api.NewHexBytes([]byte(as.roundManager.GetSMT().GetRootHash())),
 		true,
 	)
 
@@ -173,7 +282,7 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 func (as *AggregatorService) GetNoDeletionProof(ctx context.Context) (*api.GetNoDeletionProofResponse, error) {
 	// TODO: Implement no-deletion proof generation
 	// For now, return a placeholder
-	proof := models.NewNoDeletionProof(models.HexBytes("mock_no_deletion_proof"))
+	proof := api.NewNoDeletionProof(api.HexBytes("mock_no_deletion_proof"))
 	
 	return &api.GetNoDeletionProofResponse{
 		NoDeletionProof: proof,
@@ -188,7 +297,7 @@ func (as *AggregatorService) GetBlockHeight(ctx context.Context) (*api.GetBlockH
 	}
 
 	return &api.GetBlockHeightResponse{
-		BlockNumber: latestBlockNumber,
+		BlockNumber: modelToAPIBigInt(latestBlockNumber),
 	}, nil
 }
 
@@ -227,23 +336,29 @@ func (as *AggregatorService) GetBlock(ctx context.Context, req *api.GetBlockRequ
 		return nil, fmt.Errorf("block not found")
 	}
 
-	return &api.GetBlockResponse{Block: block}, nil
+	return &api.GetBlockResponse{Block: modelToAPIBlock(block)}, nil
 }
 
 // GetBlockCommitments retrieves all commitments in a block
 func (as *AggregatorService) GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error) {
-	records, err := as.storage.AggregatorRecordStorage().GetByBlockNumber(ctx, req.BlockNumber)
+	records, err := as.storage.AggregatorRecordStorage().GetByBlockNumber(ctx, apiToModelBigInt(req.BlockNumber))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block commitments: %w", err)
 	}
 
+	// Convert model records to API records
+	apiRecords := make([]*api.AggregatorRecord, len(records))
+	for i, record := range records {
+		apiRecords[i] = modelToAPIAggregatorRecord(record)
+	}
+
 	return &api.GetBlockCommitmentsResponse{
-		Commitments: records,
+		Commitments: apiRecords,
 	}, nil
 }
 
 // GetHealthStatus retrieves the health status of the service
-func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*models.HealthStatus, error) {
+func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthStatus, error) {
 	// Check if HA is enabled and determine role
 	var role string
 	var isLeader bool
@@ -285,5 +400,5 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*models.Healt
 		status.AddDetail("commitment_queue", strconv.FormatInt(unprocessedCount, 10))
 	}
 
-	return status, nil
+	return modelToAPIHealthStatus(status), nil
 }
