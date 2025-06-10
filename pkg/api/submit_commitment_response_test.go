@@ -68,8 +68,6 @@ func TestSubmitCommitmentResponse_SerializeAndValidate(t *testing.T) {
 			PublicKey: NewHexBytes(publicKeyBytes),
 			Signature: NewHexBytes(signatureBytes),
 			Request: ReceiptRequest{
-				Service:         "aggregator",
-				Method:          "submit_commitment",
 				RequestID:       "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40",
 				TransactionHash: "00010000000000000000000000000000000000000000000000000000000000000000",
 				StateHash:       ImprintHexString("00000000000000000000000000000000000000000000000000000000000000000000"),
@@ -105,8 +103,6 @@ func TestSubmitCommitmentResponse_SerializeAndValidate(t *testing.T) {
 		assert.Equal(t, "SUCCESS", decodedResponse3.Status)
 		assert.NotNil(t, decodedResponse3.Receipt)
 		assert.Equal(t, "secp256k1", decodedResponse3.Receipt.Algorithm)
-		assert.Equal(t, "aggregator", decodedResponse3.Receipt.Request.Service)
-		assert.Equal(t, "submit_commitment", decodedResponse3.Receipt.Request.Method)
 	})
 
 	t.Run("should validate JSON structure correctly", func(t *testing.T) {
@@ -155,7 +151,6 @@ func TestSubmitCommitmentResponse_SerializeAndValidate(t *testing.T) {
 		assert.Equal(t, response2.Status, roundTripResponse.Status)
 		if response2.Receipt != nil && roundTripResponse.Receipt != nil {
 			assert.Equal(t, response2.Receipt.Algorithm, roundTripResponse.Receipt.Algorithm)
-			assert.Equal(t, response2.Receipt.Request.Service, roundTripResponse.Receipt.Request.Service)
 		}
 	})
 
@@ -212,11 +207,9 @@ func TestSubmitCommitmentResponse_SerializeAndValidate(t *testing.T) {
 			PublicKey: NewHexBytes([]byte{0x02, 0x79}), // shortened for test
 			Signature: NewHexBytes([]byte{0xa0, 0xb3}), // shortened for test
 			Request: ReceiptRequest{
-				Service:         "aggregator",
-				Method:          "submit_commitment",
 				RequestID:       "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40",
 				TransactionHash: "00010000000000000000000000000000000000000000000000000000000000000000",
-				StateHash:       ImprintHexString("0000"), // shortened for test
+				StateHash:       ImprintHexString("000000"), // shortened for test, minimum 3 bytes
 			},
 		}
 
@@ -249,7 +242,5 @@ func TestSubmitCommitmentResponse_SerializeAndValidate(t *testing.T) {
 		assert.Equal(t, response.Status, decodedResponse.Status)
 		assert.NotNil(t, decodedResponse.Receipt)
 		assert.Equal(t, receipt.Algorithm, decodedResponse.Receipt.Algorithm)
-		assert.Equal(t, receipt.Request.Service, decodedResponse.Receipt.Request.Service)
-		assert.Equal(t, receipt.Request.Method, decodedResponse.Receipt.Request.Method)
 	})
 }

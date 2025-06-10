@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 
@@ -28,7 +29,7 @@ func NewLeadershipStorage(db *mongo.Database) *LeadershipStorage {
 // AcquireLock attempts to acquire the leadership lock
 func (ls *LeadershipStorage) AcquireLock(ctx context.Context, serverID string, ttlSeconds int) (bool, error) {
 	lock := models.NewLeadershipLock(serverID, ttlSeconds)
-	
+
 	// Try to insert the lock document
 	_, err := ls.collection.InsertOne(ctx, lock)
 	if err != nil {
@@ -38,28 +39,28 @@ func (ls *LeadershipStorage) AcquireLock(ctx context.Context, serverID string, t
 		}
 		return false, fmt.Errorf("failed to acquire leadership lock: %w", err)
 	}
-	
+
 	return true, nil
 }
 
 // tryUpdateExpiredLock attempts to update an expired lock
 func (ls *LeadershipStorage) tryUpdateExpiredLock(ctx context.Context, serverID string, ttlSeconds int) (bool, error) {
 	now := time.Now()
-	
+
 	// Filter for expired locks
 	filter := bson.M{
-		"_id": "leadership",
-		"expiresAt": bson.M{"$lt": models.NewTimestamp(now)},
+		"_id":       "leadership",
+		"expiresAt": bson.M{"$lt": api.NewTimestamp(now)},
 	}
-	
+
 	lock := models.NewLeadershipLock(serverID, ttlSeconds)
 	update := bson.M{"$set": lock}
-	
+
 	result, err := ls.collection.UpdateOne(ctx, filter, update)
 	if err != nil {
 		return false, fmt.Errorf("failed to update expired lock: %w", err)
 	}
-	
+
 	return result.ModifiedCount > 0, nil
 }
 
@@ -67,43 +68,43 @@ func (ls *LeadershipStorage) tryUpdateExpiredLock(ctx context.Context, serverID 
 func (ls *LeadershipStorage) RenewLock(ctx context.Context, serverID string, ttlSeconds int) error {
 	now := time.Now()
 	expiresAt := now.Add(time.Second * time.Duration(ttlSeconds))
-	
+
 	filter := bson.M{
-		"_id": "leadership",
+		"_id":      "leadership",
 		"serverId": serverID,
 	}
-	
+
 	update := bson.M{
 		"$set": bson.M{
-			"expiresAt": models.NewTimestamp(expiresAt),
-			"updatedAt": models.NewTimestamp(now),
+			"expiresAt": api.NewTimestamp(expiresAt),
+			"updatedAt": api.NewTimestamp(now),
 		},
 	}
-	
+
 	result, err := ls.collection.UpdateOne(ctx, filter, update)
 	if err != nil {
 		return fmt.Errorf("failed to renew leadership lock: %w", err)
 	}
-	
+
 	if result.ModifiedCount == 0 {
 		return fmt.Errorf("failed to renew lock: server is not the current leader")
 	}
-	
+
 	return nil
 }
 
 // ReleaseLock releases the leadership lock
 func (ls *LeadershipStorage) ReleaseLock(ctx context.Context, serverID string) error {
 	filter := bson.M{
-		"_id": "leadership",
+		"_id":      "leadership",
 		"serverId": serverID,
 	}
-	
+
 	_, err := ls.collection.DeleteOne(ctx, filter)
 	if err != nil {
 		return fmt.Errorf("failed to release leadership lock: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -117,14 +118,14 @@ func (ls *LeadershipStorage) GetCurrentLeader(ctx context.Context) (*models.Lead
 		}
 		return nil, fmt.Errorf("failed to get current leader: %w", err)
 	}
-	
+
 	// Check if lock is expired
 	if lock.IsExpired() {
 		// Clean up expired lock
 		_, _ = ls.collection.DeleteOne(ctx, bson.M{"_id": "leadership"})
 		return nil, nil
 	}
-	
+
 	return &lock, nil
 }
 
@@ -134,11 +135,11 @@ func (ls *LeadershipStorage) IsLeader(ctx context.Context, serverID string) (boo
 	if err != nil {
 		return false, err
 	}
-	
+
 	if leader == nil {
 		return false, nil
 	}
-	
+
 	return leader.ServerID == serverID, nil
 }
 

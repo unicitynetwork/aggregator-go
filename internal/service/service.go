@@ -25,48 +25,18 @@ type AggregatorService struct {
 
 // Conversion functions between API and internal model types
 
-func apiToModelCommitment(apiCommitment *api.Commitment) *models.Commitment {
-	return &models.Commitment{
-		RequestID:       models.RequestID(apiCommitment.RequestID),
-		TransactionHash: models.TransactionHash(apiCommitment.TransactionHash),
-		Authenticator: models.Authenticator{
-			Algorithm: apiCommitment.Authenticator.Algorithm,
-			PublicKey: models.HexBytes(apiCommitment.Authenticator.PublicKey),
-			Signature: models.HexBytes(apiCommitment.Authenticator.Signature),
-			StateHash: models.HexBytes(apiCommitment.Authenticator.StateHash),
-		},
-		CreatedAt:   (*models.Timestamp)(apiCommitment.CreatedAt),
-		ProcessedAt: (*models.Timestamp)(apiCommitment.ProcessedAt),
-	}
-}
-
-func modelToAPICommitment(modelCommitment *models.Commitment) *api.Commitment {
-	return &api.Commitment{
-		RequestID:       api.RequestID(modelCommitment.RequestID),
-		TransactionHash: api.TransactionHash(modelCommitment.TransactionHash),
-		Authenticator: api.Authenticator{
-			Algorithm: modelCommitment.Authenticator.Algorithm,
-			PublicKey: api.HexBytes(modelCommitment.Authenticator.PublicKey),
-			Signature: api.HexBytes(modelCommitment.Authenticator.Signature),
-			StateHash: api.HexBytes(modelCommitment.Authenticator.StateHash),
-		},
-		CreatedAt:   (*api.Timestamp)(modelCommitment.CreatedAt),
-		ProcessedAt: (*api.Timestamp)(modelCommitment.ProcessedAt),
-	}
-}
-
-func modelToAPIBigInt(modelBigInt *models.BigInt) *api.BigInt {
+func modelToAPIBigInt(modelBigInt *api.BigInt) *api.BigInt {
 	if modelBigInt == nil {
 		return nil
 	}
 	return &api.BigInt{Int: modelBigInt.Int}
 }
 
-func apiToModelBigInt(apiBigInt *api.BigInt) *models.BigInt {
+func apiToModelBigInt(apiBigInt *api.BigInt) *api.BigInt {
 	if apiBigInt == nil {
 		return nil
 	}
-	return &models.BigInt{Int: apiBigInt.Int}
+	return &api.BigInt{Int: apiBigInt.Int}
 }
 
 func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.AggregatorRecord {
@@ -77,7 +47,7 @@ func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.Aggre
 			Algorithm: modelRecord.Authenticator.Algorithm,
 			PublicKey: api.HexBytes(modelRecord.Authenticator.PublicKey),
 			Signature: api.HexBytes(modelRecord.Authenticator.Signature),
-			StateHash: api.HexBytes(modelRecord.Authenticator.StateHash),
+			StateHash: api.StateHash(modelRecord.Authenticator.StateHash.String()),
 		},
 		BlockNumber: modelToAPIBigInt(modelRecord.BlockNumber),
 		LeafIndex:   modelToAPIBigInt(modelRecord.LeafIndex),
@@ -92,7 +62,7 @@ func modelToAPIBlock(modelBlock *models.Block) *api.Block {
 		converted := api.HexBytes(*modelBlock.NoDeletionProofHash)
 		noDeletionProofHash = &converted
 	}
-	
+
 	return &api.Block{
 		Index:               modelToAPIBigInt(modelBlock.Index),
 		ChainID:             modelBlock.ChainID,
@@ -119,7 +89,7 @@ func modelToAPIHealthStatus(modelHealth *models.HealthStatus) *api.HealthStatus 
 func NewAggregatorService(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) *AggregatorService {
 	roundManager := round.NewRoundManager(cfg, logger, storage)
 	commitmentValidator := signing.NewCommitmentValidator()
-	
+
 	return &AggregatorService{
 		config:              cfg,
 		logger:              logger,
@@ -132,12 +102,12 @@ func NewAggregatorService(cfg *config.Config, logger *logger.Logger, storage int
 // Start starts the aggregator service and round manager
 func (as *AggregatorService) Start(ctx context.Context) error {
 	as.logger.WithContext(ctx).Info("Starting Aggregator Service")
-	
+
 	// Start the round manager
 	if err := as.roundManager.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start round manager: %w", err)
 	}
-	
+
 	as.logger.WithContext(ctx).Info("Aggregator Service started successfully")
 	return nil
 }
@@ -145,13 +115,13 @@ func (as *AggregatorService) Start(ctx context.Context) error {
 // Stop stops the aggregator service and round manager
 func (as *AggregatorService) Stop(ctx context.Context) error {
 	as.logger.WithContext(ctx).Info("Stopping Aggregator Service")
-	
+
 	// Stop the round manager
 	if err := as.roundManager.Stop(ctx); err != nil {
 		as.logger.WithContext(ctx).WithError(err).Error("Failed to stop round manager")
 		return fmt.Errorf("failed to stop round manager: %w", err)
 	}
-	
+
 	as.logger.WithContext(ctx).Info("Aggregator Service stopped successfully")
 	return nil
 }
@@ -159,11 +129,11 @@ func (as *AggregatorService) Stop(ctx context.Context) error {
 // SubmitCommitment handles commitment submission
 func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error) {
 	// Create commitment for validation
-	commitment := models.NewCommitment(models.RequestID(req.RequestID), models.TransactionHash(req.TransactionHash), models.Authenticator{
+	commitment := models.NewCommitment(api.RequestID(req.RequestID), req.TransactionHash, models.Authenticator{
 		Algorithm: req.Authenticator.Algorithm,
 		PublicKey: models.HexBytes(req.Authenticator.PublicKey),
 		Signature: models.HexBytes(req.Authenticator.Signature),
-		StateHash: models.HexBytes(req.Authenticator.StateHash),
+		StateHash: req.Authenticator.StateHash,
 	})
 
 	// Validate commitment signature and request ID
@@ -174,18 +144,18 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 			WithField("validationStatus", validationResult.Status.String()).
 			WithError(validationResult.Error).
 			Warn("Commitment validation failed")
-		
+
 		return &api.SubmitCommitmentResponse{
 			Status: validationResult.Status.String(),
 		}, nil
 	}
 
 	// Check if commitment already exists
-	existing, err := as.storage.CommitmentStorage().GetByRequestID(ctx, models.RequestID(req.RequestID))
+	existing, err := as.storage.CommitmentStorage().GetByRequestID(ctx, api.RequestID(req.RequestID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to check existing commitment: %w", err)
 	}
-	
+
 	if existing != nil {
 		return &api.SubmitCommitmentResponse{
 			Status: "REQUEST_ID_EXISTS",
@@ -215,23 +185,21 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 	// Generate receipt if requested
 	if req.Receipt != nil && *req.Receipt {
 		// TODO: Implement receipt generation with actual signing
-		receipt := models.NewReceipt(
-			commitment,
-			"secp256k1",
-			models.HexBytes("mock_public_key"),
-			models.HexBytes("mock_signature"),
-		)
+		//receipt := api.NewReceipt(
+		//	commitment.,
+		//	"secp256k1",
+		//	models.HexBytes("mock_public_key"),
+		//	models.HexBytes("mock_signature"),
+		//)
 		// Convert to API receipt
 		response.Receipt = &api.Receipt{
-			Algorithm: receipt.Algorithm,
-			PublicKey: api.HexBytes(receipt.PublicKey),
-			Signature: api.HexBytes(receipt.Signature),
+			Algorithm: "secp256k1",
+			PublicKey: api.HexBytes("mock_public_key"),
+			Signature: api.HexBytes("mock_signature"),
 			Request: api.ReceiptRequest{
-				Service:         receipt.Request.Service,
-				Method:          receipt.Request.Method,
-				RequestID:       api.RequestID(receipt.Request.RequestID),
-				TransactionHash: api.TransactionHash(receipt.Request.TransactionHash),
-				StateHash:       api.HexBytes(receipt.Request.StateHash),
+				RequestID:       commitment.RequestID,
+				TransactionHash: commitment.TransactionHash,
+				StateHash:       commitment.Authenticator.StateHash,
 			},
 		}
 	}
@@ -242,14 +210,14 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 // GetInclusionProof retrieves inclusion proof for a commitment
 func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error) {
 	// First check if commitment exists in aggregator records (finalized)
-	record, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, models.RequestID(req.RequestID))
+	record, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, api.RequestID(req.RequestID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get aggregator record: %w", err)
 	}
 
 	if record == nil {
 		// Check if commitment exists but not yet processed
-		commitment, err := as.storage.CommitmentStorage().GetByRequestID(ctx, models.RequestID(req.RequestID))
+		commitment, err := as.storage.CommitmentStorage().GetByRequestID(ctx, api.RequestID(req.RequestID))
 		if err != nil {
 			return nil, fmt.Errorf("failed to get commitment: %w", err)
 		}
@@ -277,13 +245,12 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 	return &api.GetInclusionProofResponse{InclusionProof: proof}, nil
 }
 
-
 // GetNoDeletionProof retrieves the global no-deletion proof
 func (as *AggregatorService) GetNoDeletionProof(ctx context.Context) (*api.GetNoDeletionProofResponse, error) {
 	// TODO: Implement no-deletion proof generation
 	// For now, return a placeholder
 	proof := api.NewNoDeletionProof(api.HexBytes("mock_no_deletion_proof"))
-	
+
 	return &api.GetNoDeletionProofResponse{
 		NoDeletionProof: proof,
 	}, nil
@@ -311,13 +278,13 @@ func (as *AggregatorService) GetBlock(ctx context.Context, req *api.GetBlockRequ
 		block, err = as.storage.BlockStorage().GetLatest(ctx)
 	} else {
 		// Parse block number
-		var blockNum *models.BigInt
+		var blockNum *api.BigInt
 		switch v := req.BlockNumber.(type) {
 		case float64:
-			blockNum = models.NewBigInt(nil)
+			blockNum = api.NewBigInt(nil)
 			blockNum.SetInt64(int64(v))
 		case string:
-			blockNum, err = models.NewBigIntFromString(v)
+			blockNum, err = api.NewBigIntFromString(v)
 			if err != nil {
 				return nil, fmt.Errorf("invalid block number: %w", err)
 			}

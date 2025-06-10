@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // RoundState represents the current state of a round
@@ -38,7 +39,7 @@ func (rs RoundState) String() string {
 
 // Round represents a single aggregation round
 type Round struct {
-	Number      *models.BigInt
+	Number      *api.BigInt
 	StartTime   time.Time
 	State       RoundState
 	Commitments []*models.Commitment
@@ -47,21 +48,21 @@ type Round struct {
 
 // RoundManager handles the creation of blocks and processing of commitments
 type RoundManager struct {
-	config       *config.Config
-	logger       *logger.Logger
-	storage      interfaces.Storage
-	smt          *ThreadSafeSMT
-	
+	config  *config.Config
+	logger  *logger.Logger
+	storage interfaces.Storage
+	smt     *ThreadSafeSMT
+
 	// Round management
 	currentRound *Round
 	roundMutex   sync.RWMutex
 	roundTimer   *time.Timer
 	stopChan     chan struct{}
 	wg           sync.WaitGroup
-	
+
 	// Round duration (configurable, default 1 second)
 	roundDuration time.Duration
-	
+
 	// Metrics
 	totalRounds      int64
 	totalCommitments int64
@@ -102,7 +103,7 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 	}
 
 	// Initialize first round (start from next block number)
-	nextRoundNumber := models.NewBigInt(nil)
+	nextRoundNumber := api.NewBigInt(nil)
 	if latestBlockNumber != nil && latestBlockNumber.Int != nil {
 		// If blocks exist, start from latest + 1
 		nextRoundNumber.Set(latestBlockNumber.Int)
@@ -116,7 +117,7 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 		nextRoundNumber.SetInt64(1)
 		rm.logger.WithContext(ctx).Info("No existing blocks found, starting from block 1")
 	}
-	
+
 	// Keep checking until we find a block number that doesn't exist
 	for {
 		existingBlock, err := rm.storage.BlockStorage().GetByNumber(ctx, nextRoundNumber)
@@ -127,17 +128,17 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 			// Found a gap - this is our next block number
 			break
 		}
-		
+
 		rm.logger.WithContext(ctx).
 			WithField("blockNumber", nextRoundNumber.String()).
 			Debug("Block already exists, incrementing to find next available number")
 		nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
 	}
-	
+
 	rm.logger.WithContext(ctx).
 		WithField("finalRoundNumber", nextRoundNumber.String()).
 		Info("Found next available block number for new round")
-	
+
 	if err := rm.startNewRound(ctx, nextRoundNumber); err != nil {
 		return fmt.Errorf("failed to start initial round: %w", err)
 	}
@@ -152,20 +153,20 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 // Stop gracefully stops the round manager
 func (rm *RoundManager) Stop(ctx context.Context) error {
 	rm.logger.WithContext(ctx).Info("Stopping Round Manager")
-	
+
 	// Signal stop
 	close(rm.stopChan)
-	
+
 	// Stop current round timer
 	rm.roundMutex.Lock()
 	if rm.roundTimer != nil {
 		rm.roundTimer.Stop()
 	}
 	rm.roundMutex.Unlock()
-	
+
 	// Wait for goroutines to finish
 	rm.wg.Wait()
-	
+
 	rm.logger.WithContext(ctx).Info("Round Manager stopped")
 	return nil
 }
@@ -180,13 +181,13 @@ func (rm *RoundManager) AddCommitment(ctx context.Context, commitment *models.Co
 	}
 
 	if rm.currentRound.State != RoundStateCollecting {
-		return fmt.Errorf("round %s is not collecting commitments (state: %s)", 
+		return fmt.Errorf("round %s is not collecting commitments (state: %s)",
 			rm.currentRound.Number.String(), rm.currentRound.State.String())
 	}
 
 	// Add commitment to current round
 	rm.currentRound.Commitments = append(rm.currentRound.Commitments, commitment)
-	
+
 	rm.logger.WithContext(ctx).
 		WithField("roundNumber", rm.currentRound.Number.String()).
 		WithField("commitmentCount", len(rm.currentRound.Commitments)).
@@ -200,7 +201,7 @@ func (rm *RoundManager) AddCommitment(ctx context.Context, commitment *models.Co
 func (rm *RoundManager) GetCurrentRound() *Round {
 	rm.roundMutex.RLock()
 	defer rm.roundMutex.RUnlock()
-	
+
 	if rm.currentRound == nil {
 		return nil
 	}
@@ -245,7 +246,7 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 }
 
 // startNewRound initializes a new round
-func (rm *RoundManager) startNewRound(ctx context.Context, roundNumber *models.BigInt) error {
+func (rm *RoundManager) startNewRound(ctx context.Context, roundNumber *api.BigInt) error {
 	rm.roundMutex.Lock()
 	defer rm.roundMutex.Unlock()
 
@@ -312,10 +313,10 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 		rm.logger.WithContext(ctx).WithError(err).Warn("Failed to get unprocessed commitments")
 		unprocessedCommitments = []*models.Commitment{}
 	}
-	
+
 	// Combine round commitments with unprocessed commitments
 	allCommitments := append(commitments, unprocessedCommitments...)
-	
+
 	rm.logger.WithContext(ctx).
 		WithField("roundCommitments", len(commitments)).
 		WithField("unprocessedCommitments", len(unprocessedCommitments)).
@@ -328,16 +329,16 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 
 	if len(allCommitments) > 0 {
 		// Mark commitments as processed FIRST to prevent duplicate processing
-		requestIDs := make([]models.RequestID, len(allCommitments))
+		requestIDs := make([]api.RequestID, len(allCommitments))
 		for i, commitment := range allCommitments {
 			requestIDs[i] = commitment.RequestID
 		}
-		
+
 		if err := rm.storage.CommitmentStorage().MarkProcessed(ctx, requestIDs); err != nil {
 			rm.logger.WithContext(ctx).WithError(err).Error("Failed to mark commitments as processed")
 			return fmt.Errorf("failed to mark commitments as processed: %w", err)
 		}
-		
+
 		rootHash, records, err = rm.processBatch(ctx, allCommitments, roundNumber)
 		if err != nil {
 			rm.logger.WithContext(ctx).WithError(err).Error("Failed to process batch, but commitments are already marked as processed")
@@ -359,10 +360,10 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	rm.totalCommitments += int64(len(allCommitments))
 
 	// Start next round
-	nextRoundNumber := models.NewBigInt(nil)
+	nextRoundNumber := api.NewBigInt(nil)
 	nextRoundNumber.Set(roundNumber.Int)
 	nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
-	
+
 	return rm.startNewRound(ctx, nextRoundNumber)
 }
 

@@ -87,8 +87,13 @@ func (v *CommitmentValidator) ValidateCommitment(commitment *models.Commitment) 
 	}
 
 	// 3. Parse and validate state hash (should be DataHash imprint: algorithm + data)
-	// HexBytes already contains the binary data, no need to decode
-	stateHashImprint := []byte(commitment.Authenticator.StateHash)
+	stateHashImprint, err := commitment.Authenticator.StateHash.Bytes()
+	if err != nil {
+		return ValidationResult{
+			Status: ValidationStatusInvalidStateHashFormat,
+			Error:  fmt.Errorf("failed to decode state hash imprint: %w", err),
+		}
+	}
 
 	// Validate state hash imprint format (minimum 3 bytes: 2 for algorithm + 1 for data)
 	if len(stateHashImprint) < 3 {
@@ -134,7 +139,7 @@ func (v *CommitmentValidator) ValidateCommitment(commitment *models.Commitment) 
 	// 5. Parse signature
 	// HexBytes already contains the binary data, no need to decode
 	signatureBytes := []byte(commitment.Authenticator.Signature)
-	
+
 	// Validate signature format (must be 65 bytes for secp256k1)
 	if len(signatureBytes) != 65 {
 		return ValidationResult{

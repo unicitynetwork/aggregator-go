@@ -41,6 +41,10 @@ func (r ImprintHexString) Imprint() ([]byte, error) {
 	return hex.DecodeString(string(r))
 }
 
+func (r ImprintHexString) Bytes() ([]byte, error) {
+	return r.Imprint()
+}
+
 func (r ImprintHexString) DataBytes() ([]byte, error) {
 	decoded, err := hex.DecodeString(string(r))
 	if err != nil {

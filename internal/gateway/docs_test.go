@@ -7,6 +7,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // TestDocumentationExamplePayload verifies that the example payload in the documentation
@@ -34,10 +35,10 @@ func TestDocumentationExamplePayload(t *testing.T) {
 	}
 
 	// Extract fields
-	requestID := models.RequestID(payload["requestId"].(string))
+	requestID := api.RequestID(payload["requestId"].(string))
 	transactionHashHex := payload["transactionHash"].(string)
 	authenticator := payload["authenticator"].(map[string]interface{})
-	
+
 	algorithm := authenticator["algorithm"].(string)
 	publicKeyHex := authenticator["publicKey"].(string)
 	signatureHex := authenticator["signature"].(string)
@@ -73,7 +74,7 @@ func TestDocumentationExamplePayload(t *testing.T) {
 	if len(stateHashImprint) < 3 || stateHashImprint[0] != 0 || stateHashImprint[1] != 0 {
 		t.Errorf("State hash should be a SHA256 DataHash imprint starting with 0000")
 	}
-	
+
 	if len(transactionHashImprint) < 3 || transactionHashImprint[0] != 0 || transactionHashImprint[1] != 0 {
 		t.Errorf("Transaction hash should be a SHA256 DataHash imprint starting with 0000")
 	}
@@ -103,7 +104,7 @@ func TestDocumentationExamplePayload(t *testing.T) {
 	}
 
 	if string(expectedRequestID) != string(requestID) {
-		t.Errorf("Request ID mismatch.\nExpected: %s\nActual: %s", 
+		t.Errorf("Request ID mismatch.\nExpected: %s\nActual: %s",
 			string(expectedRequestID), string(requestID))
 	}
 
@@ -129,7 +130,7 @@ func TestDocumentationExamplePayload(t *testing.T) {
 	result := validator.ValidateCommitment(&commitment)
 
 	if result.Status != signing.ValidationStatusSuccess {
-		t.Errorf("Commitment validation failed with status: %s, error: %v", 
+		t.Errorf("Commitment validation failed with status: %s, error: %v",
 			result.Status.String(), result.Error)
 	}
 

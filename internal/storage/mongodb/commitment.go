@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -35,7 +36,7 @@ func (cs *CommitmentStorage) Store(ctx context.Context, commitment *models.Commi
 }
 
 // GetByRequestID retrieves a commitment by request ID
-func (cs *CommitmentStorage) GetByRequestID(ctx context.Context, requestID models.RequestID) (*models.Commitment, error) {
+func (cs *CommitmentStorage) GetByRequestID(ctx context.Context, requestID api.RequestID) (*models.Commitment, error) {
 	var commitment models.Commitment
 	err := cs.collection.FindOne(ctx, bson.M{"requestId": requestID}).Decode(&commitment)
 	if err != nil {
@@ -77,13 +78,13 @@ func (cs *CommitmentStorage) GetUnprocessedBatch(ctx context.Context, limit int)
 }
 
 // MarkProcessed marks commitments as processed
-func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, requestIDs []models.RequestID) error {
+func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, requestIDs []api.RequestID) error {
 	if len(requestIDs) == 0 {
 		return nil
 	}
 
 	filter := bson.M{"requestId": bson.M{"$in": requestIDs}}
-	update := bson.M{"$set": bson.M{"processedAt": models.Now()}}
+	update := bson.M{"$set": bson.M{"processedAt": api.Now()}}
 
 	_, err := cs.collection.UpdateMany(ctx, filter, update)
 	if err != nil {
@@ -94,7 +95,7 @@ func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, requestIDs []mod
 }
 
 // Delete removes processed commitments
-func (cs *CommitmentStorage) Delete(ctx context.Context, requestIDs []models.RequestID) error {
+func (cs *CommitmentStorage) Delete(ctx context.Context, requestIDs []api.RequestID) error {
 	if len(requestIDs) == 0 {
 		return nil
 	}

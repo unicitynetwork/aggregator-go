@@ -123,7 +123,7 @@ func createValidCommitment() *api.SubmitCommitmentRequest {
 			Algorithm: "secp256k1",
 			PublicKey: api.HexBytes(publicKeyBytes),
 			Signature: api.HexBytes(signatureBytes),
-			StateHash: api.HexBytes(stateHashImprint),
+			StateHash: api.StateHash(stateHashImprint),
 		},
 		Receipt: &receipt,
 	}

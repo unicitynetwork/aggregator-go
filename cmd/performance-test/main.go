@@ -226,10 +226,7 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 			Algorithm: "secp256k1",
 			PublicKey: api.HexBytes(publicKeyBytes),
 			Signature: api.HexBytes(signatureBytes),
-			StateHash: func() api.HexBytes {
-			data, _ := hex.DecodeString(stateHashImprint)
-			return api.HexBytes(data)
-		}(),
+			StateHash: api.StateHash(stateHashImprint),
 		},
 		Receipt: &receipt,
 	}
