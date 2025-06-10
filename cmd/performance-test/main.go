@@ -12,6 +12,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/unicitynetwork/aggregator-go/internal/signing"
 )
 
 // JSON-RPC types
@@ -183,16 +186,59 @@ func generateRandomHex(length int) string {
 	return hex.EncodeToString(bytes)
 }
 
-// Generate a random commitment request
+// Generate a cryptographically valid commitment request
 func generateCommitmentRequest() *SubmitCommitmentRequest {
+	// Generate a real secp256k1 key pair
+	privateKey, err := btcec.NewPrivateKey()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to generate private key: %v", err))
+	}
+	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
+
+	// Generate random state data and create DataHash imprint
+	stateData := make([]byte, 32)
+	rand.Read(stateData)
+	stateHashImprint := signing.CreateDataHashImprint(stateData)
+
+	// Extract actual state hash bytes for RequestID calculation
+	stateHashBytes, err := signing.ExtractDataFromImprint(stateHashImprint)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to extract state hash: %v", err))
+	}
+
+	// Create RequestID deterministically 
+	requestIDGenerator := signing.NewRequestIDGenerator()
+	requestID, err := requestIDGenerator.CreateRequestID(publicKeyBytes, stateHashBytes)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to create request ID: %v", err))
+	}
+
+	// Generate random transaction data and create DataHash imprint
+	transactionData := make([]byte, 32)
+	rand.Read(transactionData)
+	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
+
+	// Extract transaction hash bytes for signing
+	transactionHashBytes, err := signing.ExtractDataFromImprint(transactionHashImprint)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to extract transaction hash: %v", err))
+	}
+
+	// Sign the transaction hash bytes
+	signingService := signing.NewSigningService()
+	signatureBytes, err := signingService.Sign(transactionHashBytes, privateKey.Serialize())
+	if err != nil {
+		panic(fmt.Sprintf("Failed to sign transaction: %v", err))
+	}
+
 	return &SubmitCommitmentRequest{
-		RequestID:       generateRandomHex(68), // 4 chars algorithm + 64 chars hash
-		TransactionHash: generateRandomHex(68), // 4 chars algorithm + 64 chars hash
+		RequestID:       string(requestID),
+		TransactionHash: transactionHashImprint,
 		Authenticator: Authenticator{
 			Algorithm: "secp256k1",
-			PublicKey: generateRandomHex(66),  // 33 bytes = 66 hex chars
-			Signature: generateRandomHex(128), // 64 bytes = 128 hex chars
-			StateHash: generateRandomHex(64),  // 32 bytes = 64 hex chars
+			PublicKey: hex.EncodeToString(publicKeyBytes),
+			Signature: hex.EncodeToString(signatureBytes),
+			StateHash: stateHashImprint,
 		},
 	}
 }
