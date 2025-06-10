@@ -10,7 +10,6 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
-	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
@@ -35,7 +34,7 @@ type Service interface {
 	GetBlockHeight(ctx context.Context) (*api.GetBlockHeightResponse, error)
 	GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error)
 	GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error)
-	GetHealthStatus(ctx context.Context) (*models.HealthStatus, error)
+	GetHealthStatus(ctx context.Context) (*api.HealthStatus, error)
 }
 
 // NewServer creates a new gateway server

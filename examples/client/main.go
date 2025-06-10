@@ -9,7 +9,6 @@ import (
 	"net/http"
 
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -118,13 +117,13 @@ func createValidCommitment() *api.SubmitCommitmentRequest {
 	receipt := true
 	
 	return &api.SubmitCommitmentRequest{
-		RequestID:       models.RequestID(requestID),
-		TransactionHash: models.TransactionHash(transactionHashImprint),
-		Authenticator: models.Authenticator{
+		RequestID:       api.RequestID(requestID),
+		TransactionHash: api.TransactionHash(transactionHashImprint),
+		Authenticator: api.Authenticator{
 			Algorithm: "secp256k1",
-			PublicKey: models.HexBytes(publicKeyBytes),
-			Signature: models.HexBytes(signatureBytes),
-			StateHash: models.HexBytes(stateHashImprint),
+			PublicKey: api.HexBytes(publicKeyBytes),
+			Signature: api.HexBytes(signatureBytes),
+			StateHash: api.HexBytes(stateHashImprint),
 		},
 		Receipt: &receipt,
 	}
