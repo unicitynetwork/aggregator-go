@@ -118,19 +118,15 @@ func TestDocumentationExamplePayload(t *testing.T) {
 	}
 
 	// 5. Test with commitment validator (end-to-end validation)
-	commitment := &models.Commitment{
-		RequestID:       requestID,
-		TransactionHash: models.TransactionHash(transactionHashHex),
-		Authenticator: models.Authenticator{
-			Algorithm: algorithm,
-			PublicKey: models.HexBytes(publicKeyHex),
-			Signature: models.HexBytes(signatureHex),
-			StateHash: models.HexBytes(stateHashHex),
-		},
+	// Create commitment by unmarshaling the JSON directly to simulate real usage
+	var commitment models.Commitment
+	err = json.Unmarshal([]byte(exampleJSON), &commitment)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal commitment: %v", err)
 	}
 
 	validator := signing.NewCommitmentValidator()
-	result := validator.ValidateCommitment(commitment)
+	result := validator.ValidateCommitment(&commitment)
 
 	if result.Status != signing.ValidationStatusSuccess {
 		t.Errorf("Commitment validation failed with status: %s, error: %v", 
