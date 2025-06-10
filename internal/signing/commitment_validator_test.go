@@ -8,6 +8,15 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 )
 
+// Helper function to convert hex string to HexBytes for tests
+func hexStringToHexBytes(hexStr string) models.HexBytes {
+	data, err := hex.DecodeString(hexStr)
+	if err != nil {
+		panic(err)
+	}
+	return models.HexBytes(data)
+}
+
 func TestCommitmentValidator_ValidateCommitment_Success(t *testing.T) {
 	validator := NewCommitmentValidator()
 
@@ -58,9 +67,9 @@ func TestCommitmentValidator_ValidateCommitment_Success(t *testing.T) {
 		TransactionHash: models.TransactionHash(transactionHashImprint),
 		Authenticator: models.Authenticator{
 			Algorithm:   AlgorithmSecp256k1,
-			PublicKey:   models.HexBytes(hex.EncodeToString(publicKeyBytes)),
-			Signature:   models.HexBytes(hex.EncodeToString(signatureBytes)),
-			StateHash:   models.HexBytes(stateHashImprint),
+			PublicKey:   models.HexBytes(publicKeyBytes),
+			Signature:   models.HexBytes(signatureBytes),
+			StateHash:   hexStringToHexBytes(stateHashImprint),
 		},
 	}
 
@@ -85,7 +94,7 @@ func TestCommitmentValidator_ValidateCommitment_UnsupportedAlgorithm(t *testing.
 			Algorithm: "unsupported-algorithm",
 			PublicKey: models.HexBytes("test-public-key"),
 			Signature: models.HexBytes("test-signature"),
-			StateHash: models.HexBytes("0000" + hex.EncodeToString([]byte("test-state-hash"))),
+			StateHash: hexStringToHexBytes(CreateDataHashImprint([]byte("test-state-hash"))),
 		},
 	}
 
@@ -109,7 +118,7 @@ func TestCommitmentValidator_ValidateCommitment_InvalidPublicKeyFormat(t *testin
 			Algorithm: AlgorithmSecp256k1,
 			PublicKey: models.HexBytes("invalid-hex-public-key"), // Invalid hex
 			Signature: models.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
-			StateHash: models.HexBytes(CreateDataHashImprint([]byte("test-state"))),
+			StateHash: hexStringToHexBytes(CreateDataHashImprint([]byte("test-state"))),
 		},
 	}
 
@@ -135,7 +144,7 @@ func TestCommitmentValidator_ValidateCommitment_InvalidStateHashFormat(t *testin
 		TransactionHash: models.TransactionHash(CreateDataHashImprint([]byte("hello"))),
 		Authenticator: models.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
-			PublicKey: models.HexBytes(hex.EncodeToString(publicKeyBytes)),
+			PublicKey: models.HexBytes(publicKeyBytes),
 			Signature: models.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
 			StateHash: models.HexBytes("invalid-hex-state-hash"), // Invalid hex
 		},
@@ -167,9 +176,9 @@ func TestCommitmentValidator_ValidateCommitment_RequestIDMismatch(t *testing.T) 
 		TransactionHash: models.TransactionHash(CreateDataHashImprint([]byte("hello"))),
 		Authenticator: models.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
-			PublicKey: models.HexBytes(hex.EncodeToString(publicKeyBytes)),
+			PublicKey: models.HexBytes(publicKeyBytes),
 			Signature: models.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
-			StateHash: models.HexBytes(CreateDataHashImprint(stateHashBytes)),
+			StateHash: hexStringToHexBytes(CreateDataHashImprint(stateHashBytes)),
 		},
 	}
 
@@ -201,9 +210,9 @@ func TestCommitmentValidator_ValidateCommitment_InvalidSignatureFormat(t *testin
 		TransactionHash: models.TransactionHash(CreateDataHashImprint([]byte("hello"))),
 		Authenticator: models.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
-			PublicKey: models.HexBytes(hex.EncodeToString(publicKeyBytes)),
-			Signature: models.HexBytes("invalid-hex-signature"), // Invalid hex
-			StateHash: models.HexBytes(stateHashImprint),
+			PublicKey: models.HexBytes(publicKeyBytes),
+			Signature: models.HexBytes(make([]byte, 32)), // Invalid length - should be 65 bytes
+			StateHash: hexStringToHexBytes(stateHashImprint),
 		},
 	}
 
@@ -235,9 +244,9 @@ func TestCommitmentValidator_ValidateCommitment_InvalidTransactionHashFormat(t *
 		TransactionHash: models.TransactionHash("invalid-hex-transaction-hash-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"), // Invalid hex but 68 chars
 		Authenticator: models.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
-			PublicKey: models.HexBytes(hex.EncodeToString(publicKeyBytes)),
-			Signature: models.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
-			StateHash: models.HexBytes(stateHashImprint),
+			PublicKey: models.HexBytes(publicKeyBytes),
+			Signature: models.HexBytes(make([]byte, 65)), // Valid length signature
+			StateHash: hexStringToHexBytes(stateHashImprint),
 		},
 	}
 
@@ -277,9 +286,9 @@ func TestCommitmentValidator_ValidateCommitment_SignatureVerificationFailed(t *t
 		TransactionHash: models.TransactionHash(CreateDataHashImprint(transactionData)), // Different from signed data
 		Authenticator: models.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
-			PublicKey: models.HexBytes(hex.EncodeToString(publicKeyBytes)),
-			Signature: models.HexBytes(hex.EncodeToString(signatureBytes)),
-			StateHash: models.HexBytes(stateHashImprint),
+			PublicKey: models.HexBytes(publicKeyBytes),
+			Signature: models.HexBytes(signatureBytes),
+			StateHash: hexStringToHexBytes(stateHashImprint),
 		},
 	}
 
@@ -337,9 +346,9 @@ func TestCommitmentValidator_ValidateCommitment_RealSecp256k1Data(t *testing.T) 
 		TransactionHash: models.TransactionHash(transactionHashImprint),
 		Authenticator: models.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
-			PublicKey: models.HexBytes(hex.EncodeToString(publicKeyBytes)),
-			Signature: models.HexBytes(hex.EncodeToString(signatureBytes)),
-			StateHash: models.HexBytes(stateHashImprint),
+			PublicKey: models.HexBytes(publicKeyBytes),
+			Signature: models.HexBytes(signatureBytes),
+			StateHash: hexStringToHexBytes(stateHashImprint),
 		},
 	}
 
