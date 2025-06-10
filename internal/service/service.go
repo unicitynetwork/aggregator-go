@@ -6,12 +6,12 @@ import (
 	"strconv"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
-	"github.com/unicitynetwork/aggregator-go/internal/gateway"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // AggregatorService implements the business logic for the aggregator
@@ -65,7 +65,7 @@ func (as *AggregatorService) Stop(ctx context.Context) error {
 }
 
 // SubmitCommitment handles commitment submission
-func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *gateway.SubmitCommitmentRequest) (*gateway.SubmitCommitmentResponse, error) {
+func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error) {
 	// Create commitment for validation
 	commitment := models.NewCommitment(req.RequestID, req.TransactionHash, req.Authenticator)
 
@@ -78,7 +78,7 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *gateway.
 			WithError(validationResult.Error).
 			Warn("Commitment validation failed")
 		
-		return &gateway.SubmitCommitmentResponse{
+		return &api.SubmitCommitmentResponse{
 			Status: validationResult.Status.String(),
 		}, nil
 	}
@@ -90,7 +90,7 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *gateway.
 	}
 	
 	if existing != nil {
-		return &gateway.SubmitCommitmentResponse{
+		return &api.SubmitCommitmentResponse{
 			Status: "REQUEST_ID_EXISTS",
 		}, nil
 	}
@@ -111,7 +111,7 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *gateway.
 
 	as.logger.WithContext(ctx).WithField("requestId", req.RequestID).Info("Commitment submitted successfully")
 
-	response := &gateway.SubmitCommitmentResponse{
+	response := &api.SubmitCommitmentResponse{
 		Status: "SUCCESS",
 	}
 
@@ -131,7 +131,7 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *gateway.
 }
 
 // GetInclusionProof retrieves inclusion proof for a commitment
-func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *gateway.GetInclusionProofRequest) (*gateway.GetInclusionProofResponse, error) {
+func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error) {
 	// First check if commitment exists in aggregator records (finalized)
 	record, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, req.RequestID)
 	if err != nil {
@@ -151,7 +151,7 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *gateway
 
 		// Commitment exists but not yet finalized
 		proof := models.NewInclusionProof(req.RequestID, nil, nil, []models.ProofNode{}, models.HexBytes{}, false)
-		return &gateway.GetInclusionProofResponse{InclusionProof: proof}, nil
+		return &api.GetInclusionProofResponse{InclusionProof: proof}, nil
 	}
 
 	// TODO: Generate actual inclusion proof from SMT when available
@@ -165,35 +165,35 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *gateway
 		true,
 	)
 
-	return &gateway.GetInclusionProofResponse{InclusionProof: proof}, nil
+	return &api.GetInclusionProofResponse{InclusionProof: proof}, nil
 }
 
 
 // GetNoDeletionProof retrieves the global no-deletion proof
-func (as *AggregatorService) GetNoDeletionProof(ctx context.Context) (*gateway.GetNoDeletionProofResponse, error) {
+func (as *AggregatorService) GetNoDeletionProof(ctx context.Context) (*api.GetNoDeletionProofResponse, error) {
 	// TODO: Implement no-deletion proof generation
 	// For now, return a placeholder
 	proof := models.NewNoDeletionProof(models.HexBytes("mock_no_deletion_proof"))
 	
-	return &gateway.GetNoDeletionProofResponse{
-		NonDeletionProof: proof,
+	return &api.GetNoDeletionProofResponse{
+		NoDeletionProof: proof,
 	}, nil
 }
 
 // GetBlockHeight retrieves the current block height
-func (as *AggregatorService) GetBlockHeight(ctx context.Context) (*gateway.GetBlockHeightResponse, error) {
+func (as *AggregatorService) GetBlockHeight(ctx context.Context) (*api.GetBlockHeightResponse, error) {
 	latestBlockNumber, err := as.storage.BlockStorage().GetLatestNumber(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get latest block number: %w", err)
 	}
 
-	return &gateway.GetBlockHeightResponse{
+	return &api.GetBlockHeightResponse{
 		BlockNumber: latestBlockNumber,
 	}, nil
 }
 
 // GetBlock retrieves block information
-func (as *AggregatorService) GetBlock(ctx context.Context, req *gateway.GetBlockRequest) (*gateway.GetBlockResponse, error) {
+func (as *AggregatorService) GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error) {
 	var block *models.Block
 	var err error
 
@@ -227,17 +227,17 @@ func (as *AggregatorService) GetBlock(ctx context.Context, req *gateway.GetBlock
 		return nil, fmt.Errorf("block not found")
 	}
 
-	return &gateway.GetBlockResponse{Block: block}, nil
+	return &api.GetBlockResponse{Block: block}, nil
 }
 
 // GetBlockCommitments retrieves all commitments in a block
-func (as *AggregatorService) GetBlockCommitments(ctx context.Context, req *gateway.GetBlockCommitmentsRequest) (*gateway.GetBlockCommitmentsResponse, error) {
+func (as *AggregatorService) GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error) {
 	records, err := as.storage.AggregatorRecordStorage().GetByBlockNumber(ctx, req.BlockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block commitments: %w", err)
 	}
 
-	return &gateway.GetBlockCommitmentsResponse{
+	return &api.GetBlockCommitmentsResponse{
 		Commitments: records,
 	}, nil
 }
