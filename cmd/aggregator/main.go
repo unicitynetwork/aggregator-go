@@ -3,30 +3,30 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
 )
 
 func main() {
-	fmt.Println("Starting Aggregator...")
+	log.Println("Starting Aggregator...")
 	ctx := quitSignalContext()
 
 	configPath := ""
 	if len(os.Args) > 1 {
 		configPath = os.Args[1]
-		fmt.Printf("reading config from %s\n", configPath)
+		log.Printf("reading config from %s\n", configPath)
 	}
 
 	config, err := LoadConfig(configPath)
 	if err != nil {
-		panic(fmt.Errorf("failed to read config: %w", err))
+		log.Fatalf("failed to read config: %v", err)
 	}
-	fmt.Printf("config: %+v\n", config)
+	log.Printf("config: %+v\n", config)
 
 	if err = run(ctx, config); err != nil && !errors.Is(err, context.Canceled) {
-		panic(err)
+		log.Fatalf("failed to run aggregator: %v", err)
 	}
 }
 
@@ -38,7 +38,7 @@ func quitSignalContext() context.Context {
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		defer signal.Stop(sigChan)
 		sig := <-sigChan
-		fmt.Printf("Caught signal %v: terminating\n", sig)
+		log.Printf("Caught signal %v: terminating\n", sig)
 		cancel()
 	}()
 
