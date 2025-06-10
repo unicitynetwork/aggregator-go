@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -29,7 +30,7 @@ func NewBlockStorage(db *mongo.Database) *BlockStorage {
 func (bs *BlockStorage) Store(ctx context.Context, block *models.Block) error {
 	// Convert to BSON format for storage
 	blockBSON := block.ToBSON()
-	
+
 	_, err := bs.collection.InsertOne(ctx, blockBSON)
 	if err != nil {
 		return fmt.Errorf("failed to store block: %w", err)
@@ -38,7 +39,7 @@ func (bs *BlockStorage) Store(ctx context.Context, block *models.Block) error {
 }
 
 // GetByNumber retrieves a block by number
-func (bs *BlockStorage) GetByNumber(ctx context.Context, blockNumber *models.BigInt) (*models.Block, error) {
+func (bs *BlockStorage) GetByNumber(ctx context.Context, blockNumber *api.BigInt) (*models.Block, error) {
 	var blockBSON models.BlockBSON
 	err := bs.collection.FindOne(ctx, bson.M{"index": blockNumber.String()}).Decode(&blockBSON)
 	if err != nil {
@@ -47,7 +48,7 @@ func (bs *BlockStorage) GetByNumber(ctx context.Context, blockNumber *models.Big
 		}
 		return nil, fmt.Errorf("failed to get block by number: %w", err)
 	}
-	
+
 	block, err := blockBSON.FromBSON()
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert from BSON: %w", err)
@@ -58,7 +59,7 @@ func (bs *BlockStorage) GetByNumber(ctx context.Context, blockNumber *models.Big
 // GetLatest retrieves the latest block
 func (bs *BlockStorage) GetLatest(ctx context.Context) (*models.Block, error) {
 	opts := options.FindOne().SetSort(bson.M{"index": -1})
-	
+
 	var blockBSON models.BlockBSON
 	err := bs.collection.FindOne(ctx, bson.M{}, opts).Decode(&blockBSON)
 	if err != nil {
@@ -67,7 +68,7 @@ func (bs *BlockStorage) GetLatest(ctx context.Context) (*models.Block, error) {
 		}
 		return nil, fmt.Errorf("failed to get latest block: %w", err)
 	}
-	
+
 	block, err := blockBSON.FromBSON()
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert from BSON: %w", err)
@@ -76,7 +77,7 @@ func (bs *BlockStorage) GetLatest(ctx context.Context) (*models.Block, error) {
 }
 
 // GetLatestNumber retrieves the latest block number
-func (bs *BlockStorage) GetLatestNumber(ctx context.Context) (*models.BigInt, error) {
+func (bs *BlockStorage) GetLatestNumber(ctx context.Context) (*api.BigInt, error) {
 	// Get all block indices and find the maximum numerically
 	opts := options.Find().SetProjection(bson.M{"index": 1})
 	cursor, err := bs.collection.Find(ctx, bson.M{}, opts)
@@ -84,32 +85,32 @@ func (bs *BlockStorage) GetLatestNumber(ctx context.Context) (*models.BigInt, er
 		return nil, fmt.Errorf("failed to find blocks: %w", err)
 	}
 	defer cursor.Close(ctx)
-	
-	var maxBlockNumber *models.BigInt
-	
+
+	var maxBlockNumber *api.BigInt
+
 	for cursor.Next(ctx) {
 		var result struct {
 			Index string `bson:"index"`
 		}
-		
+
 		if err := cursor.Decode(&result); err != nil {
 			return nil, fmt.Errorf("failed to decode block: %w", err)
 		}
-		
-		blockNumber, err := models.NewBigIntFromString(result.Index)
+
+		blockNumber, err := api.NewBigIntFromString(result.Index)
 		if err != nil {
 			continue // Skip invalid block numbers
 		}
-		
+
 		if maxBlockNumber == nil || blockNumber.Cmp(maxBlockNumber.Int) > 0 {
 			maxBlockNumber = blockNumber
 		}
 	}
-	
+
 	if err := cursor.Err(); err != nil {
 		return nil, fmt.Errorf("cursor error: %w", err)
 	}
-	
+
 	return maxBlockNumber, nil
 }
 
@@ -123,14 +124,14 @@ func (bs *BlockStorage) Count(ctx context.Context) (int64, error) {
 }
 
 // GetRange retrieves blocks in a range
-func (bs *BlockStorage) GetRange(ctx context.Context, fromBlock, toBlock *models.BigInt) ([]*models.Block, error) {
+func (bs *BlockStorage) GetRange(ctx context.Context, fromBlock, toBlock *api.BigInt) ([]*models.Block, error) {
 	filter := bson.M{
 		"index": bson.M{
 			"$gte": fromBlock.String(),
 			"$lte": toBlock.String(),
 		},
 	}
-	
+
 	opts := options.Find().SetSort(bson.M{"index": 1})
 	cursor, err := bs.collection.Find(ctx, filter, opts)
 	if err != nil {
@@ -144,7 +145,7 @@ func (bs *BlockStorage) GetRange(ctx context.Context, fromBlock, toBlock *models
 		if err := cursor.Decode(&blockBSON); err != nil {
 			return nil, fmt.Errorf("failed to decode block: %w", err)
 		}
-		
+
 		block, err := blockBSON.FromBSON()
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert from BSON: %w", err)

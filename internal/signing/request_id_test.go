@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 func TestRequestIDGenerator_CreateRequestID(t *testing.T) {
@@ -58,7 +58,7 @@ func TestRequestIDGenerator_CreateRequestIDCompatibility(t *testing.T) {
 	expectedHash := hasher.Sum(nil)
 	// Add algorithm prefix as per the RequestID format
 	algorithmImprint := "0000" // SHA256 algorithm identifier (HashAlgorithm.SHA256 = 0)
-	expectedRequestID := models.RequestID(algorithmImprint + hex.EncodeToString(expectedHash))
+	expectedRequestID := api.RequestID(algorithmImprint + hex.EncodeToString(expectedHash))
 
 	// Generate using our function
 	actualRequestID, err := generator.CreateRequestID(publicKey, stateHashBytes)
@@ -93,7 +93,7 @@ func TestRequestIDGenerator_ValidateRequestID(t *testing.T) {
 	}
 
 	// Test invalid request ID validation
-	invalidRequestID := models.RequestID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	invalidRequestID := api.RequestID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	isValid, err = generator.ValidateRequestID(invalidRequestID, publicKey, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to validate invalid request ID: %v", err)

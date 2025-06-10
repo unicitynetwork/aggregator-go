@@ -153,8 +153,8 @@ type Receipt struct {
 
 // ReceiptRequest represents the request data in a receipt
 type ReceiptRequest struct {
-	Service         string          `json:"service"`
-	Method          string          `json:"method"`
+	//Service         string          `json:"service"`
+	//Method          string          `json:"method"`
 	RequestID       RequestID       `json:"requestId"`
 	TransactionHash TransactionHash `json:"transactionHash"`
 	StateHash       StateHash       `json:"stateHash"`
@@ -167,8 +167,8 @@ func NewReceipt(commitment *Commitment, algorithm string, publicKey, signature H
 		PublicKey: publicKey,
 		Signature: signature,
 		Request: ReceiptRequest{
-			Service:         "aggregator",
-			Method:          "submit_commitment",
+			//Service:         "aggregator",
+			//Method:          "submit_commitment",
 			RequestID:       commitment.RequestID,
 			TransactionHash: commitment.TransactionHash,
 			StateHash:       commitment.Authenticator.StateHash,

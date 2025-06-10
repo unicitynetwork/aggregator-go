@@ -4,48 +4,50 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // Authenticator represents the authentication data for a commitment
 type Authenticator struct {
-	Algorithm string   `json:"algorithm" bson:"algorithm"`
-	PublicKey HexBytes `json:"publicKey" bson:"publicKey"`
-	Signature HexBytes `json:"signature" bson:"signature"`
-	StateHash HexBytes `json:"stateHash" bson:"stateHash"`
+	Algorithm string        `json:"algorithm" bson:"algorithm"`
+	PublicKey HexBytes      `json:"publicKey" bson:"publicKey"`
+	Signature HexBytes      `json:"signature" bson:"signature"`
+	StateHash api.StateHash `json:"stateHash" bson:"stateHash"`
 }
 
 // Commitment represents a state transition request
 type Commitment struct {
-	RequestID       RequestID       `json:"requestId" bson:"requestId"`
-	TransactionHash TransactionHash `json:"transactionHash" bson:"transactionHash"`
-	Authenticator   Authenticator   `json:"authenticator" bson:"authenticator"`
-	CreatedAt       *Timestamp      `json:"createdAt" bson:"createdAt"`
-	ProcessedAt     *Timestamp      `json:"processedAt,omitempty" bson:"processedAt,omitempty"`
+	RequestID       api.RequestID       `json:"requestId" bson:"requestId"`
+	TransactionHash api.TransactionHash `json:"transactionHash" bson:"transactionHash"`
+	Authenticator   Authenticator       `json:"authenticator" bson:"authenticator"`
+	CreatedAt       *api.Timestamp      `json:"createdAt" bson:"createdAt"`
+	ProcessedAt     *api.Timestamp      `json:"processedAt,omitempty" bson:"processedAt,omitempty"`
 }
 
 // NewCommitment creates a new commitment
-func NewCommitment(requestID RequestID, transactionHash TransactionHash, authenticator Authenticator) *Commitment {
+func NewCommitment(requestID api.RequestID, transactionHash api.TransactionHash, authenticator Authenticator) *Commitment {
 	return &Commitment{
 		RequestID:       requestID,
 		TransactionHash: transactionHash,
 		Authenticator:   authenticator,
-		CreatedAt:       Now(),
+		CreatedAt:       api.Now(),
 	}
 }
 
 // AggregatorRecord represents a finalized commitment with proof data
 type AggregatorRecord struct {
-	RequestID       RequestID       `json:"requestId" bson:"requestId"`
-	TransactionHash TransactionHash `json:"transactionHash" bson:"transactionHash"`
-	Authenticator   Authenticator   `json:"authenticator" bson:"authenticator"`
-	BlockNumber     *BigInt         `json:"blockNumber" bson:"blockNumber"`
-	LeafIndex       *BigInt         `json:"leafIndex" bson:"leafIndex"`
-	CreatedAt       *Timestamp      `json:"createdAt" bson:"createdAt"`
-	FinalizedAt     *Timestamp      `json:"finalizedAt" bson:"finalizedAt"`
+	RequestID       api.RequestID       `json:"requestId" bson:"requestId"`
+	TransactionHash api.TransactionHash `json:"transactionHash" bson:"transactionHash"`
+	Authenticator   Authenticator       `json:"authenticator" bson:"authenticator"`
+	BlockNumber     *api.BigInt         `json:"blockNumber" bson:"blockNumber"`
+	LeafIndex       *api.BigInt         `json:"leafIndex" bson:"leafIndex"`
+	CreatedAt       *api.Timestamp      `json:"createdAt" bson:"createdAt"`
+	FinalizedAt     *api.Timestamp      `json:"finalizedAt" bson:"finalizedAt"`
 }
 
 // NewAggregatorRecord creates a new aggregator record from a commitment
-func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *BigInt) *AggregatorRecord {
+func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *api.BigInt) *AggregatorRecord {
 	return &AggregatorRecord{
 		RequestID:       commitment.RequestID,
 		TransactionHash: commitment.TransactionHash,
@@ -53,7 +55,7 @@ func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *BigInt)
 		BlockNumber:     blockNumber,
 		LeafIndex:       leafIndex,
 		CreatedAt:       commitment.CreatedAt,
-		FinalizedAt:     Now(),
+		FinalizedAt:     api.Now(),
 	}
 }
 
@@ -96,22 +98,22 @@ func (ar *AggregatorRecord) ToBSON() *AggregatorRecordBSON {
 
 // FromBSON converts AggregatorRecordBSON back to AggregatorRecord
 func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
-	requestID, err := NewRequestID(arb.RequestID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse requestID: %w", err)
-	}
-
-	transactionHash, err := NewTransactionHash(arb.TransactionHash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse transactionHash: %w", err)
-	}
-
-	blockNumber, err := NewBigIntFromString(arb.BlockNumber)
+	//requestID, err := NewRequestID(arb.RequestID)
+	//if err != nil {
+	//	return nil, fmt.Errorf("failed to parse requestID: %w", err)
+	//}
+	//
+	//transactionHash, err := NewTransactionHash(arb.TransactionHash)
+	//if err != nil {
+	//	return nil, fmt.Errorf("failed to parse transactionHash: %w", err)
+	//}
+	//
+	blockNumber, err := api.NewBigIntFromString(arb.BlockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse blockNumber: %w", err)
 	}
 
-	leafIndex, err := NewBigIntFromString(arb.LeafIndex)
+	leafIndex, err := api.NewBigIntFromString(arb.LeafIndex)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse leafIndex: %w", err)
 	}
@@ -126,68 +128,35 @@ func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
 		return nil, fmt.Errorf("failed to parse signature: %w", err)
 	}
 
-	stateHash, err := NewHexBytesFromString(arb.Authenticator.StateHash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse stateHash: %w", err)
-	}
+	//stateHash, err := NewHexBytesFromString(arb.Authenticator.StateHash)
+	//if err != nil {
+	//	return nil, fmt.Errorf("failed to parse stateHash: %w", err)
+	//}
 
 	createdAtMillis, err := strconv.ParseInt(arb.CreatedAt, 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse createdAt: %w", err)
 	}
-	createdAt := &Timestamp{Time: time.UnixMilli(createdAtMillis)}
+	createdAt := &api.Timestamp{Time: time.UnixMilli(createdAtMillis)}
 
 	finalizedAtMillis, err := strconv.ParseInt(arb.FinalizedAt, 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse finalizedAt: %w", err)
 	}
-	finalizedAt := &Timestamp{Time: time.UnixMilli(finalizedAtMillis)}
+	finalizedAt := &api.Timestamp{Time: time.UnixMilli(finalizedAtMillis)}
 
 	return &AggregatorRecord{
-		RequestID:       requestID,
-		TransactionHash: transactionHash,
+		RequestID:       api.RequestID(arb.RequestID),
+		TransactionHash: api.TransactionHash(arb.TransactionHash),
 		Authenticator: Authenticator{
 			Algorithm: arb.Authenticator.Algorithm,
 			PublicKey: publicKey,
 			Signature: signature,
-			StateHash: stateHash,
+			StateHash: api.StateHash(arb.Authenticator.StateHash),
 		},
 		BlockNumber: blockNumber,
 		LeafIndex:   leafIndex,
 		CreatedAt:   createdAt,
 		FinalizedAt: finalizedAt,
 	}, nil
-}
-
-// Receipt represents a signed receipt for a commitment submission
-type Receipt struct {
-	Algorithm string         `json:"algorithm"`
-	PublicKey HexBytes       `json:"publicKey"`
-	Signature HexBytes       `json:"signature"`
-	Request   ReceiptRequest `json:"request"`
-}
-
-// ReceiptRequest represents the request data in a receipt
-type ReceiptRequest struct {
-	Service         string          `json:"service"`
-	Method          string          `json:"method"`
-	RequestID       RequestID       `json:"requestId"`
-	TransactionHash TransactionHash `json:"transactionHash"`
-	StateHash       HexBytes        `json:"stateHash"`
-}
-
-// NewReceipt creates a new receipt for a commitment
-func NewReceipt(commitment *Commitment, algorithm string, publicKey, signature HexBytes) *Receipt {
-	return &Receipt{
-		Algorithm: algorithm,
-		PublicKey: publicKey,
-		Signature: signature,
-		Request: ReceiptRequest{
-			Service:         "aggregator",
-			Method:          "submit_commitment",
-			RequestID:       commitment.RequestID,
-			TransactionHash: commitment.TransactionHash,
-			StateHash:       commitment.Authenticator.StateHash,
-		},
-	}
 }

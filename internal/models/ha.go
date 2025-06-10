@@ -1,6 +1,10 @@
 package models
 
-import "time"
+import (
+	"time"
+
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
+)
 
 // LeadershipStatus represents the current leadership status
 type LeadershipStatus struct {
@@ -27,16 +31,16 @@ func NewLeadershipStatus(isLeader bool, serverID string, haEnabled bool) *Leader
 
 // LeadershipLock represents the leadership lock document in MongoDB
 type LeadershipLock struct {
-	ID        string     `json:"id" bson:"_id"`
-	ServerID  string     `json:"serverId" bson:"serverId"`
-	ExpiresAt *Timestamp `json:"expiresAt" bson:"expiresAt"`
-	UpdatedAt *Timestamp `json:"updatedAt" bson:"updatedAt"`
+	ID        string         `json:"id" bson:"_id"`
+	ServerID  string         `json:"serverId" bson:"serverId"`
+	ExpiresAt *api.Timestamp `json:"expiresAt" bson:"expiresAt"`
+	UpdatedAt *api.Timestamp `json:"updatedAt" bson:"updatedAt"`
 }
 
 // NewLeadershipLock creates a new leadership lock
 func NewLeadershipLock(serverID string, ttlSeconds int) *LeadershipLock {
-	now := Now()
-	expiresAt := NewTimestamp(now.Time.Add(time.Second * time.Duration(ttlSeconds)))
+	now := api.Now()
+	expiresAt := api.NewTimestamp(now.Time.Add(time.Second * time.Duration(ttlSeconds)))
 
 	return &LeadershipLock{
 		ID:        "leadership",

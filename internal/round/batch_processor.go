@@ -8,10 +8,11 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // processBatch processes a batch of commitments and adds them to the SMT
-func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.Commitment, blockNumber *models.BigInt) (string, []*models.AggregatorRecord, error) {
+func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.Commitment, blockNumber *api.BigInt) (string, []*models.AggregatorRecord, error) {
 	rm.logger.WithContext(ctx).
 		WithField("commitmentCount", len(commitments)).
 		WithField("blockNumber", blockNumber.String()).
@@ -40,7 +41,7 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 		}
 
 		// Create aggregator record
-		leafIndex := models.NewBigInt(big.NewInt(int64(i)))
+		leafIndex := api.NewBigInt(big.NewInt(int64(i)))
 		records[i] = models.NewAggregatorRecord(commitment, blockNumber, leafIndex)
 
 		rm.logger.WithContext(ctx).
@@ -68,14 +69,14 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 		if err != nil {
 			return "", nil, fmt.Errorf("failed to check existing aggregator record for %s: %w", record.RequestID, err)
 		}
-		
+
 		if existing != nil {
 			rm.logger.WithContext(ctx).
 				WithField("requestId", record.RequestID.String()).
 				Debug("Aggregator record already exists, skipping")
 			continue
 		}
-		
+
 		if err := rm.storage.AggregatorRecordStorage().Store(ctx, record); err != nil {
 			return "", nil, fmt.Errorf("failed to store aggregator record for %s: %w", record.RequestID, err)
 		}
@@ -85,7 +86,7 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 }
 
 // generateLeafPath generates a uint64 path for the SMT from a RequestID
-func (rm *RoundManager) generateLeafPath(requestID models.RequestID) (uint64, error) {
+func (rm *RoundManager) generateLeafPath(requestID api.RequestID) (uint64, error) {
 	// Convert RequestID to bytes
 	requestIDBytes, err := requestID.Bytes()
 	if err != nil {
@@ -94,7 +95,7 @@ func (rm *RoundManager) generateLeafPath(requestID models.RequestID) (uint64, er
 
 	// Hash the requestID to get a deterministic path
 	hash := sha256.Sum256(requestIDBytes)
-	
+
 	// Use the first 8 bytes of the hash as a uint64 path
 	path := uint64(0)
 	for i := 0; i < 8 && i < len(hash); i++ {
@@ -108,7 +109,7 @@ func (rm *RoundManager) generateLeafPath(requestID models.RequestID) (uint64, er
 func (rm *RoundManager) createLeafValue(commitment *models.Commitment) ([]byte, error) {
 	// Create a deterministic value from commitment data
 	// This includes requestID, transactionHash, and authenticator data
-	
+
 	requestIDBytes, err := commitment.RequestID.Bytes()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get requestID bytes: %w", err)
@@ -133,7 +134,7 @@ func (rm *RoundManager) createLeafValue(commitment *models.Commitment) ([]byte, 
 }
 
 // finalizeBlock creates and persists a new block with the given data
-func (rm *RoundManager) finalizeBlock(ctx context.Context, blockNumber *models.BigInt, rootHash string, records []*models.AggregatorRecord) error {
+func (rm *RoundManager) finalizeBlock(ctx context.Context, blockNumber *api.BigInt, rootHash string, records []*models.AggregatorRecord) error {
 	rm.roundMutex.Lock()
 	if rm.currentRound != nil {
 		rm.currentRound.State = RoundStateFinalizing
@@ -150,10 +151,10 @@ func (rm *RoundManager) finalizeBlock(ctx context.Context, blockNumber *models.B
 	var parentHash models.HexBytes
 	if blockNumber.Cmp(big.NewInt(1)) > 0 {
 		// Get previous block
-		prevBlockNumber := models.NewBigInt(nil)
+		prevBlockNumber := api.NewBigInt(nil)
 		prevBlockNumber.Set(blockNumber.Int)
 		prevBlockNumber.Sub(prevBlockNumber.Int, big.NewInt(1))
-		
+
 		prevBlock, err := rm.storage.BlockStorage().GetByNumber(ctx, prevBlockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get previous block %s: %w", prevBlockNumber.String(), err)
@@ -194,4 +195,3 @@ func (rm *RoundManager) finalizeBlock(ctx context.Context, blockNumber *models.B
 
 	return nil
 }
-

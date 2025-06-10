@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -35,7 +36,7 @@ func (brs *BlockRecordsStorage) Store(ctx context.Context, records *models.Block
 }
 
 // GetByBlockNumber retrieves block records by block number
-func (brs *BlockRecordsStorage) GetByBlockNumber(ctx context.Context, blockNumber *models.BigInt) (*models.BlockRecords, error) {
+func (brs *BlockRecordsStorage) GetByBlockNumber(ctx context.Context, blockNumber *api.BigInt) (*models.BlockRecords, error) {
 	var records models.BlockRecords
 	err := brs.collection.FindOne(ctx, bson.M{"blockNumber": blockNumber.String()}).Decode(&records)
 	if err != nil {
@@ -48,14 +49,14 @@ func (brs *BlockRecordsStorage) GetByBlockNumber(ctx context.Context, blockNumbe
 }
 
 // GetByRequestID retrieves the block number for a request ID
-func (brs *BlockRecordsStorage) GetByRequestID(ctx context.Context, requestID models.RequestID) (*models.BigInt, error) {
+func (brs *BlockRecordsStorage) GetByRequestID(ctx context.Context, requestID api.RequestID) (*api.BigInt, error) {
 	filter := bson.M{"requestIds": requestID}
 	opts := options.FindOne().SetProjection(bson.M{"blockNumber": 1})
-	
+
 	var result struct {
-		BlockNumber *models.BigInt `bson:"blockNumber"`
+		BlockNumber *api.BigInt `bson:"blockNumber"`
 	}
-	
+
 	err := brs.collection.FindOne(ctx, filter, opts).Decode(&result)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
@@ -63,7 +64,7 @@ func (brs *BlockRecordsStorage) GetByRequestID(ctx context.Context, requestID mo
 		}
 		return nil, fmt.Errorf("failed to get block number by request ID: %w", err)
 	}
-	
+
 	return result.BlockNumber, nil
 }
 

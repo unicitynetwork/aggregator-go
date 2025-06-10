@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -54,7 +55,7 @@ func (ars *AggregatorRecordStorage) StoreBatch(ctx context.Context, records []*m
 }
 
 // GetByRequestID retrieves an aggregator record by request ID
-func (ars *AggregatorRecordStorage) GetByRequestID(ctx context.Context, requestID models.RequestID) (*models.AggregatorRecord, error) {
+func (ars *AggregatorRecordStorage) GetByRequestID(ctx context.Context, requestID api.RequestID) (*models.AggregatorRecord, error) {
 	var recordBSON models.AggregatorRecordBSON
 	err := ars.collection.FindOne(ctx, bson.M{"requestId": string(requestID)}).Decode(&recordBSON)
 	if err != nil {
@@ -63,7 +64,7 @@ func (ars *AggregatorRecordStorage) GetByRequestID(ctx context.Context, requestI
 		}
 		return nil, fmt.Errorf("failed to get aggregator record by request ID: %w", err)
 	}
-	
+
 	record, err := recordBSON.FromBSON()
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert from BSON: %w", err)
@@ -72,7 +73,7 @@ func (ars *AggregatorRecordStorage) GetByRequestID(ctx context.Context, requestI
 }
 
 // GetByBlockNumber retrieves all records for a specific block
-func (ars *AggregatorRecordStorage) GetByBlockNumber(ctx context.Context, blockNumber *models.BigInt) ([]*models.AggregatorRecord, error) {
+func (ars *AggregatorRecordStorage) GetByBlockNumber(ctx context.Context, blockNumber *api.BigInt) ([]*models.AggregatorRecord, error) {
 	filter := bson.M{"blockNumber": blockNumber.String()}
 	cursor, err := ars.collection.Find(ctx, filter)
 	if err != nil {
@@ -86,7 +87,7 @@ func (ars *AggregatorRecordStorage) GetByBlockNumber(ctx context.Context, blockN
 		if err := cursor.Decode(&recordBSON); err != nil {
 			return nil, fmt.Errorf("failed to decode aggregator record: %w", err)
 		}
-		
+
 		record, err := recordBSON.FromBSON()
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert from BSON: %w", err)
@@ -128,7 +129,7 @@ func (ars *AggregatorRecordStorage) GetLatest(ctx context.Context, limit int) ([
 		if err := cursor.Decode(&recordBSON); err != nil {
 			return nil, fmt.Errorf("failed to decode aggregator record: %w", err)
 		}
-		
+
 		record, err := recordBSON.FromBSON()
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert from BSON: %w", err)
