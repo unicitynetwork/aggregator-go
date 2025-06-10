@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // JSON-RPC types
@@ -38,23 +40,7 @@ type JSONRPCError struct {
 	Data    string `json:"data,omitempty"`
 }
 
-// Request/Response types
-type SubmitCommitmentRequest struct {
-	RequestID       string        `json:"requestId"`
-	TransactionHash string        `json:"transactionHash"`
-	Authenticator   Authenticator `json:"authenticator"`
-}
-
-type Authenticator struct {
-	Algorithm string `json:"algorithm"`
-	PublicKey string `json:"publicKey"`
-	Signature string `json:"signature"`
-	StateHash string `json:"stateHash"`
-}
-
-type SubmitCommitmentResponse struct {
-	Status string `json:"status"`
-}
+// Use the public API types
 
 type GetBlockResponse struct {
 	Block Block `json:"block"`
@@ -187,7 +173,7 @@ func generateRandomHex(length int) string {
 }
 
 // Generate a cryptographically valid commitment request
-func generateCommitmentRequest() *SubmitCommitmentRequest {
+func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 	// Generate a real secp256k1 key pair
 	privateKey, err := btcec.NewPrivateKey()
 	if err != nil {
@@ -231,15 +217,22 @@ func generateCommitmentRequest() *SubmitCommitmentRequest {
 		panic(fmt.Sprintf("Failed to sign transaction: %v", err))
 	}
 
-	return &SubmitCommitmentRequest{
-		RequestID:       string(requestID),
-		TransactionHash: transactionHashImprint,
-		Authenticator: Authenticator{
+	// Create receipt flag
+	receipt := true
+	
+	return &api.SubmitCommitmentRequest{
+		RequestID:       models.RequestID(requestID),
+		TransactionHash: models.TransactionHash(transactionHashImprint),
+		Authenticator: models.Authenticator{
 			Algorithm: "secp256k1",
-			PublicKey: hex.EncodeToString(publicKeyBytes),
-			Signature: hex.EncodeToString(signatureBytes),
-			StateHash: stateHashImprint,
+			PublicKey: models.HexBytes(publicKeyBytes),
+			Signature: models.HexBytes(signatureBytes),
+			StateHash: func() models.HexBytes {
+			data, _ := hex.DecodeString(stateHashImprint)
+			return models.HexBytes(data)
+		}(),
 		},
+		Receipt: &receipt,
 	}
 }
 
@@ -275,7 +268,7 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 			}
 
 			// Parse response
-			var submitResp SubmitCommitmentResponse
+			var submitResp api.SubmitCommitmentResponse
 			respBytes, _ := json.Marshal(resp.Result)
 			if err := json.Unmarshal(respBytes, &submitResp); err != nil {
 				atomic.AddInt64(&metrics.failedRequests, 1)
