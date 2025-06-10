@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -53,7 +54,7 @@ func (ss *SmtStorage) StoreBatch(ctx context.Context, nodes []*models.SmtNode) e
 }
 
 // GetByKey retrieves an SMT node by key
-func (ss *SmtStorage) GetByKey(ctx context.Context, key models.HexBytes) (*models.SmtNode, error) {
+func (ss *SmtStorage) GetByKey(ctx context.Context, key api.HexBytes) (*models.SmtNode, error) {
 	var node models.SmtNode
 	err := ss.collection.FindOne(ctx, bson.M{"key": key.String()}).Decode(&node)
 	if err != nil {
@@ -66,7 +67,7 @@ func (ss *SmtStorage) GetByKey(ctx context.Context, key models.HexBytes) (*model
 }
 
 // Delete removes an SMT node
-func (ss *SmtStorage) Delete(ctx context.Context, key models.HexBytes) error {
+func (ss *SmtStorage) Delete(ctx context.Context, key api.HexBytes) error {
 	_, err := ss.collection.DeleteOne(ctx, bson.M{"key": key.String()})
 	if err != nil {
 		return fmt.Errorf("failed to delete SMT node: %w", err)
@@ -75,7 +76,7 @@ func (ss *SmtStorage) Delete(ctx context.Context, key models.HexBytes) error {
 }
 
 // DeleteBatch removes multiple SMT nodes
-func (ss *SmtStorage) DeleteBatch(ctx context.Context, keys []models.HexBytes) error {
+func (ss *SmtStorage) DeleteBatch(ctx context.Context, keys []api.HexBytes) error {
 	if len(keys) == 0 {
 		return nil
 	}

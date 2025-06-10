@@ -148,7 +148,7 @@ func (rm *RoundManager) finalizeBlock(ctx context.Context, blockNumber *api.BigI
 		Info("Finalizing block")
 
 	// Get parent block hash
-	var parentHash models.HexBytes
+	var parentHash api.HexBytes
 	if blockNumber.Cmp(big.NewInt(1)) > 0 {
 		// Get previous block
 		prevBlockNumber := api.NewBigInt(nil)
@@ -171,7 +171,7 @@ func (rm *RoundManager) finalizeBlock(ctx context.Context, blockNumber *api.BigI
 		"unicity",
 		"1.0",
 		"mainnet",
-		models.NewHexBytes([]byte(rootHash)),
+		api.NewHexBytes([]byte(rootHash)),
 		parentHash,
 	)
 

@@ -112,15 +112,12 @@ func (v *CommitmentValidator) ValidateCommitment(commitment *models.Commitment) 
 		}
 	}
 
-	// Extract actual state hash data (skip first 2 bytes)
-	stateHashBytes := stateHashImprint[2:]
-
 	// 4. Validate Request ID matches expected value
 	// RequestID should be SHA256(publicKey || stateHash)
 	isValidRequestID, err := v.requestIDGenerator.ValidateRequestID(
 		commitment.RequestID,
 		publicKeyBytes,
-		stateHashBytes,
+		stateHashImprint,
 	)
 	if err != nil {
 		return ValidationResult{

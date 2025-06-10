@@ -82,13 +82,13 @@ type SmtStorage interface {
 	StoreBatch(ctx context.Context, nodes []*models.SmtNode) error
 
 	// GetByKey retrieves an SMT node by key
-	GetByKey(ctx context.Context, key models.HexBytes) (*models.SmtNode, error)
+	GetByKey(ctx context.Context, key api.HexBytes) (*models.SmtNode, error)
 
 	// Delete removes an SMT node
-	Delete(ctx context.Context, key models.HexBytes) error
+	Delete(ctx context.Context, key api.HexBytes) error
 
 	// DeleteBatch removes multiple SMT nodes
-	DeleteBatch(ctx context.Context, keys []models.HexBytes) error
+	DeleteBatch(ctx context.Context, keys []api.HexBytes) error
 
 	// Count returns the total number of nodes
 	Count(ctx context.Context) (int64, error)
