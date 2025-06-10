@@ -1,3 +1,6 @@
 .idea
 .claude
 bin
+aggregator
+aggregator.log
+performance-test
