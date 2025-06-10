@@ -11,7 +11,7 @@ type HexBytes []byte
 
 // NewHexBytes creates HexBytes from byte slice
 func NewHexBytes(data []byte) HexBytes {
-	return HexBytes(data)
+	return data
 }
 
 // NewHexBytesFromString creates HexBytes from hex string
@@ -25,7 +25,7 @@ func NewHexBytesFromString(s string) (HexBytes, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid hex string: %w", err)
 	}
-	return HexBytes(data), nil
+	return data, nil
 }
 
 // MarshalJSON implements json.Marshaler

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 
+	"github.com/alphabill-org/alphabill-go-base/crypto"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 )
@@ -35,12 +36,17 @@ func (s *SigningService) Sign(data []byte, privateKey []byte) ([]byte, error) {
 
 	// Sign the hash  
 	signature := ecdsa.SignCompact(privKey, hash[:], true) // true for compressed public key recovery
-	
+
 	return signature, nil
 }
 
 // VerifyWithPublicKey verifies a signature against data using a public key
 func (s *SigningService) VerifyWithPublicKey(data []byte, signature []byte, publicKey []byte) (bool, error) {
+	hash := sha256.Sum256(data)
+	return s.VerifyHashWithPublicKey(hash[:], signature, publicKey)
+}
+
+func (s *SigningService) VerifyHashWithPublicKey(dataHash []byte, signature []byte, publicKey []byte) (bool, error) {
 	if len(signature) != 65 {
 		return false, fmt.Errorf("signature must be 65 bytes (64 bytes + recovery), got %d", len(signature))
 	}
@@ -49,23 +55,16 @@ func (s *SigningService) VerifyWithPublicKey(data []byte, signature []byte, publ
 		return false, fmt.Errorf("compressed public key must be 33 bytes, got %d", len(publicKey))
 	}
 
-	// Parse the public key
-	pubKey, err := btcec.ParsePubKey(publicKey)
+	verifier, err := crypto.NewVerifierSecp256k1(publicKey)
 	if err != nil {
-		return false, fmt.Errorf("failed to parse public key: %w", err)
+		return false, fmt.Errorf("failed to create verifier: %w", err)
 	}
 
-	// Hash the data
-	hash := sha256.Sum256(data)
-
-	// Use RecoverCompact to verify - this is more reliable than manual parsing
-	recoveredPubKey, _, err := ecdsa.RecoverCompact(signature, hash[:])
-	if err != nil {
-		return false, nil // Invalid signature, but not an error
+	if err := verifier.VerifyHash(signature, dataHash); err != nil {
+		return false, fmt.Errorf("signature verification failed: %w", err)
 	}
 
-	// Compare the recovered public key with the provided public key
-	return recoveredPubKey.IsEqual(pubKey), nil
+	return true, nil
 }
 
 // RecoverPublicKey recovers the public key from a signature and the original data

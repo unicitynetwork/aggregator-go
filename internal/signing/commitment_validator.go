@@ -177,7 +177,7 @@ func (v *CommitmentValidator) ValidateCommitment(commitment *models.Commitment) 
 
 	// 7. Verify signature
 	// The signature should be over the transaction hash bytes
-	isValidSignature, err := v.signingService.VerifyWithPublicKey(
+	isValidSignature, err := v.signingService.VerifyHashWithPublicKey(
 		transactionHashBytes,
 		signatureBytes,
 		publicKeyBytes,
