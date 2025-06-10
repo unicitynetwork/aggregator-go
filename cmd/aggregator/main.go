@@ -19,7 +19,7 @@ func main() {
 		log.Printf("reading config from %s\n", configPath)
 	}
 
-	config, err := LoadConfig(configPath)
+	config, err := loadConfig(configPath)
 	if err != nil {
 		log.Fatalf("failed to read config: %v", err)
 	}

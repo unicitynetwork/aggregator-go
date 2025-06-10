@@ -15,9 +15,9 @@ type (
 	}
 )
 
-const envPrefix = ""
+const envPrefix = "AGGREGATOR"
 
-func LoadConfig(configFilePath string) (*Config, error) {
+func loadConfig(configFilePath string) (*Config, error) {
 	viper.AutomaticEnv()
 	viper.SetEnvPrefix(envPrefix)
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
