@@ -11,7 +11,7 @@ build:
 	go build -o $(BIN_PATH) ./${CMD_DIR}
 
 test:
-	go test ./... -coverpkg=./... -count=1 -coverprofile test-coverage.out
+	go test -race ./... -coverpkg=./... -count=1 -coverprofile test-coverage.out
 
 run: build
 	$(BIN_PATH)
