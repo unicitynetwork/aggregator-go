@@ -131,8 +131,8 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 	// Create commitment for validation
 	commitment := models.NewCommitment(api.RequestID(req.RequestID), req.TransactionHash, models.Authenticator{
 		Algorithm: req.Authenticator.Algorithm,
-		PublicKey: models.HexBytes(req.Authenticator.PublicKey),
-		Signature: models.HexBytes(req.Authenticator.Signature),
+		PublicKey: api.HexBytes(req.Authenticator.PublicKey),
+		Signature: api.HexBytes(req.Authenticator.Signature),
 		StateHash: req.Authenticator.StateHash,
 	})
 
@@ -188,8 +188,8 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 		//receipt := api.NewReceipt(
 		//	commitment.,
 		//	"secp256k1",
-		//	models.HexBytes("mock_public_key"),
-		//	models.HexBytes("mock_signature"),
+		//	api.HexBytes("mock_public_key"),
+		//	api.HexBytes("mock_signature"),
 		//)
 		// Convert to API receipt
 		response.Receipt = &api.Receipt{

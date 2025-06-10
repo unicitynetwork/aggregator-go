@@ -11,8 +11,8 @@ import (
 // Authenticator represents the authentication data for a commitment
 type Authenticator struct {
 	Algorithm string        `json:"algorithm" bson:"algorithm"`
-	PublicKey HexBytes      `json:"publicKey" bson:"publicKey"`
-	Signature HexBytes      `json:"signature" bson:"signature"`
+	PublicKey api.HexBytes  `json:"publicKey" bson:"publicKey"`
+	Signature api.HexBytes  `json:"signature" bson:"signature"`
 	StateHash api.StateHash `json:"stateHash" bson:"stateHash"`
 }
 
@@ -118,12 +118,12 @@ func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
 		return nil, fmt.Errorf("failed to parse leafIndex: %w", err)
 	}
 
-	publicKey, err := NewHexBytesFromString(arb.Authenticator.PublicKey)
+	publicKey, err := api.NewHexBytesFromString(arb.Authenticator.PublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse publicKey: %w", err)
 	}
 
-	signature, err := NewHexBytesFromString(arb.Authenticator.Signature)
+	signature, err := api.NewHexBytesFromString(arb.Authenticator.Signature)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse signature: %w", err)
 	}

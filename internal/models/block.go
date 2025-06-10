@@ -15,9 +15,9 @@ type Block struct {
 	Version             string         `json:"version" bson:"version"`
 	ForkID              string         `json:"forkId" bson:"forkId"`
 	Timestamp           *api.Timestamp `json:"timestamp" bson:"timestamp"`
-	RootHash            HexBytes       `json:"rootHash" bson:"rootHash"`
-	PreviousBlockHash   HexBytes       `json:"previousBlockHash" bson:"previousBlockHash"`
-	NoDeletionProofHash *HexBytes      `json:"noDeletionProofHash" bson:"noDeletionProofHash,omitempty"`
+	RootHash            api.HexBytes   `json:"rootHash" bson:"rootHash"`
+	PreviousBlockHash   api.HexBytes   `json:"previousBlockHash" bson:"previousBlockHash"`
+	NoDeletionProofHash *api.HexBytes  `json:"noDeletionProofHash" bson:"noDeletionProofHash,omitempty"`
 	CreatedAt           *api.Timestamp `json:"createdAt" bson:"createdAt"`
 }
 
@@ -73,12 +73,12 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 	}
 	createdAt := &api.Timestamp{Time: time.UnixMilli(createdAtMillis)}
 
-	rootHash, err := NewHexBytesFromString(bb.RootHash)
+	rootHash, err := api.NewHexBytesFromString(bb.RootHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse rootHash: %w", err)
 	}
 
-	previousBlockHash, err := NewHexBytesFromString(bb.PreviousBlockHash)
+	previousBlockHash, err := api.NewHexBytesFromString(bb.PreviousBlockHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse previousBlockHash: %w", err)
 	}
@@ -95,7 +95,7 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 	}
 
 	if bb.NoDeletionProofHash != "" {
-		noDeletionProofHash, err := NewHexBytesFromString(bb.NoDeletionProofHash)
+		noDeletionProofHash, err := api.NewHexBytesFromString(bb.NoDeletionProofHash)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse noDeletionProofHash: %w", err)
 		}
@@ -106,7 +106,7 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 }
 
 // NewBlock creates a new block
-func NewBlock(index *api.BigInt, chainID, version, forkID string, rootHash, previousBlockHash HexBytes) *Block {
+func NewBlock(index *api.BigInt, chainID, version, forkID string, rootHash, previousBlockHash api.HexBytes) *Block {
 	return &Block{
 		Index:             index,
 		ChainID:           chainID,
@@ -137,14 +137,14 @@ func NewBlockRecords(blockNumber *api.BigInt, requestIDs []api.RequestID) *Block
 
 // SmtNode represents a Sparse Merkle Tree node
 type SmtNode struct {
-	Key       HexBytes       `json:"key" bson:"key"`
-	Value     HexBytes       `json:"value" bson:"value"`
-	Hash      HexBytes       `json:"hash" bson:"hash"`
+	Key       api.HexBytes   `json:"key" bson:"key"`
+	Value     api.HexBytes   `json:"value" bson:"value"`
+	Hash      api.HexBytes   `json:"hash" bson:"hash"`
 	CreatedAt *api.Timestamp `json:"createdAt" bson:"createdAt"`
 }
 
 // NewSmtNode creates a new SMT node
-func NewSmtNode(key, value, hash HexBytes) *SmtNode {
+func NewSmtNode(key, value, hash api.HexBytes) *SmtNode {
 	return &SmtNode{
 		Key:       key,
 		Value:     value,
