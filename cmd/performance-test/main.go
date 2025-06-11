@@ -72,7 +72,7 @@ const (
 	aggregatorURL  = "http://localhost:3000"
 	testDuration   = 10 * time.Second
 	workerCount    = 100  // Number of concurrent workers (increased)
-	requestsPerSec = 5000 // Target requests per second (increased)
+	requestsPerSec = 1000 // Target requests per second (increased)
 	samplingRounds = 10   // Number of recent rounds to sample for average
 )
 
@@ -185,15 +185,8 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 	rand.Read(stateData)
 	stateHashImprint := signing.CreateDataHashImprint(stateData)
 
-	// Extract actual state hash bytes for RequestID calculation
-	stateHashBytes, err := signing.ExtractDataFromImprint(stateHashImprint)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to extract state hash: %v", err))
-	}
-
-	// Create RequestID deterministically 
-	requestIDGenerator := signing.NewRequestIDGenerator()
-	requestID, err := requestIDGenerator.CreateRequestID(publicKeyBytes, stateHashBytes)
+	// Create RequestID deterministically
+	requestID, err := api.CreateRequestID(publicKeyBytes, signing.CreateDataHashImprint(stateData))
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create request ID: %v", err))
 	}
@@ -204,21 +197,21 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
 
 	// Extract transaction hash bytes for signing
-	transactionHashBytes, err := signing.ExtractDataFromImprint(transactionHashImprint)
+	transactionHashBytes, err := transactionHashImprint.DataBytes()
 	if err != nil {
 		panic(fmt.Sprintf("Failed to extract transaction hash: %v", err))
 	}
 
 	// Sign the transaction hash bytes
 	signingService := signing.NewSigningService()
-	signatureBytes, err := signingService.Sign(transactionHashBytes, privateKey.Serialize())
+	signatureBytes, err := signingService.SignHash(transactionHashBytes, privateKey.Serialize())
 	if err != nil {
 		panic(fmt.Sprintf("Failed to sign transaction: %v", err))
 	}
 
 	// Create receipt flag
-	receipt := true
-	
+	receipt := false
+
 	return &api.SubmitCommitmentRequest{
 		RequestID:       api.RequestID(requestID),
 		TransactionHash: api.TransactionHash(transactionHashImprint),
@@ -292,29 +285,29 @@ func blockMonitor(ctx context.Context, client *JSONRPCClient, metrics *Metrics, 
 		fmt.Printf("Failed to get initial block height: %v\n", err)
 		return
 	}
-	
+
 	if resp.Error != nil {
 		fmt.Printf("Error getting initial block height: %v\n", resp.Error.Message)
 		return
 	}
-	
+
 	var heightResp GetBlockHeightResponse
 	respBytes, _ := json.Marshal(resp.Result)
 	if err := json.Unmarshal(respBytes, &heightResp); err != nil {
 		fmt.Printf("Failed to parse initial block height: %v\n", err)
 		return
 	}
-	
+
 	// Parse starting block number
 	var startingBlockNumber int64
 	if _, err := fmt.Sscanf(heightResp.BlockNumber, "%d", &startingBlockNumber); err != nil {
 		fmt.Printf("Failed to parse starting block number: %v\n", err)
 		return
 	}
-	
+
 	fmt.Printf("Starting block monitoring from block %d\n", startingBlockNumber+1)
 	lastBlockNumber := startingBlockNumber
-	
+
 	ticker := time.NewTicker(100 * time.Millisecond) // Check for new blocks frequently
 	defer ticker.Stop()
 

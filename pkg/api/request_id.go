@@ -12,6 +12,13 @@ type RequestID = ImprintHexString
 // ImprintHexString represents a hex string (4 chars (two bytes) algorithm + n-byte chars hash)
 type ImprintHexString string
 
+func NewImprintHexStringFromBytes(imprint []byte) (ImprintHexString, error) {
+	if len(imprint) <= 3 {
+		return "", fmt.Errorf("imprint must be at least 3 bytes, got %d", len(imprint))
+	}
+	return ImprintHexString(fmt.Sprintf("%x", imprint)), nil
+}
+
 func NewImprintHexString(s string) (ImprintHexString, error) {
 	if len(s) <= 4 {
 		return "", fmt.Errorf("imprint must be at least 3 bytes, got %d", len(s)/2)
@@ -79,11 +86,23 @@ func CreateRequestID(publicKey []byte, stateHash ImprintHexString) (RequestID, e
 	if err != nil {
 		return "", fmt.Errorf("failed to convert state hash to bytes: %w", err)
 	}
+	return CreateRequestIDFromBytes(publicKey, stateHashBytes)
+}
 
+func CreateRequestIDFromBytes(publicKey []byte, stateHashBytes []byte) (RequestID, error) {
 	// Create the data to hash: publicKey + stateHash
 	data := make([]byte, 0, len(publicKey)+len(stateHashBytes))
 	data = append(data, publicKey...)
 	data = append(data, stateHashBytes...)
 
 	return NewImprintHexString(fmt.Sprintf("0000%x", sha256.Sum256(data)))
+}
+
+func ValidateRequestID(requestID RequestID, publicKey []byte, stateHashBytes []byte) (bool, error) {
+	expectedRequestID, err := CreateRequestIDFromBytes(publicKey, stateHashBytes)
+	if err != nil {
+		return false, err
+	}
+
+	return requestID == expectedRequestID, nil
 }

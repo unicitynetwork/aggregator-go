@@ -9,19 +9,19 @@ import (
 )
 
 func TestRequestIDGenerator_CreateRequestID(t *testing.T) {
-	generator := NewRequestIDGenerator()
+	// Using api.CreateRequestIDFromBytes and api.ValidateRequestID
 
 	// Test with known values
 	publicKey := []byte{0x03, 0xd8, 0xe2, 0xb2, 0xff, 0x8a, 0xc4, 0xf0, 0x2b, 0x2b, 0x5c, 0x45, 0x12, 0xc5, 0xe4, 0xe6, 0xb1, 0xc7, 0xd2, 0xe3, 0xa8, 0xb9, 0xc1, 0xf8, 0xe9, 0xd1, 0xc2, 0xa3, 0xb4, 0xe5, 0xf6, 0xa7}
 	stateHash := []byte{0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64} // "Hello World"
 
-	requestID, err := generator.CreateRequestID(publicKey, stateHash)
+	requestID, err := api.CreateRequestIDFromBytes(publicKey, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to create request ID: %v", err)
 	}
 
 	// Verify the result is deterministic by creating it again
-	requestID2, err := generator.CreateRequestID(publicKey, stateHash)
+	requestID2, err := api.CreateRequestIDFromBytes(publicKey, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to create request ID second time: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestRequestIDGenerator_CreateRequestID(t *testing.T) {
 
 func TestRequestIDGenerator_CreateRequestIDCompatibility(t *testing.T) {
 	// Test that matches the TypeScript implementation
-	generator := NewRequestIDGenerator()
+	// Using api.CreateRequestIDFromBytes and api.ValidateRequestID
 
 	// Manually compute expected value using the same algorithm as TypeScript
 	publicKey := []byte{0x03, 0xd8, 0xe2, 0xb2, 0xff, 0x8a, 0xc4, 0xf0, 0x2b, 0x2b, 0x5c, 0x45, 0x12, 0xc5, 0xe4, 0xe6, 0xb1, 0xc7, 0xd2, 0xe3, 0xa8, 0xb9, 0xc1, 0xf8, 0xe9, 0xd1, 0xc2, 0xa3, 0xb4, 0xe5, 0xf6, 0xa7}
@@ -61,7 +61,7 @@ func TestRequestIDGenerator_CreateRequestIDCompatibility(t *testing.T) {
 	expectedRequestID := api.RequestID(algorithmImprint + hex.EncodeToString(expectedHash))
 
 	// Generate using our function
-	actualRequestID, err := generator.CreateRequestID(publicKey, stateHashBytes)
+	actualRequestID, err := api.CreateRequestIDFromBytes(publicKey, stateHashBytes)
 	if err != nil {
 		t.Fatalf("Failed to create request ID: %v", err)
 	}
@@ -72,19 +72,19 @@ func TestRequestIDGenerator_CreateRequestIDCompatibility(t *testing.T) {
 }
 
 func TestRequestIDGenerator_ValidateRequestID(t *testing.T) {
-	generator := NewRequestIDGenerator()
+	// Using api.CreateRequestIDFromBytes and api.ValidateRequestID
 
 	publicKey := []byte{0x03, 0xd8, 0xe2, 0xb2, 0xff, 0x8a, 0xc4, 0xf0, 0x2b, 0x2b, 0x5c, 0x45, 0x12, 0xc5, 0xe4, 0xe6, 0xb1, 0xc7, 0xd2, 0xe3, 0xa8, 0xb9, 0xc1, 0xf8, 0xe9, 0xd1, 0xc2, 0xa3, 0xb4, 0xe5, 0xf6, 0xa7}
 	stateHash := []byte("test-state-for-validation")
 
 	// Create a valid request ID
-	validRequestID, err := generator.CreateRequestID(publicKey, stateHash)
+	validRequestID, err := api.CreateRequestIDFromBytes(publicKey, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to create valid request ID: %v", err)
 	}
 
 	// Test valid request ID validation
-	isValid, err := generator.ValidateRequestID(validRequestID, publicKey, stateHash)
+	isValid, err := api.ValidateRequestID(validRequestID, publicKey, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to validate request ID: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestRequestIDGenerator_ValidateRequestID(t *testing.T) {
 
 	// Test invalid request ID validation
 	invalidRequestID := api.RequestID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-	isValid, err = generator.ValidateRequestID(invalidRequestID, publicKey, stateHash)
+	isValid, err = api.ValidateRequestID(invalidRequestID, publicKey, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to validate invalid request ID: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestRequestIDGenerator_ValidateRequestID(t *testing.T) {
 	copy(differentPublicKey, publicKey)
 	differentPublicKey[0] = 0x02 // Change first byte
 
-	isValid, err = generator.ValidateRequestID(validRequestID, differentPublicKey, stateHash)
+	isValid, err = api.ValidateRequestID(validRequestID, differentPublicKey, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to validate request ID with different public key: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestRequestIDGenerator_ValidateRequestID(t *testing.T) {
 
 	// Test with different state hash (should be invalid)
 	differentStateHash := []byte("different-state-hash")
-	isValid, err = generator.ValidateRequestID(validRequestID, publicKey, differentStateHash)
+	isValid, err = api.ValidateRequestID(validRequestID, publicKey, differentStateHash)
 	if err != nil {
 		t.Fatalf("Failed to validate request ID with different state hash: %v", err)
 	}
@@ -127,19 +127,19 @@ func TestRequestIDGenerator_ValidateRequestID(t *testing.T) {
 }
 
 func TestRequestIDGenerator_EmptyInputs(t *testing.T) {
-	generator := NewRequestIDGenerator()
+	// Using api.CreateRequestIDFromBytes and api.ValidateRequestID
 
 	// Test with empty public key
 	emptyPublicKey := []byte{}
 	stateHash := []byte("test-state")
 
-	requestID, err := generator.CreateRequestID(emptyPublicKey, stateHash)
+	requestID, err := api.CreateRequestIDFromBytes(emptyPublicKey, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to create request ID with empty public key: %v", err)
 	}
 
 	// Should still be deterministic
-	requestID2, err := generator.CreateRequestID(emptyPublicKey, stateHash)
+	requestID2, err := api.CreateRequestIDFromBytes(emptyPublicKey, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to create request ID with empty public key second time: %v", err)
 	}
@@ -152,13 +152,13 @@ func TestRequestIDGenerator_EmptyInputs(t *testing.T) {
 	publicKey := []byte{0x03, 0xd8}
 	emptyStateHash := []byte{}
 
-	requestID, err = generator.CreateRequestID(publicKey, emptyStateHash)
+	requestID, err = api.CreateRequestIDFromBytes(publicKey, emptyStateHash)
 	if err != nil {
 		t.Fatalf("Failed to create request ID with empty state hash: %v", err)
 	}
 
 	// Test with both empty
-	requestID, err = generator.CreateRequestID([]byte{}, []byte{})
+	requestID, err = api.CreateRequestIDFromBytes([]byte{}, []byte{})
 	if err != nil {
 		t.Fatalf("Failed to create request ID with both inputs empty: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestRequestIDGenerator_EmptyInputs(t *testing.T) {
 }
 
 func TestRequestIDGenerator_LargeInputs(t *testing.T) {
-	generator := NewRequestIDGenerator()
+	// Using api.CreateRequestIDFromBytes and api.ValidateRequestID
 
 	// Test with large public key (larger than typical 33 bytes)
 	largePublicKey := make([]byte, 1024)
@@ -185,13 +185,13 @@ func TestRequestIDGenerator_LargeInputs(t *testing.T) {
 		largeStateHash[i] = byte((i * 7) % 256)
 	}
 
-	requestID, err := generator.CreateRequestID(largePublicKey, largeStateHash)
+	requestID, err := api.CreateRequestIDFromBytes(largePublicKey, largeStateHash)
 	if err != nil {
 		t.Fatalf("Failed to create request ID with large inputs: %v", err)
 	}
 
 	// Verify deterministic behavior
-	requestID2, err := generator.CreateRequestID(largePublicKey, largeStateHash)
+	requestID2, err := api.CreateRequestIDFromBytes(largePublicKey, largeStateHash)
 	if err != nil {
 		t.Fatalf("Failed to create request ID with large inputs second time: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestRequestIDGenerator_LargeInputs(t *testing.T) {
 	}
 
 	// Verify validation works with large inputs
-	isValid, err := generator.ValidateRequestID(requestID, largePublicKey, largeStateHash)
+	isValid, err := api.ValidateRequestID(requestID, largePublicKey, largeStateHash)
 	if err != nil {
 		t.Fatalf("Failed to validate request ID with large inputs: %v", err)
 	}

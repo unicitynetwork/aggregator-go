@@ -108,15 +108,15 @@ curl -X POST http://localhost:3333/ \
     "jsonrpc": "2.0",
     "method": "submit_commitment",
     "params": {
-      "requestId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "transactionHash": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "requestId": "0000220207629fb5d473755e804685971f946eb2ebddc54cbced5b34bc67911bf98e",
+      "transactionHash": "00003055507c62716fc2e38af9326f3d894eb0813b8e66b8fea45da4012f36560a9b",
       "authenticator": {
-        "stateHash": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-        "publicKey": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
-        "signature": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-        "signAlg": "ed25519",
-        "hashAlg": "SHA256"
-      }
+        "algorithm": "secp256k1",
+        "publicKey": "02bdc93b5b700fc0562b6b4606bb57bde490cbc5e429913cfdadcb5c35ae02ba49",
+        "signature": "1f4ed5ce831d95e8f3f3325f72f3f361435a64bb6969cf032d78618cf191625a3b326cd9fdac2972b11605be401df498acd644f4e9ef9e39257ad3a4aeff649fc8",
+        "stateHash": "0000abac20b3ac6a9dfd4e0b645e1e584e3efe81a3dc6d0a55fb543226d94c96ef2a"
+      },
+      "receipt": true
     },
     "id": 1
   }'

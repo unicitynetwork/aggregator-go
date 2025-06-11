@@ -57,7 +57,7 @@ func main() {
 	// Example 3: Show other API types usage
 	fmt.Println("\n3. Other API types available:")
 	fmt.Println("   - api.GetInclusionProofRequest")
-	fmt.Println("   - api.GetInclusionProofResponse") 
+	fmt.Println("   - api.GetInclusionProofResponse")
 	fmt.Println("   - api.GetBlockRequest")
 	fmt.Println("   - api.GetBlockResponse")
 	fmt.Println("   - api.GetBlockCommitmentsRequest")
@@ -80,17 +80,10 @@ func createValidCommitment() *api.SubmitCommitmentRequest {
 	// Generate random state data and create DataHash imprint
 	stateData := make([]byte, 32)
 	rand.Read(stateData)
+
 	stateHashImprint := signing.CreateDataHashImprint(stateData)
-
-	// Extract actual state hash bytes for RequestID calculation
-	stateHashBytes, err := signing.ExtractDataFromImprint(stateHashImprint)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to extract state hash: %v", err))
-	}
-
 	// Create RequestID deterministically 
-	requestIDGenerator := signing.NewRequestIDGenerator()
-	requestID, err := requestIDGenerator.CreateRequestID(publicKeyBytes, stateHashBytes)
+	requestID, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create request ID: %v", err))
 	}
@@ -101,7 +94,7 @@ func createValidCommitment() *api.SubmitCommitmentRequest {
 	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
 
 	// Extract transaction hash bytes for signing
-	transactionHashBytes, err := signing.ExtractDataFromImprint(transactionHashImprint)
+	transactionHashBytes, err := transactionHashImprint.Imprint()
 	if err != nil {
 		panic(fmt.Sprintf("Failed to extract transaction hash: %v", err))
 	}
@@ -115,9 +108,9 @@ func createValidCommitment() *api.SubmitCommitmentRequest {
 
 	// Create receipt flag
 	receipt := true
-	
+
 	return &api.SubmitCommitmentRequest{
-		RequestID:       api.RequestID(requestID),
+		RequestID:       requestID,
 		TransactionHash: api.TransactionHash(transactionHashImprint),
 		Authenticator: api.Authenticator{
 			Algorithm: "secp256k1",

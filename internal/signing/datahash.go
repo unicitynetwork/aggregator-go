@@ -3,7 +3,6 @@ package signing
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -22,20 +21,4 @@ func CreateDataHashImprint(data []byte) api.ImprintHexString {
 	copy(imprint[2:], hash[:])
 
 	return api.ImprintHexString(hex.EncodeToString(imprint))
-}
-
-// ExtractDataFromImprint extracts the actual data from a DataHash imprint
-// Returns the data bytes (without the algorithm prefix)
-func ExtractDataFromImprint(imprintHex api.ImprintHexString) ([]byte, error) {
-	imprint, err := hex.DecodeString(imprintHex.String())
-	if err != nil {
-		return nil, err
-	}
-
-	if len(imprint) < 3 {
-		return nil, fmt.Errorf("imprint must have at least 3 bytes")
-	}
-
-	// Skip first 2 bytes (algorithm) and return the data
-	return imprint[2:], nil
 }

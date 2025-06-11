@@ -152,13 +152,13 @@ Submit a state transition request to the aggregation layer with cryptographic va
   "jsonrpc": "2.0",
   "method": "submit_commitment",
   "params": {
-    "requestId": "00005c9c027a51f9ccd163878fed568ba1425774f6e568a43b7b1f8233c476a42c8e",
-    "transactionHash": "0000163c3d5c540f2f790f4db549130d4f6b22cc7dda6b6e61a53a0b14bd7859047b",
+    "requestId": "0000220207629fb5d473755e804685971f946eb2ebddc54cbced5b34bc67911bf98e",
+    "transactionHash": "00003055507c62716fc2e38af9326f3d894eb0813b8e66b8fea45da4012f36560a9b",
     "authenticator": {
       "algorithm": "secp256k1",
-      "publicKey": "033cf8de37cec427b5e3d782e5fc516dcc43f8e9c7bc03530833879f6ee7987d4e",
-      "signature": "2061590eeaf9c3fc3e894454b43410d0410f37ab17e5104a08db3d018d072880f9715dc3b60989cf9cc4589850edecac344702594aa264b2789792bb855a30f39c",
-      "stateHash": "0000026581b5546639dc5110634df8cbbdf4150f3583fc54a0db98ef413574396dd0"
+      "publicKey": "02bdc93b5b700fc0562b6b4606bb57bde490cbc5e429913cfdadcb5c35ae02ba49",
+      "signature": "1f4ed5ce831d95e8f3f3325f72f3f361435a64bb6969cf032d78618cf191625a3b326cd9fdac2972b11605be401df498acd644f4e9ef9e39257ad3a4aeff649fc8",
+      "stateHash": "0000abac20b3ac6a9dfd4e0b645e1e584e3efe81a3dc6d0a55fb543226d94c96ef2a"
     },
     "receipt": true
   },
@@ -182,14 +182,14 @@ Submit a state transition request to the aggregation layer with cryptographic va
     "status": "SUCCESS",
     "receipt": {
       "algorithm": "secp256k1",
-      "publicKey": "033cf8de37cec427b5e3d782e5fc516dcc43f8e9c7bc03530833879f6ee7987d4e",
+      "publicKey": "02bdc93b5b700fc0562b6b4606bb57bde490cbc5e429913cfdadcb5c35ae02ba49",
       "signature": "...",
       "request": {
         "service": "aggregator",
         "method": "submit_commitment",
-        "requestId": "00005c9c027a51f9ccd163878fed568ba1425774f6e568a43b7b1f8233c476a42c8e",
-        "transactionHash": "0000163c3d5c540f2f790f4db549130d4f6b22cc7dda6b6e61a53a0b14bd7859047b",
-        "stateHash": "0000026581b5546639dc5110634df8cbbdf4150f3583fc54a0db98ef413574396dd0"
+        "requestId": "0000220207629fb5d473755e804685971f946eb2ebddc54cbced5b34bc67911bf98e",
+        "transactionHash": "00003055507c62716fc2e38af9326f3d894eb0813b8e66b8fea45da4012f36560a9b",
+        "stateHash": "0000abac20b3ac6a9dfd4e0b645e1e584e3efe81a3dc6d0a55fb543226d94c96ef2a"
       }
     }
   },
@@ -216,7 +216,7 @@ Retrieve the Sparse Merkle Tree inclusion proof for a specific state transition 
   "jsonrpc": "2.0",
   "method": "get_inclusion_proof",
   "params": {
-    "requestId": "00005c9c027a51f9ccd163878fed568ba1425774f6e568a43b7b1f8233c476a42c8e"
+    "requestId": "0000220207629fb5d473755e804685971f946eb2ebddc54cbced5b34bc67911bf98e"
   },
   "id": 2
 }
@@ -232,18 +232,18 @@ Retrieve the Sparse Merkle Tree inclusion proof for a specific state transition 
       "steps": [
         {
           "branch": ["0", "1"],
-          "path": "00005c9c027a51f9ccd163878fed568ba1425774f6e568a43b7b1f8233c476a42c8e",
+          "path": "0000220207629fb5d473755e804685971f946eb2ebddc54cbced5b34bc67911bf98e",
           "sibling": "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234"
         }
       ]
     },
     "authenticator": {
       "algorithm": "secp256k1",
-      "publicKey": "033cf8de37cec427b5e3d782e5fc516dcc43f8e9c7bc03530833879f6ee7987d4e",
-      "signature": "2061590eeaf9c3fc3e894454b43410d0410f37ab17e5104a08db3d018d072880f9715dc3b60989cf9cc4589850edecac344702594aa264b2789792bb855a30f39c",
-      "stateHash": "0000026581b5546639dc5110634df8cbbdf4150f3583fc54a0db98ef413574396dd0"
+      "publicKey": "02bdc93b5b700fc0562b6b4606bb57bde490cbc5e429913cfdadcb5c35ae02ba49",
+      "signature": "1f4ed5ce831d95e8f3f3325f72f3f361435a64bb6969cf032d78618cf191625a3b326cd9fdac2972b11605be401df498acd644f4e9ef9e39257ad3a4aeff649fc8",
+      "stateHash": "0000abac20b3ac6a9dfd4e0b645e1e584e3efe81a3dc6d0a55fb543226d94c96ef2a"
     },
-    "transactionHash": "0000163c3d5c540f2f790f4db549130d4f6b22cc7dda6b6e61a53a0b14bd7859047b"
+    "transactionHash": "00003055507c62716fc2e38af9326f3d894eb0813b8e66b8fea45da4012f36560a9b"
   },
   "id": 2
 }
@@ -330,13 +330,13 @@ Retrieve all commitments included in a specific block.
   "result": {
     "commitments": [
       {
-        "requestId": "00005c9c027a51f9ccd163878fed568ba1425774f6e568a43b7b1f8233c476a42c8e",
-        "transactionHash": "0000163c3d5c540f2f790f4db549130d4f6b22cc7dda6b6e61a53a0b14bd7859047b",
+        "requestId": "0000220207629fb5d473755e804685971f946eb2ebddc54cbced5b34bc67911bf98e",
+        "transactionHash": "00003055507c62716fc2e38af9326f3d894eb0813b8e66b8fea45da4012f36560a9b",
         "authenticator": {
           "algorithm": "secp256k1",
-          "publicKey": "033cf8de37cec427b5e3d782e5fc516dcc43f8e9c7bc03530833879f6ee7987d4e",
-          "signature": "2061590eeaf9c3fc3e894454b43410d0410f37ab17e5104a08db3d018d072880f9715dc3b60989cf9cc4589850edecac344702594aa264b2789792bb855a30f39c",
-          "stateHash": "0000026581b5546639dc5110634df8cbbdf4150f3583fc54a0db98ef413574396dd0"
+          "publicKey": "02bdc93b5b700fc0562b6b4606bb57bde490cbc5e429913cfdadcb5c35ae02ba49",
+          "signature": "1f4ed5ce831d95e8f3f3325f72f3f361435a64bb6969cf032d78618cf191625a3b326cd9fdac2972b11605be401df498acd644f4e9ef9e39257ad3a4aeff649fc8",
+          "stateHash": "0000abac20b3ac6a9dfd4e0b645e1e584e3efe81a3dc6d0a55fb543226d94c96ef2a"
         },
         "blockNumber": "123",
         "leafIndex": "0",

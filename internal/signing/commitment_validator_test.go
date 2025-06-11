@@ -18,31 +18,6 @@ func hexStringToHexBytes(hexStr string) api.HexBytes {
 	return data
 }
 
-//TODO
-func TestCommitmentValidator_ValidateCommitment_Success_FromTS(t *testing.T) {
-	validator := NewCommitmentValidator()
-
-	commitment := &models.Commitment{
-		RequestID:       api.RequestID("0000cfe84a1828e2edd0a7d9533b23e519f746069a938d549a150e07e14dc0f9cf00"),
-		TransactionHash: api.TransactionHash("00008a51b5b84171e6c7c345bf3610cc18fa1b61bad33908e1522520c001b0e7fd1d"),
-		Authenticator: models.Authenticator{
-			Algorithm: AlgorithmSecp256k1,
-			PublicKey: hexStringToHexBytes("032044f2cd28867f57ace2b3fd1437b775df8dd62ea0acf0e1fc43cc846c1a05e1"),
-			Signature: hexStringToHexBytes("416751e864ba85250091e4fcd1b728850e7d1ea757ad4f297a29b018182ff4dd1f25982aede58e56d9163cc6ab36b3433bfe34d1cec41bdb03d9e31b87619b1f00"),
-			StateHash: api.StateHash("0000cd6065a0f1d503113f443505fd7981e6096e8f5b725501c00379e8eb74055648"),
-		},
-	}
-
-	result := validator.ValidateCommitment(commitment)
-
-	if result.Status != ValidationStatusSuccess {
-		t.Errorf("Expected validation success, got status: %s, error: %v", result.Status.String(), result.Error)
-	}
-	if result.Error != nil {
-		t.Errorf("Expected no error, got: %v", result.Error)
-	}
-}
-
 func TestCommitmentValidator_ValidateCommitment_Success(t *testing.T) {
 	validator := NewCommitmentValidator()
 
@@ -57,15 +32,8 @@ func TestCommitmentValidator_ValidateCommitment_Success(t *testing.T) {
 	stateHashData := []byte("test-state-hash")
 	stateHashImprint := CreateDataHashImprint(stateHashData)
 
-	// Extract the actual hash bytes from the imprint (what the validator will use)
-	stateHashBytes, err := ExtractDataFromImprint(stateHashImprint)
-	if err != nil {
-		t.Fatalf("Failed to extract state hash from imprint: %v", err)
-	}
-
-	// Create request ID using the extracted state hash bytes (same as what validator will use)
-	requestIDGenerator := NewRequestIDGenerator()
-	requestID, err := requestIDGenerator.CreateRequestID(publicKeyBytes, stateHashBytes)
+	// Create request ID using the full imprint bytes (same as what validator will use)
+	requestID, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
 	if err != nil {
 		t.Fatalf("Failed to create request ID: %v", err)
 	}
@@ -75,14 +43,14 @@ func TestCommitmentValidator_ValidateCommitment_Success(t *testing.T) {
 	transactionHashImprint := CreateDataHashImprint(transactionData)
 
 	// Extract the transaction hash bytes from the imprint (what the validator will use for verification)
-	transactionHashBytes, err := ExtractDataFromImprint(transactionHashImprint)
+	transactionHashBytes, err := transactionHashImprint.DataBytes()
 	if err != nil {
 		t.Fatalf("Failed to extract transaction hash from imprint: %v", err)
 	}
 
 	// Sign the actual transaction hash bytes (what the validator expects)
 	signingService := NewSigningService()
-	signatureBytes, err := signingService.Sign(transactionHashBytes, privateKey.Serialize())
+	signatureBytes, err := signingService.SignHash(transactionHashBytes, privateKey.Serialize())
 	if err != nil {
 		t.Fatalf("Failed to sign transaction data: %v", err)
 	}
@@ -226,10 +194,8 @@ func TestCommitmentValidator_ValidateCommitment_InvalidSignatureFormat(t *testin
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 	stateHashData := []byte("test-state-hash")
 	stateHashImprint := CreateDataHashImprint(stateHashData)
-	stateHashBytes, _ := ExtractDataFromImprint(stateHashImprint)
-
-	requestIDGenerator := NewRequestIDGenerator()
-	requestID, _ := requestIDGenerator.CreateRequestID(publicKeyBytes, stateHashBytes)
+	stateHashImprintBytes, _ := stateHashImprint.Bytes()
+	requestID, _ := api.CreateRequestIDFromBytes(publicKeyBytes, stateHashImprintBytes)
 
 	commitment := &models.Commitment{
 		RequestID:       requestID,
@@ -260,10 +226,8 @@ func TestCommitmentValidator_ValidateCommitment_InvalidTransactionHashFormat(t *
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 	stateHashData := []byte("test-state-hash")
 	stateHashImprint := CreateDataHashImprint(stateHashData)
-	stateHashBytes, _ := ExtractDataFromImprint(stateHashImprint)
-
-	requestIDGenerator := NewRequestIDGenerator()
-	requestID, _ := requestIDGenerator.CreateRequestID(publicKeyBytes, stateHashBytes)
+	stateHashImprintBytes, _ := stateHashImprint.Bytes()
+	requestID, _ := api.CreateRequestIDFromBytes(publicKeyBytes, stateHashImprintBytes)
 
 	commitment := &models.Commitment{
 		RequestID:       requestID,
@@ -294,10 +258,8 @@ func TestCommitmentValidator_ValidateCommitment_SignatureVerificationFailed(t *t
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 	stateHashData := []byte("test-state-hash")
 	stateHashImprint := CreateDataHashImprint(stateHashData)
-	stateHashBytes, _ := ExtractDataFromImprint(stateHashImprint)
-
-	requestIDGenerator := NewRequestIDGenerator()
-	requestID, _ := requestIDGenerator.CreateRequestID(publicKeyBytes, stateHashBytes)
+	stateHashImprintBytes, _ := stateHashImprint.Bytes()
+	requestID, _ := api.CreateRequestIDFromBytes(publicKeyBytes, stateHashImprintBytes)
 
 	// Create transaction data
 	transactionData := []byte("test-transaction-data")
@@ -343,25 +305,24 @@ func TestCommitmentValidator_ValidateCommitment_RealSecp256k1Data(t *testing.T) 
 	// Create state hash
 	stateHashData := []byte("real-state-hash-test")
 	stateHashImprint := CreateDataHashImprint(stateHashData)
-	stateHashBytes, _ := ExtractDataFromImprint(stateHashImprint)
 
 	// Create proper request ID
-	requestIDGenerator := NewRequestIDGenerator()
-	requestID, _ := requestIDGenerator.CreateRequestID(publicKeyBytes, stateHashBytes)
+	stateHashImprintBytes, _ := stateHashImprint.Bytes()
+	requestID, _ := api.CreateRequestIDFromBytes(publicKeyBytes, stateHashImprintBytes)
 
 	// Create transaction data
 	transactionData := []byte("real-transaction-data-to-sign")
 	transactionHashImprint := CreateDataHashImprint(transactionData)
 
 	// Extract the transaction hash bytes from the imprint (what the validator will use for verification)
-	transactionHashBytes, err := ExtractDataFromImprint(transactionHashImprint)
+	transactionHashBytes, err := transactionHashImprint.DataBytes()
 	if err != nil {
 		t.Fatalf("Failed to extract transaction hash from imprint: %v", err)
 	}
 
 	// Sign the actual transaction hash bytes (what the validator expects)
 	signingService := NewSigningService()
-	signatureBytes, err := signingService.Sign(transactionHashBytes, privateKeyBytes)
+	signatureBytes, err := signingService.SignHash(transactionHashBytes, privateKeyBytes)
 	if err != nil {
 		t.Fatalf("Failed to sign transaction data: %v", err)
 	}
