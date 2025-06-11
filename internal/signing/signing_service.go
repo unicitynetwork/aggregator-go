@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 
-	"github.com/alphabill-org/alphabill-go-base/crypto"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 )
@@ -24,6 +23,13 @@ func NewSigningService() *SigningService {
 
 // Sign signs the given data with the private key and returns the signature
 func (s *SigningService) Sign(data []byte, privateKey []byte) ([]byte, error) {
+	// Hash the data
+	hash := sha256.Sum256(data)
+	return s.SignHash(hash[:], privateKey)
+}
+
+// SignHash signs the given hash with the private key and returns the signature
+func (s *SigningService) SignHash(dataHash []byte, privateKey []byte) ([]byte, error) {
 	if len(privateKey) != 32 {
 		return nil, fmt.Errorf("private key must be 32 bytes, got %d", len(privateKey))
 	}
@@ -31,11 +37,8 @@ func (s *SigningService) Sign(data []byte, privateKey []byte) ([]byte, error) {
 	// Create private key object
 	privKey, _ := btcec.PrivKeyFromBytes(privateKey)
 
-	// Hash the data
-	hash := sha256.Sum256(data)
-
 	// Sign the hash  
-	signature := ecdsa.SignCompact(privKey, hash[:], true) // true for compressed public key recovery
+	signature := ecdsa.SignCompact(privKey, dataHash, true) // true for compressed public key recovery
 
 	return signature, nil
 }
@@ -55,13 +58,22 @@ func (s *SigningService) VerifyHashWithPublicKey(dataHash []byte, signature []by
 		return false, fmt.Errorf("compressed public key must be 33 bytes, got %d", len(publicKey))
 	}
 
-	verifier, err := crypto.NewVerifierSecp256k1(publicKey)
+	// Parse the public key
+	pubKey, err := btcec.ParsePubKey(publicKey)
 	if err != nil {
-		return false, fmt.Errorf("failed to create verifier: %w", err)
+		return false, fmt.Errorf("failed to parse public key: %w", err)
 	}
 
-	if err := verifier.VerifyHash(signature, dataHash); err != nil {
-		return false, fmt.Errorf("signature verification failed: %w", err)
+	// For compact signatures, we need to recover the public key and verify it matches
+	// Recover public key from signature
+	recoveredPubKey, _, err := ecdsa.RecoverCompact(signature, dataHash)
+	if err != nil {
+		return false, fmt.Errorf("failed to recover public key from signature: %w", err)
+	}
+
+	// Check if the recovered public key matches the provided public key
+	if !recoveredPubKey.IsEqual(pubKey) {
+		return false, nil // Signature doesn't match the public key
 	}
 
 	return true, nil

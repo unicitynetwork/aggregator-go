@@ -41,7 +41,7 @@ npm run docker:mongo
 npm run docker:alphabill
 ```
 
-### Go Implementation (To be implemented)
+### Go Implementation
 ```bash
 # Build the Go service
 go build -o aggregator ./cmd/aggregator
@@ -58,8 +58,8 @@ go test -bench=. ./...
 # Format code
 go fmt ./...
 
-# Lint code (requires golangci-lint)
-golangci-lint run
+# Run the service and connect to MongoDB running on localhost
+MONGODB_URI=mongodb://admin:password@localhost:27017/aggregator?authSource=admin make run
 ```
 
 ## Architecture Overview

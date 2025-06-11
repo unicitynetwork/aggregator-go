@@ -16,13 +16,13 @@ func TestDocumentationExamplePayload(t *testing.T) {
 	// Extract the example payload from the documentation
 	// This is the exact payload shown in the docs
 	exampleJSON := `{
-  "requestId": "00004d1b938134c52340952357dd89c4c270b9b0b523bd69c03c1774fed907f1ebb5",
-  "transactionHash": "0000d89cdfd6716717577adeb4149e22646cca3b4daf76632d35e97bd19642f8478a",
+  "requestId": "0000220207629fb5d473755e804685971f946eb2ebddc54cbced5b34bc67911bf98e",
+  "transactionHash": "00003055507c62716fc2e38af9326f3d894eb0813b8e66b8fea45da4012f36560a9b",
   "authenticator": {
     "algorithm": "secp256k1",
-    "publicKey": "033cf8de37cec427b5e3d782e5fc516dcc43f8e9c7bc03530833879f6ee7987d4e",
-    "signature": "2061590eeaf9c3fc3e894454b43410d0410f37ab17e5104a08db3d018d072880f9715dc3b60989cf9cc4589850edecac344702594aa264b2789792bb855a30f39c",
-    "stateHash": "0000026581b5546639dc5110634df8cbbdf4150f3583fc54a0db98ef413574396dd0"
+    "publicKey": "02bdc93b5b700fc0562b6b4606bb57bde490cbc5e429913cfdadcb5c35ae02ba49",
+    "signature": "1f4ed5ce831d95e8f3f3325f72f3f361435a64bb6969cf032d78618cf191625a3b326cd9fdac2972b11605be401df498acd644f4e9ef9e39257ad3a4aeff649fc8",
+    "stateHash": "0000abac20b3ac6a9dfd4e0b645e1e584e3efe81a3dc6d0a55fb543226d94c96ef2a"
   },
   "receipt": true
 }`
@@ -79,13 +79,10 @@ func TestDocumentationExamplePayload(t *testing.T) {
 		t.Errorf("Transaction hash should be a SHA256 DataHash imprint starting with 0000")
 	}
 
-	// Extract actual data from imprints (skip first 2 bytes)
-	stateHash := stateHashImprint[2:]
 	transactionHash := transactionHashImprint[2:]
 
 	// Verify using our signing service
 	signingService := signing.NewSigningService()
-	requestIDGenerator := signing.NewRequestIDGenerator()
 
 	// 1. Verify public key format
 	if err := signingService.ValidatePublicKey(publicKey); err != nil {
@@ -98,7 +95,7 @@ func TestDocumentationExamplePayload(t *testing.T) {
 	}
 
 	// 3. Verify request ID
-	expectedRequestID, err := requestIDGenerator.CreateRequestID(publicKey, stateHash)
+	expectedRequestID, err := api.CreateRequestIDFromBytes(publicKey, stateHashImprint)
 	if err != nil {
 		t.Fatalf("Failed to create expected request ID: %v", err)
 	}
@@ -109,7 +106,8 @@ func TestDocumentationExamplePayload(t *testing.T) {
 	}
 
 	// 4. Verify signature
-	isValid, err := signingService.VerifyWithPublicKey(transactionHash, signature, publicKey)
+	// The signature is over the raw transaction hash bytes (no additional hashing)
+	isValid, err := signingService.VerifyHashWithPublicKey(transactionHash, signature, publicKey)
 	if err != nil {
 		t.Fatalf("Failed to verify signature: %v", err)
 	}

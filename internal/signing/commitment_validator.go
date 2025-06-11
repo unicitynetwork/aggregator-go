@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // ValidationStatus represents the result of commitment validation
@@ -52,15 +53,13 @@ type ValidationResult struct {
 
 // CommitmentValidator validates commitment signatures and request IDs
 type CommitmentValidator struct {
-	signingService     *SigningService
-	requestIDGenerator *RequestIDGenerator
+	signingService *SigningService
 }
 
 // NewCommitmentValidator creates a new commitment validator
 func NewCommitmentValidator() *CommitmentValidator {
 	return &CommitmentValidator{
-		signingService:     NewSigningService(),
-		requestIDGenerator: NewRequestIDGenerator(),
+		signingService: NewSigningService(),
 	}
 }
 
@@ -114,7 +113,7 @@ func (v *CommitmentValidator) ValidateCommitment(commitment *models.Commitment) 
 
 	// 4. Validate Request ID matches expected value
 	// RequestID should be SHA256(publicKey || stateHash)
-	isValidRequestID, err := v.requestIDGenerator.ValidateRequestID(
+	isValidRequestID, err := api.ValidateRequestID(
 		commitment.RequestID,
 		publicKeyBytes,
 		stateHashImprint,
