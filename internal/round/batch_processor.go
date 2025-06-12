@@ -13,10 +13,9 @@ import (
 
 // processBatch processes a batch of commitments and adds them to the SMT
 func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.Commitment, blockNumber *api.BigInt) (string, []*models.AggregatorRecord, error) {
-	rm.logger.WithContext(ctx).
-		WithField("commitmentCount", len(commitments)).
-		WithField("blockNumber", blockNumber.String()).
-		Info("Processing commitment batch")
+	rm.logger.WithContext(ctx).Info("Processing commitment batch",
+		"commitmentCount", len(commitments),
+		"blockNumber", blockNumber.String())
 
 	// Convert commitments to SMT leaves
 	leaves := make([]*smt.Leaf, len(commitments))
@@ -44,11 +43,10 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 		leafIndex := api.NewBigInt(big.NewInt(int64(i)))
 		records[i] = models.NewAggregatorRecord(commitment, blockNumber, leafIndex)
 
-		rm.logger.WithContext(ctx).
-			WithField("requestId", commitment.RequestID.String()).
-			WithField("path", path).
-			WithField("leafIndex", i).
-			Debug("Created SMT leaf for commitment")
+		rm.logger.WithContext(ctx).Debug("Created SMT leaf for commitment",
+			"requestId", commitment.RequestID.String(),
+			"path", path,
+			"leafIndex", i)
 	}
 
 	// Add all leaves to SMT in a single batch operation
@@ -57,10 +55,9 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 		return "", nil, fmt.Errorf("failed to add batch to SMT: %w", err)
 	}
 
-	rm.logger.WithContext(ctx).
-		WithField("rootHash", rootHash).
-		WithField("commitmentCount", len(commitments)).
-		Info("Successfully processed commitment batch")
+	rm.logger.WithContext(ctx).Info("Successfully processed commitment batch",
+		"rootHash", rootHash,
+		"commitmentCount", len(commitments))
 
 	// Store aggregator records
 	for _, record := range records {
@@ -71,9 +68,8 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 		}
 
 		if existing != nil {
-			rm.logger.WithContext(ctx).
-				WithField("requestId", record.RequestID.String()).
-				Debug("Aggregator record already exists, skipping")
+			rm.logger.WithContext(ctx).Debug("Aggregator record already exists, skipping",
+				"requestId", record.RequestID.String())
 			continue
 		}
 
@@ -141,11 +137,10 @@ func (rm *RoundManager) finalizeBlock(ctx context.Context, blockNumber *api.BigI
 	}
 	rm.roundMutex.Unlock()
 
-	rm.logger.WithContext(ctx).
-		WithField("blockNumber", blockNumber.String()).
-		WithField("rootHash", rootHash).
-		WithField("recordCount", len(records)).
-		Info("Finalizing block")
+	rm.logger.WithContext(ctx).Info("Finalizing block",
+		"blockNumber", blockNumber.String(),
+		"rootHash", rootHash,
+		"recordCount", len(records))
 
 	// Get parent block hash
 	var parentHash api.HexBytes
@@ -187,11 +182,10 @@ func (rm *RoundManager) finalizeBlock(ctx context.Context, blockNumber *api.BigI
 	}
 	rm.roundMutex.Unlock()
 
-	rm.logger.WithContext(ctx).
-		WithField("blockNumber", blockNumber.String()).
-		WithField("rootHash", block.RootHash.String()).
-		WithField("commitmentCount", len(records)).
-		Info("Block finalized successfully")
+	rm.logger.WithContext(ctx).Info("Block finalized successfully",
+		"blockNumber", blockNumber.String(),
+		"rootHash", block.RootHash.String(),
+		"commitmentCount", len(records))
 
 	return nil
 }
