@@ -55,7 +55,7 @@ func NewServer(cfg *config.Config, logger *logger.Logger, storage interfaces.Sto
 	}
 
 	// Create JSON-RPC server
-	rpcServer := jsonrpc.NewServer(logger.Logger, cfg.Server.ConcurrencyLimit)
+	rpcServer := jsonrpc.NewServer(logger, cfg.Server.ConcurrencyLimit)
 
 	server := &Server{
 		config:    cfg,
@@ -117,7 +117,7 @@ func (s *Server) setupRoutes() {
 func (s *Server) setupJSONRPCHandlers() {
 	// Add middleware
 	s.rpcServer.AddMiddleware(jsonrpc.RequestIDMiddleware())
-	s.rpcServer.AddMiddleware(jsonrpc.LoggingMiddleware(s.logger.Logger))
+	s.rpcServer.AddMiddleware(jsonrpc.LoggingMiddleware(s.logger))
 	s.rpcServer.AddMiddleware(jsonrpc.TimeoutMiddleware(30 * time.Second))
 
 	// Register handlers
@@ -131,7 +131,7 @@ func (s *Server) setupJSONRPCHandlers() {
 
 // Start starts the HTTP server
 func (s *Server) Start(ctx context.Context) error {
-	s.logger.WithComponent("gateway").Infof("Starting HTTP server on %s", s.httpServer.Addr)
+	s.logger.WithComponent("gateway").Info("Starting HTTP server", "addr", s.httpServer.Addr)
 
 	if s.config.Server.EnableTLS {
 		return s.httpServer.ListenAndServeTLS(s.config.Server.TLSCertFile, s.config.Server.TLSKeyFile)
@@ -152,7 +152,7 @@ func (s *Server) handleHealth(c *gin.Context) {
 
 	status, err := s.service.GetHealthStatus(ctx)
 	if err != nil {
-		s.logger.WithContext(ctx).WithError(err).Error("Failed to get health status")
+		s.logger.WithContext(ctx).Error("Failed to get health status", "error", err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}

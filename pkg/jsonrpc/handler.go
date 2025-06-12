@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sirupsen/logrus"
+	"github.com/unicitynetwork/aggregator-go/internal/logger"
 )
 
 // HandlerFunc represents a JSON-RPC method handler
@@ -18,7 +18,7 @@ type HandlerFunc func(ctx context.Context, params json.RawMessage) (interface{},
 type Server struct {
 	handlers         map[string]HandlerFunc
 	middleware       []MiddlewareFunc
-	logger           *logrus.Logger
+	logger           *logger.Logger
 	concurrencyLimit int
 	activeSemaphore  chan struct{}
 	mutex            sync.RWMutex
@@ -28,7 +28,7 @@ type Server struct {
 type MiddlewareFunc func(ctx context.Context, req *Request, next func(context.Context, *Request) *Response) *Response
 
 // NewServer creates a new JSON-RPC server
-func NewServer(logger *logrus.Logger, concurrencyLimit int) *Server {
+func NewServer(logger *logger.Logger, concurrencyLimit int) *Server {
 	return &Server{
 		handlers:         make(map[string]HandlerFunc),
 		middleware:       make([]MiddlewareFunc, 0),
@@ -56,17 +56,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-	
+
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	
+
 	if r.Method != "POST" {
 		s.writeErrorResponse(w, ErrInvalidRequest, nil)
 		return
 	}
-	
+
 	// Check concurrency limit
 	select {
 	case s.activeSemaphore <- struct{}{}:
@@ -75,28 +75,28 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, ErrConcurrencyLimit, nil)
 		return
 	}
-	
+
 	// Add request ID to context
 	ctx := context.WithValue(r.Context(), "request_id", uuid.New().String())
-	
+
 	// Parse request
 	var req Request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.logger.WithContext(ctx).WithError(err).Error("Failed to parse JSON-RPC request")
+		s.logger.WithContext(ctx).Error("Failed to parse JSON-RPC request", "error", err.Error())
 		s.writeErrorResponse(w, ErrParseError, nil)
 		return
 	}
-	
+
 	// Validate request
 	if err := req.IsValidRequest(); err != nil {
-		s.logger.WithContext(ctx).WithError(err).Error("Invalid JSON-RPC request")
+		s.logger.WithContext(ctx).Error("Invalid JSON-RPC request", "error", err.Error())
 		s.writeErrorResponse(w, ErrInvalidRequest, req.ID)
 		return
 	}
-	
+
 	// Process request
 	response := s.processRequest(ctx, &req)
-	
+
 	// Write response
 	s.writeJSONResponse(w, response)
 }
@@ -107,7 +107,7 @@ func (s *Server) processRequest(ctx context.Context, req *Request) *Response {
 	handler := func(ctx context.Context, req *Request) *Response {
 		return s.handleRequest(ctx, req)
 	}
-	
+
 	// Apply middleware in reverse order
 	for i := len(s.middleware) - 1; i >= 0; i-- {
 		middleware := s.middleware[i]
@@ -116,7 +116,7 @@ func (s *Server) processRequest(ctx context.Context, req *Request) *Response {
 			return middleware(ctx, req, nextHandler)
 		}
 	}
-	
+
 	return handler(ctx, req)
 }
 
@@ -125,35 +125,36 @@ func (s *Server) handleRequest(ctx context.Context, req *Request) *Response {
 	s.mutex.RLock()
 	handler, exists := s.handlers[req.Method]
 	s.mutex.RUnlock()
-	
+
 	if !exists {
 		return NewErrorResponse(ErrMethodNotFound, req.ID)
 	}
-	
+
 	start := time.Now()
 	result, rpcErr := handler(ctx, req.Params)
 	duration := time.Since(start)
-	
+
 	// Log request
-	entry := s.logger.WithContext(ctx).WithFields(logrus.Fields{
-		"method":      req.Method,
-		"duration_ms": duration.Milliseconds(),
-		"request_id":  ctx.Value("request_id"),
-	})
-	
 	if rpcErr != nil {
-		entry.WithField("error_code", rpcErr.Code).Error("JSON-RPC request failed")
+		s.logger.WithContext(ctx).Error("JSON-RPC request failed",
+			"method", req.Method,
+			"duration_ms", duration.Milliseconds(),
+			"request_id", ctx.Value("request_id"),
+			"error_code", rpcErr.Code)
 		return NewErrorResponse(rpcErr, req.ID)
 	}
-	
-	entry.Info("JSON-RPC request completed")
+
+	s.logger.WithContext(ctx).Info("JSON-RPC request completed",
+		"method", req.Method,
+		"duration_ms", duration.Milliseconds(),
+		"request_id", ctx.Value("request_id"))
 	return NewResponse(result, req.ID)
 }
 
 // writeJSONResponse writes a JSON response
 func (s *Server) writeJSONResponse(w http.ResponseWriter, response *Response) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		s.logger.WithError(err).Error("Failed to encode JSON response")
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -176,30 +177,31 @@ func RequestIDMiddleware() MiddlewareFunc {
 }
 
 // LoggingMiddleware logs JSON-RPC requests
-func LoggingMiddleware(logger *logrus.Logger) MiddlewareFunc {
+func LoggingMiddleware(logger *logger.Logger) MiddlewareFunc {
 	return func(ctx context.Context, req *Request, next func(context.Context, *Request) *Response) *Response {
 		start := time.Now()
-		
-		logger.WithContext(ctx).WithFields(logrus.Fields{
-			"method":     req.Method,
-			"request_id": ctx.Value("request_id"),
-		}).Info("Processing JSON-RPC request")
-		
+
+		logger.WithContext(ctx).Info("Processing JSON-RPC request",
+			"method", req.Method,
+			"request_id", ctx.Value("request_id"))
+
 		response := next(ctx, req)
-		
+
 		duration := time.Since(start)
-		entry := logger.WithContext(ctx).WithFields(logrus.Fields{
-			"method":      req.Method,
-			"request_id":  ctx.Value("request_id"),
-			"duration_ms": duration.Milliseconds(),
-		})
-		
+
 		if response.Error != nil {
-			entry.WithField("error_code", response.Error.Code).Error("JSON-RPC request failed")
+			logger.WithContext(ctx).Error("JSON-RPC request failed",
+				"method", req.Method,
+				"request_id", ctx.Value("request_id"),
+				"duration_ms", duration.Milliseconds(),
+				"error_code", response.Error.Code)
 		} else {
-			entry.Info("JSON-RPC request completed")
+			logger.WithContext(ctx).Info("JSON-RPC request completed",
+				"method", req.Method,
+				"request_id", ctx.Value("request_id"),
+				"duration_ms", duration.Milliseconds())
 		}
-		
+
 		return response
 	}
 }
@@ -209,13 +211,13 @@ func TimeoutMiddleware(timeout time.Duration) MiddlewareFunc {
 	return func(ctx context.Context, req *Request, next func(context.Context, *Request) *Response) *Response {
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
-		
+
 		done := make(chan *Response, 1)
-		
+
 		go func() {
 			done <- next(ctx, req)
 		}()
-		
+
 		select {
 		case response := <-done:
 			return response

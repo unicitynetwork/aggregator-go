@@ -40,14 +40,16 @@ func main() {
 	// Initialize storage
 	storage, err := mongodb.NewStorage(&cfg.Database)
 	if err != nil {
-		log.WithComponent("main").WithError(err).Fatal("Failed to initialize storage")
+		log.WithComponent("main").Error("Failed to initialize storage", "error", err.Error())
+		os.Exit(1)
 	}
 
 	// Test database connection
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := storage.Ping(ctx); err != nil {
 		cancel()
-		log.WithComponent("main").WithError(err).Fatal("Failed to connect to database")
+		log.WithComponent("main").Error("Failed to connect to database", "error", err.Error())
+		os.Exit(1)
 	}
 	cancel()
 
@@ -58,7 +60,8 @@ func main() {
 
 	// Start the aggregator service
 	if err := aggregatorService.Start(context.Background()); err != nil {
-		log.WithComponent("main").WithError(err).Fatal("Failed to start aggregator service")
+		log.WithComponent("main").Error("Failed to start aggregator service", "error", err.Error())
+		os.Exit(1)
 	}
 
 	// Initialize gateway server
@@ -71,11 +74,13 @@ func main() {
 	// Start server in a goroutine
 	go func() {
 		if err := server.Start(ctx); err != nil {
-			log.WithComponent("main").WithError(err).Error("Server failed to start")
+			log.WithComponent("main").Error("Server failed to start", "error", err.Error())
 		}
 	}()
 
-	log.WithComponent("main").Infof("Aggregator started successfully on %s:%s", cfg.Server.Host, cfg.Server.Port)
+	log.WithComponent("main").Info("Aggregator started successfully",
+		"host", cfg.Server.Host,
+		"port", cfg.Server.Port)
 
 	// Wait for interrupt signal
 	<-ctx.Done()
@@ -88,17 +93,17 @@ func main() {
 
 	// Stop server
 	if err := server.Stop(shutdownCtx); err != nil {
-		log.WithComponent("main").WithError(err).Error("Failed to stop server gracefully")
+		log.WithComponent("main").Error("Failed to stop server gracefully", "error", err.Error())
 	}
 
 	// Stop aggregator service
 	if err := aggregatorService.Stop(shutdownCtx); err != nil {
-		log.WithComponent("main").WithError(err).Error("Failed to stop aggregator service gracefully")
+		log.WithComponent("main").Error("Failed to stop aggregator service gracefully", "error", err.Error())
 	}
 
 	// Close storage
 	if err := storage.Close(shutdownCtx); err != nil {
-		log.WithComponent("main").WithError(err).Error("Failed to close storage gracefully")
+		log.WithComponent("main").Error("Failed to close storage gracefully", "error", err.Error())
 	}
 
 	log.WithComponent("main").Info("Aggregator shut down successfully")

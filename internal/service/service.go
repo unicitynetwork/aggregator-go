@@ -118,7 +118,7 @@ func (as *AggregatorService) Stop(ctx context.Context) error {
 
 	// Stop the round manager
 	if err := as.roundManager.Stop(ctx); err != nil {
-		as.logger.WithContext(ctx).WithError(err).Error("Failed to stop round manager")
+		as.logger.WithContext(ctx).Error("Failed to stop round manager", "error", err.Error())
 		return fmt.Errorf("failed to stop round manager: %w", err)
 	}
 
@@ -139,11 +139,14 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 	// Validate commitment signature and request ID
 	validationResult := as.commitmentValidator.ValidateCommitment(commitment)
 	if validationResult.Status != signing.ValidationStatusSuccess {
-		as.logger.WithContext(ctx).
-			WithField("requestId", req.RequestID).
-			WithField("validationStatus", validationResult.Status.String()).
-			WithError(validationResult.Error).
-			Warn("Commitment validation failed")
+		errorMsg := ""
+		if validationResult.Error != nil {
+			errorMsg = validationResult.Error.Error()
+		}
+		as.logger.WithContext(ctx).Warn("Commitment validation failed",
+			"requestId", req.RequestID,
+			"validationStatus", validationResult.Status.String(),
+			"error", errorMsg)
 
 		return &api.SubmitCommitmentResponse{
 			Status: validationResult.Status.String(),
@@ -169,14 +172,13 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 
 	// Add commitment to current round for processing
 	if err := as.roundManager.AddCommitment(ctx, commitment); err != nil {
-		as.logger.WithContext(ctx).
-			WithField("requestId", req.RequestID).
-			WithError(err).
-			Warn("Failed to add commitment to round - will be processed in next round")
+		as.logger.WithContext(ctx).Warn("Failed to add commitment to round - will be processed in next round",
+			"requestId", req.RequestID,
+			"error", err.Error())
 		// Don't fail the request, the commitment is stored and will be picked up
 	}
 
-	as.logger.WithContext(ctx).WithField("requestId", req.RequestID).Info("Commitment submitted successfully")
+	as.logger.WithContext(ctx).Info("Commitment submitted successfully", "requestId", req.RequestID)
 
 	response := &api.SubmitCommitmentResponse{
 		Status: "SUCCESS",
@@ -334,7 +336,7 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 		var err error
 		isLeader, err = as.storage.LeadershipStorage().IsLeader(ctx, as.config.HA.ServerID)
 		if err != nil {
-			as.logger.WithContext(ctx).WithError(err).Warn("Failed to check leadership status")
+			as.logger.WithContext(ctx).Warn("Failed to check leadership status", "error", err.Error())
 			// Don't fail health check on leadership query failure
 			isLeader = false
 		}
@@ -354,7 +356,7 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 	// Add database connectivity check
 	if err := as.storage.Ping(ctx); err != nil {
 		status.AddDetail("database", "disconnected")
-		as.logger.WithContext(ctx).WithError(err).Error("Database health check failed")
+		as.logger.WithContext(ctx).Error("Database health check failed", "error", err.Error())
 	} else {
 		status.AddDetail("database", "connected")
 	}
