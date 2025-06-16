@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/unicitynetwork/aggregator-go/internal/bft"
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -48,10 +49,11 @@ type Round struct {
 
 // RoundManager handles the creation of blocks and processing of commitments
 type RoundManager struct {
-	config  *config.Config
-	logger  *logger.Logger
-	storage interfaces.Storage
-	smt     *ThreadSafeSMT
+	config    *config.Config
+	logger    *logger.Logger
+	storage   interfaces.Storage
+	smt       *ThreadSafeSMT
+	bftClient *bft.BFTClient
 
 	// Round management
 	currentRound *Round
@@ -74,6 +76,12 @@ func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfac
 	smtInstance := smt.NewSparseMerkleTree(smt.SHA256)
 	threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
+	bftClient, err := bft.NewBFTClient(context.Background(), &cfg.BFT, logger)
+	if err != nil {
+		logger.WithError(err).Warn("Failed to create BFT client, continuing without BFT integration")
+		bftClient = nil
+	}
+
 	return &RoundManager{
 		config:        cfg,
 		logger:        logger,
@@ -81,6 +89,7 @@ func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfac
 		smt:           threadSafeSMT,
 		stopChan:      make(chan struct{}),
 		roundDuration: time.Second, // 1 second rounds
+		bftClient:     bftClient,
 	}
 }
 
@@ -95,6 +104,8 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 		rm.roundTimer = nil
 	}
 	rm.roundMutex.Unlock()
+
+	rm.bftClient.Start(ctx)
 
 	// Get latest block number to determine starting round
 	latestBlockNumber, err := rm.storage.BlockStorage().GetLatestNumber(ctx)
