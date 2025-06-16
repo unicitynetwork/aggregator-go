@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "networkId": 3,
+  "epoch": 1,
+  "epochStartRound": 1,
+  "rootNodes": [
+    {
+      "nodeId": "16Uiu2HAm5XF8vxZZ2duKVHdXPWLeMxpaAFBtMZWiu2sZjUEqShWL",
+      "sigKey": "0x021bc8014d870e207f0713cfa71e3bb78cc4954c7e8d2e80cdea65c4a2eb4d5863",
+      "stake": 1
+    },
+    {
+      "nodeId": "16Uiu2HAmKEftpcZAhAA8LqYoZp1Jc8RaqLBCJ6J18myroK2smvrm",
+      "sigKey": "0x0273bd51d78f452df3fd9635d7056cddf9a99758b1655c8d5ad3141320ad8121cb",
+      "stake": 1
+    },
+    {
+      "nodeId": "16Uiu2HAmMnNFfTYMVNaKH5taBKxoPX9siqtdnzgKE76STT6Kw8YP",
+      "sigKey": "0x0245026f9c3d2997eeb2ca5bd0f118456f42205bbf0ac5b48438f2c045b3b4a8db",
+      "stake": 1
+    }
+  ],
+  "quorumThreshold": 3,
+  "stateHash": "",
+  "changeRecordHash": "",
+  "previousEntryHash": "",
+  "signatures": {
+    "16Uiu2HAm5XF8vxZZ2duKVHdXPWLeMxpaAFBtMZWiu2sZjUEqShWL": "0x75e2d3a2ede9391c95398af0fe4be6c86a633430f906a36113bb0ba81cbd703769b67dd4cb7cb6f1e8755aad8c42083d016f4b98cd32004b1e1674527527863600",
+    "16Uiu2HAmKEftpcZAhAA8LqYoZp1Jc8RaqLBCJ6J18myroK2smvrm": "0xf90dde88aa614808b07752614b319c02e38f844911954ad39cf1154e35de6a7871a8249eb415129ba26ad43ddb02915fe4af9f45e3751dc7dd768ea4126e27cb00",
+    "16Uiu2HAmMnNFfTYMVNaKH5taBKxoPX9siqtdnzgKE76STT6Kw8YP": "0x8503d78540ed13d0e65e7be39f1a9f023e5b4e43fee7ba591f827337edac087e0f6f6054d9bc982351034b22579abdd16c7fd1e2570af1abf5600df1880c333501"
+  }
+}
