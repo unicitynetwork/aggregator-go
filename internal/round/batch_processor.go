@@ -169,6 +169,9 @@ func (rm *RoundManager) finalizeBlock(ctx context.Context, blockNumber *api.BigI
 		api.NewHexBytes([]byte(rootHash)),
 		parentHash,
 	)
+	if err := rm.bftClient.CertificationRequest(ctx, rootHash); err != nil {
+		return fmt.Errorf("failed to send certification request: %w", err)
+	}
 
 	// Store block
 	if err := rm.storage.BlockStorage().Store(ctx, block); err != nil {
