@@ -97,7 +97,7 @@ func Load() (*Config, error) {
 			EnableTLS:        getEnvBoolOrDefault("ENABLE_TLS", false),
 		},
 		Database: DatabaseConfig{
-			URI:                    getEnvOrDefault("MONGODB_URI", "mongodb://admin:password@10.77.1.2:27017/aggregator?authSource=admin"),
+			URI:                    getEnvOrDefault("MONGODB_URI", "mongodb://localhost:27017"),
 			Database:               getEnvOrDefault("MONGODB_DATABASE", "aggregator"),
 			ConnectTimeout:         getEnvDurationOrDefault("MONGODB_CONNECT_TIMEOUT", "10s"),
 			ServerSelectionTimeout: getEnvDurationOrDefault("MONGODB_SERVER_SELECTION_TIMEOUT", "5s"),
@@ -124,7 +124,7 @@ func Load() (*Config, error) {
 		Enabled:                    getEnvBoolOrDefault("BFT_ENABLED", true),
 		Address:                    getEnvOrDefault("BFT_ADDRESS", "/ip4/0.0.0.0/tcp/9000"),
 		AnnounceAddresses:          strings.Split(getEnvOrDefault("BFT_ANNOUNCE_ADDRESSES", ""), ","),
-		BootstrapAddresses:         strings.Split(getEnvOrDefault("BFT_BOOTSTRAP_ADDRESSES", "/ip4/127.0.0.1/tcp/26662/p2p/16Uiu2HAmC5XTLzf91HPDbLWoi2sJDow5ndHCPy9XCCLiWfA6z6rG"), ","),
+		BootstrapAddresses:         strings.Split(getEnvOrDefault("BFT_BOOTSTRAP_ADDRESSES", "/ip4/127.0.0.1/tcp/26662/p2p/16Uiu2HAm6eQMr2sQVbcWZsPPbpc2Su7AnnMVGHpC23PUzGTAATnp"), ","),
 		BootstrapConnectRetry:      getEnvIntOrDefault("BFT_BOOTSTRAP_CONNECT_RETRY", 3),
 		BootstrapConnectRetryDelay: getEnvIntOrDefault("BFT_BOOTSTRAP_CONNECT_RETRY_DELAY", 5),
 	}
