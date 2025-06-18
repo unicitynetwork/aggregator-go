@@ -53,7 +53,7 @@ type RoundManager struct {
 	logger    *logger.Logger
 	storage   interfaces.Storage
 	smt       *ThreadSafeSMT
-	bftClient *bft.BFTClient
+	bftClient bft.BFTClient
 
 	// Round management
 	currentRound *Round
@@ -71,26 +71,31 @@ type RoundManager struct {
 }
 
 // NewRoundManager creates a new round manager
-func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) *RoundManager {
+func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*RoundManager, error) {
 	// Initialize SMT with thread-safe wrapper
 	smtInstance := smt.NewSparseMerkleTree(smt.SHA256)
 	threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
-	bftClient, err := bft.NewBFTClient(context.Background(), &cfg.BFT, logger)
-	if err != nil {
-		logger.WithError(err).Warn("Failed to create BFT client, continuing without BFT integration")
-		bftClient = nil
-	}
-
-	return &RoundManager{
+	rm := &RoundManager{
 		config:        cfg,
 		logger:        logger,
 		storage:       storage,
 		smt:           threadSafeSMT,
 		stopChan:      make(chan struct{}),
 		roundDuration: time.Second, // 1 second rounds
-		bftClient:     bftClient,
 	}
+
+	if cfg.BFT.Enabled {
+		var err error
+		rm.bftClient, err = bft.NewBFTClient(context.Background(), &cfg.BFT, logger, rm)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create BFT client: %w", err)
+		}
+	} else {
+		rm.bftClient = bft.NewBFTClientStub(logger, rm)
+	}
+
+	return rm, nil
 }
 
 // Start begins the round manager operation
@@ -104,8 +109,6 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 		rm.roundTimer = nil
 	}
 	rm.roundMutex.Unlock()
-
-	rm.bftClient.Start(ctx)
 
 	// Get latest block number to determine starting round
 	latestBlockNumber, err := rm.storage.BlockStorage().GetLatestNumber(ctx)
@@ -147,8 +150,8 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 	rm.logger.WithContext(ctx).Info("Found next available block number for new round",
 		"finalRoundNumber", nextRoundNumber.String())
 
-	if err := rm.startNewRound(ctx, nextRoundNumber); err != nil {
-		return fmt.Errorf("failed to start initial round: %w", err)
+	if err := rm.bftClient.Start(ctx, nextRoundNumber); err != nil {
+		return fmt.Errorf("failed to start BFT client: %w", err)
 	}
 
 	// Start the round processing goroutine
@@ -252,8 +255,8 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 	return stats
 }
 
-// startNewRound initializes a new round
-func (rm *RoundManager) startNewRound(ctx context.Context, roundNumber *api.BigInt) error {
+// StartNewRound initializes a new round
+func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
 	rm.roundMutex.Lock()
 	defer rm.roundMutex.Unlock()
 
@@ -353,21 +356,16 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 		records = make([]*models.AggregatorRecord, 0)
 	}
 
-	// Create and finalize block
-	if err := rm.finalizeBlock(ctx, roundNumber, rootHash, records); err != nil {
-		return fmt.Errorf("failed to finalize block: %w", err)
+	// Create and propose block
+	if err := rm.proposeBlock(ctx, roundNumber, rootHash, records); err != nil {
+		return fmt.Errorf("failed to propose block: %w", err)
 	}
 
 	// Update stats
 	rm.totalRounds++
 	rm.totalCommitments += int64(len(allCommitments))
 
-	// Start next round
-	nextRoundNumber := api.NewBigInt(nil)
-	nextRoundNumber.Set(roundNumber.Int)
-	nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
-
-	return rm.startNewRound(ctx, nextRoundNumber)
+	return nil
 }
 
 // roundProcessor is the main goroutine that handles round processing

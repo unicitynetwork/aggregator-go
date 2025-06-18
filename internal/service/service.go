@@ -86,8 +86,11 @@ func modelToAPIHealthStatus(modelHealth *models.HealthStatus) *api.HealthStatus 
 }
 
 // NewAggregatorService creates a new aggregator service
-func NewAggregatorService(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) *AggregatorService {
-	roundManager := round.NewRoundManager(cfg, logger, storage)
+func NewAggregatorService(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*AggregatorService, error) {
+	roundManager, err := round.NewRoundManager(cfg, logger, storage)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create round manager: %w", err)
+	}
 	commitmentValidator := signing.NewCommitmentValidator()
 
 	return &AggregatorService{
@@ -96,7 +99,7 @@ func NewAggregatorService(cfg *config.Config, logger *logger.Logger, storage int
 		storage:             storage,
 		roundManager:        roundManager,
 		commitmentValidator: commitmentValidator,
-	}
+	}, nil
 }
 
 // Start starts the aggregator service and round manager

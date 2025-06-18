@@ -56,8 +56,11 @@ func main() {
 	log.WithComponent("main").Info("Database connection established")
 
 	// Initialize service
-	aggregatorService := service.NewAggregatorService(cfg, log, storage)
-
+	aggregatorService, err := service.NewAggregatorService(cfg, log, storage)
+	if err != nil {
+		log.WithComponent("main").Error("Failed to initialize aggregator service", "error", err.Error())
+		os.Exit(1)
+	}
 	// Start the aggregator service
 	if err := aggregatorService.Start(context.Background()); err != nil {
 		log.WithComponent("main").Error("Failed to start aggregator service", "error", err.Error())

@@ -129,15 +129,15 @@ func (rm *RoundManager) createLeafValue(commitment *models.Commitment) ([]byte, 
 	return hash[:], nil
 }
 
-// finalizeBlock creates and persists a new block with the given data
-func (rm *RoundManager) finalizeBlock(ctx context.Context, blockNumber *api.BigInt, rootHash string, records []*models.AggregatorRecord) error {
+// ProposeBlock creates and proposes a new block with the given data
+func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigInt, rootHash string, records []*models.AggregatorRecord) error {
 	rm.roundMutex.Lock()
 	if rm.currentRound != nil {
 		rm.currentRound.State = RoundStateFinalizing
 	}
 	rm.roundMutex.Unlock()
 
-	rm.logger.WithContext(ctx).Info("Finalizing block",
+	rm.logger.WithContext(ctx).Info("Proposing block",
 		"blockNumber", blockNumber.String(),
 		"rootHash", rootHash,
 		"recordCount", len(records))
@@ -169,9 +169,16 @@ func (rm *RoundManager) finalizeBlock(ctx context.Context, blockNumber *api.BigI
 		api.NewHexBytes([]byte(rootHash)),
 		parentHash,
 	)
-	if err := rm.bftClient.CertificationRequest(ctx, rootHash); err != nil {
+
+	if err := rm.bftClient.CertificationRequest(ctx, block); err != nil {
 		return fmt.Errorf("failed to send certification request: %w", err)
 	}
+
+	return nil
+}
+
+// finalizeBlock creates and persists a new block with the given data
+func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) error {
 
 	// Store block
 	if err := rm.storage.BlockStorage().Store(ctx, block); err != nil {
@@ -186,9 +193,8 @@ func (rm *RoundManager) finalizeBlock(ctx context.Context, blockNumber *api.BigI
 	rm.roundMutex.Unlock()
 
 	rm.logger.WithContext(ctx).Info("Block finalized successfully",
-		"blockNumber", blockNumber.String(),
-		"rootHash", block.RootHash.String(),
-		"commitmentCount", len(records))
+		"blockNumber", block.Index.String(),
+		"rootHash", block.RootHash.String())
 
 	return nil
 }

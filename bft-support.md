@@ -2,18 +2,16 @@
 
 ## Overview
 
-The Unicity Aggregator supports Byzantine Fault Tolerance (BFT) through integration with the Alphabill BFT core. This enables the aggregator to participate in a distributed consensus network where nodes can continue to operate correctly even if some nodes fail or act maliciously.
+The Unicity Aggregator supports Byzantine Fault Tolerance (BFT) through integration with the BFT core. This enables the aggregator to participate in a distributed consensus network where nodes can continue to operate correctly even if some nodes fail or act maliciously.
 
 ## Requirements for BFT Support
 
 ### Prerequisites
 
-1. **Alphabill BFT Core**: The BFT functionality depends on the Alphabill BFT core library
+1. **BFT Core**: The BFT functionality depends on the BFT core library
 2. **Go Dependencies**: Ensure all BFT-related dependencies are available:
    ```
-   github.com/alphabill-org/alphabill-go-base
-   go.opentelemetry.io/otel/metric
-   go.opentelemetry.io/otel/trace
+   github.com/unicitynetwork/bft-core
    ```
 
 ### Configuration Files
@@ -23,12 +21,12 @@ For BFT support, you need to provide BFT-specific configuration files generated 
 #### Required Configuration Files
 
 1. **Shard Configuration** (`bft-config/shard-conf-7_0.json`)
-   - Generated using BFT core for "Unicity node" (a custom BFT partition)
+   - Generated using BFT core for aggregator node (a custom BFT partition)
    - Contains network topology and node information
    - Defines the shard structure and participant nodes
 
-2. **Key Configuration** (`bft-config/keys.json`)
-   - Contains cryptographic keys for the BFT node
+2. **Keys Configuration** (`bft-config/keys.json`)
+   - Contains cryptographic keys for the aggregator node
    - Includes public/private key pairs for consensus participation
    - Must be kept secure and not shared publicly
 
@@ -39,15 +37,22 @@ For BFT support, you need to provide BFT-specific configuration files generated 
 
 ### Configuration File Generation
 
-Use the Alphabill BFT core tools to generate the required configuration files:
+Use the BFT core tools to generate the required configuration files:
 
-# Generate shard configuration for Unicity node in BFT core
-`./setup-nodes.sh -r 3 -u 1`
-
-# Copy shard configuration for Unicity node
+# Generate aggregator node info and keys
+`build/ubft shard-node init --home "test-nodes/aggregator" --generate`
+# Generate shard configuration for aggregator
+`build/ubft shard-conf generate --home test-nodes \
+                  --network-id 3 \
+                  --partition-id 7 \
+                  --partition-type-id 7 \
+                  --epoch-start 10 \
+                  --node-info test-nodes/aggregator/node-info.json`
+                  
+# Copy shard configuration for aggregator node
 `cp <bftcore location>/test-nodes/shard-conf-7_0.json bft-config/shard-conf-7_0.json`
-# Copy key configuration
-`cp <bftcore location>/test-nodes/unicity1/keys.json bft-config/keys.json`
+# Copy keys configuration
+`cp <bftcore location>/test-nodes/aggregator/keys.json bft-config/keys.json`
 # Copy trust base configuration  
 `cp <bftcore location>/test-nodes/trust-base.json bft-config/trust-base.json`
 
@@ -67,13 +72,6 @@ export BFT_SHARD_CONF_FILE=/custom/path/shard-conf.json
 export BFT_TRUST_BASE_FILE=/custom/path/trust-base.json
 ```
 
-### Network Requirements
-
-1. **Network Connectivity**: All BFT nodes must be able to communicate with each other
-2. **Port Configuration**: Ensure required ports are open for BFT communication
-3. **Time Synchronization**: All nodes should have synchronized clocks (NTP recommended)
-4. **Firewall Rules**: Configure firewalls to allow BFT traffic between nodes
-
 ### Building with BFT Support
 
 To build the aggregator with BFT support, ensure all dependencies are available:
@@ -84,10 +82,3 @@ go build ./cmd/aggregator
 ```
 
 **Note**: BFT functionality is currently optional. The aggregator can run without BFT dependencies for development and testing purposes.
-
-### Troubleshooting
-
-1. **Missing Dependencies**: If BFT dependencies are unavailable, the aggregator will build without BFT support
-2. **Configuration Errors**: Check that all configuration files are valid JSON and contain required fields
-3. **Network Issues**: Verify network connectivity between BFT nodes
-4. **Key Validation**: Ensure cryptographic keys are valid and compatible with the BFT network

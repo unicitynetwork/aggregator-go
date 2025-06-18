@@ -1,15 +1,19 @@
 package bft
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"sync/atomic"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/network/protocol/handshake"
@@ -17,21 +21,46 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-// BFTRootChainClient handles communication with the BFT root chain via P2P network
-type BFTClient struct {
-	partitionID types.PartitionID
-	shardID     types.ShardID
-	peer        *network.Peer
-	network     *BftNetwork
-	logger      *logger.Logger
-	rootNodes   peer.IDSlice
-	signer      crypto.Signer
-	// Latest UC this node has seen. Can be ahead of the committed UC during recovery.
-	luc                       atomic.Pointer[types.UnicityCertificate]
-	certificationResponseChan chan struct{}
-}
+const (
+	initializing status = iota
+	normal
+)
 
-func NewBFTClient(ctx context.Context, conf *config.BFTConfig, logger *logger.Logger) (*BFTClient, error) {
+// BFTRootChainClient handles communication with the BFT root chain via P2P network
+type (
+	BFTClientImpl struct {
+		status      atomic.Value
+		partitionID types.PartitionID
+		shardID     types.ShardID
+		peer        *network.Peer
+		network     *BftNetwork
+		logger      *logger.Logger
+		rootNodes   peer.IDSlice
+		signer      crypto.Signer
+		// Latest UC this node has seen. Can be ahead of the committed UC during recovery.
+		luc           atomic.Pointer[types.UnicityCertificate]
+		roundManager  RoundManager
+		proposedBlock *models.Block
+	}
+	BFTClientStub struct {
+		logger       *logger.Logger
+		roundManager RoundManager
+	}
+
+	BFTClient interface {
+		Start(ctx context.Context, nextRoundNumber *api.BigInt) error
+		CertificationRequest(ctx context.Context, block *models.Block) error
+	}
+
+	RoundManager interface {
+		FinalizeBlock(ctx context.Context, block *models.Block) error
+		StartNewRound(ctx context.Context, roundNumber *api.BigInt) error
+	}
+
+	status int
+)
+
+func NewBFTClient(ctx context.Context, conf *config.BFTConfig, logger *logger.Logger, roundManager RoundManager) (*BFTClientImpl, error) {
 	peerConf, err := conf.PeerConf()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create peer configuration: %w", err)
@@ -48,15 +77,16 @@ func NewBFTClient(ctx context.Context, conf *config.BFTConfig, logger *logger.Lo
 	if err != nil {
 		return nil, err
 	}
-	bftClient := &BFTClient{
-		peer:                      peer,
-		logger:                    logger,
-		rootNodes:                 rootNodes,
-		partitionID:               conf.ShardConf.PartitionID,
-		shardID:                   conf.ShardConf.ShardID,
-		signer:                    signer,
-		certificationResponseChan: make(chan struct{}),
+	bftClient := &BFTClientImpl{
+		peer:         peer,
+		logger:       logger,
+		rootNodes:    rootNodes,
+		partitionID:  conf.ShardConf.PartitionID,
+		shardID:      conf.ShardConf.ShardID,
+		signer:       signer,
+		roundManager: roundManager,
 	}
+	bftClient.status.Store(initializing)
 	opts := DefaultNetworkOptions
 	bftClient.network, err = NewLibP2PNetwork(ctx, peer, logger, opts)
 	if err != nil {
@@ -70,37 +100,40 @@ func NewBFTClient(ctx context.Context, conf *config.BFTConfig, logger *logger.Lo
 	return bftClient, nil
 }
 
-func (c *BFTClient) PartitionID() types.PartitionID {
+func (c *BFTClientImpl) PartitionID() types.PartitionID {
 	return c.partitionID
 }
 
-func (c *BFTClient) ShardID() types.ShardID {
+func (c *BFTClientImpl) ShardID() types.ShardID {
 	return c.shardID
 }
 
-func (c *BFTClient) Peer() *network.Peer {
+func (c *BFTClientImpl) Peer() *network.Peer {
 	return c.peer
 }
 
-func (c *BFTClient) IsValidator() bool {
+func (c *BFTClientImpl) IsValidator() bool {
 	return true
 }
 
-func (c *BFTClient) Start(ctx context.Context) {
+func (c *BFTClientImpl) Start(ctx context.Context, _ *api.BigInt) error {
 	c.logger.WithContext(ctx).Info("Starting BFT Client")
 
-	c.sendHandshake(ctx)
+	if err := c.sendHandshake(ctx); err != nil {
+		return fmt.Errorf("failed to send handshake: %w", err)
+	}
 	go c.loop(ctx)
+
+	return nil
 }
 
-func (c *BFTClient) sendHandshake(ctx context.Context) {
+func (c *BFTClientImpl) sendHandshake(ctx context.Context) error {
 	c.logger.WithContext(ctx).Debug("sending handshake to root chain")
 	// select some random root nodes
 	rootIDs, err := randomNodeSelector(c.rootNodes, defaultHandshakeNodes)
 	if err != nil {
 		// error should only happen in case the root nodes are not initialized
-		c.logger.WarnContext(ctx, "selecting root nodes for handshake", err)
-		return
+		return fmt.Errorf("failed to select root nodes for handshake: %w", err)
 	}
 	if err = c.network.Send(ctx,
 		handshake.Handshake{
@@ -109,11 +142,12 @@ func (c *BFTClient) sendHandshake(ctx context.Context) {
 			NodeID:      c.peer.ID().String(),
 		},
 		rootIDs...); err != nil {
-		c.logger.WarnContext(ctx, "error sending handshake", err)
+		return fmt.Errorf("failed to send handshake: %w", err)
 	}
+	return nil
 }
 
-func (n *BFTClient) loop(ctx context.Context) error {
+func (n *BFTClientImpl) loop(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -128,7 +162,7 @@ func (n *BFTClient) loop(ctx context.Context) error {
 	}
 }
 
-func (n *BFTClient) handleMessage(ctx context.Context, msg any) {
+func (n *BFTClientImpl) handleMessage(ctx context.Context, msg any) {
 	switch mt := msg.(type) {
 	case *certification.CertificationResponse:
 		n.logger.WithContext(ctx).Info("received CertificationResponse")
@@ -138,7 +172,7 @@ func (n *BFTClient) handleMessage(ctx context.Context, msg any) {
 	}
 }
 
-func (n *BFTClient) handleCertificationResponse(ctx context.Context, cr *certification.CertificationResponse) error {
+func (n *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *certification.CertificationResponse) error {
 	if err := cr.IsValid(); err != nil {
 		return fmt.Errorf("invalid CertificationResponse: %w", err)
 	}
@@ -149,20 +183,48 @@ func (n *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 		return fmt.Errorf("got CertificationResponse for a wrong shard %s - %s", cr.Partition, cr.Shard)
 	}
 
-	n.luc.Store(&cr.UC)
+	prevLUC := n.luc.Load()
+	// as we can be connected to several root nodes, we can receive the same UC multiple times
+	if cr.UC.IsDuplicate(prevLUC) {
+		n.logger.WithContext(ctx).Debug(fmt.Sprintf("duplicate UC (same root round %d)", cr.UC.GetRootRoundNumber()))
+		return nil
+	}
+
 	n.logger.WithContext(ctx).Debug(fmt.Sprintf("updated LUC; UC.Round: %d, RootRound: %d",
 		cr.UC.GetRoundNumber(), cr.UC.GetRootRoundNumber()))
-	n.certificationResponseChan <- struct{}{}
-	return nil
+	n.luc.Store(&cr.UC)
+
+	nextRoundNumber := big.NewInt(0)
+	nextRoundNumber.SetUint64(cr.Technical.Round)
+
+	wasInitializing := n.status.Load() == initializing
+	if wasInitializing {
+		n.logger.WithContext(ctx).Info("initialization finished, starting new round",
+			"nextRoundNumber", nextRoundNumber.String())
+		// First UC received after an initial handshake with a root node -> initialization finished.
+		n.status.Store(normal)
+		return n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+	}
+
+	n.logger.WithContext(ctx).Info("finalize block")
+	n.roundManager.FinalizeBlock(ctx, n.proposedBlock)
+	n.logger.WithContext(ctx).Info("starting new round",
+		"nextRoundNumber", nextRoundNumber.String())
+	return n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
 }
 
-func (n *BFTClient) sendCertificationRequest(ctx context.Context, rootHash string) error {
+func (n *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash string, roundNumber uint64) error {
 	rootHashBytes, err := hex.DecodeString(rootHash)
 	if err != nil {
 		return fmt.Errorf("failed to decode root hash: %w", err)
 	}
 
 	luc := n.luc.Load()
+
+	var blockHash []byte
+	if !bytes.Equal(rootHashBytes, luc.InputRecord.Hash) {
+		blockHash = rootHashBytes
+	}
 
 	// send new input record for certification
 	req := &certification.BlockCertificationRequest{
@@ -171,13 +233,13 @@ func (n *BFTClient) sendCertificationRequest(ctx context.Context, rootHash strin
 		NodeID:      n.peer.ID().String(),
 		InputRecord: &types.InputRecord{
 			Version:         1,
-			RoundNumber:     luc.GetRoundNumber() + 1,
+			RoundNumber:     roundNumber,
 			Epoch:           luc.InputRecord.Epoch,
 			PreviousHash:    luc.InputRecord.Hash,
 			Hash:            rootHashBytes,
 			SummaryValue:    []byte{}, // cant be nil if RoundNumber > 0
 			Timestamp:       luc.UnicitySeal.Timestamp,
-			BlockHash:       rootHashBytes, // has to have value if Hash != PreviousHash, using root hash for now
+			BlockHash:       blockHash,
 			SumOfEarnedFees: 0,
 			ETHash:          nil, // can be nil, not validated
 		},
@@ -192,16 +254,33 @@ func (n *BFTClient) sendCertificationRequest(ctx context.Context, rootHash strin
 	if err != nil {
 		return fmt.Errorf("selecting root nodes: %w", err)
 	}
-	for len(n.certificationResponseChan) > 0 {
-		<-n.certificationResponseChan
-	}
 	return n.network.Send(ctx, req, rootIDs...)
 }
 
-func (n *BFTClient) CertificationRequest(ctx context.Context, rootHash string) error {
-	if err := n.sendCertificationRequest(ctx, rootHash); err != nil {
+func (n *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.Block) error {
+	n.proposedBlock = block
+	if err := n.sendCertificationRequest(ctx, n.proposedBlock.RootHash.String(), n.proposedBlock.Index.Uint64()); err != nil {
 		return fmt.Errorf("failed to send certification request: %w", err)
 	}
-	<-n.certificationResponseChan
 	return nil
+}
+
+func NewBFTClientStub(logger *logger.Logger, roundManager RoundManager) *BFTClientStub {
+	logger.Info("Using BFT Client Stub")
+	return &BFTClientStub{
+		logger:       logger,
+		roundManager: roundManager,
+	}
+}
+
+func (n *BFTClientStub) Start(ctx context.Context, nextRoundNumber *api.BigInt) error {
+	return n.roundManager.StartNewRound(ctx, nextRoundNumber)
+}
+
+func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.Block) error {
+	n.roundManager.FinalizeBlock(ctx, block)
+	nextRoundNumber := api.NewBigInt(nil)
+	nextRoundNumber.Set(block.Index.Int)
+	nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
+	return n.roundManager.StartNewRound(ctx, nextRoundNumber)
 }
