@@ -478,6 +478,8 @@ github.com/ugorji/go/codec v1.2.12 h1:9LC83zGrHhuUA9l16C9AHXAqEV/2wBQ4nkvumAE65E
 github.com/ugorji/go/codec v1.2.12/go.mod h1:UNopzCgEMSXjBc6AOMqYvWC1ktqTAfzJZUZgYf6w6lg=
 github.com/unicitynetwork/bft-core v1.0.2-0.20250616064619-f56075be2313 h1:PGdgEAhqrt3TZJqNOylrgtl8P3pbSDWIpdpy6h/CvXk=
 github.com/unicitynetwork/bft-core v1.0.2-0.20250616064619-f56075be2313/go.mod h1:oHcvP+Jp8N4SzedwzxWfq7SfOAzgV0si6WsQBNYVQIo=
+github.com/unicitynetwork/bft-core v1.0.2-0.20250618101015-e1316ad51f4e h1:C8emZcWmMPG9uEfLW3Jk1jt7IcDdGo6g7KMxer7w1Aw=
+github.com/unicitynetwork/bft-core v1.0.2-0.20250618101015-e1316ad51f4e/go.mod h1:oHcvP+Jp8N4SzedwzxWfq7SfOAzgV0si6WsQBNYVQIo=
 github.com/unicitynetwork/bft-core v1.0.2 h1:ffBrjeszvkTKlq88Vbjy2T4WCuNdtFmuUOe9u4uH8Kg=
 github.com/unicitynetwork/bft-core v1.0.2/go.mod h1:f1L9ZJugLc23pRxAj/Q466ugZPOthDlEXOSo9z0bW6Y=
 github.com/unicitynetwork/bft-go-base v1.0.2 h1:Z5stN59ZP3psY5RDH4VFDyg5HXDsePv27uqvP56mNGw=

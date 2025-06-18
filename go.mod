@@ -8,7 +8,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/libp2p/go-libp2p v0.37.0
 	github.com/stretchr/testify v1.10.0
-	github.com/unicitynetwork/bft-core v1.0.2-0.20250616064619-f56075be2313
+	github.com/unicitynetwork/bft-core v1.0.2-0.20250618101015-e1316ad51f4e
 	github.com/unicitynetwork/bft-go-base v1.0.2
 	go.mongodb.org/mongo-driver v1.17.4
 	go.opentelemetry.io/otel/metric v1.36.0
