@@ -4,3 +4,4 @@ bin
 aggregator
 aggregator.log
 performance-test
+bft-config

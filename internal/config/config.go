@@ -6,6 +6,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/unicitynetwork/bft-core/network"
+	"github.com/unicitynetwork/bft-core/partition"
+	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/util"
 )
 
 // Config represents the application configuration
@@ -14,21 +20,22 @@ type Config struct {
 	Database DatabaseConfig `mapstructure:"database"`
 	HA       HAConfig       `mapstructure:"ha"`
 	Logging  LoggingConfig  `mapstructure:"logging"`
+	BFT      BFTConfig      `mapstructure:"bft"`
 }
 
 // ServerConfig holds HTTP server configuration
 type ServerConfig struct {
-	Port                string        `mapstructure:"port"`
-	Host                string        `mapstructure:"host"`
-	ReadTimeout         time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout        time.Duration `mapstructure:"write_timeout"`
-	IdleTimeout         time.Duration `mapstructure:"idle_timeout"`
-	ConcurrencyLimit    int           `mapstructure:"concurrency_limit"`
-	EnableDocs          bool          `mapstructure:"enable_docs"`
-	EnableCORS          bool          `mapstructure:"enable_cors"`
-	TLSCertFile         string        `mapstructure:"tls_cert_file"`
-	TLSKeyFile          string        `mapstructure:"tls_key_file"`
-	EnableTLS           bool          `mapstructure:"enable_tls"`
+	Port             string        `mapstructure:"port"`
+	Host             string        `mapstructure:"host"`
+	ReadTimeout      time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout     time.Duration `mapstructure:"write_timeout"`
+	IdleTimeout      time.Duration `mapstructure:"idle_timeout"`
+	ConcurrencyLimit int           `mapstructure:"concurrency_limit"`
+	EnableDocs       bool          `mapstructure:"enable_docs"`
+	EnableCORS       bool          `mapstructure:"enable_cors"`
+	TLSCertFile      string        `mapstructure:"tls_cert_file"`
+	TLSKeyFile       string        `mapstructure:"tls_key_file"`
+	EnableTLS        bool          `mapstructure:"enable_tls"`
 }
 
 // DatabaseConfig holds MongoDB configuration
@@ -45,11 +52,11 @@ type DatabaseConfig struct {
 
 // HAConfig holds High Availability configuration
 type HAConfig struct {
-	Enabled                      bool          `mapstructure:"enabled"`
-	LockTTLSeconds              int           `mapstructure:"lock_ttl_seconds"`
-	LeaderHeartbeatInterval     time.Duration `mapstructure:"leader_heartbeat_interval"`
+	Enabled                       bool          `mapstructure:"enabled"`
+	LockTTLSeconds                int           `mapstructure:"lock_ttl_seconds"`
+	LeaderHeartbeatInterval       time.Duration `mapstructure:"leader_heartbeat_interval"`
 	LeaderElectionPollingInterval time.Duration `mapstructure:"leader_election_polling_interval"`
-	ServerID                     string        `mapstructure:"server_id"`
+	ServerID                      string        `mapstructure:"server_id"`
 }
 
 // LoggingConfig holds logging configuration
@@ -58,6 +65,19 @@ type LoggingConfig struct {
 	Format     string `mapstructure:"format"`
 	Output     string `mapstructure:"output"`
 	EnableJSON bool   `mapstructure:"enable_json"`
+}
+
+type BFTConfig struct {
+	Enabled   bool                              `mapstructure:"enabled"`
+	KeyConf   *partition.KeyConf                `mapstructure:"key_conf"`
+	ShardConf *types.PartitionDescriptionRecord `mapstructure:"shard_conf"`
+	TrustBase types.RootTrustBase               `mapstructure:"trust_base"`
+	// Peer configuration
+	Address                    string   `mapstructure:"address"`
+	AnnounceAddresses          []string `mapstructure:"announce_addresses"`
+	BootstrapAddresses         []string `mapstructure:"bootstrap_addresses"`
+	BootstrapConnectRetry      int      `mapstructure:"bootstrap_connect_retry"`
+	BootstrapConnectRetryDelay int      `mapstructure:"bootstrap_connect_retry_delay"`
 }
 
 // Load loads configuration from environment variables with defaults
@@ -87,11 +107,11 @@ func Load() (*Config, error) {
 			MaxConnIdleTime:        getEnvDurationOrDefault("MONGODB_MAX_CONN_IDLE_TIME", "5m"),
 		},
 		HA: HAConfig{
-			Enabled:                      !getEnvBoolOrDefault("DISABLE_HIGH_AVAILABILITY", false),
-			LockTTLSeconds:              getEnvIntOrDefault("LOCK_TTL_SECONDS", 30),
-			LeaderHeartbeatInterval:     getEnvDurationOrDefault("LEADER_HEARTBEAT_INTERVAL", "10s"),
+			Enabled:                       !getEnvBoolOrDefault("DISABLE_HIGH_AVAILABILITY", false),
+			LockTTLSeconds:                getEnvIntOrDefault("LOCK_TTL_SECONDS", 30),
+			LeaderHeartbeatInterval:       getEnvDurationOrDefault("LEADER_HEARTBEAT_INTERVAL", "10s"),
 			LeaderElectionPollingInterval: getEnvDurationOrDefault("LEADER_ELECTION_POLLING_INTERVAL", "5s"),
-			ServerID:                     getEnvOrDefault("SERVER_ID", generateServerID()),
+			ServerID:                      getEnvOrDefault("SERVER_ID", generateServerID()),
 		},
 		Logging: LoggingConfig{
 			Level:      getEnvOrDefault("LOG_LEVEL", "info"),
@@ -100,12 +120,40 @@ func Load() (*Config, error) {
 			EnableJSON: getEnvBoolOrDefault("LOG_ENABLE_JSON", true),
 		},
 	}
+	config.BFT = BFTConfig{
+		Enabled:                    getEnvBoolOrDefault("BFT_ENABLED", true),
+		Address:                    getEnvOrDefault("BFT_ADDRESS", "/ip4/0.0.0.0/tcp/9000"),
+		AnnounceAddresses:          strings.Split(getEnvOrDefault("BFT_ANNOUNCE_ADDRESSES", ""), ","),
+		BootstrapAddresses:         strings.Split(getEnvOrDefault("BFT_BOOTSTRAP_ADDRESSES", "/ip4/127.0.0.1/tcp/26662/p2p/16Uiu2HAm6eQMr2sQVbcWZsPPbpc2Su7AnnMVGHpC23PUzGTAATnp"), ","),
+		BootstrapConnectRetry:      getEnvIntOrDefault("BFT_BOOTSTRAP_CONNECT_RETRY", 3),
+		BootstrapConnectRetryDelay: getEnvIntOrDefault("BFT_BOOTSTRAP_CONNECT_RETRY_DELAY", 5),
+	}
+	if config.BFT.Enabled {
+		if err := loadConf(getEnvOrDefault("BFT_KEY_CONF_FILE", "bft-config/keys.json"), &config.BFT.KeyConf); err != nil {
+			return nil, fmt.Errorf("failed to load key configuration: %w", err)
+		}
+		if err := loadConf(getEnvOrDefault("BFT_SHARD_CONF_FILE", "bft-config/shard-conf-7_0.json"), &config.BFT.ShardConf); err != nil {
+			return nil, fmt.Errorf("failed to load shard configuration: %w", err)
+		}
+		trustBaseV1 := types.RootTrustBaseV1{}
+		if err := loadConf(getEnvOrDefault("BFT_TRUST_BASE_FILE", "bft-config/trust-base.json"), &trustBaseV1); err != nil {
+			return nil, fmt.Errorf("failed to load trust base configuration: %w", err)
+		}
+		config.BFT.TrustBase = &trustBaseV1
+	}
 
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
 
 	return config, nil
+}
+
+func loadConf(path string, conf any) error {
+	if _, err := util.ReadJsonFile(path, &conf); err != nil {
+		return fmt.Errorf("failed to load %q: %w", path, err)
+	}
+	return nil
 }
 
 // Validate validates the configuration
@@ -190,4 +238,40 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+func (c *BFTConfig) PeerConf() (*network.PeerConfiguration, error) {
+	authKeyPair, err := c.KeyConf.AuthKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("invalid authentication key: %w", err)
+	}
+
+	bootNodes := make([]peer.AddrInfo, len(c.BootstrapAddresses))
+	for i, addr := range c.BootstrapAddresses {
+		addrInfo, err := peer.AddrInfoFromString(addr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid bootstrap address: %w", err)
+		}
+		bootNodes[i] = *addrInfo
+	}
+
+	bootstrapConnectRetry := &network.BootstrapConnectRetry{Count: c.BootstrapConnectRetry, Delay: c.BootstrapConnectRetryDelay}
+	if len(c.AnnounceAddresses) == 1 && c.AnnounceAddresses[0] == "" {
+		c.AnnounceAddresses = nil
+	}
+
+	return network.NewPeerConfiguration(c.Address, c.AnnounceAddresses, authKeyPair, bootNodes, bootstrapConnectRetry)
+}
+
+func (c *BFTConfig) GetRootNodes() (peer.IDSlice, error) {
+	nodes := c.TrustBase.GetRootNodes()
+	idSlice := make(peer.IDSlice, len(nodes))
+	for i, node := range nodes {
+		id, err := peer.Decode(node.NodeID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid root node id in trust base: %w", err)
+		}
+		idSlice[i] = id
+	}
+	return idSlice, nil
 }

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/unicitynetwork/aggregator-go/internal/bft"
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -48,10 +49,11 @@ type Round struct {
 
 // RoundManager handles the creation of blocks and processing of commitments
 type RoundManager struct {
-	config  *config.Config
-	logger  *logger.Logger
-	storage interfaces.Storage
-	smt     *ThreadSafeSMT
+	config    *config.Config
+	logger    *logger.Logger
+	storage   interfaces.Storage
+	smt       *ThreadSafeSMT
+	bftClient bft.BFTClient
 
 	// Round management
 	currentRound *Round
@@ -69,12 +71,12 @@ type RoundManager struct {
 }
 
 // NewRoundManager creates a new round manager
-func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) *RoundManager {
+func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*RoundManager, error) {
 	// Initialize SMT with thread-safe wrapper
 	smtInstance := smt.NewSparseMerkleTree(smt.SHA256)
 	threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
-	return &RoundManager{
+	rm := &RoundManager{
 		config:        cfg,
 		logger:        logger,
 		storage:       storage,
@@ -82,6 +84,18 @@ func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfac
 		stopChan:      make(chan struct{}),
 		roundDuration: time.Second, // 1 second rounds
 	}
+
+	if cfg.BFT.Enabled {
+		var err error
+		rm.bftClient, err = bft.NewBFTClient(context.Background(), &cfg.BFT, logger, rm)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create BFT client: %w", err)
+		}
+	} else {
+		rm.bftClient = bft.NewBFTClientStub(logger, rm)
+	}
+
+	return rm, nil
 }
 
 // Start begins the round manager operation
@@ -108,10 +122,9 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 		// If blocks exist, start from latest + 1
 		nextRoundNumber.Set(latestBlockNumber.Int)
 		nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
-		rm.logger.WithContext(ctx).
-			WithField("latestBlock", latestBlockNumber.String()).
-			WithField("nextRound", nextRoundNumber.String()).
-			Info("Starting from existing blockchain state")
+		rm.logger.WithContext(ctx).Info("Starting from existing blockchain state",
+			"latestBlock", latestBlockNumber.String(),
+			"nextRound", nextRoundNumber.String())
 	} else {
 		// If no blocks exist, start from 1 (not 0)
 		nextRoundNumber.SetInt64(1)
@@ -129,18 +142,16 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 			break
 		}
 
-		rm.logger.WithContext(ctx).
-			WithField("blockNumber", nextRoundNumber.String()).
-			Debug("Block already exists, incrementing to find next available number")
+		rm.logger.WithContext(ctx).Debug("Block already exists, incrementing to find next available number",
+			"blockNumber", nextRoundNumber.String())
 		nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
 	}
 
-	rm.logger.WithContext(ctx).
-		WithField("finalRoundNumber", nextRoundNumber.String()).
-		Info("Found next available block number for new round")
+	rm.logger.WithContext(ctx).Info("Found next available block number for new round",
+		"finalRoundNumber", nextRoundNumber.String())
 
-	if err := rm.startNewRound(ctx, nextRoundNumber); err != nil {
-		return fmt.Errorf("failed to start initial round: %w", err)
+	if err := rm.bftClient.Start(ctx, nextRoundNumber); err != nil {
+		return fmt.Errorf("failed to start BFT client: %w", err)
 	}
 
 	// Start the round processing goroutine
@@ -188,11 +199,10 @@ func (rm *RoundManager) AddCommitment(ctx context.Context, commitment *models.Co
 	// Add commitment to current round
 	rm.currentRound.Commitments = append(rm.currentRound.Commitments, commitment)
 
-	rm.logger.WithContext(ctx).
-		WithField("roundNumber", rm.currentRound.Number.String()).
-		WithField("commitmentCount", len(rm.currentRound.Commitments)).
-		WithField("requestId", commitment.RequestID.String()).
-		Debug("Added commitment to round")
+	rm.logger.WithContext(ctx).Debug("Added commitment to round",
+		"roundNumber", rm.currentRound.Number.String(),
+		"commitmentCount", len(rm.currentRound.Commitments),
+		"requestId", commitment.RequestID.String())
 
 	return nil
 }
@@ -245,8 +255,8 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 	return stats
 }
 
-// startNewRound initializes a new round
-func (rm *RoundManager) startNewRound(ctx context.Context, roundNumber *api.BigInt) error {
+// StartNewRound initializes a new round
+func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
 	rm.roundMutex.Lock()
 	defer rm.roundMutex.Unlock()
 
@@ -265,14 +275,13 @@ func (rm *RoundManager) startNewRound(ctx context.Context, roundNumber *api.BigI
 	// Start round timer
 	rm.roundTimer = time.AfterFunc(rm.roundDuration, func() {
 		if err := rm.processCurrentRound(ctx); err != nil {
-			rm.logger.WithContext(ctx).WithError(err).Error("Failed to process round")
+			rm.logger.WithContext(ctx).Error("Failed to process round", "error", err.Error())
 		}
 	})
 
-	rm.logger.WithContext(ctx).
-		WithField("roundNumber", roundNumber.String()).
-		WithField("duration", rm.roundDuration.String()).
-		Info("Started new round")
+	rm.logger.WithContext(ctx).Info("Started new round",
+		"roundNumber", roundNumber.String(),
+		"duration", rm.roundDuration.String())
 
 	return nil
 }
@@ -288,10 +297,9 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	// Check if round is already being processed
 	if rm.currentRound.State != RoundStateCollecting {
 		rm.roundMutex.Unlock()
-		rm.logger.WithContext(ctx).
-			WithField("roundNumber", rm.currentRound.Number.String()).
-			WithField("state", rm.currentRound.State.String()).
-			Debug("Round already being processed, skipping")
+		rm.logger.WithContext(ctx).Debug("Round already being processed, skipping",
+			"roundNumber", rm.currentRound.Number.String(),
+			"state", rm.currentRound.State.String())
 		return nil
 	}
 
@@ -301,27 +309,25 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	roundNumber := rm.currentRound.Number
 	rm.roundMutex.Unlock()
 
-	rm.logger.WithContext(ctx).
-		WithField("roundNumber", roundNumber.String()).
-		WithField("commitmentCount", len(commitments)).
-		Info("Processing round")
+	rm.logger.WithContext(ctx).Info("Processing round",
+		"roundNumber", roundNumber.String(),
+		"commitmentCount", len(commitments))
 
 	// Get any unprocessed commitments from storage in addition to round commitments
 	const batchLimit = 1000 // Limit to prevent memory issues
 	unprocessedCommitments, err := rm.storage.CommitmentStorage().GetUnprocessedBatch(ctx, batchLimit)
 	if err != nil {
-		rm.logger.WithContext(ctx).WithError(err).Warn("Failed to get unprocessed commitments")
+		rm.logger.WithContext(ctx).Warn("Failed to get unprocessed commitments", "error", err.Error())
 		unprocessedCommitments = []*models.Commitment{}
 	}
 
 	// Combine round commitments with unprocessed commitments
 	allCommitments := append(commitments, unprocessedCommitments...)
 
-	rm.logger.WithContext(ctx).
-		WithField("roundCommitments", len(commitments)).
-		WithField("unprocessedCommitments", len(unprocessedCommitments)).
-		WithField("totalCommitments", len(allCommitments)).
-		Info("Processing commitments batch")
+	rm.logger.WithContext(ctx).Info("Processing commitments batch",
+		"roundCommitments", len(commitments),
+		"unprocessedCommitments", len(unprocessedCommitments),
+		"totalCommitments", len(allCommitments))
 
 	// Process commitments in batch
 	var rootHash string
@@ -335,13 +341,13 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 		}
 
 		if err := rm.storage.CommitmentStorage().MarkProcessed(ctx, requestIDs); err != nil {
-			rm.logger.WithContext(ctx).WithError(err).Error("Failed to mark commitments as processed")
+			rm.logger.WithContext(ctx).Error("Failed to mark commitments as processed", "error", err.Error())
 			return fmt.Errorf("failed to mark commitments as processed: %w", err)
 		}
 
 		rootHash, records, err = rm.processBatch(ctx, allCommitments, roundNumber)
 		if err != nil {
-			rm.logger.WithContext(ctx).WithError(err).Error("Failed to process batch, but commitments are already marked as processed")
+			rm.logger.WithContext(ctx).Error("Failed to process batch, but commitments are already marked as processed", "error", err.Error())
 			return fmt.Errorf("failed to process batch: %w", err)
 		}
 	} else {
@@ -350,21 +356,16 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 		records = make([]*models.AggregatorRecord, 0)
 	}
 
-	// Create and finalize block
-	if err := rm.finalizeBlock(ctx, roundNumber, rootHash, records); err != nil {
-		return fmt.Errorf("failed to finalize block: %w", err)
+	// Create and propose block
+	if err := rm.proposeBlock(ctx, roundNumber, rootHash, records); err != nil {
+		return fmt.Errorf("failed to propose block: %w", err)
 	}
 
 	// Update stats
 	rm.totalRounds++
 	rm.totalCommitments += int64(len(allCommitments))
 
-	// Start next round
-	nextRoundNumber := api.NewBigInt(nil)
-	nextRoundNumber.Set(roundNumber.Int)
-	nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
-
-	return rm.startNewRound(ctx, nextRoundNumber)
+	return nil
 }
 
 // roundProcessor is the main goroutine that handles round processing

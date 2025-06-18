@@ -8,7 +8,6 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
 
-
 // JSON-RPC method handlers
 
 // handleSubmitCommitment handles the submit_commitment method
@@ -29,7 +28,7 @@ func (s *Server) handleSubmitCommitment(ctx context.Context, params json.RawMess
 	// Call service
 	response, err := s.service.SubmitCommitment(ctx, &req)
 	if err != nil {
-		s.logger.WithContext(ctx).WithError(err).Error("Failed to submit commitment")
+		s.logger.WithContext(ctx).Error("Failed to submit commitment", "error", err.Error())
 		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to submit commitment", err.Error())
 	}
 
@@ -51,7 +50,7 @@ func (s *Server) handleGetInclusionProof(ctx context.Context, params json.RawMes
 	// Call service
 	response, err := s.service.GetInclusionProof(ctx, &req)
 	if err != nil {
-		s.logger.WithContext(ctx).WithError(err).Error("Failed to get inclusion proof")
+		s.logger.WithContext(ctx).Error("Failed to get inclusion proof", "error", err.Error())
 		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to get inclusion proof", err.Error())
 	}
 
@@ -63,7 +62,7 @@ func (s *Server) handleGetNoDeletionProof(ctx context.Context, params json.RawMe
 	// Call service
 	response, err := s.service.GetNoDeletionProof(ctx)
 	if err != nil {
-		s.logger.WithContext(ctx).WithError(err).Error("Failed to get no-deletion proof")
+		s.logger.WithContext(ctx).Error("Failed to get no-deletion proof", "error", err.Error())
 		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to get no-deletion proof", err.Error())
 	}
 
@@ -75,7 +74,7 @@ func (s *Server) handleGetBlockHeight(ctx context.Context, params json.RawMessag
 	// Call service
 	response, err := s.service.GetBlockHeight(ctx)
 	if err != nil {
-		s.logger.WithContext(ctx).WithError(err).Error("Failed to get block height")
+		s.logger.WithContext(ctx).Error("Failed to get block height", "error", err.Error())
 		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to get block height", err.Error())
 	}
 
@@ -92,7 +91,7 @@ func (s *Server) handleGetBlock(ctx context.Context, params json.RawMessage) (in
 	// Call service
 	response, err := s.service.GetBlock(ctx, &req)
 	if err != nil {
-		s.logger.WithContext(ctx).WithError(err).Error("Failed to get block")
+		s.logger.WithContext(ctx).Error("Failed to get block", "error", err.Error())
 		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to get block", err.Error())
 	}
 
@@ -114,7 +113,7 @@ func (s *Server) handleGetBlockCommitments(ctx context.Context, params json.RawM
 	// Call service
 	response, err := s.service.GetBlockCommitments(ctx, &req)
 	if err != nil {
-		s.logger.WithContext(ctx).WithError(err).Error("Failed to get block commitments")
+		s.logger.WithContext(ctx).Error("Failed to get block commitments", "error", err.Error())
 		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to get block commitments", err.Error())
 	}
 
