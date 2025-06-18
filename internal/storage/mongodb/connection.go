@@ -39,17 +39,12 @@ func NewStorage(cfg *config.DatabaseConfig) (*Storage, error) {
 		SetMinPoolSize(cfg.MinPoolSize).
 		SetMaxConnIdleTime(cfg.MaxConnIdleTime)
 
-	// Create client
-	client, err := mongo.NewClient(clientOpts)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create MongoDB client: %w", err)
-	}
-
 	// Connect to MongoDB
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ConnectTimeout)
 	defer cancel()
 
-	if err := client.Connect(ctx); err != nil {
+	client, err := mongo.Connect(ctx, clientOpts)
+	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
 	}
 
