@@ -41,25 +41,25 @@ func apiToModelBigInt(apiBigInt *api.BigInt) *api.BigInt {
 
 func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.AggregatorRecord {
 	return &api.AggregatorRecord{
-		RequestID:       api.RequestID(modelRecord.RequestID),
-		TransactionHash: api.TransactionHash(modelRecord.TransactionHash),
+		RequestID:       modelRecord.RequestID,
+		TransactionHash: modelRecord.TransactionHash,
 		Authenticator: api.Authenticator{
 			Algorithm: modelRecord.Authenticator.Algorithm,
-			PublicKey: api.HexBytes(modelRecord.Authenticator.PublicKey),
-			Signature: api.HexBytes(modelRecord.Authenticator.Signature),
+			PublicKey: modelRecord.Authenticator.PublicKey,
+			Signature: modelRecord.Authenticator.Signature,
 			StateHash: api.StateHash(modelRecord.Authenticator.StateHash.String()),
 		},
 		BlockNumber: modelToAPIBigInt(modelRecord.BlockNumber),
 		LeafIndex:   modelToAPIBigInt(modelRecord.LeafIndex),
-		CreatedAt:   (*api.Timestamp)(modelRecord.CreatedAt),
-		FinalizedAt: (*api.Timestamp)(modelRecord.FinalizedAt),
+		CreatedAt:   modelRecord.CreatedAt,
+		FinalizedAt: modelRecord.FinalizedAt,
 	}
 }
 
 func modelToAPIBlock(modelBlock *models.Block) *api.Block {
 	var noDeletionProofHash *api.HexBytes
 	if modelBlock.NoDeletionProofHash != nil {
-		converted := api.HexBytes(*modelBlock.NoDeletionProofHash)
+		converted := *modelBlock.NoDeletionProofHash
 		noDeletionProofHash = &converted
 	}
 
@@ -68,11 +68,11 @@ func modelToAPIBlock(modelBlock *models.Block) *api.Block {
 		ChainID:             modelBlock.ChainID,
 		Version:             modelBlock.Version,
 		ForkID:              modelBlock.ForkID,
-		Timestamp:           (*api.Timestamp)(modelBlock.Timestamp),
-		RootHash:            api.HexBytes(modelBlock.RootHash),
-		PreviousBlockHash:   api.HexBytes(modelBlock.PreviousBlockHash),
+		Timestamp:           modelBlock.Timestamp,
+		RootHash:            modelBlock.RootHash,
+		PreviousBlockHash:   modelBlock.PreviousBlockHash,
 		NoDeletionProofHash: noDeletionProofHash,
-		CreatedAt:           (*api.Timestamp)(modelBlock.CreatedAt),
+		CreatedAt:           modelBlock.CreatedAt,
 	}
 }
 
@@ -132,10 +132,10 @@ func (as *AggregatorService) Stop(ctx context.Context) error {
 // SubmitCommitment handles commitment submission
 func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error) {
 	// Create commitment for validation
-	commitment := models.NewCommitment(api.RequestID(req.RequestID), req.TransactionHash, models.Authenticator{
+	commitment := models.NewCommitment(req.RequestID, req.TransactionHash, models.Authenticator{
 		Algorithm: req.Authenticator.Algorithm,
-		PublicKey: api.HexBytes(req.Authenticator.PublicKey),
-		Signature: api.HexBytes(req.Authenticator.Signature),
+		PublicKey: req.Authenticator.PublicKey,
+		Signature: req.Authenticator.Signature,
 		StateHash: req.Authenticator.StateHash,
 	})
 
@@ -157,7 +157,7 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 	}
 
 	// Check if commitment already exists
-	existing, err := as.storage.CommitmentStorage().GetByRequestID(ctx, api.RequestID(req.RequestID))
+	existing, err := as.storage.CommitmentStorage().GetByRequestID(ctx, req.RequestID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check existing commitment: %w", err)
 	}
@@ -215,14 +215,14 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 // GetInclusionProof retrieves inclusion proof for a commitment
 func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error) {
 	// First check if commitment exists in aggregator records (finalized)
-	record, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, api.RequestID(req.RequestID))
+	record, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, req.RequestID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get aggregator record: %w", err)
 	}
 
 	if record == nil {
 		// Check if commitment exists but not yet processed
-		commitment, err := as.storage.CommitmentStorage().GetByRequestID(ctx, api.RequestID(req.RequestID))
+		commitment, err := as.storage.CommitmentStorage().GetByRequestID(ctx, req.RequestID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get commitment: %w", err)
 		}

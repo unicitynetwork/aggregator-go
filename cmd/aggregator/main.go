@@ -76,7 +76,7 @@ func main() {
 
 	// Start server in a goroutine
 	go func() {
-		if err := server.Start(ctx); err != nil {
+		if err := server.Start(); err != nil {
 			log.WithComponent("main").Error("Server failed to start", "error", err.Error())
 		}
 	}()

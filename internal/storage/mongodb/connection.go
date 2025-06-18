@@ -14,17 +14,17 @@ import (
 
 // Storage implements the complete storage interface for MongoDB
 type Storage struct {
-	client     *mongo.Client
-	database   *mongo.Database
-	config     *config.DatabaseConfig
-	
+	client   *mongo.Client
+	database *mongo.Database
+	config   *config.DatabaseConfig
+
 	// Storage implementations
 	commitmentStorage       *CommitmentStorage
 	aggregatorRecordStorage *AggregatorRecordStorage
-	blockStorage           *BlockStorage
-	smtStorage             *SmtStorage
-	blockRecordsStorage    *BlockRecordsStorage
-	leadershipStorage      *LeadershipStorage
+	blockStorage            *BlockStorage
+	smtStorage              *SmtStorage
+	blockRecordsStorage     *BlockRecordsStorage
+	leadershipStorage       *LeadershipStorage
 }
 
 // NewStorage creates a new MongoDB storage instance

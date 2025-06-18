@@ -2,14 +2,15 @@ package mongodb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
-	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 const blockRecordsCollection = "block_records"
@@ -40,7 +41,7 @@ func (brs *BlockRecordsStorage) GetByBlockNumber(ctx context.Context, blockNumbe
 	var records models.BlockRecords
 	err := brs.collection.FindOne(ctx, bson.M{"blockNumber": blockNumber.String()}).Decode(&records)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get block records by block number: %w", err)
@@ -59,7 +60,7 @@ func (brs *BlockRecordsStorage) GetByRequestID(ctx context.Context, requestID ap
 
 	err := brs.collection.FindOne(ctx, filter, opts).Decode(&result)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get block number by request ID: %w", err)
