@@ -42,10 +42,6 @@ type (
 		roundManager  RoundManager
 		proposedBlock *models.Block
 	}
-	BFTClientStub struct {
-		logger       *logger.Logger
-		roundManager RoundManager
-	}
 
 	BFTClient interface {
 		Start(ctx context.Context, nextRoundNumber *api.BigInt) error
@@ -263,24 +259,4 @@ func (n *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.
 		return fmt.Errorf("failed to send certification request: %w", err)
 	}
 	return nil
-}
-
-func NewBFTClientStub(logger *logger.Logger, roundManager RoundManager) *BFTClientStub {
-	logger.Info("Using BFT Client Stub")
-	return &BFTClientStub{
-		logger:       logger,
-		roundManager: roundManager,
-	}
-}
-
-func (n *BFTClientStub) Start(ctx context.Context, nextRoundNumber *api.BigInt) error {
-	return n.roundManager.StartNewRound(ctx, nextRoundNumber)
-}
-
-func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.Block) error {
-	n.roundManager.FinalizeBlock(ctx, block)
-	nextRoundNumber := api.NewBigInt(nil)
-	nextRoundNumber.Set(block.Index.Int)
-	nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
-	return n.roundManager.StartNewRound(ctx, nextRoundNumber)
 }
