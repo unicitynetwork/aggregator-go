@@ -35,8 +35,12 @@ WORKDIR /app
 # Copy binary from builder stage
 COPY --from=builder /app/bin/aggregator /app/aggregator
 
+# Copy BFT configuration files from builder stage
+COPY --from=builder /app/bft-config/ /app/bft-config/
+
 # Change ownership to non-root user
 RUN chown -R aggregator:aggregator /app
+RUN chown -R aggregator:aggregator /app/bft-config
 
 # Switch to non-root user
 USER aggregator

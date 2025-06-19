@@ -89,6 +89,8 @@ export LOG_LEVEL="debug"
 
 The service will start on `http://localhost:3000` by default (or `localhost:3333` with Docker).
 
+> **⚠️ BFT Configuration Required**: For the aggregator to run properly, BFT configuration is required. This includes setting up BFT configuration files and bootstrap node addresses. See [bft-support.md](bft-support.md) for detailed setup instructions.
+
 ## Configuration
 
 The service is configured via environment variables:

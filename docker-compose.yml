@@ -7,6 +7,7 @@ services:
     restart: unless-stopped
     ports:
       - "27017:27017"
+    network_mode: host
     environment:
       MONGO_INITDB_ROOT_USERNAME: admin
       MONGO_INITDB_ROOT_PASSWORD: password
@@ -14,8 +15,6 @@ services:
     volumes:
       - mongodb_data:/data/db
       - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
-    networks:
-      - aggregator-network
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
@@ -30,6 +29,7 @@ services:
     restart: unless-stopped
     ports:
       - "3333:3000"
+    network_mode: host
     environment:
       # Server Configuration
       PORT: "3000"
@@ -39,7 +39,7 @@ services:
       ENABLE_CORS: "true"
       
       # Database Configuration
-      MONGODB_URI: "mongodb://admin:password@mongodb:27017/aggregator?authSource=admin"
+      MONGODB_URI: "mongodb://admin:password@localhost:27017/aggregator?authSource=admin"
       MONGODB_DATABASE: "aggregator"
       MONGODB_CONNECT_TIMEOUT: "10s"
       MONGODB_SERVER_SELECTION_TIMEOUT: "5s"
@@ -51,14 +51,21 @@ services:
       LEADER_ELECTION_POLLING_INTERVAL: "5s"
       
       # Logging Configuration
-      LOG_LEVEL: "info"
+      LOG_LEVEL: "info" 
       LOG_FORMAT: "json"
       LOG_ENABLE_JSON: "true"
+
+      # BFT Configuration
+      # Enable BFT support and specify configuration file paths
+      BFT_ENABLED: "true"
+      BFT_KEY_CONF_FILE: "/app/bft-config/keys.json"
+      BFT_SHARD_CONF_FILE: "/app/bft-config/shard-conf-7_0.json"
+      BFT_TRUST_BASE_FILE: "/app/bft-config/trust-base.json"
+      BFT_BOOTSTRAP_ADDRESSES: /ip4/127.0.0.1/tcp/26662/p2p/16Uiu2HAm6eQMr2sQVbcWZsPPbpc2Su7AnnMVGHpC23PUzGTAATnp
+
     depends_on:
       mongodb:
         condition: service_healthy
-    networks:
-      - aggregator-network
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
       interval: 30s
@@ -68,8 +75,4 @@ services:
 volumes:
   mongodb_data:
     driver: local
-
-networks:
-  aggregator-network:
-    driver: bridge
     
