@@ -42,12 +42,7 @@ Use the BFT core tools to generate the required configuration files:
 # Generate aggregator node info and keys
 `build/ubft shard-node init --home "test-nodes/aggregator" --generate`
 # Generate shard configuration for aggregator
-`build/ubft shard-conf generate --home test-nodes \
-                  --network-id 3 \
-                  --partition-id 7 \
-                  --partition-type-id 7 \
-                  --epoch-start 10 \
-                  --node-info test-nodes/aggregator/node-info.json`
+`build/ubft shard-conf generate --home test-nodes --network-id 3 --partition-id 7 --partition-type-id 7 --epoch-start 10 --node-info test-nodes/aggregator/node-info.json`
                   
 # Copy shard configuration for aggregator node
 `cp <bftcore location>/test-nodes/shard-conf-7_0.json bft-config/shard-conf-7_0.json`
