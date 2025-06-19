@@ -22,6 +22,49 @@ services:
       timeout: 5s
       retries: 5
 
+  aggregator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aggregator-service
+    restart: unless-stopped
+    ports:
+      - "3333:3000"
+    environment:
+      # Server Configuration
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      CONCURRENCY_LIMIT: "1000"
+      ENABLE_DOCS: "true"
+      ENABLE_CORS: "true"
+      
+      # Database Configuration
+      MONGODB_URI: "mongodb://admin:password@mongodb:27017/aggregator?authSource=admin"
+      MONGODB_DATABASE: "aggregator"
+      MONGODB_CONNECT_TIMEOUT: "10s"
+      MONGODB_SERVER_SELECTION_TIMEOUT: "5s"
+      
+      # High Availability Configuration
+      DISABLE_HIGH_AVAILABILITY: "false"
+      LOCK_TTL_SECONDS: "30"
+      LEADER_HEARTBEAT_INTERVAL: "10s"
+      LEADER_ELECTION_POLLING_INTERVAL: "5s"
+      
+      # Logging Configuration
+      LOG_LEVEL: "info"
+      LOG_FORMAT: "json"
+      LOG_ENABLE_JSON: "true"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - aggregator-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
 volumes:
   mongodb_data:
     driver: local
@@ -29,3 +72,4 @@ volumes:
 networks:
   aggregator-network:
     driver: bridge
+    
