@@ -108,24 +108,24 @@ type Block struct {
 	ChainID             string     `json:"chainId"`
 	Version             string     `json:"version"`
 	ForkID              string     `json:"forkId"`
-	Timestamp           *Timestamp `json:"timestamp"`
 	RootHash            HexBytes   `json:"rootHash"`
 	PreviousBlockHash   HexBytes   `json:"previousBlockHash"`
-	NoDeletionProofHash *HexBytes  `json:"noDeletionProofHash"`
+	NoDeletionProofHash HexBytes   `json:"noDeletionProofHash"`
 	CreatedAt           *Timestamp `json:"createdAt"`
+	UnicityCertificate  HexBytes   `json:"unicityCertificate"`
 }
 
 // NewBlock creates a new block
-func NewBlock(index *BigInt, chainID, version, forkID string, rootHash, previousBlockHash HexBytes) *Block {
+func NewBlock(index *BigInt, chainID, version, forkID string, rootHash, previousBlockHash, unicityCertificate HexBytes) *Block {
 	return &Block{
-		Index:             index,
-		ChainID:           chainID,
-		Version:           version,
-		ForkID:            forkID,
-		Timestamp:         Now(),
-		RootHash:          rootHash,
-		PreviousBlockHash: previousBlockHash,
-		CreatedAt:         Now(),
+		Index:              index,
+		ChainID:            chainID,
+		Version:            version,
+		ForkID:             forkID,
+		RootHash:           rootHash,
+		PreviousBlockHash:  previousBlockHash,
+		CreatedAt:          Now(),
+		UnicityCertificate: unicityCertificate,
 	}
 }
 

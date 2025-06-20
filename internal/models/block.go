@@ -14,11 +14,11 @@ type Block struct {
 	ChainID             string         `json:"chainId" bson:"chainId"`
 	Version             string         `json:"version" bson:"version"`
 	ForkID              string         `json:"forkId" bson:"forkId"`
-	Timestamp           *api.Timestamp `json:"timestamp" bson:"timestamp"`
 	RootHash            api.HexBytes   `json:"rootHash" bson:"rootHash"`
 	PreviousBlockHash   api.HexBytes   `json:"previousBlockHash" bson:"previousBlockHash"`
-	NoDeletionProofHash *api.HexBytes  `json:"noDeletionProofHash" bson:"noDeletionProofHash,omitempty"`
+	NoDeletionProofHash api.HexBytes   `json:"noDeletionProofHash" bson:"noDeletionProofHash,omitempty"`
 	CreatedAt           *api.Timestamp `json:"createdAt" bson:"createdAt"`
+	UnicityCertificate  api.HexBytes   `json:"unicityCertificate" bson:"unicityCertificate"`
 }
 
 // BlockBSON represents the BSON version of Block for MongoDB storage
@@ -27,28 +27,25 @@ type BlockBSON struct {
 	ChainID             string `bson:"chainId"`
 	Version             string `bson:"version"`
 	ForkID              string `bson:"forkId"`
-	Timestamp           string `bson:"timestamp"`
 	RootHash            string `bson:"rootHash"`
 	PreviousBlockHash   string `bson:"previousBlockHash"`
 	NoDeletionProofHash string `bson:"noDeletionProofHash,omitempty"`
 	CreatedAt           string `bson:"createdAt"`
+	UnicityCertificate  string `bson:"unicityCertificate"`
 }
 
 // ToBSON converts Block to BlockBSON for MongoDB storage
 func (b *Block) ToBSON() *BlockBSON {
 	blockBSON := &BlockBSON{
-		Index:             b.Index.String(),
-		ChainID:           b.ChainID,
-		Version:           b.Version,
-		ForkID:            b.ForkID,
-		Timestamp:         strconv.FormatInt(b.Timestamp.UnixMilli(), 10),
-		RootHash:          b.RootHash.String(),
-		PreviousBlockHash: b.PreviousBlockHash.String(),
-		CreatedAt:         strconv.FormatInt(b.CreatedAt.UnixMilli(), 10),
-	}
-
-	if b.NoDeletionProofHash != nil {
-		blockBSON.NoDeletionProofHash = b.NoDeletionProofHash.String()
+		Index:               b.Index.String(),
+		ChainID:             b.ChainID,
+		Version:             b.Version,
+		ForkID:              b.ForkID,
+		RootHash:            b.RootHash.String(),
+		PreviousBlockHash:   b.PreviousBlockHash.String(),
+		NoDeletionProofHash: b.NoDeletionProofHash.String(),
+		CreatedAt:           strconv.FormatInt(b.CreatedAt.UnixMilli(), 10),
+		UnicityCertificate:  b.UnicityCertificate.String(),
 	}
 
 	return blockBSON
@@ -60,12 +57,6 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse index: %w", err)
 	}
-
-	timestampMillis, err := strconv.ParseInt(bb.Timestamp, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse timestamp: %w", err)
-	}
-	timestamp := &api.Timestamp{Time: time.UnixMilli(timestampMillis)}
 
 	createdAtMillis, err := strconv.ParseInt(bb.CreatedAt, 10, 64)
 	if err != nil {
@@ -83,23 +74,26 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 		return nil, fmt.Errorf("failed to parse previousBlockHash: %w", err)
 	}
 
-	block := &Block{
-		Index:             index,
-		ChainID:           bb.ChainID,
-		Version:           bb.Version,
-		ForkID:            bb.ForkID,
-		Timestamp:         timestamp,
-		RootHash:          rootHash,
-		PreviousBlockHash: previousBlockHash,
-		CreatedAt:         createdAt,
+	unicityCertificate, err := api.NewHexBytesFromString(bb.UnicityCertificate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse unicityCertificate: %w", err)
 	}
 
-	if bb.NoDeletionProofHash != "" {
-		noDeletionProofHash, err := api.NewHexBytesFromString(bb.NoDeletionProofHash)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse noDeletionProofHash: %w", err)
-		}
-		block.NoDeletionProofHash = &noDeletionProofHash
+	noDeletionProofHash, err := api.NewHexBytesFromString(bb.NoDeletionProofHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse noDeletionProofHash: %w", err)
+	}
+
+	block := &Block{
+		Index:               index,
+		ChainID:             bb.ChainID,
+		Version:             bb.Version,
+		ForkID:              bb.ForkID,
+		RootHash:            rootHash,
+		PreviousBlockHash:   previousBlockHash,
+		CreatedAt:           createdAt,
+		UnicityCertificate:  unicityCertificate,
+		NoDeletionProofHash: noDeletionProofHash,
 	}
 
 	return block, nil
@@ -112,7 +106,6 @@ func NewBlock(index *api.BigInt, chainID, version, forkID string, rootHash, prev
 		ChainID:           chainID,
 		Version:           version,
 		ForkID:            forkID,
-		Timestamp:         api.Now(),
 		RootHash:          rootHash,
 		PreviousBlockHash: previousBlockHash,
 		CreatedAt:         api.Now(),

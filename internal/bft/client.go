@@ -179,19 +179,23 @@ func (n *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *cer
 		return fmt.Errorf("got CertificationResponse for a wrong shard %s - %s", cr.Partition, cr.Shard)
 	}
 
+	return n.handleUnicityCertificate(ctx, &cr.UC, &cr.Technical)
+}
+
+func (n *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
 	prevLUC := n.luc.Load()
 	// as we can be connected to several root nodes, we can receive the same UC multiple times
-	if cr.UC.IsDuplicate(prevLUC) {
-		n.logger.WithContext(ctx).Debug(fmt.Sprintf("duplicate UC (same root round %d)", cr.UC.GetRootRoundNumber()))
+	if uc.IsDuplicate(prevLUC) {
+		n.logger.WithContext(ctx).Debug(fmt.Sprintf("duplicate UC (same root round %d)", uc.GetRootRoundNumber()))
 		return nil
 	}
 
 	n.logger.WithContext(ctx).Debug(fmt.Sprintf("updated LUC; UC.Round: %d, RootRound: %d",
-		cr.UC.GetRoundNumber(), cr.UC.GetRootRoundNumber()))
-	n.luc.Store(&cr.UC)
+		uc.GetRoundNumber(), uc.GetRootRoundNumber()))
+	n.luc.Store(uc)
 
 	nextRoundNumber := big.NewInt(0)
-	nextRoundNumber.SetUint64(cr.Technical.Round)
+	nextRoundNumber.SetUint64(tr.Round)
 
 	wasInitializing := n.status.Load() == initializing
 	if wasInitializing {
@@ -203,6 +207,13 @@ func (n *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *cer
 	}
 
 	n.logger.WithContext(ctx).Info("finalize block")
+
+	ucCbor, err := types.Cbor.Marshal(uc)
+	if err != nil {
+		return fmt.Errorf("failed to encode unicity certificate: %w", err)
+	}
+	n.proposedBlock.UnicityCertificate = api.NewHexBytes(ucCbor)
+
 	n.roundManager.FinalizeBlock(ctx, n.proposedBlock)
 	n.logger.WithContext(ctx).Info("starting new round",
 		"nextRoundNumber", nextRoundNumber.String())
