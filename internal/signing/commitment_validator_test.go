@@ -2,9 +2,11 @@ package signing
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -372,5 +374,46 @@ func TestCommitmentValidator_ValidationStatusString(t *testing.T) {
 		if result != test.expected {
 			t.Errorf("Expected status string %s, got %s", test.expected, result)
 		}
+	}
+}
+
+func TestCommitmentValidator_ValidateCommitment_vsTS(t *testing.T) {
+	validator := NewCommitmentValidator()
+
+	requestJson := `{
+	  "authenticator": {
+		"algorithm": "secp256k1",
+		"publicKey": "02bf8d9e7687f66c7fce1e98edbc05566f7db740030722cf6cf62aca035c5035ea",
+		"signature": "301c7f19d5e0a7e350012ab7bbaf26a0152a751eec06d18563f96bcf06d2380e7de7ce6cebb8c11479d1bd9c463c3ba47396b5f815c552b344d430b0d011a2e701",
+		"stateHash": "0000f7f53c361c30535ed52b05f24616b5580d562ba7494e352dc2f934a51a78bb0a"
+	  },
+	  "receipt": false,
+	  "requestId": "00009399ada3bd4dfa4bce4787bbc416be1e617a734efeb9c4d70a70d4503d5637b0",
+	  "transactionHash": "0000d6035b65700f0af73cc62a580eb833c20f40aaee460087f5fb43ebb3c047f1d4"
+	}`
+	var request api.SubmitCommitmentRequest
+	err := json.Unmarshal([]byte(requestJson), &request)
+	require.NoError(t, err)
+
+	// Create commitment with all real cryptographic data
+	commitment := &models.Commitment{
+		RequestID:       request.RequestID,
+		TransactionHash: request.TransactionHash,
+		Authenticator: models.Authenticator{
+			Algorithm: AlgorithmSecp256k1,
+			PublicKey: request.Authenticator.PublicKey,
+			Signature: request.Authenticator.Signature,
+			StateHash: request.Authenticator.StateHash,
+		},
+	}
+
+	// Validate the commitment - should succeed
+	result := validator.ValidateCommitment(commitment)
+
+	if result.Status != ValidationStatusSuccess {
+		t.Errorf("Expected validation success with real secp256k1 data, got status: %s, error: %v", result.Status.String(), result.Error)
+	}
+	if result.Error != nil {
+		t.Errorf("Expected no error with real secp256k1 data, got: %v", result.Error)
 	}
 }
