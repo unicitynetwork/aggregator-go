@@ -17,7 +17,7 @@ type Block struct {
 	Timestamp           *api.Timestamp `json:"timestamp" bson:"timestamp"`
 	RootHash            api.HexBytes   `json:"rootHash" bson:"rootHash"`
 	PreviousBlockHash   api.HexBytes   `json:"previousBlockHash" bson:"previousBlockHash"`
-	NoDeletionProofHash *api.HexBytes  `json:"noDeletionProofHash" bson:"noDeletionProofHash,omitempty"`
+	NoDeletionProofHash api.HexBytes   `json:"noDeletionProofHash" bson:"noDeletionProofHash,omitempty"`
 	CreatedAt           *api.Timestamp `json:"createdAt" bson:"createdAt"`
 	UnicityCertificate  api.HexBytes   `json:"unicityCertificate" bson:"unicityCertificate"`
 }
@@ -39,19 +39,16 @@ type BlockBSON struct {
 // ToBSON converts Block to BlockBSON for MongoDB storage
 func (b *Block) ToBSON() *BlockBSON {
 	blockBSON := &BlockBSON{
-		Index:              b.Index.String(),
-		ChainID:            b.ChainID,
-		Version:            b.Version,
-		ForkID:             b.ForkID,
-		Timestamp:          strconv.FormatInt(b.Timestamp.UnixMilli(), 10),
-		RootHash:           b.RootHash.String(),
-		PreviousBlockHash:  b.PreviousBlockHash.String(),
-		CreatedAt:          strconv.FormatInt(b.CreatedAt.UnixMilli(), 10),
-		UnicityCertificate: b.UnicityCertificate.String(),
-	}
-
-	if b.NoDeletionProofHash != nil {
-		blockBSON.NoDeletionProofHash = b.NoDeletionProofHash.String()
+		Index:               b.Index.String(),
+		ChainID:             b.ChainID,
+		Version:             b.Version,
+		ForkID:              b.ForkID,
+		Timestamp:           strconv.FormatInt(b.Timestamp.UnixMilli(), 10),
+		RootHash:            b.RootHash.String(),
+		PreviousBlockHash:   b.PreviousBlockHash.String(),
+		NoDeletionProofHash: b.NoDeletionProofHash.String(),
+		CreatedAt:           strconv.FormatInt(b.CreatedAt.UnixMilli(), 10),
+		UnicityCertificate:  b.UnicityCertificate.String(),
 	}
 
 	return blockBSON
@@ -91,24 +88,22 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 		return nil, fmt.Errorf("failed to parse unicityCertificate: %w", err)
 	}
 
-	block := &Block{
-		Index:              index,
-		ChainID:            bb.ChainID,
-		Version:            bb.Version,
-		ForkID:             bb.ForkID,
-		Timestamp:          timestamp,
-		RootHash:           rootHash,
-		PreviousBlockHash:  previousBlockHash,
-		CreatedAt:          createdAt,
-		UnicityCertificate: unicityCertificate,
+	noDeletionProofHash, err := api.NewHexBytesFromString(bb.NoDeletionProofHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse noDeletionProofHash: %w", err)
 	}
 
-	if bb.NoDeletionProofHash != "" {
-		noDeletionProofHash, err := api.NewHexBytesFromString(bb.NoDeletionProofHash)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse noDeletionProofHash: %w", err)
-		}
-		block.NoDeletionProofHash = &noDeletionProofHash
+	block := &Block{
+		Index:               index,
+		ChainID:             bb.ChainID,
+		Version:             bb.Version,
+		ForkID:              bb.ForkID,
+		Timestamp:           timestamp,
+		RootHash:            rootHash,
+		PreviousBlockHash:   previousBlockHash,
+		CreatedAt:           createdAt,
+		UnicityCertificate:  unicityCertificate,
+		NoDeletionProofHash: noDeletionProofHash,
 	}
 
 	return block, nil

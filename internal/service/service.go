@@ -57,12 +57,6 @@ func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.Aggre
 }
 
 func modelToAPIBlock(modelBlock *models.Block) *api.Block {
-	var noDeletionProofHash *api.HexBytes
-	if modelBlock.NoDeletionProofHash != nil {
-		converted := *modelBlock.NoDeletionProofHash
-		noDeletionProofHash = &converted
-	}
-
 	return &api.Block{
 		Index:               modelToAPIBigInt(modelBlock.Index),
 		ChainID:             modelBlock.ChainID,
@@ -71,7 +65,7 @@ func modelToAPIBlock(modelBlock *models.Block) *api.Block {
 		Timestamp:           modelBlock.Timestamp,
 		RootHash:            modelBlock.RootHash,
 		PreviousBlockHash:   modelBlock.PreviousBlockHash,
-		NoDeletionProofHash: noDeletionProofHash,
+		NoDeletionProofHash: modelBlock.NoDeletionProofHash,
 		CreatedAt:           modelBlock.CreatedAt,
 	}
 }

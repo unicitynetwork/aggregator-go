@@ -111,7 +111,7 @@ type Block struct {
 	Timestamp           *Timestamp `json:"timestamp"`
 	RootHash            HexBytes   `json:"rootHash"`
 	PreviousBlockHash   HexBytes   `json:"previousBlockHash"`
-	NoDeletionProofHash *HexBytes  `json:"noDeletionProofHash"`
+	NoDeletionProofHash HexBytes   `json:"noDeletionProofHash"`
 	CreatedAt           *Timestamp `json:"createdAt"`
 }
 
