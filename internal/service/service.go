@@ -67,6 +67,7 @@ func modelToAPIBlock(modelBlock *models.Block) *api.Block {
 		PreviousBlockHash:   modelBlock.PreviousBlockHash,
 		NoDeletionProofHash: modelBlock.NoDeletionProofHash,
 		CreatedAt:           modelBlock.CreatedAt,
+		UnicityCertificate:  modelBlock.UnicityCertificate,
 	}
 }
 
