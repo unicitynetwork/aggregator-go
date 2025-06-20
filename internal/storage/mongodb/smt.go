@@ -2,14 +2,15 @@ package mongodb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
-	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 const smtCollection = "smt_nodes"
@@ -58,7 +59,7 @@ func (ss *SmtStorage) GetByKey(ctx context.Context, key api.HexBytes) (*models.S
 	var node models.SmtNode
 	err := ss.collection.FindOne(ctx, bson.M{"key": key.String()}).Decode(&node)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get SMT node by key: %w", err)

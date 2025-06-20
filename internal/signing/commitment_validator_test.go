@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -55,10 +56,10 @@ func TestCommitmentValidator_ValidateCommitment_Success(t *testing.T) {
 		t.Fatalf("Failed to sign transaction data: %v", err)
 	}
 
-	// Create commitment with valid data  
+	// Create commitment with valid data
 	commitment := &models.Commitment{
 		RequestID:       requestID,
-		TransactionHash: api.TransactionHash(transactionHashImprint),
+		TransactionHash: transactionHashImprint,
 		Authenticator: models.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
 			PublicKey: api.HexBytes(publicKeyBytes),
@@ -107,7 +108,7 @@ func TestCommitmentValidator_ValidateCommitment_InvalidPublicKeyFormat(t *testin
 
 	commitment := &models.Commitment{
 		RequestID:       api.RequestID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
-		TransactionHash: api.TransactionHash(CreateDataHashImprint([]byte("hello"))),
+		TransactionHash: CreateDataHashImprint([]byte("hello")),
 		Authenticator: models.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
 			PublicKey: api.HexBytes("invalid-hex-public-key"), // Invalid hex
@@ -135,7 +136,7 @@ func TestCommitmentValidator_ValidateCommitment_InvalidStateHashFormat(t *testin
 
 	commitment := &models.Commitment{
 		RequestID:       api.RequestID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
-		TransactionHash: api.TransactionHash(CreateDataHashImprint([]byte("hello"))),
+		TransactionHash: CreateDataHashImprint([]byte("hello")),
 		Authenticator: models.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
 			PublicKey: api.HexBytes(publicKeyBytes),
@@ -167,7 +168,7 @@ func TestCommitmentValidator_ValidateCommitment_RequestIDMismatch(t *testing.T) 
 
 	commitment := &models.Commitment{
 		RequestID:       wrongRequestID,
-		TransactionHash: api.TransactionHash(CreateDataHashImprint([]byte("hello"))),
+		TransactionHash: CreateDataHashImprint([]byte("hello")),
 		Authenticator: models.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
 			PublicKey: api.HexBytes(publicKeyBytes),
@@ -199,7 +200,7 @@ func TestCommitmentValidator_ValidateCommitment_InvalidSignatureFormat(t *testin
 
 	commitment := &models.Commitment{
 		RequestID:       requestID,
-		TransactionHash: api.TransactionHash(CreateDataHashImprint([]byte("hello"))),
+		TransactionHash: CreateDataHashImprint([]byte("hello")),
 		Authenticator: models.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
 			PublicKey: api.HexBytes(publicKeyBytes),
@@ -271,7 +272,7 @@ func TestCommitmentValidator_ValidateCommitment_SignatureVerificationFailed(t *t
 
 	commitment := &models.Commitment{
 		RequestID:       requestID,
-		TransactionHash: api.TransactionHash(CreateDataHashImprint(transactionData)), // Different from signed data
+		TransactionHash: CreateDataHashImprint(transactionData), // Different from signed data
 		Authenticator: models.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
 			PublicKey: api.HexBytes(publicKeyBytes),
@@ -330,7 +331,7 @@ func TestCommitmentValidator_ValidateCommitment_RealSecp256k1Data(t *testing.T) 
 	// Create commitment with all real cryptographic data
 	commitment := &models.Commitment{
 		RequestID:       requestID,
-		TransactionHash: api.TransactionHash(transactionHashImprint),
+		TransactionHash: transactionHashImprint,
 		Authenticator: models.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
 			PublicKey: api.HexBytes(publicKeyBytes),

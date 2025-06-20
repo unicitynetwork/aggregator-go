@@ -2,14 +2,15 @@ package mongodb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
-	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 const leadershipCollection = "leadership"
@@ -113,7 +114,7 @@ func (ls *LeadershipStorage) GetCurrentLeader(ctx context.Context) (*models.Lead
 	var lock models.LeadershipLock
 	err := ls.collection.FindOne(ctx, bson.M{"_id": "leadership"}).Decode(&lock)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get current leader: %w", err)
