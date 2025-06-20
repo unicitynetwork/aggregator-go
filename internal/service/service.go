@@ -62,7 +62,6 @@ func modelToAPIBlock(modelBlock *models.Block) *api.Block {
 		ChainID:             modelBlock.ChainID,
 		Version:             modelBlock.Version,
 		ForkID:              modelBlock.ForkID,
-		Timestamp:           modelBlock.Timestamp,
 		RootHash:            modelBlock.RootHash,
 		PreviousBlockHash:   modelBlock.PreviousBlockHash,
 		NoDeletionProofHash: modelBlock.NoDeletionProofHash,

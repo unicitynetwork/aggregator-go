@@ -27,7 +27,6 @@ db.aggregator_records.createIndex({ blockNumber: 1, leafIndex: 1 });
 // Blocks collection
 db.createCollection('blocks');
 db.blocks.createIndex({ index: 1 }, { unique: true });
-db.blocks.createIndex({ timestamp: -1 });
 db.blocks.createIndex({ createdAt: -1 });
 db.blocks.createIndex({ chainId: 1 });
 

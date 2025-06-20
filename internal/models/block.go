@@ -14,7 +14,6 @@ type Block struct {
 	ChainID             string         `json:"chainId" bson:"chainId"`
 	Version             string         `json:"version" bson:"version"`
 	ForkID              string         `json:"forkId" bson:"forkId"`
-	Timestamp           *api.Timestamp `json:"timestamp" bson:"timestamp"`
 	RootHash            api.HexBytes   `json:"rootHash" bson:"rootHash"`
 	PreviousBlockHash   api.HexBytes   `json:"previousBlockHash" bson:"previousBlockHash"`
 	NoDeletionProofHash api.HexBytes   `json:"noDeletionProofHash" bson:"noDeletionProofHash,omitempty"`
@@ -28,7 +27,6 @@ type BlockBSON struct {
 	ChainID             string `bson:"chainId"`
 	Version             string `bson:"version"`
 	ForkID              string `bson:"forkId"`
-	Timestamp           string `bson:"timestamp"`
 	RootHash            string `bson:"rootHash"`
 	PreviousBlockHash   string `bson:"previousBlockHash"`
 	NoDeletionProofHash string `bson:"noDeletionProofHash,omitempty"`
@@ -43,7 +41,6 @@ func (b *Block) ToBSON() *BlockBSON {
 		ChainID:             b.ChainID,
 		Version:             b.Version,
 		ForkID:              b.ForkID,
-		Timestamp:           strconv.FormatInt(b.Timestamp.UnixMilli(), 10),
 		RootHash:            b.RootHash.String(),
 		PreviousBlockHash:   b.PreviousBlockHash.String(),
 		NoDeletionProofHash: b.NoDeletionProofHash.String(),
@@ -60,12 +57,6 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse index: %w", err)
 	}
-
-	timestampMillis, err := strconv.ParseInt(bb.Timestamp, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse timestamp: %w", err)
-	}
-	timestamp := &api.Timestamp{Time: time.UnixMilli(timestampMillis)}
 
 	createdAtMillis, err := strconv.ParseInt(bb.CreatedAt, 10, 64)
 	if err != nil {
@@ -98,7 +89,6 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 		ChainID:             bb.ChainID,
 		Version:             bb.Version,
 		ForkID:              bb.ForkID,
-		Timestamp:           timestamp,
 		RootHash:            rootHash,
 		PreviousBlockHash:   previousBlockHash,
 		CreatedAt:           createdAt,
@@ -116,7 +106,6 @@ func NewBlock(index *api.BigInt, chainID, version, forkID string, rootHash, prev
 		ChainID:           chainID,
 		Version:           version,
 		ForkID:            forkID,
-		Timestamp:         api.Now(),
 		RootHash:          rootHash,
 		PreviousBlockHash: previousBlockHash,
 		CreatedAt:         api.Now(),

@@ -108,7 +108,6 @@ type Block struct {
 	ChainID             string     `json:"chainId"`
 	Version             string     `json:"version"`
 	ForkID              string     `json:"forkId"`
-	Timestamp           *Timestamp `json:"timestamp"`
 	RootHash            HexBytes   `json:"rootHash"`
 	PreviousBlockHash   HexBytes   `json:"previousBlockHash"`
 	NoDeletionProofHash HexBytes   `json:"noDeletionProofHash"`
@@ -123,7 +122,6 @@ func NewBlock(index *BigInt, chainID, version, forkID string, rootHash, previous
 		ChainID:            chainID,
 		Version:            version,
 		ForkID:             forkID,
-		Timestamp:          Now(),
 		RootHash:           rootHash,
 		PreviousBlockHash:  previousBlockHash,
 		CreatedAt:          Now(),
