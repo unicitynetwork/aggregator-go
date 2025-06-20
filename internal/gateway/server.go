@@ -130,7 +130,7 @@ func (s *Server) setupJSONRPCHandlers() {
 }
 
 // Start starts the HTTP server
-func (s *Server) Start(ctx context.Context) error {
+func (s *Server) Start() error {
 	s.logger.WithComponent("gateway").Info("Starting HTTP server", "addr", s.httpServer.Addr)
 
 	if s.config.Server.EnableTLS {

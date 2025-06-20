@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/partition"
 	"github.com/unicitynetwork/bft-go-base/types"

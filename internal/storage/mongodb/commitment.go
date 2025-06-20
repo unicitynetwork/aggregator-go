@@ -2,14 +2,15 @@ package mongodb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
-	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 const commitmentCollection = "commitments"
@@ -40,7 +41,7 @@ func (cs *CommitmentStorage) GetByRequestID(ctx context.Context, requestID api.R
 	var commitment models.Commitment
 	err := cs.collection.FindOne(ctx, bson.M{"requestId": requestID}).Decode(&commitment)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get commitment by request ID: %w", err)
