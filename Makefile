@@ -100,3 +100,4 @@ docker-clean:
 	@echo "Cleaning up Docker resources..."
 	@docker compose down -v
 	@docker image rm unicity-aggregator 2>/dev/null || true
+	@docker image rm aggregator-go-aggregator 2>/dev/null || true
