@@ -74,6 +74,8 @@ Use the BFT core tools to generate the required configuration files:
 # Copy trust base configuration  
 `cp <bftcore location>/test-nodes/trust-base.json bft-config/trust-base.json`
 
+**Important**: The generated shard configuration file (`shard-conf-7_0.json`) must also be added to the root nodes in the BFT network. Root nodes need to be aware of the aggregator's shard configuration to properly support aggregator node.
+
 
 ### Environment Variable Configuration
 
