@@ -596,7 +596,7 @@ The service implements complete secp256k1 signature validation:
 ### Supported Algorithms
 - **secp256k1** - Full implementation with btcec library
 - **SHA256** - Hash algorithm for all cryptographic operations
-- **DataHash Imprints** - TypeScript-compatible format with algorithm prefix
+- **DataHash Imprints** - Unicity-compatible format with algorithm prefix
 
 ### Validation Process
 1. **Algorithm Check** - Verify "secp256k1" algorithm support

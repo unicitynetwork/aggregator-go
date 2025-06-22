@@ -465,7 +465,7 @@ func BenchmarkSMTRootHashOnly(b *testing.B) {
 
 // BenchmarkSMTBatchVsIndividual compares batch vs individual addition directly
 func BenchmarkSMTBatchVsIndividual(b *testing.B) {
-	// Prepare test data (known working TypeScript-compatible set)
+	// Prepare test data (known working Unicity SDK-compatible set)
 	testData := []struct {
 		path  int64
 		value string

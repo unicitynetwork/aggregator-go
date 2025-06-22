@@ -13,7 +13,7 @@ const (
 	SHA256 HashAlgorithm = iota
 )
 
-// SparseMerkleTree implements a sparse merkle tree compatible with TypeScript version
+// SparseMerkleTree implements a sparse merkle tree compatible with Unicity SDK
 type SparseMerkleTree struct {
 	algorithm HashAlgorithm
 	root      *RootNode
@@ -566,7 +566,7 @@ func bigintEncode(value *big.Int) []byte {
 		return []byte{}
 	}
 	
-	// Convert to bytes in big-endian format (matches TypeScript)
+	// Convert to bytes in big-endian format (matches Unicity SDK)
 	return value.Bytes()
 }
 
