@@ -34,7 +34,7 @@ func NewInclusionProof(requestID RequestID, blockNumber, leafIndex *BigInt, proo
 
 // TODO remove?
 
-// APIInclusionProof represents a proof for external API (TypeScript compatible)
+// APIInclusionProof represents a proof for external API (Unicity SDK compatible)
 type APIInclusionProof struct {
 	MerkleTreePath  *MerkleTreePath `json:"merkleTreePath"`
 	Authenticator   *Authenticator  `json:"authenticator"`

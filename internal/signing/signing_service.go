@@ -28,6 +28,38 @@ func (s *SigningService) Sign(data []byte, privateKey []byte) ([]byte, error) {
 	return s.SignHash(hash[:], privateKey)
 }
 
+// convertBtcecToUnicity converts a signature from btcec's [V || R || S] format 
+// to Unicity's [R || S || V] format
+func convertBtcecToUnicity(compactSig []byte) []byte {
+	// For compressed keys, btcec's V is 31-34. We normalize it to 0 or 1.
+	v := compactSig[0] - 31
+	r := compactSig[1:33]
+	sigS := compactSig[33:65]
+
+	signature := make([]byte, 65)
+	copy(signature[0:32], r)
+	copy(signature[32:64], sigS)
+	signature[64] = v
+
+	return signature
+}
+
+// convertUnicityToBtcec converts a signature from Unicity's [R || S || V] format
+// to btcec's [V || R || S] format
+func convertUnicityToBtcec(signature []byte) []byte {
+	// Unicity uses recovery ID 0 or 1, we need to convert to btcec's 31-34 for compressed keys
+	r := signature[0:32]
+	sigS := signature[32:64]
+	v := signature[64] + 31 // Convert 0/1 to 31/32 for compressed keys
+
+	compactSig := make([]byte, 65)
+	compactSig[0] = v
+	copy(compactSig[1:33], r)
+	copy(compactSig[33:65], sigS)
+
+	return compactSig
+}
+
 // SignHash signs the given hash with the private key and returns the signature
 func (s *SigningService) SignHash(dataHash []byte, privateKey []byte) ([]byte, error) {
 	if len(privateKey) != 32 {
@@ -40,18 +72,8 @@ func (s *SigningService) SignHash(dataHash []byte, privateKey []byte) ([]byte, e
 	// Sign the hash  
 	compactSig := ecdsa.SignCompact(privKey, dataHash, true) // true for compressed public key recovery
 
-	// Convert from btcec's [V || R || S] format to TypeScript's [R || S || V] format
-	// For compressed keys, btcec's V is 31-34. We normalize it to 0 or 1.
-	v := compactSig[0] - 31
-	r := compactSig[1:33]
-	sigS := compactSig[33:65]
-
-	signature := make([]byte, 65)
-	copy(signature[0:32], r)
-	copy(signature[32:64], sigS)
-	signature[64] = v
-
-	return signature, nil
+	// Convert from btcec's [V || R || S] format to Unicity's [R || S || V] format
+	return convertBtcecToUnicity(compactSig), nil
 }
 
 // VerifyWithPublicKey verifies a signature against data using a public key
@@ -75,16 +97,8 @@ func (s *SigningService) VerifyHashWithPublicKey(dataHash []byte, signature []by
 		return false, fmt.Errorf("failed to parse public key: %w", err)
 	}
 
-	// Convert from TypeScript's [R || S || V] format to btcec's [V || R || S] format
-	// TypeScript uses recovery ID 0 or 1, we need to convert to btcec's 31-34 for compressed keys
-	r := signature[0:32]
-	sigS := signature[32:64]
-	v := signature[64] + 31 // Convert 0/1 to 31/32 for compressed keys
-
-	compactSig := make([]byte, 65)
-	compactSig[0] = v
-	copy(compactSig[1:33], r)
-	copy(compactSig[33:65], sigS)
+	// Convert from Unicity's [R || S || V] format to btcec's [V || R || S] format
+	compactSig := convertUnicityToBtcec(signature)
 
 	// For compact signatures, we need to recover the public key and verify it matches
 	// Recover public key from signature
@@ -110,15 +124,8 @@ func (s *SigningService) RecoverPublicKey(data []byte, signature []byte) ([]byte
 	// Hash the data
 	hash := sha256.Sum256(data)
 
-	// Convert from TypeScript's [R || S || V] format to btcec's [V || R || S] format
-	r := signature[0:32]
-	sigS := signature[32:64]
-	v := signature[64] + 31 // Convert 0/1 to 31/32 for compressed keys
-
-	compactSig := make([]byte, 65)
-	compactSig[0] = v
-	copy(compactSig[1:33], r)
-	copy(compactSig[33:65], sigS)
+	// Convert from Unicity's [R || S || V] format to btcec's [V || R || S] format
+	compactSig := convertUnicityToBtcec(signature)
 
 	// Recover the public key using compact recovery
 	pubKey, _, err := ecdsa.RecoverCompact(compactSig, hash[:])

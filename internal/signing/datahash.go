@@ -7,7 +7,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-// CreateDataHashImprint creates a DataHash imprint in the TypeScript format:
+// CreateDataHashImprint creates a DataHash imprint in the Unicity format:
 // 2 bytes algorithm (big-endian) + actual hash bytes
 // For SHA256: algorithm = 0, so prefix is [0x00, 0x00]
 func CreateDataHashImprint(data []byte) api.ImprintHexString {
