@@ -38,7 +38,18 @@ func (s *SigningService) SignHash(dataHash []byte, privateKey []byte) ([]byte, e
 	privKey, _ := btcec.PrivKeyFromBytes(privateKey)
 
 	// Sign the hash  
-	signature := ecdsa.SignCompact(privKey, dataHash, true) // true for compressed public key recovery
+	compactSig := ecdsa.SignCompact(privKey, dataHash, true) // true for compressed public key recovery
+
+	// Convert from btcec's [V || R || S] format to TypeScript's [R || S || V] format
+	// For compressed keys, btcec's V is 31-34. We normalize it to 0 or 1.
+	v := compactSig[0] - 31
+	r := compactSig[1:33]
+	sigS := compactSig[33:65]
+
+	signature := make([]byte, 65)
+	copy(signature[0:32], r)
+	copy(signature[32:64], sigS)
+	signature[64] = v
 
 	return signature, nil
 }
@@ -64,9 +75,20 @@ func (s *SigningService) VerifyHashWithPublicKey(dataHash []byte, signature []by
 		return false, fmt.Errorf("failed to parse public key: %w", err)
 	}
 
+	// Convert from TypeScript's [R || S || V] format to btcec's [V || R || S] format
+	// TypeScript uses recovery ID 0 or 1, we need to convert to btcec's 31-34 for compressed keys
+	r := signature[0:32]
+	sigS := signature[32:64]
+	v := signature[64] + 31 // Convert 0/1 to 31/32 for compressed keys
+
+	compactSig := make([]byte, 65)
+	compactSig[0] = v
+	copy(compactSig[1:33], r)
+	copy(compactSig[33:65], sigS)
+
 	// For compact signatures, we need to recover the public key and verify it matches
 	// Recover public key from signature
-	recoveredPubKey, _, err := ecdsa.RecoverCompact(signature, dataHash)
+	recoveredPubKey, _, err := ecdsa.RecoverCompact(compactSig, dataHash)
 	if err != nil {
 		return false, fmt.Errorf("failed to recover public key from signature: %w", err)
 	}
@@ -88,8 +110,18 @@ func (s *SigningService) RecoverPublicKey(data []byte, signature []byte) ([]byte
 	// Hash the data
 	hash := sha256.Sum256(data)
 
+	// Convert from TypeScript's [R || S || V] format to btcec's [V || R || S] format
+	r := signature[0:32]
+	sigS := signature[32:64]
+	v := signature[64] + 31 // Convert 0/1 to 31/32 for compressed keys
+
+	compactSig := make([]byte, 65)
+	compactSig[0] = v
+	copy(compactSig[1:33], r)
+	copy(compactSig[33:65], sigS)
+
 	// Recover the public key using compact recovery
-	pubKey, _, err := ecdsa.RecoverCompact(signature, hash[:])
+	pubKey, _, err := ecdsa.RecoverCompact(compactSig, hash[:])
 	if err != nil {
 		return nil, fmt.Errorf("failed to recover public key: %w", err)
 	}

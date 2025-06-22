@@ -176,13 +176,13 @@ func GenerateDocsHTML() string {
                     <div class="params-section">
                         <h3>Request Parameters</h3>
                         <textarea id="submit_commitment_params">{
-  "requestId": "0000220207629fb5d473755e804685971f946eb2ebddc54cbced5b34bc67911bf98e",
-  "transactionHash": "00003055507c62716fc2e38af9326f3d894eb0813b8e66b8fea45da4012f36560a9b",
+  "requestId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122",
+  "transactionHash": "0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297",
   "authenticator": {
     "algorithm": "secp256k1",
-    "publicKey": "02bdc93b5b700fc0562b6b4606bb57bde490cbc5e429913cfdadcb5c35ae02ba49",
-    "signature": "1f4ed5ce831d95e8f3f3325f72f3f361435a64bb6969cf032d78618cf191625a3b326cd9fdac2972b11605be401df498acd644f4e9ef9e39257ad3a4aeff649fc8",
-    "stateHash": "0000abac20b3ac6a9dfd4e0b645e1e584e3efe81a3dc6d0a55fb543226d94c96ef2a"
+    "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
+    "signature": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
+    "stateHash": "0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647"
   },
   "receipt": true
 }</textarea>
@@ -211,7 +211,7 @@ func GenerateDocsHTML() string {
                     <div class="params-section">
                         <h3>Request Parameters</h3>
                         <textarea id="get_inclusion_proof_params">{
-  "requestId": "0000220207629fb5d473755e804685971f946eb2ebddc54cbced5b34bc67911bf98e"
+  "requestId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122"
 }</textarea>
                         <div class="button-group">
                             <button onclick="sendRequest('get_inclusion_proof')">🚀 Send Request</button>
