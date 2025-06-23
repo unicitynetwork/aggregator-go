@@ -3,47 +3,37 @@ package api
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestRequestIDMarshalJSON(t *testing.T) {
 	requestID := RequestID("0000cfe84a1828e2edd0a7d9533b23e519f746069a938d549a150e07e14dc0f9cf00")
 
 	data, err := json.Marshal(requestID)
-	if err != nil {
-		t.Fatalf("Failed to marshal RequestID: %v", err)
-	}
+	require.NoError(t, err, "Failed to marshal RequestID")
 
 	var unmarshaledID RequestID
-	if err := json.Unmarshal(data, &unmarshaledID); err != nil {
-		t.Fatalf("Failed to unmarshal RequestID: %v", err)
-	}
+	err = json.Unmarshal(data, &unmarshaledID)
+	require.NoError(t, err, "Failed to unmarshal RequestID")
 
-	if unmarshaledID != requestID {
-		t.Errorf("RequestID mismatch: got %s, want %s", unmarshaledID, requestID)
-	}
+	require.Equal(t, requestID, unmarshaledID, "RequestID mismatch")
 }
 
 func TestHexBytesMarshalJSON(t *testing.T) {
 	hexBytes := HexBytes{0x01, 0x02, 0x03, 0x04}
 
 	data, err := json.Marshal(hexBytes)
-	if err != nil {
-		t.Fatalf("Failed to marshal HexBytes: %v", err)
-	}
+	require.NoError(t, err, "Failed to marshal HexBytes")
 
 	var unmarshaledHex HexBytes
-	if err := json.Unmarshal(data, &unmarshaledHex); err != nil {
-		t.Fatalf("Failed to unmarshal HexBytes: %v", err)
-	}
+	err = json.Unmarshal(data, &unmarshaledHex)
+	require.NoError(t, err, "Failed to unmarshal HexBytes")
 
-	if len(unmarshaledHex) != len(hexBytes) {
-		t.Errorf("HexBytes length mismatch: got %d, want %d", len(unmarshaledHex), len(hexBytes))
-	}
+	require.Equal(t, len(hexBytes), len(unmarshaledHex), "HexBytes length mismatch")
 
 	for i, b := range hexBytes {
-		if unmarshaledHex[i] != b {
-			t.Errorf("HexBytes byte mismatch at index %d: got %x, want %x", i, unmarshaledHex[i], b)
-		}
+		require.Equal(t, b, unmarshaledHex[i], "HexBytes byte mismatch at index %d", i)
 	}
 }
 
@@ -60,24 +50,15 @@ func TestSubmitCommitmentRequestJSON(t *testing.T) {
 	}
 
 	data, err := json.Marshal(req)
-	if err != nil {
-		t.Fatalf("Failed to marshal SubmitCommitmentRequest: %v", err)
-	}
+	require.NoError(t, err, "Failed to marshal SubmitCommitmentRequest")
 
 	var unmarshaledReq SubmitCommitmentRequest
-	if err := json.Unmarshal(data, &unmarshaledReq); err != nil {
-		t.Fatalf("Failed to unmarshal SubmitCommitmentRequest: %v", err)
-	}
+	err = json.Unmarshal(data, &unmarshaledReq)
+	require.NoError(t, err, "Failed to unmarshal SubmitCommitmentRequest")
 
-	if unmarshaledReq.RequestID != req.RequestID {
-		t.Errorf("RequestID mismatch: got %s, want %s", unmarshaledReq.RequestID, req.RequestID)
-	}
+	require.Equal(t, req.RequestID, unmarshaledReq.RequestID, "RequestID mismatch")
 
-	if unmarshaledReq.TransactionHash != req.TransactionHash {
-		t.Errorf("TransactionHash mismatch: got %s, want %s", unmarshaledReq.TransactionHash, req.TransactionHash)
-	}
+	require.Equal(t, req.TransactionHash, unmarshaledReq.TransactionHash, "TransactionHash mismatch")
 
-	if unmarshaledReq.Authenticator.Algorithm != req.Authenticator.Algorithm {
-		t.Errorf("Algorithm mismatch: got %s, want %s", unmarshaledReq.Authenticator.Algorithm, req.Authenticator.Algorithm)
-	}
+	require.Equal(t, req.Authenticator.Algorithm, unmarshaledReq.Authenticator.Algorithm, "Algorithm mismatch")
 }

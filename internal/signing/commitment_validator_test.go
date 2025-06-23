@@ -26,9 +26,7 @@ func TestCommitmentValidator_ValidateCommitment_Success(t *testing.T) {
 
 	// Generate a test key pair for signing
 	privateKey, err := btcec.NewPrivateKey()
-	if err != nil {
-		t.Fatalf("Failed to generate private key: %v", err)
-	}
+	require.NoError(t, err, "Failed to generate private key")
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 
 	// Create test state hash
@@ -37,9 +35,7 @@ func TestCommitmentValidator_ValidateCommitment_Success(t *testing.T) {
 
 	// Create request ID using the full imprint bytes (same as what validator will use)
 	requestID, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
-	if err != nil {
-		t.Fatalf("Failed to create request ID: %v", err)
-	}
+	require.NoError(t, err, "Failed to create request ID")
 
 	// Create transaction data and sign it
 	transactionData := []byte("test-transaction-data")
@@ -47,16 +43,12 @@ func TestCommitmentValidator_ValidateCommitment_Success(t *testing.T) {
 
 	// Extract the transaction hash bytes from the imprint (what the validator will use for verification)
 	transactionHashBytes, err := transactionHashImprint.DataBytes()
-	if err != nil {
-		t.Fatalf("Failed to extract transaction hash from imprint: %v", err)
-	}
+	require.NoError(t, err, "Failed to extract transaction hash from imprint")
 
 	// Sign the actual transaction hash bytes (what the validator expects)
 	signingService := NewSigningService()
 	signatureBytes, err := signingService.SignHash(transactionHashBytes, privateKey.Serialize())
-	if err != nil {
-		t.Fatalf("Failed to sign transaction data: %v", err)
-	}
+	require.NoError(t, err, "Failed to sign transaction data")
 
 	// Create commitment with valid data
 	commitment := &models.Commitment{
@@ -73,12 +65,8 @@ func TestCommitmentValidator_ValidateCommitment_Success(t *testing.T) {
 	// Validate the commitment
 	result := validator.ValidateCommitment(commitment)
 
-	if result.Status != ValidationStatusSuccess {
-		t.Errorf("Expected validation success, got status: %s, error: %v", result.Status.String(), result.Error)
-	}
-	if result.Error != nil {
-		t.Errorf("Expected no error, got: %v", result.Error)
-	}
+	require.Equal(t, ValidationStatusSuccess, result.Status, "Expected validation success, got status: %s, error: %v", result.Status.String(), result.Error)
+	require.NoError(t, result.Error, "Expected no error")
 }
 
 func TestCommitmentValidator_ValidateCommitment_UnsupportedAlgorithm(t *testing.T) {
@@ -97,12 +85,8 @@ func TestCommitmentValidator_ValidateCommitment_UnsupportedAlgorithm(t *testing.
 
 	result := validator.ValidateCommitment(commitment)
 
-	if result.Status != ValidationStatusUnsupportedAlgorithm {
-		t.Errorf("Expected unsupported algorithm status, got: %s", result.Status.String())
-	}
-	if result.Error == nil {
-		t.Error("Expected error for unsupported algorithm")
-	}
+	require.Equal(t, ValidationStatusUnsupportedAlgorithm, result.Status, "Expected unsupported algorithm status")
+	require.Error(t, result.Error, "Expected error for unsupported algorithm")
 }
 
 func TestCommitmentValidator_ValidateCommitment_InvalidPublicKeyFormat(t *testing.T) {
@@ -121,9 +105,7 @@ func TestCommitmentValidator_ValidateCommitment_InvalidPublicKeyFormat(t *testin
 
 	result := validator.ValidateCommitment(commitment)
 
-	if result.Status != ValidationStatusInvalidPublicKeyFormat {
-		t.Errorf("Expected invalid public key format status, got: %s", result.Status.String())
-	}
+	require.Equal(t, ValidationStatusInvalidPublicKeyFormat, result.Status, "Expected invalid public key format status")
 	if result.Error == nil {
 		t.Error("Expected error for invalid public key format")
 	}
@@ -149,9 +131,7 @@ func TestCommitmentValidator_ValidateCommitment_InvalidStateHashFormat(t *testin
 
 	result := validator.ValidateCommitment(commitment)
 
-	if result.Status != ValidationStatusInvalidStateHashFormat {
-		t.Errorf("Expected invalid state hash format status, got: %s", result.Status.String())
-	}
+	require.Equal(t, ValidationStatusInvalidStateHashFormat, result.Status, "Expected invalid state hash format status")
 	if result.Error == nil {
 		t.Error("Expected error for invalid state hash format")
 	}
@@ -181,9 +161,7 @@ func TestCommitmentValidator_ValidateCommitment_RequestIDMismatch(t *testing.T) 
 
 	result := validator.ValidateCommitment(commitment)
 
-	if result.Status != ValidationStatusRequestIDMismatch {
-		t.Errorf("Expected request ID mismatch status, got: %s", result.Status.String())
-	}
+	require.Equal(t, ValidationStatusRequestIDMismatch, result.Status, "Expected request ID mismatch status")
 	if result.Error == nil {
 		t.Error("Expected error for request ID mismatch")
 	}
@@ -213,9 +191,7 @@ func TestCommitmentValidator_ValidateCommitment_InvalidSignatureFormat(t *testin
 
 	result := validator.ValidateCommitment(commitment)
 
-	if result.Status != ValidationStatusInvalidSignatureFormat {
-		t.Errorf("Expected invalid signature format status, got: %s", result.Status.String())
-	}
+	require.Equal(t, ValidationStatusInvalidSignatureFormat, result.Status, "Expected invalid signature format status")
 	if result.Error == nil {
 		t.Error("Expected error for invalid signature format")
 	}
@@ -245,9 +221,7 @@ func TestCommitmentValidator_ValidateCommitment_InvalidTransactionHashFormat(t *
 
 	result := validator.ValidateCommitment(commitment)
 
-	if result.Status != ValidationStatusInvalidTransactionHashFormat {
-		t.Errorf("Expected invalid transaction hash format status, got: %s", result.Status.String())
-	}
+	require.Equal(t, ValidationStatusInvalidTransactionHashFormat, result.Status, "Expected invalid transaction hash format status")
 	if result.Error == nil {
 		t.Error("Expected error for invalid transaction hash format")
 	}
@@ -285,9 +259,7 @@ func TestCommitmentValidator_ValidateCommitment_SignatureVerificationFailed(t *t
 
 	result := validator.ValidateCommitment(commitment)
 
-	if result.Status != ValidationStatusSignatureVerificationFailed {
-		t.Errorf("Expected signature verification failed status, got: %s", result.Status.String())
-	}
+	require.Equal(t, ValidationStatusSignatureVerificationFailed, result.Status, "Expected signature verification failed status")
 	if result.Error == nil {
 		t.Error("Expected error for signature verification failure")
 	}
@@ -345,9 +317,7 @@ func TestCommitmentValidator_ValidateCommitment_RealSecp256k1Data(t *testing.T) 
 	// Validate the commitment - should succeed
 	result := validator.ValidateCommitment(commitment)
 
-	if result.Status != ValidationStatusSuccess {
-		t.Errorf("Expected validation success with real secp256k1 data, got status: %s, error: %v", result.Status.String(), result.Error)
-	}
+	require.Equal(t, ValidationStatusSuccess, result.Status, "Expected validation success with real secp256k1 data, got status: %s, error: %v", result.Status.String(), result.Error)
 	if result.Error != nil {
 		t.Errorf("Expected no error with real secp256k1 data, got: %v", result.Error)
 	}
@@ -410,9 +380,7 @@ func TestCommitmentValidator_ValidateCommitment_vsTS(t *testing.T) {
 	// Validate the commitment - should succeed
 	result := validator.ValidateCommitment(commitment)
 
-	if result.Status != ValidationStatusSuccess {
-		t.Errorf("Expected validation success with real secp256k1 data, got status: %s, error: %v", result.Status.String(), result.Error)
-	}
+	require.Equal(t, ValidationStatusSuccess, result.Status, "Expected validation success with real secp256k1 data, got status: %s, error: %v", result.Status.String(), result.Error)
 	if result.Error != nil {
 		t.Errorf("Expected no error with real secp256k1 data, got: %v", result.Error)
 	}
