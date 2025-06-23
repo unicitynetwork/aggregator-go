@@ -5,6 +5,8 @@ import (
 	"math/big"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestSMTTypeScriptCompatibility tests exact compatibility with TypeScript implementation
@@ -14,23 +16,16 @@ func TestSMTTypeScriptCompatibility(t *testing.T) {
 		smt := NewSparseMerkleTree(SHA256)
 		
 		err := smt.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3})
-		if err != nil {
-			t.Fatalf("AddLeaf failed: %v", err)
-		}
+		require.NoError(t, err, "AddLeaf failed")
 		
 		err = smt.AddLeaf(big.NewInt(0b101), []byte{4, 5, 6})
-		if err != nil {
-			t.Fatalf("AddLeaf failed: %v", err)
-		}
+		require.NoError(t, err, "AddLeaf failed")
 		
 		expectedHash := "00001c84da4abb4a2af2fa49e295032a5fbce583e2b8043a20246c27f327ee38d927"
 		actualHash := smt.GetRootHashHex()
 		
-		if actualHash != expectedHash {
-			t.Errorf("Hash mismatch:\nExpected: %s\nActual:   %s", expectedHash, actualHash)
-		} else {
-			t.Logf("✅ Simple case exact match: %s", actualHash)
-		}
+		require.Equal(t, expectedHash, actualHash, "Hash mismatch")
+		t.Logf("✅ Simple case exact match: %s", actualHash)
 	})
 	
 	// Test case 2: Complex case from TypeScript tests
