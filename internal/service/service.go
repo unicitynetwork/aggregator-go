@@ -167,14 +167,6 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 		return nil, fmt.Errorf("failed to store commitment: %w", err)
 	}
 
-	// Add commitment to current round for processing
-	if err := as.roundManager.AddCommitment(ctx, commitment); err != nil {
-		as.logger.WithContext(ctx).Warn("Failed to add commitment to round - will be processed in next round",
-			"requestId", req.RequestID,
-			"error", err.Error())
-		// Don't fail the request, the commitment is stored and will be picked up
-	}
-
 	as.logger.WithContext(ctx).Info("Commitment submitted successfully", "requestId", req.RequestID)
 
 	response := &api.SubmitCommitmentResponse{
