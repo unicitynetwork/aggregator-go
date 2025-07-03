@@ -182,31 +182,6 @@ func (rm *RoundManager) Stop(ctx context.Context) error {
 	return nil
 }
 
-// AddCommitment adds a commitment to the current round
-func (rm *RoundManager) AddCommitment(ctx context.Context, commitment *models.Commitment) error {
-	rm.roundMutex.Lock()
-	defer rm.roundMutex.Unlock()
-
-	if rm.currentRound == nil {
-		return fmt.Errorf("no active round")
-	}
-
-	if rm.currentRound.State != RoundStateCollecting {
-		return fmt.Errorf("round %s is not collecting commitments (state: %s)",
-			rm.currentRound.Number.String(), rm.currentRound.State.String())
-	}
-
-	// Add commitment to current round
-	rm.currentRound.Commitments = append(rm.currentRound.Commitments, commitment)
-
-	rm.logger.WithContext(ctx).Debug("Added commitment to round",
-		"roundNumber", rm.currentRound.Number.String(),
-		"commitmentCount", len(rm.currentRound.Commitments),
-		"requestId", commitment.RequestID.String())
-
-	return nil
-}
-
 // GetCurrentRound returns information about the current round
 func (rm *RoundManager) GetCurrentRound() *Round {
 	rm.roundMutex.RLock()
@@ -305,38 +280,30 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 
 	// Change state to processing
 	rm.currentRound.State = RoundStateProcessing
-	commitments := append([]*models.Commitment(nil), rm.currentRound.Commitments...)
 	roundNumber := rm.currentRound.Number
-	rm.roundMutex.Unlock()
-
-	rm.logger.WithContext(ctx).Info("Processing round",
-		"roundNumber", roundNumber.String(),
-		"commitmentCount", len(commitments))
 
 	// Get any unprocessed commitments from storage in addition to round commitments
 	const batchLimit = 1000 // Limit to prevent memory issues
-	unprocessedCommitments, err := rm.storage.CommitmentStorage().GetUnprocessedBatch(ctx, batchLimit)
+	var err error
+	rm.currentRound.Commitments, err = rm.storage.CommitmentStorage().GetUnprocessedBatch(ctx, batchLimit)
 	if err != nil {
 		rm.logger.WithContext(ctx).Warn("Failed to get unprocessed commitments", "error", err.Error())
-		unprocessedCommitments = []*models.Commitment{}
+		rm.currentRound.Commitments = []*models.Commitment{}
 	}
 
-	// Combine round commitments with unprocessed commitments
-	allCommitments := append(commitments, unprocessedCommitments...)
-
-	rm.logger.WithContext(ctx).Info("Processing commitments batch",
-		"roundCommitments", len(commitments),
-		"unprocessedCommitments", len(unprocessedCommitments),
-		"totalCommitments", len(allCommitments))
+	rm.logger.WithContext(ctx).Info("Processing round",
+		"roundNumber", roundNumber.String(),
+		"commitmentCount", len(rm.currentRound.Commitments))
+	rm.roundMutex.Unlock()
 
 	// Process commitments in batch
 	var rootHash string
 	var records []*models.AggregatorRecord
 
-	if len(allCommitments) > 0 {
+	if len(rm.currentRound.Commitments) > 0 {
 		// Mark commitments as processed FIRST to prevent duplicate processing
-		requestIDs := make([]api.RequestID, len(allCommitments))
-		for i, commitment := range allCommitments {
+		requestIDs := make([]api.RequestID, len(rm.currentRound.Commitments))
+		for i, commitment := range rm.currentRound.Commitments {
 			requestIDs[i] = commitment.RequestID
 		}
 
@@ -345,7 +312,7 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 			return fmt.Errorf("failed to mark commitments as processed: %w", err)
 		}
 
-		rootHash, records, err = rm.processBatch(ctx, allCommitments, roundNumber)
+		rootHash, records, err = rm.processBatch(ctx, rm.currentRound.Commitments, roundNumber)
 		if err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to process batch, but commitments are already marked as processed", "error", err.Error())
 			return fmt.Errorf("failed to process batch: %w", err)
@@ -363,7 +330,7 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 
 	// Update stats
 	rm.totalRounds++
-	rm.totalCommitments += int64(len(allCommitments))
+	rm.totalCommitments += int64(len(rm.currentRound.Commitments))
 
 	return nil
 }
