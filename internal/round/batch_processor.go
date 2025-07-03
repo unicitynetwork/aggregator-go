@@ -23,9 +23,9 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 
 	for i, commitment := range commitments {
 		// Generate leaf path from requestID
-		path, err := rm.generateLeafPath(commitment.RequestID)
-		if err != nil {
-			return "", nil, fmt.Errorf("failed to generate leaf path for commitment %s: %w", commitment.RequestID, err)
+		path, ok := new(big.Int).SetString("0x01"+string(commitment.RequestID), 0)
+		if !ok {
+			return "", nil, fmt.Errorf("failed to convert requestID %s to path", commitment.RequestID)
 		}
 
 		// Create leaf value (hash of commitment data)
@@ -35,7 +35,7 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 		}
 
 		leaves[i] = &smt.Leaf{
-			Path:  big.NewInt(int64(path)),
+			Path:  path,
 			Value: leafValue,
 		}
 
@@ -79,26 +79,6 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 	}
 
 	return rootHash, records, nil
-}
-
-// generateLeafPath generates a uint64 path for the SMT from a RequestID
-func (rm *RoundManager) generateLeafPath(requestID api.RequestID) (uint64, error) {
-	// Convert RequestID to bytes
-	requestIDBytes, err := requestID.Bytes()
-	if err != nil {
-		return 0, fmt.Errorf("failed to convert requestID to bytes: %w", err)
-	}
-
-	// Hash the requestID to get a deterministic path
-	hash := sha256.Sum256(requestIDBytes)
-
-	// Use the first 8 bytes of the hash as a uint64 path
-	path := uint64(0)
-	for i := 0; i < 8 && i < len(hash); i++ {
-		path = (path << 8) | uint64(hash[i])
-	}
-
-	return path, nil
 }
 
 // createLeafValue creates the value to store in the SMT leaf for a commitment

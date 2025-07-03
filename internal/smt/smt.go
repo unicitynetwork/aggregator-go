@@ -534,6 +534,91 @@ func (smt *SparseMerkleTree) buildTree(branch Branch, remainingPath *big.Int, va
 	}
 }
 
+func (smt *SparseMerkleTree) GetPath(path *big.Int) *MerkleTreePath {
+	rootHash := smt.root.CalculateHash(smt.algorithm)
+	steps := smt.generatePath(path, smt.root.Left, smt.root.Right)
+
+	return &MerkleTreePath{
+		Root:  rootHash.ToHex(),
+		Steps: steps,
+	}
+}
+
+// generatePath recursively generates the Merkle tree path steps
+func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Branch) []MerkleTreeStep {
+	// Determine if we should go right (remainingPath & 1n)
+	isRight := new(big.Int).And(remainingPath, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
+
+	var branch, siblingBranch Branch
+	if isRight {
+		branch = right
+		siblingBranch = left
+	} else {
+		branch = left
+		siblingBranch = right
+	}
+
+	if branch == nil {
+		return []MerkleTreeStep{smt.createMerkleTreeStep(remainingPath, nil, siblingBranch)}
+	}
+
+	commonPath := calculateCommonPath(remainingPath, branch.GetPath())
+
+	if branch.GetPath().Cmp(commonPath.path) == 0 {
+		if branch.IsLeaf() {
+			return []MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
+		}
+
+		// If path has ended, return the current non-leaf branch data
+		shifted := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+		if shifted.Cmp(big.NewInt(1)) == 0 {
+			return []MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
+		}
+
+		// Continue recursively into the branch
+		nodeBranch, ok := branch.(*NodeBranch)
+		if !ok {
+			// Should not happen if IsLeaf() returned false
+			return []MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
+		}
+
+		// Recursively generate path for the shifted remaining path
+		shiftedRemaining := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+		recursiveSteps := smt.generatePath(shiftedRemaining, nodeBranch.Left, nodeBranch.Right)
+
+		// Append the current step without branch (since we went into it)
+		currentStep := smt.createMerkleTreeStep(branch.GetPath(), nil, siblingBranch)
+
+		return append(recursiveSteps, currentStep)
+	}
+
+	return []MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
+}
+
+// createMerkleTreeStep creates a MerkleTreeStep with proper branch and sibling handling
+func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, siblingBranch Branch) MerkleTreeStep {
+	step := MerkleTreeStep{
+		Path:    path.String(),
+		Branch:  []string{},
+		Sibling: nil,
+	}
+
+	// Add branch hash if branch exists
+	if branch != nil {
+		branchHash := branch.CalculateHash(smt.algorithm)
+		step.Branch = []string{branchHash.ToHex()}
+	}
+
+	// Add sibling hash if sibling exists
+	if siblingBranch != nil {
+		siblingHash := siblingBranch.CalculateHash(smt.algorithm)
+		siblingHex := siblingHash.ToHex()
+		step.Sibling = &siblingHex
+	}
+
+	return step
+}
+
 // calculateCommonPath matches TypeScript calculateCommonPath exactly
 func calculateCommonPath(path1, path2 *big.Int) struct {
 	length *big.Int
