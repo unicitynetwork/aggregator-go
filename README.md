@@ -232,27 +232,27 @@ Retrieve the Sparse Merkle Tree inclusion proof for a specific state transition 
 **Response:**
 ```json
 {
-  "jsonrpc": "2.0",
-  "result": {
-    "merkleTreePath": {
-      "root": "0000b67ebbbb3a8369f93981b9d8b510a7b8e72fc1e1b8a83b7c0d8a3c9f7e4d",
-      "steps": [
+  "jsonrpc":"2.0",
+  "result":{
+    "authenticator":{
+      "algorithm":"secp256k1",
+      "publicKey":"027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
+      "signature":"65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
+      "stateHash":"0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647"
+    },
+    "merkleTreePath":{
+      "root":"0000342d44bb4f43b2de5661cf3690254b95b49e46820b90f13fbe2798f428459ba4",
+      "steps":[
         {
-          "branch": ["0", "1"],
-          "path": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122",
-          "sibling": "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234"
+          "branch":["0000f00a106493f8bee8846b84325fe71411ea01b8a7c5d7cc0853888b1ef9cbf83b"],
+          "path":"7588619140208316325429861720569170962648734570557434545963804239233978322458521890",
+          "sibling":null
         }
       ]
     },
-    "authenticator": {
-      "algorithm": "secp256k1",
-      "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
-      "signature": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
-      "stateHash": "0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647"
-    },
-    "transactionHash": "0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297"
+    "transactionHash":"0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297"
   },
-  "id": 2
+  "id":2
 }
 ```
 

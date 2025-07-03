@@ -10,6 +10,8 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/bsontype"
+
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
 )
 
 // Basic types for API
@@ -229,7 +231,9 @@ type GetInclusionProofRequest struct {
 
 // GetInclusionProofResponse represents the get_inclusion_proof JSON-RPC response
 type GetInclusionProofResponse struct {
-	InclusionProof *InclusionProof `json:"inclusionProof"`
+	Authenticator   *Authenticator      `json:"authenticator"`
+	MerkleTreePath  *smt.MerkleTreePath `json:"merkleTreePath"`
+	TransactionHash *TransactionHash    `json:"transactionHash"`
 }
 
 // GetNoDeletionProofResponse represents the get_no_deletion_proof JSON-RPC response

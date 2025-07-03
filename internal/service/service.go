@@ -218,22 +218,20 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		}
 
 		// Commitment exists but not yet finalized
-		proof := api.NewInclusionProof(req.RequestID, nil, nil, []api.ProofNode{}, api.HexBytes{}, false)
-		return &api.GetInclusionProofResponse{InclusionProof: proof}, nil
+		return &api.GetInclusionProofResponse{Authenticator: nil, MerkleTreePath: nil, TransactionHash: nil}, nil
+	}
+
+	// Convert model authenticator to API authenticator
+	apiAuthenticator := &api.Authenticator{
+		Algorithm: record.Authenticator.Algorithm,
+		PublicKey: record.Authenticator.PublicKey,
+		Signature: record.Authenticator.Signature,
+		StateHash: api.StateHash(record.Authenticator.StateHash.String()),
 	}
 
 	// TODO: Generate actual inclusion proof from SMT when available
 	// For now, return a basic proof indicating inclusion
-	proof := api.NewInclusionProof(
-		req.RequestID,
-		modelToAPIBigInt(record.BlockNumber),
-		modelToAPIBigInt(record.LeafIndex),
-		[]api.ProofNode{}, // TODO: Generate real proof path
-		api.NewHexBytes([]byte(as.roundManager.GetSMT().GetRootHash())),
-		true,
-	)
-
-	return &api.GetInclusionProofResponse{InclusionProof: proof}, nil
+	return &api.GetInclusionProofResponse{Authenticator: apiAuthenticator, MerkleTreePath: nil, TransactionHash: &record.TransactionHash}, nil
 }
 
 // GetNoDeletionProof retrieves the global no-deletion proof

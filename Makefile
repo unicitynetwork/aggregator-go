@@ -78,7 +78,7 @@ docker-build:
 
 docker-up:
 	@echo "Starting services with Docker Compose..."
-	@docker compose up -d
+	@docker compose up --detach  --build --remove-orphans
 
 docker-down:
 	@echo "Stopping services..."
