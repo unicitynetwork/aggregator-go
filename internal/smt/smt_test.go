@@ -432,3 +432,79 @@ func TestSMTProductionTiming(t *testing.T) {
 		})
 	}
 }
+
+// TestSMTGetPath tests the GetPath method implementation
+func TestSMTGetPath(t *testing.T) {
+	t.Run("BasicGetPath", func(t *testing.T) {
+		smt := NewSparseMerkleTree(SHA256)
+
+		// Add some test data
+		err := smt.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3})
+		require.NoError(t, err, "AddLeaf failed")
+
+		err = smt.AddLeaf(big.NewInt(0b101), []byte{4, 5, 6})
+		require.NoError(t, err, "AddLeaf failed")
+
+		// Test getting path for an existing leaf
+		path := smt.GetPath(big.NewInt(0b10))
+		require.NotNil(t, path, "GetPath should return a path")
+		require.NotEmpty(t, path.Root, "Root hash should not be empty")
+		require.NotNil(t, path.Steps, "Steps should not be nil")
+
+		t.Logf("✅ GetPath for existing leaf - Root: %s, Steps: %d", path.Root, len(path.Steps))
+
+		// Verify the root hash matches the tree's root
+		expectedRoot := smt.GetRootHashHex()
+		require.Equal(t, expectedRoot, path.Root, "Path root should match tree root")
+	})
+
+	t.Run("GetPathForNonExistentLeaf", func(t *testing.T) {
+		smt := NewSparseMerkleTree(SHA256)
+
+		// Add some test data
+		err := smt.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3})
+		require.NoError(t, err, "AddLeaf failed")
+
+		// Test getting path for a non-existent leaf
+		path := smt.GetPath(big.NewInt(0b11))
+		require.NotNil(t, path, "GetPath should return a path even for non-existent leaves")
+		require.NotEmpty(t, path.Root, "Root hash should not be empty")
+		require.NotNil(t, path.Steps, "Steps should not be nil")
+
+		t.Logf("✅ GetPath for non-existent leaf - Root: %s, Steps: %d", path.Root, len(path.Steps))
+	})
+	t.Run("GetPathStructure", func(t *testing.T) {
+		smt := NewSparseMerkleTree(SHA256)
+
+		// Add test data - just use the two paths that we know work
+		err := smt.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3})
+		require.NoError(t, err, "AddLeaf failed")
+
+		err = smt.AddLeaf(big.NewInt(0b101), []byte{4, 5, 6})
+		require.NoError(t, err, "AddLeaf failed")
+
+		// Test path structure
+		path := smt.GetPath(big.NewInt(0b10))
+		require.NotNil(t, path, "GetPath should return a path")
+
+		// Verify step structure
+		for i, step := range path.Steps {
+			require.NotEmpty(t, step.Path, "Step path should not be empty")
+			t.Logf("Step %d: Path=%s, Branch=%v, Sibling=%v", i, step.Path, len(step.Branch), step.Sibling != nil)
+		}
+
+		t.Logf("✅ GetPath structure verification - Root: %s, Steps: %d", path.Root, len(path.Steps))
+	})
+
+	t.Run("EmptyTreeGetPath", func(t *testing.T) {
+		smt := NewSparseMerkleTree(SHA256)
+
+		// Test getting path from empty tree
+		path := smt.GetPath(big.NewInt(0b10))
+		require.NotNil(t, path, "GetPath should return a path even for empty tree")
+		require.NotEmpty(t, path.Root, "Root hash should not be empty even for empty tree")
+		require.NotNil(t, path.Steps, "Steps should not be nil")
+
+		t.Logf("✅ GetPath for empty tree - Root: %s, Steps: %d", path.Root, len(path.Steps))
+	})
+}

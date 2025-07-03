@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"strconv"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
@@ -221,6 +222,15 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		return &api.GetInclusionProofResponse{Authenticator: nil, MerkleTreePath: nil, TransactionHash: nil}, nil
 	}
 
+	// Generate the Merkle tree path using the SMT's GetPath method
+	// Convert RequestID to big.Int for SMT path lookup
+	requestIDBigInt, ok := new(big.Int).SetString("0x01"+string(req.RequestID), 0)
+	if !ok {
+		return nil, fmt.Errorf("invalid request ID format: %s", req.RequestID)
+	}
+
+	merkleTreePath := as.roundManager.GetSMT().GetPath(requestIDBigInt)
+
 	// Convert model authenticator to API authenticator
 	apiAuthenticator := &api.Authenticator{
 		Algorithm: record.Authenticator.Algorithm,
@@ -229,9 +239,7 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		StateHash: api.StateHash(record.Authenticator.StateHash.String()),
 	}
 
-	// TODO: Generate actual inclusion proof from SMT when available
-	// For now, return a basic proof indicating inclusion
-	return &api.GetInclusionProofResponse{Authenticator: apiAuthenticator, MerkleTreePath: nil, TransactionHash: &record.TransactionHash}, nil
+	return &api.GetInclusionProofResponse{Authenticator: apiAuthenticator, MerkleTreePath: merkleTreePath, TransactionHash: &record.TransactionHash}, nil
 }
 
 // GetNoDeletionProof retrieves the global no-deletion proof
