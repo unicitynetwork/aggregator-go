@@ -55,6 +55,9 @@ services:
       LOG_FORMAT: "json"
       LOG_ENABLE_JSON: "true"
 
+      # Processing Configuration
+      BATCH_LIMIT: "1000"
+
       # BFT Configuration
       # Enable BFT support and specify configuration file paths
       BFT_ENABLED: "true"

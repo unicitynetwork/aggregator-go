@@ -17,11 +17,12 @@ import (
 
 // Config represents the application configuration
 type Config struct {
-	Server   ServerConfig   `mapstructure:"server"`
-	Database DatabaseConfig `mapstructure:"database"`
-	HA       HAConfig       `mapstructure:"ha"`
-	Logging  LoggingConfig  `mapstructure:"logging"`
-	BFT      BFTConfig      `mapstructure:"bft"`
+	Server     ServerConfig     `mapstructure:"server"`
+	Database   DatabaseConfig   `mapstructure:"database"`
+	HA         HAConfig         `mapstructure:"ha"`
+	Logging    LoggingConfig    `mapstructure:"logging"`
+	BFT        BFTConfig        `mapstructure:"bft"`
+	Processing ProcessingConfig `mapstructure:"processing"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -66,6 +67,11 @@ type LoggingConfig struct {
 	Format     string `mapstructure:"format"`
 	Output     string `mapstructure:"output"`
 	EnableJSON bool   `mapstructure:"enable_json"`
+}
+
+// ProcessingConfig holds batch processing configuration
+type ProcessingConfig struct {
+	BatchLimit int `mapstructure:"batch_limit"`
 }
 
 type BFTConfig struct {
@@ -119,6 +125,9 @@ func Load() (*Config, error) {
 			Format:     getEnvOrDefault("LOG_FORMAT", "json"),
 			Output:     getEnvOrDefault("LOG_OUTPUT", "stdout"),
 			EnableJSON: getEnvBoolOrDefault("LOG_ENABLE_JSON", true),
+		},
+		Processing: ProcessingConfig{
+			BatchLimit: getEnvIntOrDefault("BATCH_LIMIT", 1000),
 		},
 	}
 	config.BFT = BFTConfig{
