@@ -185,6 +185,21 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		return fmt.Errorf("failed to store block: %w", err)
 	}
 
+	var requestIds []api.RequestID
+	for _, commitment := range rm.currentRound.Commitments {
+		requestIds = append(requestIds, commitment.RequestID)
+	}
+
+	blockRecord := &models.BlockRecords{
+		BlockNumber: block.Index,
+		RequestIDs:  requestIds,
+		CreatedAt:   block.CreatedAt,
+	}
+
+	if err := rm.storage.BlockRecordsStorage().Store(ctx, blockRecord); err != nil {
+		return fmt.Errorf("failed to store block record: %w", err)
+	}
+
 	// Update current round with finalized block
 	rm.roundMutex.Lock()
 	if rm.currentRound != nil {

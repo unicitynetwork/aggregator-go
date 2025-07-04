@@ -214,7 +214,9 @@ func (n *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 	}
 	n.proposedBlock.UnicityCertificate = api.NewHexBytes(ucCbor)
 
-	n.roundManager.FinalizeBlock(ctx, n.proposedBlock)
+	if err := n.roundManager.FinalizeBlock(ctx, n.proposedBlock); err != nil {
+		return fmt.Errorf("failed to finalize block: %w", err)
+	}
 	n.logger.WithContext(ctx).Info("starting new round",
 		"nextRoundNumber", nextRoundNumber.String())
 	return n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
