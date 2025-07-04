@@ -139,6 +139,11 @@ The service is configured via environment variables:
 | `LOG_OUTPUT` | Log output (stdout, stderr, file path) | `stdout` |
 | `LOG_ENABLE_JSON` | Enable JSON formatted logs | `true` |
 
+### Processing Configuration
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `BATCH_LIMIT` | Maximum number of commitments to process per batch | `1000` |
+
 ## API Endpoints
 
 ### JSON-RPC 2.0 Methods

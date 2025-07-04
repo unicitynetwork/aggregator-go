@@ -282,10 +282,9 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	rm.currentRound.State = RoundStateProcessing
 	roundNumber := rm.currentRound.Number
 
-	// Get any unprocessed commitments from storage in addition to round commitments
-	const batchLimit = 1000 // Limit to prevent memory issues
+	// Get any unprocessed commitments from storage
 	var err error
-	rm.currentRound.Commitments, err = rm.storage.CommitmentStorage().GetUnprocessedBatch(ctx, batchLimit)
+	rm.currentRound.Commitments, err = rm.storage.CommitmentStorage().GetUnprocessedBatch(ctx, rm.config.Processing.BatchLimit)
 	if err != nil {
 		rm.logger.WithContext(ctx).Warn("Failed to get unprocessed commitments", "error", err.Error())
 		rm.currentRound.Commitments = []*models.Commitment{}
