@@ -119,6 +119,27 @@ type BlockRecords struct {
 	CreatedAt   *api.Timestamp  `json:"createdAt" bson:"createdAt"`
 }
 
+type BlockRecordsBSON struct {
+	BlockNumber string   `bson:"blockNumber"`
+	RequestIDs  []string `bson:"requestIds"`
+	CreatedAt   string   `bson:"createdAt"`
+}
+
+// ToBSON converts BlockRecords to BlockRecordsBSON for MongoDB storage
+func (b *BlockRecords) ToBSON() *BlockRecordsBSON {
+	blockRecordsBSON := &BlockRecordsBSON{
+		BlockNumber: b.BlockNumber.String(),
+		RequestIDs:  make([]string, len(b.RequestIDs)),
+		CreatedAt:   strconv.FormatInt(b.CreatedAt.UnixMilli(), 10),
+	}
+
+	for i, requestID := range b.RequestIDs {
+		blockRecordsBSON.RequestIDs[i] = requestID.String()
+	}
+
+	return blockRecordsBSON
+}
+
 // NewBlockRecords creates a new block records entry
 func NewBlockRecords(blockNumber *api.BigInt, requestIDs []api.RequestID) *BlockRecords {
 	return &BlockRecords{

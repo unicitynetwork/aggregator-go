@@ -2,6 +2,7 @@ package bft
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
@@ -29,7 +30,9 @@ func (n *BFTClientStub) Start(ctx context.Context, nextRoundNumber *api.BigInt) 
 }
 
 func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.Block) error {
-	n.roundManager.FinalizeBlock(ctx, block)
+	if err := n.roundManager.FinalizeBlock(ctx, block); err != nil {
+		return fmt.Errorf("failed to finalize block: %w", err)
+	}
 	nextRoundNumber := api.NewBigInt(nil)
 	nextRoundNumber.Set(block.Index.Int)
 	nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
