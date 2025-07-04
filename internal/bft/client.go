@@ -57,6 +57,7 @@ type (
 )
 
 func NewBFTClient(ctx context.Context, conf *config.BFTConfig, logger *logger.Logger, roundManager RoundManager) (*BFTClientImpl, error) {
+	logger.Info("Using BFT Client")
 	peerConf, err := conf.PeerConf()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create peer configuration: %w", err)
