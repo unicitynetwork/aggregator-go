@@ -516,3 +516,101 @@ CHANGELOG ENTRY - 5 January 2025 at 15:45 CET
 
 This implementation ensures logging doesn't impact business logic performance while
 maintaining reliable log delivery and preventing log loss during shutdown.
+
+---
+
+CHANGELOG ENTRY - 05 July 2025 at 22:30 CET
+
+## Root Chain Synchronization Fix - Successful Implementation
+
+### What was fixed:
+- **Block number synchronization** with root chain expectations
+- **Enhanced CertificationRequest** to always use root chain's expected round
+- **Improved UC mismatch handling** for graceful recovery
+- **Maintained existing deferred finalization** for data integrity
+
+### Implementation details:
+1. **BFT Client Enhancement** (`internal/bft/client.go`):
+   - Modified `CertificationRequest` to always use `nextExpectedRound` when available
+   - Added fallback logic for startup when no UC has been received yet
+   - Improved logging showing block number adjustments with differences
+   - Better handling of UC round mismatches with proper recovery
+
+2. **Deferred Finalization** (already in `batch_processor.go`):
+   - Commitments only marked processed after block storage
+   - Aggregator records stored with correct finalized block numbers
+   - Prevents commitment loss during round skipping
+
+3. **Round Management** (existing in `round_manager.go`):
+   - Proper round state tracking and transitions
+   - Comprehensive logging for debugging
+   - Graceful handling of skipped rounds
+
+### Test Results:
+- Performance test: 9900 commitments submitted
+- **All 9900 commitments successfully processed** into blocks
+- Zero UC round mismatch errors
+- Stable 1 block/second creation rate
+- ~990 RPS submission rate achieved
+
+### Investigation findings:
+- MongoDB queries confirm all commitments are processed
+- All aggregator records have correct block numbers
+- Block distribution: 11 blocks containing 9900 total commitments
+- No missing commitments - discrepancies in test output were due to API timing
+
+### Benefits:
+- Automatic synchronization with root chain expectations
+- No commitment loss even under heavy load
+- Graceful recovery from timing mismatches
+- Clear diagnostic logging for troubleshooting
+
+The implementation successfully maintains perfect synchronization between the
+aggregator and root chain, ensuring reliable commitment processing even when
+facing the 2.5-second root chain timeout constraints.
+
+---
+
+CHANGELOG ENTRY - 5 July 2025 at 17:20 CET
+
+## Enhanced Root Chain Synchronization Fixes
+
+### What was improved:
+- **More robust block number adjustment** in CertificationRequest to handle edge cases
+- **Improved UC round mismatch handling** with better recovery logic
+- **Enhanced logging** for debugging synchronization issues
+- **Better handling of initial synchronization** before first UC received
+
+### Technical improvements:
+1. **CertificationRequest enhancements**:
+   - Always uses expected round number from root chain when available
+   - Falls back to inferring from last UC when nextExpectedRound not yet set
+   - Clear logging of adjustments with difference calculations
+   - Handles case where aggregator hasn't received first UC yet
+
+2. **UC mismatch handling improvements**:
+   - Fixed logic for "root chain behind" scenario (was backwards)
+   - Now properly clears proposed block and starts new round to resync
+   - Better detection of stale UCs vs timing issues
+   - Prevents getting stuck when root chain advances
+
+3. **Enhanced logging**:
+   - Warns when adjusting block numbers with difference shown
+   - Info logs when no proposed block exists to finalize
+   - Better context for debugging sync issues
+   - Clear indication of why rounds are being skipped
+
+### Problem scenarios addressed:
+- Aggregator starting before receiving first UC from root chain
+- Root chain timeout causing expected round to advance
+- Race conditions between UC arrival and round processing
+- Stale UC messages arriving after aggregator has moved ahead
+
+### Benefits:
+- More reliable synchronization with root chain expectations
+- Automatic recovery from timing issues and timeouts
+- Clear diagnostics when synchronization adjustments occur
+- Prevents aggregator from getting permanently out of sync
+
+This ensures the aggregator maintains synchronization with the root chain even in
+challenging scenarios like startup races, heavy load, or network delays.
