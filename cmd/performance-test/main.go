@@ -86,7 +86,8 @@ type Metrics struct {
 	blockCommitmentCounts []int
 	totalBlockCommitments int64 // Track total commitments processed in blocks
 	startingBlockNumber   int64 // Store starting block number
-	mutex                 sync.RWMutex
+	submittedRequestIDs   sync.Map // Thread-safe map to track which request IDs we submitted
+	mutex                 sync.RWMutex // For protecting blockCommitmentCounts slice
 }
 
 func (m *Metrics) addBlockCommitmentCount(count int) {
@@ -100,7 +101,7 @@ func (m *Metrics) addBlockCommitmentCount(count int) {
 func (m *Metrics) getAverageCommitments() float64 {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
-
+	
 	if len(m.blockCommitmentCounts) == 0 {
 		return 0
 	}
@@ -270,6 +271,8 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 
 			if submitResp.Status == "SUCCESS" {
 				atomic.AddInt64(&metrics.successfulRequests, 1)
+				// Track this request ID as submitted by us
+				metrics.submittedRequestIDs.Store(string(req.RequestID), true)
 			} else if submitResp.Status == "REQUEST_ID_EXISTS" {
 				atomic.AddInt64(&metrics.requestIdExistsErr, 1)
 			} else {
@@ -391,26 +394,26 @@ func main() {
 			// Get current block height
 			resp, err := waitClient.call("get_block_height", nil)
 			if err != nil {
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(1 * time.Second)
 				continue
 			}
 			
 			if resp.Error != nil {
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(1 * time.Second)
 				continue
 			}
 			
 			var heightResp GetBlockHeightResponse
 			respBytes, _ := json.Marshal(resp.Result)
 			if err := json.Unmarshal(respBytes, &heightResp); err != nil {
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(1 * time.Second)
 				continue
 			}
 			
 			// Parse block number
 			var currentBlockNumber int64
 			if _, err := fmt.Sscanf(heightResp.BlockNumber, "%d", &currentBlockNumber); err != nil {
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(1 * time.Second)
 				continue
 			}
 			
@@ -435,22 +438,36 @@ func main() {
 				}
 				
 				var commitsResp GetBlockCommitmentsResponse
-				commitRespBytes, _ := json.Marshal(commitResp.Result)
+				commitRespBytes, err := json.Marshal(commitResp.Result)
+				if err != nil {
+					fmt.Printf("\nError marshaling result for block %d: %v\n", blockNum, err)
+					continue
+				}
 				if err := json.Unmarshal(commitRespBytes, &commitsResp); err != nil {
+					fmt.Printf("\nError unmarshaling commitments for block %d: %v\n", blockNum, err)
 					continue
 				}
 				
-				commitmentCount := len(commitsResp.Commitments)
+				// Count only commitments that we submitted
+				ourCommitmentCount := 0
+				for _, commitment := range commitsResp.Commitments {
+					if _, exists := metrics.submittedRequestIDs.Load(commitment.RequestID); exists {
+						ourCommitmentCount++
+					}
+				}
 				
-				// Always add the block to our stats
-				metrics.addBlockCommitmentCount(commitmentCount)
-				processedCount += int64(commitmentCount)
+				// Track all blocks, but only count our commitments
+				metrics.addBlockCommitmentCount(ourCommitmentCount)
+				processedCount += int64(ourCommitmentCount)
 				
-				if commitmentCount > 0 {
-					fmt.Printf("\nBlock %d: %d commitments (total: %d/%d)", 
-						blockNum, commitmentCount, processedCount, successful)
+				if ourCommitmentCount > 0 {
+					fmt.Printf("\nBlock %d: %d our commitments (total in block: %d, our total: %d/%d)", 
+						blockNum, ourCommitmentCount, len(commitsResp.Commitments), processedCount, successful)
 					newCommitmentsFound = true
 					lastCheckTime = time.Now()
+				} else if len(commitsResp.Commitments) > 0 {
+					// Block has commitments but none are ours
+					fmt.Printf("\nBlock %d: %d commitments from other sources", blockNum, len(commitsResp.Commitments))
 				}
 				
 				currentCheckBlock = blockNum + 1
@@ -458,7 +475,11 @@ func main() {
 			
 			// Check for timeout if no progress
 			if !newCommitmentsFound && time.Since(lastCheckTime) > 30*time.Second {
-				fmt.Printf("\nNo new commitments for 30 seconds, stopping check\n")
+				pendingCount := successful - processedCount
+				if pendingCount > 0 {
+					fmt.Printf("\n⚠️  WARNING: %d commitments still pending after 30 seconds of no progress!\n", pendingCount)
+					fmt.Printf("This indicates a problem with the aggregator service.\n")
+				}
 				goto finalize
 			}
 			
@@ -467,7 +488,7 @@ func main() {
 				fmt.Printf("\rChecking blocks... %d/%d commitments found", processedCount, successful)
 			}
 			
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(1 * time.Second)
 		}
 	}
 	
@@ -482,25 +503,25 @@ func main() {
 	for time.Since(emptyBlockCheckStart) < 5*time.Second {
 		resp, err := waitClient.call("get_block_height", nil)
 		if err != nil {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(1 * time.Second)
 			continue
 		}
 		
 		if resp.Error != nil {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(1 * time.Second)
 			continue
 		}
 		
 		var heightResp GetBlockHeightResponse
 		respBytes, _ := json.Marshal(resp.Result)
 		if err := json.Unmarshal(respBytes, &heightResp); err != nil {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(1 * time.Second)
 			continue
 		}
 		
 		var currentHeight int64
 		if _, err := fmt.Sscanf(heightResp.BlockNumber, "%d", &currentHeight); err != nil {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(1 * time.Second)
 			continue
 		}
 		
@@ -521,22 +542,32 @@ func main() {
 				continue
 			}
 			
-			commitmentCount := len(commitsResp.Commitments)
-			metrics.addBlockCommitmentCount(commitmentCount)
+			// Count only our commitments
+			ourCommitmentCount := 0
+			for _, commitment := range commitsResp.Commitments {
+				if _, exists := metrics.submittedRequestIDs.Load(commitment.RequestID); exists {
+					ourCommitmentCount++
+				}
+			}
 			
-			if commitmentCount == 0 {
+			metrics.addBlockCommitmentCount(ourCommitmentCount)
+			
+			if len(commitsResp.Commitments) == 0 {
 				emptyBlocksFound++
 				fmt.Printf("Empty block %d created (total empty blocks: %d)\n", blockNum, emptyBlocksFound)
+			} else if ourCommitmentCount > 0 {
+				// Unexpected: found our commitments after we thought we were done
+				processedCount += int64(ourCommitmentCount)
+				fmt.Printf("WARNING: Block %d has %d of our commitments (total: %d)\n", blockNum, ourCommitmentCount, len(commitsResp.Commitments))
 			} else {
-				// Unexpected: found commitments after we thought we were done
-				processedCount += int64(commitmentCount)
-				fmt.Printf("WARNING: Block %d has %d unexpected commitments\n", blockNum, commitmentCount)
+				// Block has commitments but none are ours
+				fmt.Printf("Block %d has %d commitments from other sources\n", blockNum, len(commitsResp.Commitments))
 			}
 			
 			lastEmptyBlockCheck = blockNum + 1
 		}
 		
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(1 * time.Second)
 	}
 	
 	if emptyBlocksFound == 0 {
@@ -574,12 +605,23 @@ finalize:
 								continue
 							}
 							
-							commitmentCount := len(commitsResp.Commitments)
-							if commitmentCount > 0 {
-								metrics.addBlockCommitmentCount(commitmentCount)
-								processedCount += int64(commitmentCount)
-								fmt.Printf("Block %d: %d commitments (final total: %d/%d)\n", 
-									blockNum, commitmentCount, processedCount, successful)
+							// Count only our commitments
+							ourCommitmentCount := 0
+							for _, commitment := range commitsResp.Commitments {
+								if _, exists := metrics.submittedRequestIDs.Load(commitment.RequestID); exists {
+									ourCommitmentCount++
+								}
+							}
+							
+							if ourCommitmentCount > 0 {
+								metrics.addBlockCommitmentCount(ourCommitmentCount)
+								processedCount += int64(ourCommitmentCount)
+								fmt.Printf("Block %d: %d of our commitments (total in block: %d, final total: %d/%d)\n", 
+									blockNum, ourCommitmentCount, len(commitsResp.Commitments), processedCount, successful)
+							} else if len(commitsResp.Commitments) > 0 {
+								// Block has commitments but none are ours
+								metrics.addBlockCommitmentCount(0)
+								fmt.Printf("Block %d: %d commitments from other sources\n", blockNum, len(commitsResp.Commitments))
 							}
 						}
 					}
@@ -610,7 +652,17 @@ finalize:
 
 	fmt.Printf("\nBLOCK PROCESSING:\n")
 	fmt.Printf("Total commitments in blocks: %d\n", processedInBlocks)
-	fmt.Printf("Commitments pending: %d\n", successful-processedInBlocks)
+	pendingCommitments := successful - processedInBlocks
+	fmt.Printf("Commitments pending: %d\n", pendingCommitments)
+	
+	if pendingCommitments > 0 {
+		fmt.Printf("\n⚠️  ERROR: %d commitments were NOT processed into blocks!\n", pendingCommitments)
+		fmt.Printf("This indicates the aggregator service is not processing commitments correctly.\n")
+		fmt.Printf("Possible causes:\n")
+		fmt.Printf("- Processing pipeline is stuck\n")
+		fmt.Printf("- Root chain synchronization issues\n")
+		fmt.Printf("- Commitments marked as processed but not included in blocks\n")
+	}
 	
 	fmt.Printf("\nBLOCK THROUGHPUT:\n")
 	fmt.Printf("Total blocks checked: %d\n", len(metrics.blockCommitmentCounts))

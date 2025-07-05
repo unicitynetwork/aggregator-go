@@ -39,9 +39,9 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 			Value: leafValue,
 		}
 
-		// Create aggregator record
+		// Create aggregator record (block number will be set when finalized)
 		leafIndex := api.NewBigInt(big.NewInt(int64(i)))
-		records[i] = models.NewAggregatorRecord(commitment, blockNumber, leafIndex)
+		records[i] = models.NewAggregatorRecord(commitment, nil, leafIndex)
 
 		rm.logger.WithContext(ctx).Debug("Created SMT leaf for commitment",
 			"requestId", commitment.RequestID.String(),
@@ -59,24 +59,9 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 		"rootHash", rootHash,
 		"commitmentCount", len(commitments))
 
-	// Store aggregator records
-	for _, record := range records {
-		// Check if record already exists to prevent duplicate key errors
-		existing, err := rm.storage.AggregatorRecordStorage().GetByRequestID(ctx, record.RequestID)
-		if err != nil {
-			return "", nil, fmt.Errorf("failed to check existing aggregator record for %s: %w", record.RequestID, err)
-		}
-
-		if existing != nil {
-			rm.logger.WithContext(ctx).Debug("Aggregator record already exists, skipping",
-				"requestId", record.RequestID.String())
-			continue
-		}
-
-		if err := rm.storage.AggregatorRecordStorage().Store(ctx, record); err != nil {
-			return "", nil, fmt.Errorf("failed to store aggregator record for %s: %w", record.RequestID, err)
-		}
-	}
+	// Don't store aggregator records yet - wait until block is finalized
+	rm.logger.WithContext(ctx).Debug("Deferring aggregator record storage until block finalization",
+		"recordCount", len(records))
 
 	return rootHash, records, nil
 }
@@ -131,13 +116,21 @@ func (rm *RoundManager) createLeafValue(commitment *models.Commitment) ([]byte, 
 
 // ProposeBlock creates and proposes a new block with the given data
 func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigInt, rootHash string, records []*models.AggregatorRecord) error {
+	rm.logger.WithContext(ctx).Info("proposeBlock called",
+		"blockNumber", blockNumber.String(),
+		"rootHash", rootHash,
+		"recordCount", len(records))
+
 	rm.roundMutex.Lock()
 	if rm.currentRound != nil {
+		rm.logger.WithContext(ctx).Debug("Changing round state to finalizing",
+			"roundNumber", rm.currentRound.Number.String(),
+			"previousState", rm.currentRound.State.String())
 		rm.currentRound.State = RoundStateFinalizing
 	}
 	rm.roundMutex.Unlock()
 
-	rm.logger.WithContext(ctx).Info("Proposing block",
+	rm.logger.WithContext(ctx).Info("Creating block proposal",
 		"blockNumber", blockNumber.String(),
 		"rootHash", rootHash,
 		"recordCount", len(records))
@@ -170,18 +163,38 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		parentHash,
 	)
 
+	rm.logger.WithContext(ctx).Info("Sending certification request to BFT client",
+		"blockNumber", blockNumber.String(),
+		"bftClientType", fmt.Sprintf("%T", rm.bftClient))
+
 	if err := rm.bftClient.CertificationRequest(ctx, block); err != nil {
+		rm.logger.WithContext(ctx).Error("Failed to send certification request",
+			"blockNumber", blockNumber.String(),
+			"error", err.Error())
 		return fmt.Errorf("failed to send certification request: %w", err)
 	}
+
+	rm.logger.WithContext(ctx).Info("Certification request sent successfully",
+		"blockNumber", blockNumber.String())
 
 	return nil
 }
 
 // finalizeBlock creates and persists a new block with the given data
 func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) error {
+	rm.logger.WithContext(ctx).Info("FinalizeBlock called",
+		"blockNumber", block.Index.String(),
+		"rootHash", block.RootHash.String(),
+		"hasUnicityCertificate", block.UnicityCertificate != nil)
 
 	// Store block
+	rm.logger.WithContext(ctx).Debug("Storing block in database",
+		"blockNumber", block.Index.String())
+
 	if err := rm.storage.BlockStorage().Store(ctx, block); err != nil {
+		rm.logger.WithContext(ctx).Error("Failed to store block",
+			"blockNumber", block.Index.String(),
+			"error", err.Error())
 		return fmt.Errorf("failed to store block: %w", err)
 	}
 
@@ -194,14 +207,81 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		return fmt.Errorf("failed to store block record: %w", err)
 	}
 
-	// Update current round with finalized block
+	// Now that block is stored, finalize commitments and aggregator records
 	rm.roundMutex.Lock()
-	if rm.currentRound != nil {
-		rm.currentRound.Block = block
-	}
-	rm.roundMutex.Unlock()
+	if rm.currentRound != nil && len(rm.currentRound.Commitments) > 0 {
+		rm.logger.WithContext(ctx).Debug("Finalizing commitments and records after successful block storage",
+			"roundNumber", rm.currentRound.Number.String(),
+			"commitmentCount", len(rm.currentRound.Commitments),
+			"recordCount", len(rm.currentRound.PendingRecords))
 
-	rm.logger.WithContext(ctx).Info("Block finalized successfully",
+		// Extract data we need
+		requestIDs := make([]api.RequestID, len(rm.currentRound.Commitments))
+		for i, commitment := range rm.currentRound.Commitments {
+			requestIDs[i] = commitment.RequestID
+		}
+		pendingRecords := rm.currentRound.PendingRecords
+		rm.roundMutex.Unlock()
+
+		// Store aggregator records first
+		if len(pendingRecords) > 0 {
+			rm.logger.WithContext(ctx).Debug("Storing aggregator records",
+				"count", len(pendingRecords))
+			for _, record := range pendingRecords {
+				// Update block number to the actual finalized block
+				record.BlockNumber = block.Index
+
+				// Check if record already exists to prevent duplicate key errors
+				existing, err := rm.storage.AggregatorRecordStorage().GetByRequestID(ctx, record.RequestID)
+				if err != nil {
+					rm.logger.WithContext(ctx).Error("Failed to check existing aggregator record",
+						"requestId", record.RequestID.String(),
+						"error", err.Error())
+					continue
+				}
+
+				if existing != nil {
+					rm.logger.WithContext(ctx).Debug("Aggregator record already exists, skipping",
+						"requestId", record.RequestID.String())
+					continue
+				}
+
+				if err := rm.storage.AggregatorRecordStorage().Store(ctx, record); err != nil {
+					rm.logger.WithContext(ctx).Error("Failed to store aggregator record",
+						"requestId", record.RequestID.String(),
+						"error", err.Error())
+					// Continue with other records
+				}
+			}
+		}
+
+		// Mark commitments as processed in storage
+		if err := rm.storage.CommitmentStorage().MarkProcessed(ctx, requestIDs); err != nil {
+			rm.logger.WithContext(ctx).Error("Failed to mark commitments as processed after finalization",
+				"error", err.Error(),
+				"blockNumber", block.Index.String())
+			// This is a critical error but block is already stored
+			// Log it but don't fail the finalization
+		} else {
+			rm.logger.WithContext(ctx).Info("Successfully marked commitments as processed",
+				"count", len(requestIDs),
+				"blockNumber", block.Index.String())
+		}
+
+		// Update current round with finalized block
+		rm.roundMutex.Lock()
+		if rm.currentRound != nil {
+			rm.currentRound.Block = block
+			// Clear pending data as it's now finalized
+			rm.currentRound.PendingRecords = nil
+			rm.currentRound.PendingRootHash = ""
+		}
+		rm.roundMutex.Unlock()
+	} else {
+		rm.roundMutex.Unlock()
+	}
+
+	rm.logger.WithContext(ctx).Info("Block finalized and stored successfully",
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String())
 
