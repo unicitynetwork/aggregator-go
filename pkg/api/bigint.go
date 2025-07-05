@@ -83,6 +83,10 @@ func (b *BigInt) MarshalBSONValue() (bsontype.Type, []byte, error) {
 
 // UnmarshalBSONValue implements bson.ValueUnmarshaler
 func (b *BigInt) UnmarshalBSONValue(bsonType bsontype.Type, data []byte) error {
+	if bsonType == bson.TypeNull {
+		b.Int = big.NewInt(0)
+		return nil
+	}
 	var s string
 	err := bson.UnmarshalValue(bsonType, data, &s)
 	if err != nil {
