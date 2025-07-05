@@ -29,10 +29,7 @@ func NewBlockRecordsStorage(db *mongo.Database) *BlockRecordsStorage {
 
 // Store stores a new block records entry
 func (brs *BlockRecordsStorage) Store(ctx context.Context, records *models.BlockRecords) error {
-	// Convert to BSON format for storage
-	recordsBSON := records.ToBSON()
-
-	_, err := brs.collection.InsertOne(ctx, recordsBSON)
+	_, err := brs.collection.InsertOne(ctx, records)
 	if err != nil {
 		return fmt.Errorf("failed to store block records: %w", err)
 	}
