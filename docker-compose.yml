@@ -153,7 +153,28 @@ services:
       BFT_KEY_CONF_FILE: "/app/bft-config/aggregator/keys.json"
       BFT_SHARD_CONF_FILE: "/app/bft-config/shard-conf-7_0.json"
       BFT_TRUST_BASE_FILE: "/app/bft-config/trust-base.json"
-      BFT_BOOTSTRAP_ADDRESSES: /dns4/bft-root/tcp/8000/p2p/16Uiu2HAmMvMiavmqhVmmZdJ7cG7cq99TLnz34dqNbr1o9YDzrb9i
+      # BFT_BOOTSTRAP_ADDRESSES will be set dynamically by the entrypoint script
+
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Extract the first root node's nodeId from trust-base.json
+        if [ -f /app/bft-config/trust-base.json ]; then
+          ROOT_NODE_ID=$$(cat /app/bft-config/trust-base.json | grep -o '"nodeId": "[^"]*"' | head -1 | cut -d'"' -f4)
+          if [ -n "$$ROOT_NODE_ID" ]; then
+            export BFT_BOOTSTRAP_ADDRESSES="/dns4/bft-root/tcp/8000/p2p/$$ROOT_NODE_ID"
+            echo "Set BFT_BOOTSTRAP_ADDRESSES to: $$BFT_BOOTSTRAP_ADDRESSES"
+          else
+            echo "Warning: Could not extract nodeId from trust-base.json"
+            exit 1
+          fi
+        else
+          echo "Error: trust-base.json not found at /app/bft-config/trust-base.json"
+          exit 1
+        fi
+        
+        # Start the aggregator application
+        exec /app/aggregator
 
     depends_on:
       bft-aggregator-genesis-gen:
