@@ -144,7 +144,7 @@ func (s *Server) handleRequest(ctx context.Context, req *Request) *Response {
 		return NewErrorResponse(rpcErr, req.ID)
 	}
 
-	s.logger.WithContext(ctx).Info("JSON-RPC request completed",
+	s.logger.WithContext(ctx).Debug("JSON-RPC request completed",
 		"method", req.Method,
 		"duration_ms", duration.Milliseconds(),
 		"request_id", ctx.Value("request_id"))
@@ -196,7 +196,7 @@ func LoggingMiddleware(logger *logger.Logger) MiddlewareFunc {
 				"duration_ms", duration.Milliseconds(),
 				"error_code", response.Error.Code)
 		} else {
-			logger.WithContext(ctx).Info("JSON-RPC request completed",
+			logger.WithContext(ctx).Debug("JSON-RPC request completed",
 				"method", req.Method,
 				"request_id", ctx.Value("request_id"),
 				"duration_ms", duration.Milliseconds())

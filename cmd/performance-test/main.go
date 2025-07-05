@@ -92,6 +92,7 @@ type Metrics struct {
 func (m *Metrics) addBlockCommitmentCount(count int) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
+	// Track all blocks including empty ones to show the real pattern
 	m.blockCommitmentCounts = append(m.blockCommitmentCounts, count)
 	atomic.AddInt64(&m.totalBlockCommitments, int64(count))
 }
@@ -278,109 +279,6 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 	}
 }
 
-// Monitor blocks and count commitments
-func blockMonitor(ctx context.Context, client *JSONRPCClient, metrics *Metrics, wg *sync.WaitGroup) (int64, int64) {
-	defer wg.Done()
-
-	// Get the starting block number to only monitor new blocks created during the test
-	resp, err := client.call("get_block_height", nil)
-	if err != nil {
-		fmt.Printf("Failed to get initial block height: %v\n", err)
-		return 0, 0
-	}
-
-	if resp.Error != nil {
-		fmt.Printf("Error getting initial block height: %v\n", resp.Error.Message)
-		return 0, 0
-	}
-
-	var heightResp GetBlockHeightResponse
-	respBytes, _ := json.Marshal(resp.Result)
-	if err := json.Unmarshal(respBytes, &heightResp); err != nil {
-		fmt.Printf("Failed to parse initial block height: %v\n", err)
-		return 0, 0
-	}
-
-	// Parse starting block number
-	var startingBlockNumber int64
-	if _, err := fmt.Sscanf(heightResp.BlockNumber, "%d", &startingBlockNumber); err != nil {
-		fmt.Printf("Failed to parse starting block number: %v\n", err)
-		return 0, 0
-	}
-
-	fmt.Printf("Starting block monitoring from block %d\n", startingBlockNumber+1)
-	lastBlockNumber := startingBlockNumber
-	
-	// Store the starting block number in metrics
-	metrics.mutex.Lock()
-	metrics.startingBlockNumber = startingBlockNumber
-	metrics.mutex.Unlock()
-
-	ticker := time.NewTicker(100 * time.Millisecond) // Check for new blocks frequently
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return startingBlockNumber, lastBlockNumber
-		case <-ticker.C:
-			// Get current block height
-			resp, err := client.call("get_block_height", nil)
-			if err != nil {
-				continue
-			}
-
-			if resp.Error != nil {
-				continue
-			}
-
-			var heightResp GetBlockHeightResponse
-			respBytes, _ := json.Marshal(resp.Result)
-			if err := json.Unmarshal(respBytes, &heightResp); err != nil {
-				continue
-			}
-
-			// Parse block number
-			var currentBlockNumber int64
-			if _, err := fmt.Sscanf(heightResp.BlockNumber, "%d", &currentBlockNumber); err != nil {
-				continue
-			}
-
-			// Only check new blocks created during the test
-			for blockNum := lastBlockNumber + 1; blockNum <= currentBlockNumber; blockNum++ {
-
-				// Get commitments for this block
-				commitReq := GetBlockCommitmentsRequest{
-					BlockNumber: fmt.Sprintf("%d", blockNum),
-				}
-
-				commitResp, err := client.call("get_block_commitments", commitReq)
-				if err != nil {
-					continue
-				}
-
-				if commitResp.Error != nil {
-					continue
-				}
-
-				var commitsResp GetBlockCommitmentsResponse
-				commitRespBytes, _ := json.Marshal(commitResp.Result)
-				if err := json.Unmarshal(commitRespBytes, &commitsResp); err != nil {
-					continue
-				}
-
-				commitmentCount := len(commitsResp.Commitments)
-				metrics.addBlockCommitmentCount(commitmentCount)
-
-				fmt.Printf("Block %d: %d commitments\n", blockNum, commitmentCount)
-			}
-
-			lastBlockNumber = currentBlockNumber
-		}
-	}
-	
-	return startingBlockNumber, lastBlockNumber
-}
 
 func main() {
 	fmt.Printf("Starting aggregator performance test...\n")
@@ -402,20 +300,36 @@ func main() {
 	// Create JSON-RPC client
 	client := NewJSONRPCClient(aggregatorURL)
 
-	// Test connectivity
+	// Test connectivity and get starting block number
 	fmt.Printf("Testing connectivity to %s...\n", aggregatorURL)
-	if _, err := client.call("get_block_height", nil); err != nil {
+	resp, err := client.call("get_block_height", nil)
+	if err != nil {
 		log.Fatalf("Failed to connect to aggregator: %v", err)
 	}
+	
+	if resp.Error != nil {
+		log.Fatalf("Error getting block height: %v", resp.Error.Message)
+	}
+	
+	var heightResp GetBlockHeightResponse
+	respBytes, _ := json.Marshal(resp.Result)
+	if err := json.Unmarshal(respBytes, &heightResp); err != nil {
+		log.Fatalf("Failed to parse block height: %v", err)
+	}
+	
+	// Parse starting block number
+	var startingBlockNumber int64
+	if _, err := fmt.Sscanf(heightResp.BlockNumber, "%d", &startingBlockNumber); err != nil {
+		log.Fatalf("Failed to parse starting block number: %v", err)
+	}
+	
 	fmt.Printf("✓ Connected successfully\n")
+	fmt.Printf("✓ Starting block number: %d\n", startingBlockNumber)
+	metrics.startingBlockNumber = startingBlockNumber
 
 	var wg sync.WaitGroup
 
-	// Start block monitor
-	wg.Add(1)
-	go blockMonitor(ctx, client, metrics, &wg)
-
-	// Start commitment workers
+	// Start commitment workers (no separate block monitor)
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go commitmentWorker(ctx, client, metrics, &wg)
@@ -449,48 +363,32 @@ func main() {
 
 	// Stop submission phase and get counts
 	fmt.Printf("\n----------------------------------------\n")
-	fmt.Printf("Submission phase completed. Waiting for all commitments to be processed into blocks...\n")
+	fmt.Printf("Submission completed. Now checking blocks for all commitments...\n")
 	
 	successful := atomic.LoadInt64(&metrics.successfulRequests)
+	fmt.Printf("Total successful submissions: %d\n", successful)
+	fmt.Printf("Starting from block %d\n", startingBlockNumber + 1)
 	
 	// Continue monitoring blocks until all successful commitments are processed
-	// Add a timeout to prevent infinite waiting
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Add a timeout to prevent infinite waiting (5 minutes should be enough for most tests)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer waitCancel()
 	
 	waitClient := NewJSONRPCClient(aggregatorURL)
-	lastProcessedCount := atomic.LoadInt64(&metrics.totalBlockCommitments)
-	noProgressCount := 0
+	processedCount := int64(0)
+	lastCheckTime := time.Now()
+	currentCheckBlock := startingBlockNumber + 1
+	emptyBlocksFound := 0
+	lastEmptyBlockCheck := int64(0)
+	var emptyBlockCheckStart time.Time
 	
-	for {
+	for processedCount < successful {
 		select {
 		case <-waitCtx.Done():
-			fmt.Printf("Timeout waiting for commitments to be processed\n")
+			fmt.Printf("\nTimeout waiting for commitments to be processed\n")
 			goto finalize
 		default:
-			processedCount := atomic.LoadInt64(&metrics.totalBlockCommitments)
-			
-			// Check if all successful commitments have been processed
-			if processedCount >= successful {
-				fmt.Printf("All %d successful commitments have been processed into blocks\n", successful)
-				goto finalize
-			}
-			
-			// Check for progress
-			if processedCount == lastProcessedCount {
-				noProgressCount++
-				if noProgressCount > 50 { // 5 seconds without progress
-					fmt.Printf("No new commitments processed for 5 seconds, assuming completion\n")
-					goto finalize
-				}
-			} else {
-				noProgressCount = 0
-				lastProcessedCount = processedCount
-			}
-			
-			fmt.Printf("Progress: %d/%d commitments processed into blocks\r", processedCount, successful)
-			
-			// Continue monitoring blocks
+			// Get current block height
 			resp, err := waitClient.call("get_block_height", nil)
 			if err != nil {
 				time.Sleep(100 * time.Millisecond)
@@ -516,16 +414,12 @@ func main() {
 				continue
 			}
 			
-			// Check any new blocks we haven't processed
-			metrics.mutex.RLock()
-			blocksChecked := len(metrics.blockCommitmentCounts)
-			startBlockNum := metrics.startingBlockNumber
-			metrics.mutex.RUnlock()
-			
-			// Calculate the next block to check based on starting block and blocks already checked
-			nextBlockToCheck := startBlockNum + int64(blocksChecked) + 1
-			
-			for blockNum := nextBlockToCheck; blockNum <= currentBlockNumber; blockNum++ {
+			// Check all blocks from currentCheckBlock to currentBlockNumber
+			newCommitmentsFound := false
+			if currentCheckBlock <= currentBlockNumber {
+				fmt.Printf("\nChecking blocks %d to %d\n", currentCheckBlock, currentBlockNumber)
+			}
+			for blockNum := currentCheckBlock; blockNum <= currentBlockNumber; blockNum++ {
 				// Get commitments for this block
 				commitReq := GetBlockCommitmentsRequest{
 					BlockNumber: fmt.Sprintf("%d", blockNum),
@@ -547,18 +441,154 @@ func main() {
 				}
 				
 				commitmentCount := len(commitsResp.Commitments)
+				
+				// Always add the block to our stats
+				metrics.addBlockCommitmentCount(commitmentCount)
+				processedCount += int64(commitmentCount)
+				
 				if commitmentCount > 0 {
-					metrics.addBlockCommitmentCount(commitmentCount)
-					fmt.Printf("\nBlock %d: %d commitments (total processed: %d/%d)\n", 
-						blockNum, commitmentCount, atomic.LoadInt64(&metrics.totalBlockCommitments), successful)
+					fmt.Printf("\nBlock %d: %d commitments (total: %d/%d)", 
+						blockNum, commitmentCount, processedCount, successful)
+					newCommitmentsFound = true
+					lastCheckTime = time.Now()
 				}
+				
+				currentCheckBlock = blockNum + 1
+			}
+			
+			// Check for timeout if no progress
+			if !newCommitmentsFound && time.Since(lastCheckTime) > 30*time.Second {
+				fmt.Printf("\nNo new commitments for 30 seconds, stopping check\n")
+				goto finalize
+			}
+			
+			// Progress indicator
+			if !newCommitmentsFound {
+				fmt.Printf("\rChecking blocks... %d/%d commitments found", processedCount, successful)
 			}
 			
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
+	
+	fmt.Printf("\nAll %d commitments have been processed into blocks\n", successful)
+	
+	// Now verify that empty blocks continue to be produced
+	fmt.Printf("\nVerifying empty block production for 5 seconds...\n")
+	emptyBlockCheckStart = time.Now()
+	lastEmptyBlockCheck = currentCheckBlock
+	emptyBlocksFound = 0
+	
+	for time.Since(emptyBlockCheckStart) < 5*time.Second {
+		resp, err := waitClient.call("get_block_height", nil)
+		if err != nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		
+		if resp.Error != nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		
+		var heightResp GetBlockHeightResponse
+		respBytes, _ := json.Marshal(resp.Result)
+		if err := json.Unmarshal(respBytes, &heightResp); err != nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		
+		var currentHeight int64
+		if _, err := fmt.Sscanf(heightResp.BlockNumber, "%d", &currentHeight); err != nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		
+		// Check any new blocks
+		for blockNum := lastEmptyBlockCheck; blockNum <= currentHeight; blockNum++ {
+			commitReq := GetBlockCommitmentsRequest{
+				BlockNumber: fmt.Sprintf("%d", blockNum),
+			}
+			
+			commitResp, err := waitClient.call("get_block_commitments", commitReq)
+			if err != nil || commitResp.Error != nil {
+				continue
+			}
+			
+			var commitsResp GetBlockCommitmentsResponse
+			commitRespBytes, _ := json.Marshal(commitResp.Result)
+			if err := json.Unmarshal(commitRespBytes, &commitsResp); err != nil {
+				continue
+			}
+			
+			commitmentCount := len(commitsResp.Commitments)
+			metrics.addBlockCommitmentCount(commitmentCount)
+			
+			if commitmentCount == 0 {
+				emptyBlocksFound++
+				fmt.Printf("Empty block %d created (total empty blocks: %d)\n", blockNum, emptyBlocksFound)
+			} else {
+				// Unexpected: found commitments after we thought we were done
+				processedCount += int64(commitmentCount)
+				fmt.Printf("WARNING: Block %d has %d unexpected commitments\n", blockNum, commitmentCount)
+			}
+			
+			lastEmptyBlockCheck = blockNum + 1
+		}
+		
+		time.Sleep(100 * time.Millisecond)
+	}
+	
+	if emptyBlocksFound == 0 {
+		fmt.Printf("WARNING: No empty blocks created in 5 seconds - round manager may have stopped!\n")
+	} else {
+		avgEmptyBlockRate := float64(emptyBlocksFound) / 5.0
+		fmt.Printf("Empty block creation rate: %.1f blocks/sec\n", avgEmptyBlockRate)
+	}
 
 finalize:
+	// Do one final check for any blocks we might have missed
+	if processedCount < successful {
+		resp, err := waitClient.call("get_block_height", nil)
+		if err == nil && resp.Error == nil {
+			var heightResp GetBlockHeightResponse
+			respBytes, _ := json.Marshal(resp.Result)
+			if err := json.Unmarshal(respBytes, &heightResp); err == nil {
+				var finalBlockNumber int64
+				if _, err := fmt.Sscanf(heightResp.BlockNumber, "%d", &finalBlockNumber); err == nil {
+					if finalBlockNumber >= currentCheckBlock {
+						fmt.Printf("\nDoing final check for blocks %d to %d\n", currentCheckBlock, finalBlockNumber)
+						for blockNum := currentCheckBlock; blockNum <= finalBlockNumber; blockNum++ {
+							commitReq := GetBlockCommitmentsRequest{
+								BlockNumber: fmt.Sprintf("%d", blockNum),
+							}
+							
+							commitResp, err := waitClient.call("get_block_commitments", commitReq)
+							if err != nil || commitResp.Error != nil {
+								continue
+							}
+							
+							var commitsResp GetBlockCommitmentsResponse
+							commitRespBytes, _ := json.Marshal(commitResp.Result)
+							if err := json.Unmarshal(commitRespBytes, &commitsResp); err != nil {
+								continue
+							}
+							
+							commitmentCount := len(commitsResp.Commitments)
+							if commitmentCount > 0 {
+								metrics.addBlockCommitmentCount(commitmentCount)
+								processedCount += int64(commitmentCount)
+								fmt.Printf("Block %d: %d commitments (final total: %d/%d)\n", 
+									blockNum, commitmentCount, processedCount, successful)
+							}
+						}
+					}
+				}
+			}
+		}
+		// Update the final count
+		atomic.StoreInt64(&metrics.totalBlockCommitments, processedCount)
+	}
 	// Final metrics
 	elapsed := time.Since(metrics.startTime)
 	total := atomic.LoadInt64(&metrics.totalRequests)
@@ -582,12 +612,40 @@ finalize:
 	fmt.Printf("Total commitments in blocks: %d\n", processedInBlocks)
 	fmt.Printf("Commitments pending: %d\n", successful-processedInBlocks)
 	
-	avgCommitments := metrics.getAverageCommitments()
 	fmt.Printf("\nBLOCK THROUGHPUT:\n")
-	fmt.Printf("Total blocks created: %d\n", len(metrics.blockCommitmentCounts))
-	fmt.Printf("Average commitments per block: %.2f\n", avgCommitments)
-	fmt.Printf("Blocks processed per second: %.2f\n", 1.0) // 1-second rounds
-	fmt.Printf("Effective commitment throughput: %.2f commitments/sec\n", avgCommitments)
+	fmt.Printf("Total blocks checked: %d\n", len(metrics.blockCommitmentCounts))
+	
+	// Count empty vs non-empty blocks
+	emptyBlocks := 0
+	nonEmptyBlocks := 0
+	for _, count := range metrics.blockCommitmentCounts {
+		if count == 0 {
+			emptyBlocks++
+		} else {
+			nonEmptyBlocks++
+		}
+	}
+	
+	if nonEmptyBlocks > 0 {
+		fmt.Printf("Non-empty blocks: %d (average %.1f commitments/block)\n", 
+			nonEmptyBlocks, float64(processedInBlocks)/float64(nonEmptyBlocks))
+	}
+	if emptyBlocks > 0 {
+		fmt.Printf("Empty blocks: %d\n", emptyBlocks)
+	}
+	
+	// Calculate block creation rate
+	if len(metrics.blockCommitmentCounts) > 0 {
+		totalBlockTime := float64(len(metrics.blockCommitmentCounts))
+		blockCreationRate := float64(len(metrics.blockCommitmentCounts)) / totalBlockTime
+		fmt.Printf("Block creation rate: %.1f blocks/sec\n", blockCreationRate)
+		
+		// Calculate throughput based on non-empty blocks only
+		if nonEmptyBlocks > 0 {
+			fmt.Printf("Effective commitment throughput: %.1f commitments/sec\n", 
+				float64(processedInBlocks)/totalBlockTime)
+		}
+	}
 
 	if len(metrics.blockCommitmentCounts) > 0 && len(metrics.blockCommitmentCounts) <= 20 {
 		fmt.Printf("\nBlock commitment counts: %v\n", metrics.blockCommitmentCounts)
