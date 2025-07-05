@@ -84,6 +84,8 @@ type Metrics struct {
 	requestIdExistsErr    int64
 	startTime             time.Time
 	blockCommitmentCounts []int
+	totalBlockCommitments int64 // Track total commitments processed in blocks
+	startingBlockNumber   int64 // Store starting block number
 	mutex                 sync.RWMutex
 }
 
@@ -91,6 +93,7 @@ func (m *Metrics) addBlockCommitmentCount(count int) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 	m.blockCommitmentCounts = append(m.blockCommitmentCounts, count)
+	atomic.AddInt64(&m.totalBlockCommitments, int64(count))
 }
 
 func (m *Metrics) getAverageCommitments() float64 {
@@ -276,37 +279,42 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 }
 
 // Monitor blocks and count commitments
-func blockMonitor(ctx context.Context, client *JSONRPCClient, metrics *Metrics, wg *sync.WaitGroup) {
+func blockMonitor(ctx context.Context, client *JSONRPCClient, metrics *Metrics, wg *sync.WaitGroup) (int64, int64) {
 	defer wg.Done()
 
 	// Get the starting block number to only monitor new blocks created during the test
 	resp, err := client.call("get_block_height", nil)
 	if err != nil {
 		fmt.Printf("Failed to get initial block height: %v\n", err)
-		return
+		return 0, 0
 	}
 
 	if resp.Error != nil {
 		fmt.Printf("Error getting initial block height: %v\n", resp.Error.Message)
-		return
+		return 0, 0
 	}
 
 	var heightResp GetBlockHeightResponse
 	respBytes, _ := json.Marshal(resp.Result)
 	if err := json.Unmarshal(respBytes, &heightResp); err != nil {
 		fmt.Printf("Failed to parse initial block height: %v\n", err)
-		return
+		return 0, 0
 	}
 
 	// Parse starting block number
 	var startingBlockNumber int64
 	if _, err := fmt.Sscanf(heightResp.BlockNumber, "%d", &startingBlockNumber); err != nil {
 		fmt.Printf("Failed to parse starting block number: %v\n", err)
-		return
+		return 0, 0
 	}
 
 	fmt.Printf("Starting block monitoring from block %d\n", startingBlockNumber+1)
 	lastBlockNumber := startingBlockNumber
+	
+	// Store the starting block number in metrics
+	metrics.mutex.Lock()
+	metrics.startingBlockNumber = startingBlockNumber
+	metrics.mutex.Unlock()
 
 	ticker := time.NewTicker(100 * time.Millisecond) // Check for new blocks frequently
 	defer ticker.Stop()
@@ -314,7 +322,7 @@ func blockMonitor(ctx context.Context, client *JSONRPCClient, metrics *Metrics, 
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return startingBlockNumber, lastBlockNumber
 		case <-ticker.C:
 			// Get current block height
 			resp, err := client.call("get_block_height", nil)
@@ -370,6 +378,8 @@ func blockMonitor(ctx context.Context, client *JSONRPCClient, metrics *Metrics, 
 			lastBlockNumber = currentBlockNumber
 		}
 	}
+	
+	return startingBlockNumber, lastBlockNumber
 }
 
 func main() {
@@ -437,14 +447,127 @@ func main() {
 	// Wait for completion
 	wg.Wait()
 
+	// Stop submission phase and get counts
+	fmt.Printf("\n----------------------------------------\n")
+	fmt.Printf("Submission phase completed. Waiting for all commitments to be processed into blocks...\n")
+	
+	successful := atomic.LoadInt64(&metrics.successfulRequests)
+	
+	// Continue monitoring blocks until all successful commitments are processed
+	// Add a timeout to prevent infinite waiting
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer waitCancel()
+	
+	waitClient := NewJSONRPCClient(aggregatorURL)
+	lastProcessedCount := atomic.LoadInt64(&metrics.totalBlockCommitments)
+	noProgressCount := 0
+	
+	for {
+		select {
+		case <-waitCtx.Done():
+			fmt.Printf("Timeout waiting for commitments to be processed\n")
+			goto finalize
+		default:
+			processedCount := atomic.LoadInt64(&metrics.totalBlockCommitments)
+			
+			// Check if all successful commitments have been processed
+			if processedCount >= successful {
+				fmt.Printf("All %d successful commitments have been processed into blocks\n", successful)
+				goto finalize
+			}
+			
+			// Check for progress
+			if processedCount == lastProcessedCount {
+				noProgressCount++
+				if noProgressCount > 50 { // 5 seconds without progress
+					fmt.Printf("No new commitments processed for 5 seconds, assuming completion\n")
+					goto finalize
+				}
+			} else {
+				noProgressCount = 0
+				lastProcessedCount = processedCount
+			}
+			
+			fmt.Printf("Progress: %d/%d commitments processed into blocks\r", processedCount, successful)
+			
+			// Continue monitoring blocks
+			resp, err := waitClient.call("get_block_height", nil)
+			if err != nil {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			
+			if resp.Error != nil {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			
+			var heightResp GetBlockHeightResponse
+			respBytes, _ := json.Marshal(resp.Result)
+			if err := json.Unmarshal(respBytes, &heightResp); err != nil {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			
+			// Parse block number
+			var currentBlockNumber int64
+			if _, err := fmt.Sscanf(heightResp.BlockNumber, "%d", &currentBlockNumber); err != nil {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			
+			// Check any new blocks we haven't processed
+			metrics.mutex.RLock()
+			blocksChecked := len(metrics.blockCommitmentCounts)
+			startBlockNum := metrics.startingBlockNumber
+			metrics.mutex.RUnlock()
+			
+			// Calculate the next block to check based on starting block and blocks already checked
+			nextBlockToCheck := startBlockNum + int64(blocksChecked) + 1
+			
+			for blockNum := nextBlockToCheck; blockNum <= currentBlockNumber; blockNum++ {
+				// Get commitments for this block
+				commitReq := GetBlockCommitmentsRequest{
+					BlockNumber: fmt.Sprintf("%d", blockNum),
+				}
+				
+				commitResp, err := waitClient.call("get_block_commitments", commitReq)
+				if err != nil {
+					continue
+				}
+				
+				if commitResp.Error != nil {
+					continue
+				}
+				
+				var commitsResp GetBlockCommitmentsResponse
+				commitRespBytes, _ := json.Marshal(commitResp.Result)
+				if err := json.Unmarshal(commitRespBytes, &commitsResp); err != nil {
+					continue
+				}
+				
+				commitmentCount := len(commitsResp.Commitments)
+				if commitmentCount > 0 {
+					metrics.addBlockCommitmentCount(commitmentCount)
+					fmt.Printf("\nBlock %d: %d commitments (total processed: %d/%d)\n", 
+						blockNum, commitmentCount, atomic.LoadInt64(&metrics.totalBlockCommitments), successful)
+				}
+			}
+			
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+finalize:
 	// Final metrics
 	elapsed := time.Since(metrics.startTime)
 	total := atomic.LoadInt64(&metrics.totalRequests)
-	successful := atomic.LoadInt64(&metrics.successfulRequests)
+	successful = atomic.LoadInt64(&metrics.successfulRequests)
 	failed := atomic.LoadInt64(&metrics.failedRequests)
 	exists := atomic.LoadInt64(&metrics.requestIdExistsErr)
+	processedInBlocks := atomic.LoadInt64(&metrics.totalBlockCommitments)
 
-	fmt.Printf("\n========================================\n")
+	fmt.Printf("\n\n========================================\n")
 	fmt.Printf("PERFORMANCE TEST RESULTS\n")
 	fmt.Printf("========================================\n")
 	fmt.Printf("Duration: %v\n", elapsed.Truncate(time.Millisecond))
@@ -455,14 +578,22 @@ func main() {
 	fmt.Printf("Average RPS: %.2f\n", float64(total)/elapsed.Seconds())
 	fmt.Printf("Success rate: %.2f%%\n", float64(successful)/float64(total)*100)
 
+	fmt.Printf("\nBLOCK PROCESSING:\n")
+	fmt.Printf("Total commitments in blocks: %d\n", processedInBlocks)
+	fmt.Printf("Commitments pending: %d\n", successful-processedInBlocks)
+	
 	avgCommitments := metrics.getAverageCommitments()
 	fmt.Printf("\nBLOCK THROUGHPUT:\n")
-	fmt.Printf("Average commitments per block (last %d rounds): %.2f\n", samplingRounds, avgCommitments)
+	fmt.Printf("Total blocks created: %d\n", len(metrics.blockCommitmentCounts))
+	fmt.Printf("Average commitments per block: %.2f\n", avgCommitments)
 	fmt.Printf("Blocks processed per second: %.2f\n", 1.0) // 1-second rounds
 	fmt.Printf("Effective commitment throughput: %.2f commitments/sec\n", avgCommitments)
 
-	if len(metrics.blockCommitmentCounts) > 0 {
+	if len(metrics.blockCommitmentCounts) > 0 && len(metrics.blockCommitmentCounts) <= 20 {
 		fmt.Printf("\nBlock commitment counts: %v\n", metrics.blockCommitmentCounts)
+	} else if len(metrics.blockCommitmentCounts) > 20 {
+		fmt.Printf("\nFirst 10 blocks: %v\n", metrics.blockCommitmentCounts[:10])
+		fmt.Printf("Last 10 blocks: %v\n", metrics.blockCommitmentCounts[len(metrics.blockCommitmentCounts)-10:])
 	}
 
 	fmt.Printf("========================================\n")

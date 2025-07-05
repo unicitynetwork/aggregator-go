@@ -257,3 +257,43 @@ CHANGELOG ENTRY - 09 June 2025 at 15:50 CET
 - **Developer tools integration**: Compatible with browser developer tools
 
 This transforms the API documentation from simple interactive forms into a full-featured, executable API testing environment that rivals professional API development tools while being embedded directly in the service.
+
+---
+
+CHANGELOG ENTRY - 05 July 2025 at 16:00 CET
+
+## Performance Test Enhancement - Complete Processing
+
+### What was fixed:
+- **Performance test now waits for all commitments to be processed** before calculating statistics
+- **Accurate throughput metrics** by tracking commitments from submission through block inclusion
+- **Progress monitoring** during the wait phase with real-time updates
+
+### Technical improvements:
+- **Added totalBlockCommitments tracking** to count all commitments that appear in blocks
+- **Implemented wait phase** after submission phase to ensure all commitments are processed
+- **Added timeout protection** (30 seconds) to prevent infinite waiting
+- **Progress detection** to identify when processing has completed or stalled
+- **Real-time progress display** showing X/Y commitments processed
+
+### New metrics provided:
+- **Total commitments in blocks**: Accurate count of processed commitments
+- **Commitments pending**: Shows any unprocessed commitments
+- **Total blocks created**: Number of blocks generated during test
+- **Average commitments per block**: Based on all blocks, not just samples
+- **Block commitment distribution**: Shows first and last 10 blocks for long tests
+
+### Implementation details:
+- Extended Metrics struct with `totalBlockCommitments` and `startingBlockNumber`
+- Modified `blockMonitor` to return starting and ending block numbers
+- Added post-submission monitoring loop that continues checking for new blocks
+- Proper block number calculation accounting for initial block offset
+- Graceful handling of timeouts and stalled processing
+
+### User experience improvements:
+- Clear phase separation: submission phase → processing phase → results
+- Real-time progress updates during wait phase
+- Detailed final statistics showing both submission and processing metrics
+- Better visibility into system throughput and processing delays
+
+This ensures the performance test provides accurate end-to-end metrics, measuring not just submission rates but actual commitment processing throughput through the entire aggregator pipeline.
