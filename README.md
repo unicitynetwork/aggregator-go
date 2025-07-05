@@ -138,6 +138,8 @@ The service is configured via environment variables:
 | `LOG_FORMAT` | Log format (json, text) | `json` |
 | `LOG_OUTPUT` | Log output (stdout, stderr, file path) | `stdout` |
 | `LOG_ENABLE_JSON` | Enable JSON formatted logs | `true` |
+| `LOG_ENABLE_ASYNC` | Enable asynchronous logging for better performance | `true` |
+| `LOG_ASYNC_BUFFER_SIZE` | Buffer size for async logging | `10000` |
 
 ### Processing Configuration
 | Variable | Description | Default |
@@ -586,6 +588,10 @@ The service implements comprehensive JSON-RPC 2.0 error codes:
 - **Request Correlation**: Efficient logging with request IDs
 - **Graceful Shutdown**: Proper cleanup on termination
 - **Batch Operations**: Efficient database operations (when available)
+- **Asynchronous Logging**: Non-blocking log writes with configurable buffer size (enabled by default)
+  - Batched log processing reduces I/O overhead
+  - 10ms flush interval ensures timely log delivery
+  - Graceful shutdown flushes all pending logs
 
 ## Cryptographic Implementation
 

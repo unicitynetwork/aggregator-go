@@ -318,8 +318,8 @@ CHANGELOG ENTRY - 5 January 2025 at 14:47 CET
 - **Fixed syntax error** in BFT client's conditional logging
 
 ### Discovery:
-These logs revealed that the round manager stopped producing blocks when the root chain 
-timed out waiting for a certification request and sent a "repeat UC" with an incremented 
+These logs revealed that the round manager stopped producing blocks when the root chain
+timed out waiting for a certification request and sent a "repeat UC" with an incremented
 round number that the aggregator wasn't expecting.
 
 ---
@@ -415,7 +415,7 @@ CHANGELOG ENTRY - 5 January 2025 at 15:20 CET
 
 ### Implementation changes:
 - **BFT client**: Added nextExpectedRound tracking
-- **UC handling**: Deferred round transitions when processing is in progress  
+- **UC handling**: Deferred round transitions when processing is in progress
 - **CertificationRequest**: Automatically adjusts block numbers to root chain expectations
 - **Performance test**: Added warnings and detailed error reporting for pending commitments
 
@@ -470,3 +470,49 @@ CHANGELOG ENTRY - 5 January 2025 at 15:35 CET
 
 This ensures the performance test provides accurate, isolated metrics for each test run,
 essential for reliable performance benchmarking and regression testing.
+
+---
+
+CHANGELOG ENTRY - 5 January 2025 at 15:45 CET
+
+## Asynchronous Logging Implementation
+
+### What was implemented:
+- **Asynchronous logging system** to prevent I/O blocking in business logic
+- **Configurable buffer size** for tuning memory vs performance trade-offs
+- **Batch processing** of log entries for efficient I/O operations
+- **Graceful shutdown** ensures no log loss during service termination
+
+### Why it was needed:
+- Synchronous logging was using direct I/O operations (stdout, stderr, file writes)
+- Debug logs inside loops (e.g., processing 1000 commitments) caused significant overhead
+- I/O operations in hot paths could block business logic processing
+- Performance degradation under high load due to logging bottlenecks
+
+### Solution architecture:
+1. **AsyncLogger wrapper**: Implements slog.Handler interface for seamless integration
+2. **Channel-based buffering**: Non-blocking log submission with configurable buffer
+3. **Background worker**: Dedicated goroutine processes logs in batches
+4. **Periodic flushing**: 10ms timer ensures timely log delivery
+5. **Fallback mechanism**: Reverts to sync logging if async system fails
+
+### Implementation details:
+- Created `internal/logger/async_logger.go` with AsyncLogger implementation
+- Modified Logger creation to optionally wrap with async handler
+- Added configuration options: LOG_ENABLE_ASYNC and LOG_ASYNC_BUFFER_SIZE
+- Integrated graceful shutdown to flush pending logs
+- Default: async logging enabled with 10,000 entry buffer
+
+### Performance benefits:
+- Non-blocking log operations in critical paths
+- Batch I/O reduces system call overhead
+- Eliminates logging bottlenecks during high-throughput operations
+- Particularly beneficial for debug logging in loops
+
+### Configuration:
+- `LOG_ENABLE_ASYNC=true` (default): Enable async logging
+- `LOG_ASYNC_BUFFER_SIZE=10000` (default): Buffer size for log entries
+- Async logging can be disabled by setting LOG_ENABLE_ASYNC=false
+
+This implementation ensures logging doesn't impact business logic performance while
+maintaining reliable log delivery and preventing log loss during shutdown.

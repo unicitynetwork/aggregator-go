@@ -24,7 +24,7 @@ func main() {
 	}
 
 	// Initialize logger
-	log, err := logger.New(
+	baseLogger, err := logger.New(
 		cfg.Logging.Level,
 		cfg.Logging.Format,
 		cfg.Logging.Output,
@@ -33,6 +33,22 @@ func main() {
 	if err != nil {
 		fmt.Printf("Failed to initialize logger: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Wrap with async logger if enabled
+	var log *logger.Logger
+	var asyncLogger *logger.AsyncLoggerWrapper
+	if cfg.Logging.EnableAsync {
+		bufferSize := cfg.Logging.AsyncBufferSize
+		if bufferSize <= 0 {
+			bufferSize = 10000 // Default buffer size
+		}
+		asyncLogger = logger.NewAsyncLogger(baseLogger, bufferSize)
+		log = asyncLogger.Logger
+		log.WithComponent("main").Info("Async logging enabled", 
+			"bufferSize", bufferSize)
+	} else {
+		log = baseLogger
 	}
 
 	log.WithComponent("main").Info("Starting Unicity Aggregator")
@@ -110,4 +126,9 @@ func main() {
 	}
 
 	log.WithComponent("main").Info("Aggregator shut down successfully")
+	
+	// Stop async logger if enabled
+	if asyncLogger != nil {
+		asyncLogger.Stop()
+	}
 }
