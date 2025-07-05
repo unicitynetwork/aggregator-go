@@ -41,6 +41,8 @@ type (
 		luc           atomic.Pointer[types.UnicityCertificate]
 		roundManager  RoundManager
 		proposedBlock *models.Block
+		// Track the next round number expected by root chain
+		nextExpectedRound atomic.Uint64
 	}
 
 	BFTClient interface {
@@ -191,36 +193,108 @@ func (n *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		return nil
 	}
 
-	n.logger.WithContext(ctx).Debug(fmt.Sprintf("updated LUC; UC.Round: %d, RootRound: %d",
+	n.logger.WithContext(ctx).Info(fmt.Sprintf("Handling new unicity certificate; UC.Round: %d, RootRound: %d",
 		uc.GetRoundNumber(), uc.GetRootRoundNumber()))
 	n.luc.Store(uc)
 
 	nextRoundNumber := big.NewInt(0)
 	nextRoundNumber.SetUint64(tr.Round)
 
+	// Store the next expected round number
+	n.nextExpectedRound.Store(tr.Round)
+
 	wasInitializing := n.status.Load() == initializing
 	if wasInitializing {
-		n.logger.WithContext(ctx).Info("initialization finished, starting new round",
+		n.logger.WithContext(ctx).Info("BFT client initialization finished, starting first round",
 			"nextRoundNumber", nextRoundNumber.String())
 		// First UC received after an initial handshake with a root node -> initialization finished.
 		n.status.Store(normal)
-		return n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+		err := n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+		if err != nil {
+			n.logger.WithContext(ctx).Error("Failed to start first round after initialization",
+				"nextRoundNumber", nextRoundNumber.String(),
+				"error", err.Error())
+		}
+		return err
 	}
 
-	n.logger.WithContext(ctx).Info("finalize block")
+	// Check if we have a proposed block that matches the UC round
+	blockNum := "nil"
+	expectedRound := uc.GetRoundNumber()
+	if n.proposedBlock != nil {
+		blockNum = n.proposedBlock.Index.String()
+		proposedRound := n.proposedBlock.Index.Uint64()
+
+		// If the UC is for a different round than our proposed block, we need to handle it
+		if proposedRound != expectedRound {
+			n.logger.WithContext(ctx).Warn("UC round does not match proposed block round",
+				"ucRound", expectedRound,
+				"proposedBlockRound", proposedRound,
+				"nextRound", tr.Round)
+
+			// If root chain has moved ahead, we need to skip to catch up
+			if expectedRound < proposedRound {
+				n.logger.WithContext(ctx).Info("Root chain has moved ahead, will use next round number when block is finalized",
+					"ucRound", expectedRound,
+					"ourProposedRound", proposedRound,
+					"nextRoundRequired", tr.Round)
+				// Don't start a new round yet - let the current one finish
+				// The round manager will use the correct round number when it's ready
+				return nil
+			}
+
+			// If UC is for an older round than proposed, it's a stale UC
+			n.logger.WithContext(ctx).Debug("Received UC for older round than proposed block, ignoring")
+			return nil
+		}
+	}
+
+	// Normal case: we have a proposed block matching the UC round
+	if n.proposedBlock == nil {
+		n.logger.WithContext(ctx).Warn("No proposed block to finalize, starting next round",
+			"nextRoundNumber", nextRoundNumber.String())
+		// Start the next round directly
+		err := n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+		if err != nil {
+			n.logger.WithContext(ctx).Error("Failed to start next round",
+				"nextRoundNumber", nextRoundNumber.String(),
+				"error", err.Error())
+		}
+		return err
+	}
+
+	n.logger.WithContext(ctx).Info("Finalizing block with unicity certificate",
+		"blockNumber", blockNum,
+		"ucRound", expectedRound)
 
 	ucCbor, err := types.Cbor.Marshal(uc)
 	if err != nil {
+		n.logger.WithContext(ctx).Error("Failed to encode unicity certificate",
+			"error", err.Error())
 		return fmt.Errorf("failed to encode unicity certificate: %w", err)
 	}
 	n.proposedBlock.UnicityCertificate = api.NewHexBytes(ucCbor)
 
 	if err := n.roundManager.FinalizeBlock(ctx, n.proposedBlock); err != nil {
-		return fmt.Errorf("failed to finalize block: %w", err)
+		n.logger.WithContext(ctx).Error("Failed to finalize block",
+			"blockNumber", n.proposedBlock.Index.String(),
+			"error", err.Error())
+		return err
 	}
-	n.logger.WithContext(ctx).Info("starting new round",
+
+	// Clear the proposed block after finalization
+	n.proposedBlock = nil
+
+	n.logger.WithContext(ctx).Info("Block finalized, starting new round",
 		"nextRoundNumber", nextRoundNumber.String())
-	return n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+
+	err = n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+	if err != nil {
+		n.logger.WithContext(ctx).Error("Failed to start new round",
+			"nextRoundNumber", nextRoundNumber.String(),
+			"error", err.Error())
+	}
+	return err
 }
 
 func (n *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash string, roundNumber uint64) error {
@@ -268,9 +342,34 @@ func (n *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 }
 
 func (n *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.Block) error {
+	n.logger.WithContext(ctx).Info("CertificationRequest called",
+		"blockNumber", block.Index.String(),
+		"rootHash", block.RootHash.String())
+
+	// Check if we need to adjust the block number to match root chain expectations
+	expectedRound := n.nextExpectedRound.Load()
+	if expectedRound > 0 && expectedRound != block.Index.Uint64() {
+		n.logger.WithContext(ctx).Info("Adjusting block number to match root chain expectations",
+			"originalBlockNumber", block.Index.String(),
+			"adjustedBlockNumber", expectedRound)
+		// Update the block number to what root chain expects
+		block.Index = api.NewBigInt(new(big.Int).SetUint64(expectedRound))
+	}
+
 	n.proposedBlock = block
+
+	n.logger.WithContext(ctx).Debug("Sending certification request",
+		"blockNumber", n.proposedBlock.Index.String(),
+		"roundNumber", n.proposedBlock.Index.Uint64())
+
 	if err := n.sendCertificationRequest(ctx, n.proposedBlock.RootHash.String(), n.proposedBlock.Index.Uint64()); err != nil {
+		n.logger.WithContext(ctx).Error("Failed to send certification request",
+			"blockNumber", block.Index.String(),
+			"error", err.Error())
 		return fmt.Errorf("failed to send certification request: %w", err)
 	}
+
+	n.logger.WithContext(ctx).Info("Certification request completed",
+		"blockNumber", block.Index.String())
 	return nil
 }

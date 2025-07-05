@@ -60,6 +60,9 @@ go fmt ./...
 
 # Run the service and connect to MongoDB running on localhost
 MONGODB_URI=mongodb://admin:password@localhost:27017/aggregator?authSource=admin make run
+
+# Run the performance test (IMPORTANT: Always use make, not direct binary)
+make performance-test
 ```
 
 ## Architecture Overview
@@ -212,3 +215,10 @@ All endpoints follow JSON-RPC 2.0 specification:
 - Keep entries clear and concise for future reference
 
 This ensures documentation stays accurate and useful for future development sessions.
+
+## Important Development Reminders
+
+### Performance Testing
+- **ALWAYS use `make performance-test`** to run the performance test, not the direct binary
+- The make target ensures proper environment setup and consistent execution
+- Performance test tracks only commitments submitted in the current run for accurate metrics

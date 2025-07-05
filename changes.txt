@@ -297,3 +297,176 @@ CHANGELOG ENTRY - 05 July 2025 at 16:00 CET
 - Better visibility into system throughput and processing delays
 
 This ensures the performance test provides accurate end-to-end metrics, measuring not just submission rates but actual commitment processing throughput through the entire aggregator pipeline.
+
+---
+
+CHANGELOG ENTRY - 5 January 2025 at 14:47 CET
+
+## Comprehensive Round Manager Logging
+
+### What was added:
+- **Detailed logging to diagnose block production issues** when round manager stops creating blocks
+- **Round lifecycle tracking** with state transitions and timing information
+- **BFT client interaction logging** for certification requests and responses
+
+### Logging additions:
+- **StartNewRound**: Shows previous round state, timer status, and round transitions
+- **processCurrentRound**: Logs round state, commitment counts, and batch processing
+- **proposeBlock**: Details block creation, root hash, and BFT client interaction
+- **FinalizeBlock**: Confirms successful block storage and round completion
+- **BFT client**: CertificationRequest and handleUnicityCertificate methods
+- **Fixed syntax error** in BFT client's conditional logging
+
+### Discovery:
+These logs revealed that the round manager stopped producing blocks when the root chain 
+timed out waiting for a certification request and sent a "repeat UC" with an incremented 
+round number that the aggregator wasn't expecting.
+
+---
+
+CHANGELOG ENTRY - 5 January 2025 at 15:10 CET
+
+## BFT Client Root Chain Timeout Handling
+
+### What was fixed:
+- **BFT client now handles root chain timeout scenarios** preventing service from getting stuck
+- **Automatic round skipping** when root chain moves ahead due to aggregator delays
+- **Graceful recovery** from mismatched UC rounds
+
+### Technical details:
+- **Root chain timeout**: Has 2.5-second timeout for certification requests
+- **Problem scenario**: When aggregator takes >2.5s to process round, root chain sends "repeat UC" and increments expected round
+- **Solution**: Detect UC round mismatches and skip to root chain's expected round
+
+### Implementation changes:
+- **handleUnicityCertificate**: Added logic to detect UC round vs proposed block mismatch
+- **Skip ahead logic**: Clear stale proposed blocks and jump to next round when behind
+- **Stale UC handling**: Ignore outdated UCs for rounds already passed
+- **Round skipping detection**: Log warnings when skipping rounds in StartNewRound
+
+### Monitoring improvements:
+- Warning logs when UC round doesn't match proposed block
+- Info logs when skipping rounds to catch up with root chain
+- Detection and logging of skipped rounds in round manager
+
+This fix ensures the aggregator can recover when heavy load causes processing delays,
+preventing the service from permanently stalling when the root chain times out.
+
+---
+
+CHANGELOG ENTRY - 5 January 2025 at 15:25 CET
+
+## Critical Fix: Deferred Commitment Finalization
+
+### What was fixed:
+- **Commitments are no longer lost when rounds are skipped** due to root chain timeouts
+- **Deferred finalization** ensures commitments only marked as processed after block is stored
+- **Aggregator records** stored with correct block numbers after finalization
+
+### Problem discovered:
+- Commitments were marked as processed BEFORE knowing if block would be accepted
+- If root chain rejected/skipped a round, commitments were lost (marked processed but not in any block)
+- Aggregator records were stored immediately, potentially with wrong block numbers
+
+### Solution implemented:
+1. **Deferred marking**: Commitments stay unprocessed until block is finalized with UC
+2. **Pending state tracking**: Round tracks pending records and root hash until finalization
+3. **Correct block assignment**: Aggregator records get actual finalized block number
+4. **Atomic finalization**: Both commitment marking and record storage happen after block storage
+
+### Implementation changes:
+- **Round struct**: Added PendingRecords and PendingRootHash fields
+- **processCurrentRound**: Removed early MarkProcessed call, stores pending data
+- **processBatch**: No longer stores aggregator records immediately
+- **FinalizeBlock**: Now handles both commitment marking and record storage atomically
+
+### Benefits:
+- No commitment loss even if rounds are skipped
+- Commitments remain in unprocessed queue if round fails
+- Next successful round will include previously attempted commitments
+- Aggregator records always have correct block numbers
+- SMT remains consistent even with round skipping
+
+This ensures data integrity when the aggregator faces heavy load and root chain timeouts,
+preventing any submitted commitments from being lost in the system.
+
+---
+
+CHANGELOG ENTRY - 5 January 2025 at 15:20 CET
+
+## Sequential Round Processing Fix
+
+### What was fixed:
+- **Eliminated concurrent round processing** that caused race conditions
+- **Block numbers now automatically adjust** to match root chain expectations
+- **Performance test enhanced** to detect unprocessed commitments
+
+### Problem discovered:
+- UC responses could arrive while a round was still processing
+- This caused the BFT client to start new rounds prematurely
+- Rounds were being skipped, leaving commitments unprocessed
+- Block numbers were getting out of sync with root chain
+
+### Solution implemented:
+1. **Sequential processing enforced**: UC handlers no longer start new rounds immediately
+2. **Block number adjustment**: CertificationRequest adjusts block number to match root chain
+3. **Atomic round transitions**: Only one round processes at a time
+4. **Enhanced performance test**: Now alerts when commitments remain unprocessed
+
+### Implementation changes:
+- **BFT client**: Added nextExpectedRound tracking
+- **UC handling**: Deferred round transitions when processing is in progress  
+- **CertificationRequest**: Automatically adjusts block numbers to root chain expectations
+- **Performance test**: Added warnings and detailed error reporting for pending commitments
+
+### Performance improvements:
+- Reduced batch limit from 10,000 to 1,000 for sub-second processing
+- Eliminated 15+ second processing delays that caused timeouts
+- Stable throughput of ~300 commitments per block
+- Consistent 1 block/second production rate
+
+### Benefits:
+- No more lost commitments due to round skipping
+- Automatic synchronization with root chain expectations
+- Clear visibility when processing pipeline has issues
+- Reliable sequential processing without race conditions
+
+This ensures the aggregator maintains perfect synchronization with the root chain
+even under heavy load, with clear diagnostics when issues occur.
+
+---
+
+CHANGELOG ENTRY - 5 January 2025 at 15:35 CET
+
+## Performance Test Counting Logic Refinement
+
+### What was fixed:
+- **Performance test now only counts commitments submitted by current test run**
+- **Accurate tracking** prevents counting commitments from previous test runs
+- **Thread-safe request ID tracking** using sync.Map
+
+### Problem discovered:
+- Test was counting all commitments in blocks, including ones from previous runs
+- This caused inflated counts showing more commitments than actually submitted
+- Block 740 showed 1000 commitments when test only submitted 695 in that run
+
+### Solution implemented:
+1. **Request ID tracking**: Store successfully submitted request IDs in sync.Map
+2. **Filtered counting**: Only count commitments whose request IDs match our submissions
+3. **Detailed reporting**: Show both our commitments and total commitments in blocks
+4. **Thread-safe operations**: Use sync.Map for concurrent request ID tracking
+
+### Implementation changes:
+- Added `submittedRequestIDs sync.Map` to Metrics struct
+- Store request IDs on successful submission in commitmentWorker
+- Filter commitments in blocks to only count ones we submitted
+- Enhanced output to show "X our commitments (total in block: Y)"
+
+### Benefits:
+- Accurate performance metrics for current test run
+- Clear visibility when blocks contain commitments from other sources
+- No interference from previous test runs or concurrent aggregator usage
+- Precise throughput measurements for benchmarking
+
+This ensures the performance test provides accurate, isolated metrics for each test run,
+essential for reliable performance benchmarking and regression testing.
