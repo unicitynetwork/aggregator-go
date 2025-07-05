@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+env:
+  GO_VERSION: 1.24
+  RETENTION-DAYS: 1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: build
+        run: make build
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: vet
+        run: make vet
+      - name: test
+        run: make test
+
