@@ -185,7 +185,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		return fmt.Errorf("failed to store block: %w", err)
 	}
 
-	var requestIds []api.RequestID
+	requestIds := make([]api.RequestID, 0, len(rm.currentRound.Commitments))
 	for _, commitment := range rm.currentRound.Commitments {
 		requestIds = append(requestIds, commitment.RequestID)
 	}
