@@ -190,13 +190,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		requestIds = append(requestIds, commitment.RequestID)
 	}
 
-	blockRecord := &models.BlockRecords{
-		BlockNumber: block.Index,
-		RequestIDs:  requestIds,
-		CreatedAt:   block.CreatedAt,
-	}
-
-	if err := rm.storage.BlockRecordsStorage().Store(ctx, blockRecord); err != nil {
+	if err := rm.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds)); err != nil {
 		return fmt.Errorf("failed to store block record: %w", err)
 	}
 
