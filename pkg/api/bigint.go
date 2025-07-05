@@ -75,7 +75,7 @@ func (b *BigInt) String() string {
 
 // MarshalBSONValue implements bson.ValueMarshaler
 func (b *BigInt) MarshalBSONValue() (bsontype.Type, []byte, error) {
-	if b.Int == nil {
+	if b == nil || b.Int == nil {
 		return bson.MarshalValue("0")
 	}
 	return bson.MarshalValue(b.Int.String())
