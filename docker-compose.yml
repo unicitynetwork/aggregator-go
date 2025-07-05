@@ -9,8 +9,8 @@ services:
   bft-root:
     <<: *bft-base
     volumes:
-      - genesis-root:/genesis/root
-      - genesis:/genesis
+      - ./data/genesis-root:/genesis/root
+      - ./data/genesis:/genesis
     healthcheck:
       test: [ "CMD", "nc", "-zv", "bft-root", "8000" ]
       interval: 5s
@@ -37,9 +37,8 @@ services:
   bft-aggregator-genesis-gen:
     <<: *bft-base
     volumes:
-      #      - permissioned-tokens:/genesis/permissioned-tokens
-      - genesis-root:/genesis/root
-      - genesis:/genesis
+      - ./data/genesis-root:/genesis/root
+      - ./data/genesis:/genesis
     depends_on:
       bft-root:
         condition: service_healthy
@@ -54,7 +53,7 @@ services:
           echo "Aggregator genesis and config already exist, skipping initialization."
         else
           echo "Creating aggregator genesis..." &&
-          ubft shard-node init --home /genesis/aggregator --generate && 
+          ubft shard-node init --home /genesis/aggregator --generate &&
           echo "Creating aggregator partition configuration..." &&
           ubft shard-conf generate --home /genesis --network-id 3 --partition-id 7 --partition-type-id 7 --epoch-start 10 --node-info=/genesis/aggregator/node-info.json &&
           echo "Creating aggregator partition state..." &&
@@ -77,7 +76,7 @@ services:
         condition: service_completed_successfully
     restart: on-failure
     volumes:
-      - genesis:/genesis
+      - ./data/genesis:/genesis
     command: |
       /bin/sh -c "
         echo Uploading aggregator configuration &&
@@ -90,7 +89,6 @@ services:
     restart: unless-stopped
     ports:
       - "27017:27017"
-    #    network_mode: host
     networks:
       - default
     environment:
@@ -98,7 +96,7 @@ services:
       MONGO_INITDB_ROOT_PASSWORD: password
       MONGO_INITDB_DATABASE: aggregator
     volumes:
-      - mongodb_data:/data/db
+      - ./data/mongodb_data:/data/db
       - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
@@ -113,12 +111,11 @@ services:
     container_name: aggregator-service
     restart: unless-stopped
     ports:
-      - "3333:3000"
-    #    network_mode: host
+      - "3000:3000"
     networks:
       - default
     volumes:
-      - genesis:/app/bft-config
+      - ./data/genesis:/app/bft-config
     environment:
       # Server Configuration
       PORT: "3000"
@@ -189,9 +186,3 @@ services:
 
 networks:
   default:
-
-volumes:
-  genesis:
-  genesis-root:
-  mongodb_data:
-#    driver: local
