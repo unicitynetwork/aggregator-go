@@ -234,13 +234,25 @@ func (n *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 
 			// If root chain has moved ahead, we need to skip to catch up
 			if expectedRound < proposedRound {
-				n.logger.WithContext(ctx).Info("Root chain has moved ahead, will use next round number when block is finalized",
+				n.logger.WithContext(ctx).Warn("Root chain is behind our proposed round - likely timing issue",
 					"ucRound", expectedRound,
 					"ourProposedRound", proposedRound,
 					"nextRoundRequired", tr.Round)
-				// Don't start a new round yet - let the current one finish
-				// The round manager will use the correct round number when it's ready
-				return nil
+				// This UC is for an older round, but we still need to process it
+				// to stay in sync with root chain. Clear our proposed block and
+				// start fresh with the root chain's expected round
+				n.proposedBlock = nil
+				
+				// Start new round immediately with root chain's next round
+				n.logger.WithContext(ctx).Info("Starting new round to sync with root chain",
+					"nextRoundNumber", nextRoundNumber.String())
+				err := n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+				if err != nil {
+					n.logger.WithContext(ctx).Error("Failed to start new round for sync",
+						"nextRoundNumber", nextRoundNumber.String(),
+						"error", err.Error())
+				}
+				return err
 			}
 
 			// If UC is for an older round than proposed, it's a stale UC
@@ -249,10 +261,16 @@ func (n *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		}
 	}
 
-	// Normal case: we have a proposed block matching the UC round
+	// Check if we have a proposed block to finalize
 	if n.proposedBlock == nil {
 		n.logger.WithContext(ctx).Warn("No proposed block to finalize, starting next round",
+			"ucRound", expectedRound,
 			"nextRoundNumber", nextRoundNumber.String())
+		// This can happen if:
+		// 1. We just started and haven't proposed a block yet
+		// 2. We cleared the proposed block due to sync issues
+		// 3. The root chain advanced without us sending a certification request
+		
 		// Start the next round directly
 		err := n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
 		if err != nil {
@@ -346,14 +364,37 @@ func (n *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String())
 
-	// Check if we need to adjust the block number to match root chain expectations
+	// Always prefer the expected round number from root chain if available
 	expectedRound := n.nextExpectedRound.Load()
-	if expectedRound > 0 && expectedRound != block.Index.Uint64() {
-		n.logger.WithContext(ctx).Info("Adjusting block number to match root chain expectations",
-			"originalBlockNumber", block.Index.String(),
-			"adjustedBlockNumber", expectedRound)
-		// Update the block number to what root chain expects
+	if expectedRound > 0 {
+		originalBlockNumber := block.Index.Uint64()
+		if expectedRound != originalBlockNumber {
+			n.logger.WithContext(ctx).Warn("Adjusting block number to match root chain expectations",
+				"originalBlockNumber", originalBlockNumber,
+				"adjustedBlockNumber", expectedRound,
+				"difference", int64(expectedRound) - int64(originalBlockNumber))
+		} else {
+			n.logger.WithContext(ctx).Debug("Block number matches root chain expectations",
+				"blockNumber", expectedRound)
+		}
+		// Always use the expected round number when available
 		block.Index = api.NewBigInt(new(big.Int).SetUint64(expectedRound))
+	} else {
+		// No expected round yet - this might be the very first request
+		n.logger.WithContext(ctx).Debug("No expected round number from root chain yet, using proposed block number",
+			"blockNumber", block.Index.String())
+		// If we have a last UC, we can infer the expected round
+		if luc := n.luc.Load(); luc != nil {
+			// The next round should be the UC round + 1
+			inferredRound := luc.GetRoundNumber() + 1
+			if inferredRound != block.Index.Uint64() {
+				n.logger.WithContext(ctx).Warn("Inferring expected round from last UC",
+					"lastUCRound", luc.GetRoundNumber(),
+					"inferredRound", inferredRound,
+					"proposedRound", block.Index.Uint64())
+				block.Index = api.NewBigInt(new(big.Int).SetUint64(inferredRound))
+			}
+		}
 	}
 
 	n.proposedBlock = block
