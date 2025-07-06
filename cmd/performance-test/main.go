@@ -75,6 +75,12 @@ const (
 	requestsPerSec = 200 // Target requests per second
 )
 
+// BlockCommitmentInfo stores block number and commitment count
+type BlockCommitmentInfo struct {
+	BlockNumber int64
+	CommitmentCount int
+}
+
 // Metrics
 type Metrics struct {
 	totalRequests         int64
@@ -83,17 +89,22 @@ type Metrics struct {
 	requestIdExistsErr    int64
 	startTime             time.Time
 	blockCommitmentCounts []int
-	totalBlockCommitments int64        // Track total commitments processed in blocks
-	startingBlockNumber   int64        // Store starting block number
-	submittedRequestIDs   sync.Map     // Thread-safe map to track which request IDs we submitted
-	mutex                 sync.RWMutex // For protecting blockCommitmentCounts slice
+	blockCommitmentInfo   []BlockCommitmentInfo // Track block numbers with counts
+	totalBlockCommitments int64                 // Track total commitments processed in blocks
+	startingBlockNumber   int64                 // Store starting block number
+	submittedRequestIDs   sync.Map              // Thread-safe map to track which request IDs we submitted
+	mutex                 sync.RWMutex          // For protecting blockCommitmentCounts slice
 }
 
-func (m *Metrics) addBlockCommitmentCount(count int) {
+func (m *Metrics) addBlockCommitmentCount(blockNumber int64, count int) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 	// Track all blocks including empty ones to show the real pattern
 	m.blockCommitmentCounts = append(m.blockCommitmentCounts, count)
+	m.blockCommitmentInfo = append(m.blockCommitmentInfo, BlockCommitmentInfo{
+		BlockNumber: blockNumber,
+		CommitmentCount: count,
+	})
 	atomic.AddInt64(&m.totalBlockCommitments, int64(count))
 }
 
@@ -246,7 +257,7 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 			resp, err := client.call("submit_commitment", req)
 			if err != nil {
 				atomic.AddInt64(&metrics.failedRequests, 1)
-				fmt.Printf("Network error submitting %s: %v\n", req.RequestID, err)
+				// Don't print network errors - too noisy
 				continue
 			}
 
@@ -279,6 +290,10 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 				metrics.submittedRequestIDs.Store(string(req.RequestID), true)
 			} else {
 				atomic.AddInt64(&metrics.failedRequests, 1)
+				// Log unexpected status
+				if submitResp.Status != "" {
+					fmt.Printf("Unexpected status '%s' for request %s\n", submitResp.Status, req.RequestID)
+				}
 			}
 		}
 	}
@@ -428,12 +443,14 @@ func main() {
 			continue
 		}
 
-		// Count only commitments that we submitted
+			// Count only commitments that we submitted
 		ourCommitmentCount := 0
 		notOurs := 0
 		for _, commitment := range commitsResp.Commitments {
 			if _, exists := metrics.submittedRequestIDs.Load(commitment.RequestID); exists {
 				ourCommitmentCount++
+				// Mark this ID as found
+				metrics.submittedRequestIDs.Store(commitment.RequestID, "found")
 			} else {
 				notOurs++
 			}
@@ -445,7 +462,7 @@ func main() {
 		}
 
 		// Track block and update counts
-		metrics.addBlockCommitmentCount(ourCommitmentCount)
+		metrics.addBlockCommitmentCount(currentCheckBlock, ourCommitmentCount)
 		processedCount += int64(ourCommitmentCount)
 
 		if ourCommitmentCount > 0 {
@@ -514,11 +531,13 @@ func main() {
 						for _, commitment := range commitsResp.Commitments {
 							if _, exists := metrics.submittedRequestIDs.Load(commitment.RequestID); exists {
 								ourCommitmentCount++
+								// Mark this ID as found
+								metrics.submittedRequestIDs.Store(commitment.RequestID, "found")
 							}
 						}
 
 						if ourCommitmentCount > 0 {
-							metrics.addBlockCommitmentCount(ourCommitmentCount)
+							metrics.addBlockCommitmentCount(currentCheckBlock, ourCommitmentCount)
 							processedCount += int64(ourCommitmentCount)
 							fmt.Printf("Block %d: %d our commitments (total in block: %d, running total: %d/%d)\n",
 								currentCheckBlock, ourCommitmentCount, len(commitsResp.Commitments), processedCount, successful)
@@ -550,22 +569,35 @@ func main() {
 
 	// Debug: count tracked IDs and find missing ones
 	trackedCount := 0
+	foundCount := 0
 	var sampleMissingIDs []string
 
 	metrics.submittedRequestIDs.Range(func(key, value interface{}) bool {
 		trackedCount++
 		requestID := key.(string)
 		// Check if this ID was found in blocks
-		// (This is a simplified check - in reality we'd need to track this during block checking)
-		if trackedCount <= 10 && len(sampleMissingIDs) < 3 {
+		if value == "found" {
+			foundCount++
+		} else if len(sampleMissingIDs) < 5 {
+			// This is a missing ID
 			sampleMissingIDs = append(sampleMissingIDs, requestID)
 		}
 		return true
 	})
 
-	fmt.Printf("\nDebug: Tracked %d request IDs, successful submissions: %d\n", trackedCount, successful)
+	fmt.Printf("\nDebug: Tracked %d request IDs, found in blocks: %d, missing: %d\n", trackedCount, foundCount, trackedCount-foundCount)
 	if len(sampleMissingIDs) > 0 {
-		fmt.Printf("Sample tracked IDs: %s...\n", sampleMissingIDs[0][:20])
+		fmt.Printf("Sample missing IDs:\n")
+		for i, id := range sampleMissingIDs {
+			fmt.Printf("  %d. %s\n", i+1, id)
+		}
+	}
+	
+	// Additional debug: check if we have the right block range
+	if len(metrics.blockCommitmentInfo) > 0 {
+		firstBlock := metrics.blockCommitmentInfo[0].BlockNumber
+		lastBlock := metrics.blockCommitmentInfo[len(metrics.blockCommitmentInfo)-1].BlockNumber
+		fmt.Printf("Checked blocks from %d to %d (total: %d blocks)\n", firstBlock, lastBlock, len(metrics.blockCommitmentInfo))
 	}
 
 	if processedCount < successful {
@@ -598,13 +630,13 @@ func main() {
 	fmt.Printf("Commitments pending: %d\n", pendingCommitments)
 
 	if pendingCommitments > 0 {
-		fmt.Printf("\n⚠️  WARNING: %d commitments not found in blocks after checking!\n", pendingCommitments)
-		fmt.Printf("\nPossible causes:\n")
-		fmt.Printf("- Commitments are still being processed (check aggregator logs)\n")
-		fmt.Printf("- Test timeout was too short (currently 2 minutes)\n")
-		fmt.Printf("- Blocks were created after the test stopped checking\n")
-		fmt.Printf("\nNOTE: This may be a false positive. Check aggregator logs for 'totalCommitments'.\n")
-		fmt.Printf("If aggregator shows all %d commitments processed, they are likely in later blocks.\n", successful)
+		percentage := float64(pendingCommitments) / float64(successful) * 100
+		fmt.Printf("\n⚠️  WARNING: %d commitments (%.1f%%) not found in blocks!\n", pendingCommitments, percentage)
+		fmt.Printf("\nNote: Blocks may contain commitments from other sources (previous tests, etc.)\n")
+		fmt.Printf("The test correctly tracks only commitments submitted in this run.\n")
+		if percentage < 5.0 {
+			fmt.Printf("\nWith only %.1f%% missing, this is likely due to processing delays or queue limits.\n", percentage)
+		}
 	} else {
 		fmt.Printf("\n✅ SUCCESS: All %d commitments were found in blocks!\n", successful)
 	}
@@ -644,11 +676,44 @@ func main() {
 		}
 	}
 
-	if len(metrics.blockCommitmentCounts) > 0 && len(metrics.blockCommitmentCounts) <= 20 {
-		fmt.Printf("\nBlock commitment counts: %v\n", metrics.blockCommitmentCounts)
-	} else if len(metrics.blockCommitmentCounts) > 20 {
-		fmt.Printf("\nFirst 10 blocks: %v\n", metrics.blockCommitmentCounts[:10])
-		fmt.Printf("Last 10 blocks: %v\n", metrics.blockCommitmentCounts[len(metrics.blockCommitmentCounts)-10:])
+	if len(metrics.blockCommitmentInfo) > 0 {
+		fmt.Printf("\nBlock details:\n")
+		if len(metrics.blockCommitmentInfo) <= 20 {
+			// Print all blocks if 20 or fewer
+			for _, info := range metrics.blockCommitmentInfo {
+				fmt.Printf("  Block %d: %d commitments\n", info.BlockNumber, info.CommitmentCount)
+			}
+		} else {
+			// Print first 10 and last 10 if more than 20
+			fmt.Printf("  First 10 blocks:\n")
+			for i := 0; i < 10; i++ {
+				info := metrics.blockCommitmentInfo[i]
+				fmt.Printf("    Block %d: %d commitments\n", info.BlockNumber, info.CommitmentCount)
+			}
+			fmt.Printf("  ...\n")
+			fmt.Printf("  Last 10 blocks:\n")
+			for i := len(metrics.blockCommitmentInfo) - 10; i < len(metrics.blockCommitmentInfo); i++ {
+				info := metrics.blockCommitmentInfo[i]
+				fmt.Printf("    Block %d: %d commitments\n", info.BlockNumber, info.CommitmentCount)
+			}
+		}
+		
+		// Check for gaps in block numbers
+		var gaps []string
+		for i := 1; i < len(metrics.blockCommitmentInfo); i++ {
+			expected := metrics.blockCommitmentInfo[i-1].BlockNumber + 1
+			actual := metrics.blockCommitmentInfo[i].BlockNumber
+			if actual != expected {
+				gaps = append(gaps, fmt.Sprintf("Gap between blocks %d and %d (missing %d blocks)", 
+					metrics.blockCommitmentInfo[i-1].BlockNumber, actual, actual-expected))
+			}
+		}
+		if len(gaps) > 0 {
+			fmt.Printf("\nBlock gaps detected (possibly due to repeat UCs):\n")
+			for _, gap := range gaps {
+				fmt.Printf("  %s\n", gap)
+			}
+		}
 	}
 
 	fmt.Printf("========================================\n")
