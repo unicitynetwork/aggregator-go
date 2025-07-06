@@ -1,0 +1,11 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="perf-test" type="GoApplicationRunConfiguration" factoryName="Go Application">
+    <module name="aggregator-go" />
+    <working_directory value="$PROJECT_DIR$" />
+    <kind value="PACKAGE" />
+    <package value="github.com/unicitynetwork/aggregator-go/cmd/performance-test" />
+    <directory value="$PROJECT_DIR$" />
+    <filePath value="$PROJECT_DIR$/cmd/performance-test/main.go" />
+    <method v="2" />
+  </configuration>
+</component>

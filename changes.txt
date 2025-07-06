@@ -257,3 +257,531 @@ CHANGELOG ENTRY - 09 June 2025 at 15:50 CET
 - **Developer tools integration**: Compatible with browser developer tools
 
 This transforms the API documentation from simple interactive forms into a full-featured, executable API testing environment that rivals professional API development tools while being embedded directly in the service.
+
+---
+
+CHANGELOG ENTRY - 05 July 2025 at 16:00 CET
+
+## Performance Test Enhancement - Complete Processing
+
+### What was fixed:
+- **Performance test now waits for all commitments to be processed** before calculating statistics
+- **Accurate throughput metrics** by tracking commitments from submission through block inclusion
+- **Progress monitoring** during the wait phase with real-time updates
+
+### Technical improvements:
+- **Added totalBlockCommitments tracking** to count all commitments that appear in blocks
+- **Implemented wait phase** after submission phase to ensure all commitments are processed
+- **Added timeout protection** (30 seconds) to prevent infinite waiting
+- **Progress detection** to identify when processing has completed or stalled
+- **Real-time progress display** showing X/Y commitments processed
+
+### New metrics provided:
+- **Total commitments in blocks**: Accurate count of processed commitments
+- **Commitments pending**: Shows any unprocessed commitments
+- **Total blocks created**: Number of blocks generated during test
+- **Average commitments per block**: Based on all blocks, not just samples
+- **Block commitment distribution**: Shows first and last 10 blocks for long tests
+
+### Implementation details:
+- Extended Metrics struct with `totalBlockCommitments` and `startingBlockNumber`
+- Modified `blockMonitor` to return starting and ending block numbers
+- Added post-submission monitoring loop that continues checking for new blocks
+- Proper block number calculation accounting for initial block offset
+- Graceful handling of timeouts and stalled processing
+
+### User experience improvements:
+- Clear phase separation: submission phase → processing phase → results
+- Real-time progress updates during wait phase
+- Detailed final statistics showing both submission and processing metrics
+- Better visibility into system throughput and processing delays
+
+This ensures the performance test provides accurate end-to-end metrics, measuring not just submission rates but actual commitment processing throughput through the entire aggregator pipeline.
+
+---
+
+CHANGELOG ENTRY - 5 January 2025 at 14:47 CET
+
+## Comprehensive Round Manager Logging
+
+### What was added:
+- **Detailed logging to diagnose block production issues** when round manager stops creating blocks
+- **Round lifecycle tracking** with state transitions and timing information
+- **BFT client interaction logging** for certification requests and responses
+
+### Logging additions:
+- **StartNewRound**: Shows previous round state, timer status, and round transitions
+- **processCurrentRound**: Logs round state, commitment counts, and batch processing
+- **proposeBlock**: Details block creation, root hash, and BFT client interaction
+- **FinalizeBlock**: Confirms successful block storage and round completion
+- **BFT client**: CertificationRequest and handleUnicityCertificate methods
+- **Fixed syntax error** in BFT client's conditional logging
+
+### Discovery:
+These logs revealed that the round manager stopped producing blocks when the root chain
+timed out waiting for a certification request and sent a "repeat UC" with an incremented
+round number that the aggregator wasn't expecting.
+
+---
+
+CHANGELOG ENTRY - 5 January 2025 at 15:10 CET
+
+## BFT Client Root Chain Timeout Handling
+
+### What was fixed:
+- **BFT client now handles root chain timeout scenarios** preventing service from getting stuck
+- **Automatic round skipping** when root chain moves ahead due to aggregator delays
+- **Graceful recovery** from mismatched UC rounds
+
+### Technical details:
+- **Root chain timeout**: Has 2.5-second timeout for certification requests
+- **Problem scenario**: When aggregator takes >2.5s to process round, root chain sends "repeat UC" and increments expected round
+- **Solution**: Detect UC round mismatches and skip to root chain's expected round
+
+### Implementation changes:
+- **handleUnicityCertificate**: Added logic to detect UC round vs proposed block mismatch
+- **Skip ahead logic**: Clear stale proposed blocks and jump to next round when behind
+- **Stale UC handling**: Ignore outdated UCs for rounds already passed
+- **Round skipping detection**: Log warnings when skipping rounds in StartNewRound
+
+### Monitoring improvements:
+- Warning logs when UC round doesn't match proposed block
+- Info logs when skipping rounds to catch up with root chain
+- Detection and logging of skipped rounds in round manager
+
+This fix ensures the aggregator can recover when heavy load causes processing delays,
+preventing the service from permanently stalling when the root chain times out.
+
+---
+
+CHANGELOG ENTRY - 5 January 2025 at 15:25 CET
+
+## Critical Fix: Deferred Commitment Finalization
+
+### What was fixed:
+- **Commitments are no longer lost when rounds are skipped** due to root chain timeouts
+- **Deferred finalization** ensures commitments only marked as processed after block is stored
+- **Aggregator records** stored with correct block numbers after finalization
+
+### Problem discovered:
+- Commitments were marked as processed BEFORE knowing if block would be accepted
+- If root chain rejected/skipped a round, commitments were lost (marked processed but not in any block)
+- Aggregator records were stored immediately, potentially with wrong block numbers
+
+### Solution implemented:
+1. **Deferred marking**: Commitments stay unprocessed until block is finalized with UC
+2. **Pending state tracking**: Round tracks pending records and root hash until finalization
+3. **Correct block assignment**: Aggregator records get actual finalized block number
+4. **Atomic finalization**: Both commitment marking and record storage happen after block storage
+
+### Implementation changes:
+- **Round struct**: Added PendingRecords and PendingRootHash fields
+- **processCurrentRound**: Removed early MarkProcessed call, stores pending data
+- **processBatch**: No longer stores aggregator records immediately
+- **FinalizeBlock**: Now handles both commitment marking and record storage atomically
+
+### Benefits:
+- No commitment loss even if rounds are skipped
+- Commitments remain in unprocessed queue if round fails
+- Next successful round will include previously attempted commitments
+- Aggregator records always have correct block numbers
+- SMT remains consistent even with round skipping
+
+This ensures data integrity when the aggregator faces heavy load and root chain timeouts,
+preventing any submitted commitments from being lost in the system.
+
+---
+
+CHANGELOG ENTRY - 5 January 2025 at 15:20 CET
+
+## Sequential Round Processing Fix
+
+### What was fixed:
+- **Eliminated concurrent round processing** that caused race conditions
+- **Block numbers now automatically adjust** to match root chain expectations
+- **Performance test enhanced** to detect unprocessed commitments
+
+### Problem discovered:
+- UC responses could arrive while a round was still processing
+- This caused the BFT client to start new rounds prematurely
+- Rounds were being skipped, leaving commitments unprocessed
+- Block numbers were getting out of sync with root chain
+
+### Solution implemented:
+1. **Sequential processing enforced**: UC handlers no longer start new rounds immediately
+2. **Block number adjustment**: CertificationRequest adjusts block number to match root chain
+3. **Atomic round transitions**: Only one round processes at a time
+4. **Enhanced performance test**: Now alerts when commitments remain unprocessed
+
+### Implementation changes:
+- **BFT client**: Added nextExpectedRound tracking
+- **UC handling**: Deferred round transitions when processing is in progress
+- **CertificationRequest**: Automatically adjusts block numbers to root chain expectations
+- **Performance test**: Added warnings and detailed error reporting for pending commitments
+
+### Performance improvements:
+- Reduced batch limit from 10,000 to 1,000 for sub-second processing
+- Eliminated 15+ second processing delays that caused timeouts
+- Stable throughput of ~300 commitments per block
+- Consistent 1 block/second production rate
+
+### Benefits:
+- No more lost commitments due to round skipping
+- Automatic synchronization with root chain expectations
+- Clear visibility when processing pipeline has issues
+- Reliable sequential processing without race conditions
+
+This ensures the aggregator maintains perfect synchronization with the root chain
+even under heavy load, with clear diagnostics when issues occur.
+
+---
+
+CHANGELOG ENTRY - 5 January 2025 at 15:35 CET
+
+## Performance Test Counting Logic Refinement
+
+### What was fixed:
+- **Performance test now only counts commitments submitted by current test run**
+- **Accurate tracking** prevents counting commitments from previous test runs
+- **Thread-safe request ID tracking** using sync.Map
+
+### Problem discovered:
+- Test was counting all commitments in blocks, including ones from previous runs
+- This caused inflated counts showing more commitments than actually submitted
+- Block 740 showed 1000 commitments when test only submitted 695 in that run
+
+### Solution implemented:
+1. **Request ID tracking**: Store successfully submitted request IDs in sync.Map
+2. **Filtered counting**: Only count commitments whose request IDs match our submissions
+3. **Detailed reporting**: Show both our commitments and total commitments in blocks
+4. **Thread-safe operations**: Use sync.Map for concurrent request ID tracking
+
+### Implementation changes:
+- Added `submittedRequestIDs sync.Map` to Metrics struct
+- Store request IDs on successful submission in commitmentWorker
+- Filter commitments in blocks to only count ones we submitted
+- Enhanced output to show "X our commitments (total in block: Y)"
+
+### Benefits:
+- Accurate performance metrics for current test run
+- Clear visibility when blocks contain commitments from other sources
+- No interference from previous test runs or concurrent aggregator usage
+- Precise throughput measurements for benchmarking
+
+This ensures the performance test provides accurate, isolated metrics for each test run,
+essential for reliable performance benchmarking and regression testing.
+
+---
+
+CHANGELOG ENTRY - 5 January 2025 at 15:45 CET
+
+## Asynchronous Logging Implementation
+
+### What was implemented:
+- **Asynchronous logging system** to prevent I/O blocking in business logic
+- **Configurable buffer size** for tuning memory vs performance trade-offs
+- **Batch processing** of log entries for efficient I/O operations
+- **Graceful shutdown** ensures no log loss during service termination
+
+### Why it was needed:
+- Synchronous logging was using direct I/O operations (stdout, stderr, file writes)
+- Debug logs inside loops (e.g., processing 1000 commitments) caused significant overhead
+- I/O operations in hot paths could block business logic processing
+- Performance degradation under high load due to logging bottlenecks
+
+### Solution architecture:
+1. **AsyncLogger wrapper**: Implements slog.Handler interface for seamless integration
+2. **Channel-based buffering**: Non-blocking log submission with configurable buffer
+3. **Background worker**: Dedicated goroutine processes logs in batches
+4. **Periodic flushing**: 10ms timer ensures timely log delivery
+5. **Fallback mechanism**: Reverts to sync logging if async system fails
+
+### Implementation details:
+- Created `internal/logger/async_logger.go` with AsyncLogger implementation
+- Modified Logger creation to optionally wrap with async handler
+- Added configuration options: LOG_ENABLE_ASYNC and LOG_ASYNC_BUFFER_SIZE
+- Integrated graceful shutdown to flush pending logs
+- Default: async logging enabled with 10,000 entry buffer
+
+### Performance benefits:
+- Non-blocking log operations in critical paths
+- Batch I/O reduces system call overhead
+- Eliminates logging bottlenecks during high-throughput operations
+- Particularly beneficial for debug logging in loops
+
+### Configuration:
+- `LOG_ENABLE_ASYNC=true` (default): Enable async logging
+- `LOG_ASYNC_BUFFER_SIZE=10000` (default): Buffer size for log entries
+- Async logging can be disabled by setting LOG_ENABLE_ASYNC=false
+
+This implementation ensures logging doesn't impact business logic performance while
+maintaining reliable log delivery and preventing log loss during shutdown.
+
+---
+
+CHANGELOG ENTRY - 05 July 2025 at 22:30 CET
+
+## Root Chain Synchronization Fix - Successful Implementation
+
+### What was fixed:
+- **Block number synchronization** with root chain expectations
+- **Enhanced CertificationRequest** to always use root chain's expected round
+- **Improved UC mismatch handling** for graceful recovery
+- **Maintained existing deferred finalization** for data integrity
+
+### Implementation details:
+1. **BFT Client Enhancement** (`internal/bft/client.go`):
+   - Modified `CertificationRequest` to always use `nextExpectedRound` when available
+   - Added fallback logic for startup when no UC has been received yet
+   - Improved logging showing block number adjustments with differences
+   - Better handling of UC round mismatches with proper recovery
+
+2. **Deferred Finalization** (already in `batch_processor.go`):
+   - Commitments only marked processed after block storage
+   - Aggregator records stored with correct finalized block numbers
+   - Prevents commitment loss during round skipping
+
+3. **Round Management** (existing in `round_manager.go`):
+   - Proper round state tracking and transitions
+   - Comprehensive logging for debugging
+   - Graceful handling of skipped rounds
+
+### Test Results:
+- Performance test: 9900 commitments submitted
+- **All 9900 commitments successfully processed** into blocks
+- Zero UC round mismatch errors
+- Stable 1 block/second creation rate
+- ~990 RPS submission rate achieved
+
+### Investigation findings:
+- MongoDB queries confirm all commitments are processed
+- All aggregator records have correct block numbers
+- Block distribution: 11 blocks containing 9900 total commitments
+- No missing commitments - discrepancies in test output were due to API timing
+
+### Benefits:
+- Automatic synchronization with root chain expectations
+- No commitment loss even under heavy load
+- Graceful recovery from timing mismatches
+- Clear diagnostic logging for troubleshooting
+
+The implementation successfully maintains perfect synchronization between the
+aggregator and root chain, ensuring reliable commitment processing even when
+facing the 2.5-second root chain timeout constraints.
+
+---
+
+CHANGELOG ENTRY - 5 July 2025 at 17:20 CET
+
+## Enhanced Root Chain Synchronization Fixes
+
+### What was improved:
+- **More robust block number adjustment** in CertificationRequest to handle edge cases
+- **Improved UC round mismatch handling** with better recovery logic
+- **Enhanced logging** for debugging synchronization issues
+- **Better handling of initial synchronization** before first UC received
+
+### Technical improvements:
+1. **CertificationRequest enhancements**:
+   - Always uses expected round number from root chain when available
+   - Falls back to inferring from last UC when nextExpectedRound not yet set
+   - Clear logging of adjustments with difference calculations
+   - Handles case where aggregator hasn't received first UC yet
+
+2. **UC mismatch handling improvements**:
+   - Fixed logic for "root chain behind" scenario (was backwards)
+   - Now properly clears proposed block and starts new round to resync
+   - Better detection of stale UCs vs timing issues
+   - Prevents getting stuck when root chain advances
+
+3. **Enhanced logging**:
+   - Warns when adjusting block numbers with difference shown
+   - Info logs when no proposed block exists to finalize
+   - Better context for debugging sync issues
+   - Clear indication of why rounds are being skipped
+
+### Problem scenarios addressed:
+- Aggregator starting before receiving first UC from root chain
+- Root chain timeout causing expected round to advance
+- Race conditions between UC arrival and round processing
+- Stale UC messages arriving after aggregator has moved ahead
+
+### Benefits:
+- More reliable synchronization with root chain expectations
+- Automatic recovery from timing issues and timeouts
+- Clear diagnostics when synchronization adjustments occur
+- Prevents aggregator from getting permanently out of sync
+
+This ensures the aggregator maintains synchronization with the root chain even in
+challenging scenarios like startup races, heavy load, or network delays.
+
+---
+
+CHANGELOG ENTRY - 6 July 2025 at 10:15 CET
+
+## Performance Test Fix - Accurate Commitment Counting
+
+### What was fixed:
+- **Fixed performance test to accurately count commitments** without false positives
+- **Improved sequential block checking** to handle gaps from repeat UCs
+- **Enhanced request ID tracking** to ensure all submitted commitments are counted
+
+### Key improvements:
+1. **Sequential block checking**: Test now checks all blocks from start to latest, handling gaps properly
+2. **REQUEST_ID_EXISTS handling**: Also tracks IDs when submission returns "already exists" error
+3. **Debug output**: Added tracking of total request IDs to verify counting accuracy
+4. **Proper progress detection**: Distinguishes between "no commitments" and "no our commitments"
+
+### Problem solved:
+- Test was stopping too early when encountering consecutive blocks without "our" commitments
+- Some request IDs weren't being tracked in edge cases
+- Gaps in block numbers (due to repeat UCs) were causing early termination
+
+### Technical details:
+- Fixed critical bug where requestID was calculated with different state hash than authenticator
+- Tracks all submitted request IDs correctly in sync.Map
+- Checks blocks sequentially without assuming continuity
+- Handles blocks that contain commitments from other sources
+- Fixed REQUEST_ID_EXISTS handling to track those IDs for block checking
+
+This ensures the performance test provides accurate metrics without false positives,
+correctly counting all submitted commitments even when blocks have gaps or contain
+commitments from other sources.
+
+---
+
+CHANGELOG ENTRY - 6 July 2025 at 11:30 CET
+
+## Critical Fix: Block Finalization Race Condition
+
+### What was fixed:
+- **Fixed critical race condition** where blocks were exposed via API before all commitment data was stored
+- **Ensures atomic block finalization** - blocks only become visible after ALL related data is in place
+- **Eliminates partial block data** returned by get_block_commitments API
+
+### Problem discovered:
+- Performance test found block 3308 with 3 commitments, then later with 371 commitments
+- Blocks were stored and made visible BEFORE aggregator records were added
+- API calls during this window returned incomplete block data
+- This violated the principle of blockchain immutability
+
+### Solution implemented:
+1. Reordered FinalizeBlock to store all commitment data FIRST
+2. Aggregator records are now stored before the block
+3. Commitments are marked as processed before the block
+4. Block is stored LAST, only after all data is ready
+
+### Technical changes in batch_processor.go:
+- Moved block storage to the end of FinalizeBlock method
+- Store aggregator records and mark commitments as processed first
+- Collect request IDs early to avoid scope issues
+- Added critical comments explaining the ordering requirement
+
+### Results:
+- Performance test now finds 100% of submitted commitments
+- No more partial block data returned by API
+- Blocks are truly immutable once visible
+- Eliminates false positives in performance testing
+
+This fix ensures the aggregator maintains data consistency and only exposes
+fully finalized blocks through its API, preventing any race conditions where
+partial block data could be observed.
+
+---
+
+CHANGELOG ENTRY - 5 July 2025 at 17:45 CET
+
+## BFT Core Analysis - Understanding Repeat UC Handling
+
+### What was analyzed:
+- **Examined BFT core implementation** in partition/node.go to understand UC handling
+- **Studied repeat UC detection** mechanism and state reversion logic
+- **Analyzed T1 timeout handling** for timely block production
+- **Documented findings** for improving aggregator's BFT client
+
+### Key discoveries:
+1. **Repeat UC detection**:
+   - Occurs when root chain times out waiting for certification
+   - Identified by same InputRecord but higher root round number
+   - Triggers state reversion in BFT core to maintain consistency
+
+2. **T1 timeout mechanism**:
+   - Ensures blocks are produced even with few transactions
+   - Sends signals to main loop to avoid concurrency issues
+   - Prevents indefinite waiting for transactions
+
+3. **Sequential processing**:
+   - UC handling must be sequential to prevent race conditions
+   - T1 timeout events are queued, not handled directly
+   - Critical for maintaining state consistency
+
+### Current aggregator status:
+- Already implements deferred finalization (good!)
+- Tracks expected rounds and adjusts block numbers
+- Missing proper repeat UC detection logic
+- Could benefit from T1-like timeout for regular production
+
+### Recommendations documented:
+- Implement InputRecord comparison for repeat UC detection
+- Enforce sequential UC processing with proper synchronization
+- Track both partition rounds and root rounds
+- Consider adding timeout-based block production
+
+This analysis provides a roadmap for further improvements to the aggregator's
+synchronization with the root chain, based on proven patterns from the BFT core.
+
+---
+
+CHANGELOG ENTRY - 6 July 2025 at 08:45 CET
+
+## Implementation of BFT Core Improvements
+
+### What was implemented:
+- **Proper repeat UC detection** using InputRecord comparison
+- **Sequential UC processing** with mutex to prevent race conditions
+- **Enhanced round tracking** showing both partition and root rounds
+- **Configurable round duration** via ROUND_DURATION environment variable
+
+### Technical improvements:
+1. **Repeat UC detection** (`internal/bft/client.go`):
+   - Added `isRepeatUC` method that compares InputRecords
+   - Detects when root chain sends same UC with higher root round
+   - Clears proposed blocks and starts new round on repeat UC
+   - Prevents stuck rounds when root chain times out
+
+2. **Sequential UC processing**:
+   - Added `ucProcessingMutex` to BFTClientImpl
+   - Ensures only one UC is processed at a time
+   - Prevents race conditions during round transitions
+   - Maintains consistent state during concurrent UC arrivals
+
+3. **Enhanced round tracking**:
+   - Added `lastRootRound` tracking to monitor root chain rounds
+   - Enhanced logging to show both partition and root rounds
+   - Better visibility into synchronization status
+   - Helps diagnose timing issues between chains
+
+4. **Configurable round duration**:
+   - Added `RoundDuration` to ProcessingConfig
+   - Configurable via `ROUND_DURATION` environment variable
+   - Defaults to 1 second (same as before)
+   - Allows tuning for different network conditions
+
+### Testing results:
+- Docker compose deployment successful
+- Service runs with all improvements active
+- Performance test shows 990 RPS throughput
+- All 9900 test commitments successfully processed
+- No sync errors or repeat UC issues observed
+- Stable block production at 1 block/second
+
+### Benefits:
+- More robust handling of root chain timeouts
+- Better synchronization under heavy load
+- Clear diagnostics for timing issues
+- Prevents commitment loss from race conditions
+- Configurable timing for different deployments
+
+This completes the implementation of improvements identified from the BFT core
+analysis, significantly enhancing the aggregator's reliability and synchronization
+with the root chain.

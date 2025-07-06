@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 	"sync/atomic"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -41,6 +42,12 @@ type (
 		luc           atomic.Pointer[types.UnicityCertificate]
 		roundManager  RoundManager
 		proposedBlock *models.Block
+		// Track the next round number expected by root chain
+		nextExpectedRound atomic.Uint64
+		// Track the root round number to detect repeat UCs
+		lastRootRound atomic.Uint64
+		// Mutex to ensure sequential UC processing
+		ucProcessingMutex sync.Mutex
 	}
 
 	BFTClient interface {
@@ -183,7 +190,40 @@ func (n *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *cer
 	return n.handleUnicityCertificate(ctx, &cr.UC, &cr.Technical)
 }
 
+// isRepeatUC checks if the new UC is a repeat of the previous UC
+// A repeat UC has the same InputRecord but higher root round number
+func (n *BFTClientImpl) isRepeatUC(prevUC, newUC *types.UnicityCertificate) bool {
+	if prevUC == nil || newUC == nil {
+		return false
+	}
+	
+	// Check if InputRecords are equal (same partition round, state hash, etc.)
+	if prevUC.InputRecord.RoundNumber != newUC.InputRecord.RoundNumber {
+		return false
+	}
+	if !bytes.Equal(prevUC.InputRecord.Hash, newUC.InputRecord.Hash) {
+		return false
+	}
+	if !bytes.Equal(prevUC.InputRecord.PreviousHash, newUC.InputRecord.PreviousHash) {
+		return false
+	}
+	if !bytes.Equal(prevUC.InputRecord.BlockHash, newUC.InputRecord.BlockHash) {
+		return false
+	}
+	
+	// If InputRecords match but root round is higher, it's a repeat UC
+	return prevUC.UnicitySeal.RootChainRoundNumber < newUC.UnicitySeal.RootChainRoundNumber
+}
+
 func (n *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
+	// Ensure sequential processing of UCs to prevent race conditions
+	n.ucProcessingMutex.Lock()
+	defer n.ucProcessingMutex.Unlock()
+	
+	n.logger.WithContext(ctx).Debug("Acquired UC processing lock",
+		"ucRound", uc.GetRoundNumber(),
+		"rootRound", uc.GetRootRoundNumber())
+	
 	prevLUC := n.luc.Load()
 	// as we can be connected to several root nodes, we can receive the same UC multiple times
 	if uc.IsDuplicate(prevLUC) {
@@ -191,36 +231,165 @@ func (n *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		return nil
 	}
 
-	n.logger.WithContext(ctx).Debug(fmt.Sprintf("updated LUC; UC.Round: %d, RootRound: %d",
-		uc.GetRoundNumber(), uc.GetRootRoundNumber()))
+	// Check for repeat UC (same InputRecord but higher root round)
+	if n.isRepeatUC(prevLUC, uc) {
+		n.logger.WithContext(ctx).Warn("Received repeat UC - root chain timed out waiting for certification",
+			"partitionRound", uc.GetRoundNumber(),
+			"prevRootRound", prevLUC.GetRootRoundNumber(),
+			"newRootRound", uc.GetRootRoundNumber())
+		
+		// Store the repeat UC and update root round tracking
+		n.luc.Store(uc)
+		n.lastRootRound.Store(uc.GetRootRoundNumber())
+		
+		// Clear any proposed block as it wasn't accepted in time
+		if n.proposedBlock != nil {
+			n.logger.WithContext(ctx).Info("Clearing proposed block due to repeat UC",
+				"proposedBlockNumber", n.proposedBlock.Index.String())
+			n.proposedBlock = nil
+		}
+		
+		// Start new round immediately with the next expected round
+		nextRoundNumber := big.NewInt(0)
+		nextRoundNumber.SetUint64(tr.Round)
+		n.nextExpectedRound.Store(tr.Round)
+		
+		n.logger.WithContext(ctx).Info("Starting new round after repeat UC",
+			"nextRoundNumber", nextRoundNumber.String())
+		return n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+	}
+
+	// Log both partition and root rounds for better tracking
+	n.logger.WithContext(ctx).Info("Handling new unicity certificate",
+		"partitionRound", uc.GetRoundNumber(),
+		"rootRound", uc.GetRootRoundNumber(),
+		"prevPartitionRound", func() uint64 {
+			if prevLUC != nil {
+				return prevLUC.GetRoundNumber()
+			}
+			return 0
+		}(),
+		"prevRootRound", n.lastRootRound.Load())
+	
 	n.luc.Store(uc)
+	n.lastRootRound.Store(uc.GetRootRoundNumber())
 
 	nextRoundNumber := big.NewInt(0)
 	nextRoundNumber.SetUint64(tr.Round)
 
+	// Store the next expected round number
+	n.nextExpectedRound.Store(tr.Round)
+
 	wasInitializing := n.status.Load() == initializing
 	if wasInitializing {
-		n.logger.WithContext(ctx).Info("initialization finished, starting new round",
+		n.logger.WithContext(ctx).Info("BFT client initialization finished, starting first round",
 			"nextRoundNumber", nextRoundNumber.String())
 		// First UC received after an initial handshake with a root node -> initialization finished.
 		n.status.Store(normal)
-		return n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+		err := n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+		if err != nil {
+			n.logger.WithContext(ctx).Error("Failed to start first round after initialization",
+				"nextRoundNumber", nextRoundNumber.String(),
+				"error", err.Error())
+		}
+		return err
 	}
 
-	n.logger.WithContext(ctx).Info("finalize block")
+	// Check if we have a proposed block that matches the UC round
+	blockNum := "nil"
+	expectedRound := uc.GetRoundNumber()
+	if n.proposedBlock != nil {
+		blockNum = n.proposedBlock.Index.String()
+		proposedRound := n.proposedBlock.Index.Uint64()
+
+		// If the UC is for a different round than our proposed block, we need to handle it
+		if proposedRound != expectedRound {
+			n.logger.WithContext(ctx).Warn("UC round does not match proposed block round",
+				"ucRound", expectedRound,
+				"proposedBlockRound", proposedRound,
+				"nextRound", tr.Round)
+
+			// If root chain has moved ahead, we need to skip to catch up
+			if expectedRound < proposedRound {
+				n.logger.WithContext(ctx).Warn("Root chain is behind our proposed round - likely timing issue",
+					"ucRound", expectedRound,
+					"ourProposedRound", proposedRound,
+					"nextRoundRequired", tr.Round)
+				// This UC is for an older round, but we still need to process it
+				// to stay in sync with root chain. Clear our proposed block and
+				// start fresh with the root chain's expected round
+				n.proposedBlock = nil
+				
+				// Start new round immediately with root chain's next round
+				n.logger.WithContext(ctx).Info("Starting new round to sync with root chain",
+					"nextRoundNumber", nextRoundNumber.String())
+				err := n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+				if err != nil {
+					n.logger.WithContext(ctx).Error("Failed to start new round for sync",
+						"nextRoundNumber", nextRoundNumber.String(),
+						"error", err.Error())
+				}
+				return err
+			}
+
+			// If UC is for an older round than proposed, it's a stale UC
+			n.logger.WithContext(ctx).Debug("Received UC for older round than proposed block, ignoring")
+			return nil
+		}
+	}
+
+	// Check if we have a proposed block to finalize
+	if n.proposedBlock == nil {
+		n.logger.WithContext(ctx).Warn("No proposed block to finalize, starting next round",
+			"ucRound", expectedRound,
+			"nextRoundNumber", nextRoundNumber.String())
+		// This can happen if:
+		// 1. We just started and haven't proposed a block yet
+		// 2. We cleared the proposed block due to sync issues
+		// 3. The root chain advanced without us sending a certification request
+		
+		// Start the next round directly
+		err := n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+		if err != nil {
+			n.logger.WithContext(ctx).Error("Failed to start next round",
+				"nextRoundNumber", nextRoundNumber.String(),
+				"error", err.Error())
+		}
+		return err
+	}
+
+	n.logger.WithContext(ctx).Info("Finalizing block with unicity certificate",
+		"blockNumber", blockNum,
+		"ucRound", expectedRound)
 
 	ucCbor, err := types.Cbor.Marshal(uc)
 	if err != nil {
+		n.logger.WithContext(ctx).Error("Failed to encode unicity certificate",
+			"error", err.Error())
 		return fmt.Errorf("failed to encode unicity certificate: %w", err)
 	}
 	n.proposedBlock.UnicityCertificate = api.NewHexBytes(ucCbor)
 
 	if err := n.roundManager.FinalizeBlock(ctx, n.proposedBlock); err != nil {
-		return fmt.Errorf("failed to finalize block: %w", err)
+		n.logger.WithContext(ctx).Error("Failed to finalize block",
+			"blockNumber", n.proposedBlock.Index.String(),
+			"error", err.Error())
+		return err
 	}
-	n.logger.WithContext(ctx).Info("starting new round",
+
+	// Clear the proposed block after finalization
+	n.proposedBlock = nil
+
+	n.logger.WithContext(ctx).Info("Block finalized, starting new round",
 		"nextRoundNumber", nextRoundNumber.String())
-	return n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+
+	err = n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+	if err != nil {
+		n.logger.WithContext(ctx).Error("Failed to start new round",
+			"nextRoundNumber", nextRoundNumber.String(),
+			"error", err.Error())
+	}
+	return err
 }
 
 func (n *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash string, roundNumber uint64) error {
@@ -268,9 +437,58 @@ func (n *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 }
 
 func (n *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.Block) error {
+	n.logger.WithContext(ctx).Info("CertificationRequest called",
+		"blockNumber", block.Index.String(),
+		"rootHash", block.RootHash.String(),
+		"lastRootRound", n.lastRootRound.Load())
+
+	// Always prefer the expected round number from root chain if available
+	expectedRound := n.nextExpectedRound.Load()
+	if expectedRound > 0 {
+		originalBlockNumber := block.Index.Uint64()
+		if expectedRound != originalBlockNumber {
+			n.logger.WithContext(ctx).Warn("Adjusting block number to match root chain expectations",
+				"originalBlockNumber", originalBlockNumber,
+				"adjustedBlockNumber", expectedRound,
+				"difference", int64(expectedRound) - int64(originalBlockNumber))
+		} else {
+			n.logger.WithContext(ctx).Debug("Block number matches root chain expectations",
+				"blockNumber", expectedRound)
+		}
+		// Always use the expected round number when available
+		block.Index = api.NewBigInt(new(big.Int).SetUint64(expectedRound))
+	} else {
+		// No expected round yet - this might be the very first request
+		n.logger.WithContext(ctx).Debug("No expected round number from root chain yet, using proposed block number",
+			"blockNumber", block.Index.String())
+		// If we have a last UC, we can infer the expected round
+		if luc := n.luc.Load(); luc != nil {
+			// The next round should be the UC round + 1
+			inferredRound := luc.GetRoundNumber() + 1
+			if inferredRound != block.Index.Uint64() {
+				n.logger.WithContext(ctx).Warn("Inferring expected round from last UC",
+					"lastUCRound", luc.GetRoundNumber(),
+					"inferredRound", inferredRound,
+					"proposedRound", block.Index.Uint64())
+				block.Index = api.NewBigInt(new(big.Int).SetUint64(inferredRound))
+			}
+		}
+	}
+
 	n.proposedBlock = block
+
+	n.logger.WithContext(ctx).Debug("Sending certification request",
+		"blockNumber", n.proposedBlock.Index.String(),
+		"roundNumber", n.proposedBlock.Index.Uint64())
+
 	if err := n.sendCertificationRequest(ctx, n.proposedBlock.RootHash.String(), n.proposedBlock.Index.Uint64()); err != nil {
+		n.logger.WithContext(ctx).Error("Failed to send certification request",
+			"blockNumber", block.Index.String(),
+			"error", err.Error())
 		return fmt.Errorf("failed to send certification request: %w", err)
 	}
+
+	n.logger.WithContext(ctx).Info("Certification request completed",
+		"blockNumber", block.Index.String())
 	return nil
 }

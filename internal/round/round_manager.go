@@ -45,6 +45,9 @@ type Round struct {
 	State       RoundState
 	Commitments []*models.Commitment
 	Block       *models.Block
+	// Track commitments that have been added to SMT but not yet finalized in a block
+	PendingRecords []*models.AggregatorRecord
+	PendingRootHash string
 }
 
 // RoundManager handles the creation of blocks and processing of commitments
@@ -82,7 +85,7 @@ func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfac
 		storage:       storage,
 		smt:           threadSafeSMT,
 		stopChan:      make(chan struct{}),
-		roundDuration: time.Second, // 1 second rounds
+		roundDuration: cfg.Processing.RoundDuration, // Configurable round duration (default 1s)
 	}
 
 	if cfg.BFT.Enabled {
@@ -100,7 +103,9 @@ func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfac
 
 // Start begins the round manager operation
 func (rm *RoundManager) Start(ctx context.Context) error {
-	rm.logger.WithContext(ctx).Info("Starting Round Manager")
+	rm.logger.WithContext(ctx).Info("Starting Round Manager",
+		"roundDuration", rm.roundDuration.String(),
+		"batchLimit", rm.config.Processing.BatchLimit)
 
 	// Ensure any previous timers are stopped
 	rm.roundMutex.Lock()
@@ -232,11 +237,33 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 
 // StartNewRound initializes a new round
 func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
+	rm.logger.WithContext(ctx).Info("StartNewRound called",
+		"roundNumber", roundNumber.String())
+	
 	rm.roundMutex.Lock()
 	defer rm.roundMutex.Unlock()
 
+	// Log previous round state if exists
+	if rm.currentRound != nil {
+		rm.logger.WithContext(ctx).Info("Previous round state",
+			"previousRoundNumber", rm.currentRound.Number.String(),
+			"previousRoundState", rm.currentRound.State.String(),
+			"previousRoundAge", time.Since(rm.currentRound.StartTime).String())
+		
+		// Check if we're skipping rounds (root chain timeout scenario)
+		if rm.currentRound.Number != nil && roundNumber.Cmp(rm.currentRound.Number.Int) > 1 {
+			skippedRounds := new(big.Int).Sub(roundNumber.Int, rm.currentRound.Number.Int)
+			skippedRounds.Sub(skippedRounds, big.NewInt(1))
+			rm.logger.WithContext(ctx).Warn("Skipping rounds due to root chain timeout",
+				"currentRound", rm.currentRound.Number.String(),
+				"newRound", roundNumber.String(),
+				"skippedRounds", skippedRounds.String())
+		}
+	}
+
 	// Stop any existing timer
 	if rm.roundTimer != nil {
+		rm.logger.WithContext(ctx).Debug("Stopping existing round timer")
 		rm.roundTimer.Stop()
 	}
 
@@ -249,30 +276,45 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 
 	// Start round timer
 	rm.roundTimer = time.AfterFunc(rm.roundDuration, func() {
+		rm.logger.WithContext(ctx).Info("Round timer fired",
+			"roundNumber", roundNumber.String(),
+			"elapsed", rm.roundDuration.String())
 		if err := rm.processCurrentRound(ctx); err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to process round", "error", err.Error())
+			rm.logger.WithContext(ctx).Error("Failed to process round",
+				"roundNumber", roundNumber.String(),
+				"error", err.Error())
 		}
 	})
 
 	rm.logger.WithContext(ctx).Info("Started new round",
 		"roundNumber", roundNumber.String(),
-		"duration", rm.roundDuration.String())
+		"duration", rm.roundDuration.String(),
+		"timerSet", rm.roundTimer != nil)
 
 	return nil
 }
 
 // processCurrentRound processes the current round and creates a block
 func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
+	rm.logger.WithContext(ctx).Info("processCurrentRound called")
+	
 	rm.roundMutex.Lock()
 	if rm.currentRound == nil {
 		rm.roundMutex.Unlock()
+		rm.logger.WithContext(ctx).Error("No current round to process")
 		return fmt.Errorf("no current round to process")
 	}
+
+	// Log current round state
+	rm.logger.WithContext(ctx).Info("Current round state before processing",
+		"roundNumber", rm.currentRound.Number.String(),
+		"state", rm.currentRound.State.String(),
+		"age", time.Since(rm.currentRound.StartTime).String())
 
 	// Check if round is already being processed
 	if rm.currentRound.State != RoundStateCollecting {
 		rm.roundMutex.Unlock()
-		rm.logger.WithContext(ctx).Debug("Round already being processed, skipping",
+		rm.logger.WithContext(ctx).Warn("Round already being processed, skipping",
 			"roundNumber", rm.currentRound.Number.String(),
 			"state", rm.currentRound.State.String())
 		return nil
@@ -281,18 +323,23 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	// Change state to processing
 	rm.currentRound.State = RoundStateProcessing
 	roundNumber := rm.currentRound.Number
+	rm.logger.WithContext(ctx).Info("Changed round state to processing",
+		"roundNumber", roundNumber.String())
 
 	// Get any unprocessed commitments from storage
 	var err error
 	rm.currentRound.Commitments, err = rm.storage.CommitmentStorage().GetUnprocessedBatch(ctx, rm.config.Processing.BatchLimit)
 	if err != nil {
-		rm.logger.WithContext(ctx).Warn("Failed to get unprocessed commitments", "error", err.Error())
+		rm.logger.WithContext(ctx).Error("Failed to get unprocessed commitments",
+			"roundNumber", roundNumber.String(),
+			"error", err.Error())
 		rm.currentRound.Commitments = []*models.Commitment{}
 	}
 
 	rm.logger.WithContext(ctx).Info("Processing round",
 		"roundNumber", roundNumber.String(),
-		"commitmentCount", len(rm.currentRound.Commitments))
+		"commitmentCount", len(rm.currentRound.Commitments),
+		"batchLimit", rm.config.Processing.BatchLimit)
 	rm.roundMutex.Unlock()
 
 	// Process commitments in batch
@@ -300,22 +347,23 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	var records []*models.AggregatorRecord
 
 	if len(rm.currentRound.Commitments) > 0 {
-		// Mark commitments as processed FIRST to prevent duplicate processing
-		requestIDs := make([]api.RequestID, len(rm.currentRound.Commitments))
-		for i, commitment := range rm.currentRound.Commitments {
-			requestIDs[i] = commitment.RequestID
-		}
-
-		if err := rm.storage.CommitmentStorage().MarkProcessed(ctx, requestIDs); err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to mark commitments as processed", "error", err.Error())
-			return fmt.Errorf("failed to mark commitments as processed: %w", err)
-		}
-
+		// Process batch and add to SMT, but DO NOT mark as processed yet
 		rootHash, records, err = rm.processBatch(ctx, rm.currentRound.Commitments, roundNumber)
 		if err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to process batch, but commitments are already marked as processed", "error", err.Error())
+			rm.logger.WithContext(ctx).Error("Failed to process batch", "error", err.Error())
 			return fmt.Errorf("failed to process batch: %w", err)
 		}
+		
+		// Store pending data in the round for later finalization
+		rm.roundMutex.Lock()
+		rm.currentRound.PendingRecords = records
+		rm.currentRound.PendingRootHash = rootHash
+		rm.roundMutex.Unlock()
+		
+		rm.logger.WithContext(ctx).Info("Batch processed and added to SMT, awaiting finalization",
+			"roundNumber", roundNumber.String(),
+			"commitmentCount", len(rm.currentRound.Commitments),
+			"rootHash", rootHash)
 	} else {
 		// Empty round - use previous root hash or empty hash
 		rootHash = rm.smt.GetRootHash()
@@ -323,13 +371,26 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	}
 
 	// Create and propose block
+	rm.logger.WithContext(ctx).Info("Proposing block",
+		"roundNumber", roundNumber.String(),
+		"rootHash", rootHash,
+		"recordCount", len(records))
+		
 	if err := rm.proposeBlock(ctx, roundNumber, rootHash, records); err != nil {
+		rm.logger.WithContext(ctx).Error("Failed to propose block",
+			"roundNumber", roundNumber.String(),
+			"error", err.Error())
 		return fmt.Errorf("failed to propose block: %w", err)
 	}
 
 	// Update stats
 	rm.totalRounds++
 	rm.totalCommitments += int64(len(rm.currentRound.Commitments))
+	
+	rm.logger.WithContext(ctx).Info("Round processing completed successfully",
+		"roundNumber", roundNumber.String(),
+		"totalRounds", rm.totalRounds,
+		"totalCommitments", rm.totalCommitments)
 
 	return nil
 }

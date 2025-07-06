@@ -63,15 +63,18 @@ type HAConfig struct {
 
 // LoggingConfig holds logging configuration
 type LoggingConfig struct {
-	Level      string `mapstructure:"level"`
-	Format     string `mapstructure:"format"`
-	Output     string `mapstructure:"output"`
-	EnableJSON bool   `mapstructure:"enable_json"`
+	Level            string `mapstructure:"level"`
+	Format           string `mapstructure:"format"`
+	Output           string `mapstructure:"output"`
+	EnableJSON       bool   `mapstructure:"enable_json"`
+	EnableAsync      bool   `mapstructure:"enable_async"`
+	AsyncBufferSize  int    `mapstructure:"async_buffer_size"`
 }
 
 // ProcessingConfig holds batch processing configuration
 type ProcessingConfig struct {
-	BatchLimit int `mapstructure:"batch_limit"`
+	BatchLimit    int           `mapstructure:"batch_limit"`
+	RoundDuration time.Duration `mapstructure:"round_duration"`
 }
 
 type BFTConfig struct {
@@ -121,13 +124,16 @@ func Load() (*Config, error) {
 			ServerID:                      getEnvOrDefault("SERVER_ID", generateServerID()),
 		},
 		Logging: LoggingConfig{
-			Level:      getEnvOrDefault("LOG_LEVEL", "info"),
-			Format:     getEnvOrDefault("LOG_FORMAT", "json"),
-			Output:     getEnvOrDefault("LOG_OUTPUT", "stdout"),
-			EnableJSON: getEnvBoolOrDefault("LOG_ENABLE_JSON", true),
+			Level:           getEnvOrDefault("LOG_LEVEL", "info"),
+			Format:          getEnvOrDefault("LOG_FORMAT", "json"),
+			Output:          getEnvOrDefault("LOG_OUTPUT", "stdout"),
+			EnableJSON:      getEnvBoolOrDefault("LOG_ENABLE_JSON", true),
+			EnableAsync:     getEnvBoolOrDefault("LOG_ENABLE_ASYNC", true),
+			AsyncBufferSize: getEnvIntOrDefault("LOG_ASYNC_BUFFER_SIZE", 10000),
 		},
 		Processing: ProcessingConfig{
-			BatchLimit: getEnvIntOrDefault("BATCH_LIMIT", 1000),
+			BatchLimit:    getEnvIntOrDefault("BATCH_LIMIT", 1000),
+			RoundDuration: getEnvDurationOrDefault("ROUND_DURATION", "1s"),
 		},
 	}
 	config.BFT = BFTConfig{
