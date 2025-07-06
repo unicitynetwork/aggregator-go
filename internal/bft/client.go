@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 	"sync/atomic"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -43,6 +44,10 @@ type (
 		proposedBlock *models.Block
 		// Track the next round number expected by root chain
 		nextExpectedRound atomic.Uint64
+		// Track the root round number to detect repeat UCs
+		lastRootRound atomic.Uint64
+		// Mutex to ensure sequential UC processing
+		ucProcessingMutex sync.Mutex
 	}
 
 	BFTClient interface {
@@ -185,7 +190,40 @@ func (n *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *cer
 	return n.handleUnicityCertificate(ctx, &cr.UC, &cr.Technical)
 }
 
+// isRepeatUC checks if the new UC is a repeat of the previous UC
+// A repeat UC has the same InputRecord but higher root round number
+func (n *BFTClientImpl) isRepeatUC(prevUC, newUC *types.UnicityCertificate) bool {
+	if prevUC == nil || newUC == nil {
+		return false
+	}
+	
+	// Check if InputRecords are equal (same partition round, state hash, etc.)
+	if prevUC.InputRecord.RoundNumber != newUC.InputRecord.RoundNumber {
+		return false
+	}
+	if !bytes.Equal(prevUC.InputRecord.Hash, newUC.InputRecord.Hash) {
+		return false
+	}
+	if !bytes.Equal(prevUC.InputRecord.PreviousHash, newUC.InputRecord.PreviousHash) {
+		return false
+	}
+	if !bytes.Equal(prevUC.InputRecord.BlockHash, newUC.InputRecord.BlockHash) {
+		return false
+	}
+	
+	// If InputRecords match but root round is higher, it's a repeat UC
+	return prevUC.UnicitySeal.RootChainRoundNumber < newUC.UnicitySeal.RootChainRoundNumber
+}
+
 func (n *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
+	// Ensure sequential processing of UCs to prevent race conditions
+	n.ucProcessingMutex.Lock()
+	defer n.ucProcessingMutex.Unlock()
+	
+	n.logger.WithContext(ctx).Debug("Acquired UC processing lock",
+		"ucRound", uc.GetRoundNumber(),
+		"rootRound", uc.GetRootRoundNumber())
+	
 	prevLUC := n.luc.Load()
 	// as we can be connected to several root nodes, we can receive the same UC multiple times
 	if uc.IsDuplicate(prevLUC) {
@@ -193,9 +231,48 @@ func (n *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		return nil
 	}
 
-	n.logger.WithContext(ctx).Info(fmt.Sprintf("Handling new unicity certificate; UC.Round: %d, RootRound: %d",
-		uc.GetRoundNumber(), uc.GetRootRoundNumber()))
+	// Check for repeat UC (same InputRecord but higher root round)
+	if n.isRepeatUC(prevLUC, uc) {
+		n.logger.WithContext(ctx).Warn("Received repeat UC - root chain timed out waiting for certification",
+			"partitionRound", uc.GetRoundNumber(),
+			"prevRootRound", prevLUC.GetRootRoundNumber(),
+			"newRootRound", uc.GetRootRoundNumber())
+		
+		// Store the repeat UC and update root round tracking
+		n.luc.Store(uc)
+		n.lastRootRound.Store(uc.GetRootRoundNumber())
+		
+		// Clear any proposed block as it wasn't accepted in time
+		if n.proposedBlock != nil {
+			n.logger.WithContext(ctx).Info("Clearing proposed block due to repeat UC",
+				"proposedBlockNumber", n.proposedBlock.Index.String())
+			n.proposedBlock = nil
+		}
+		
+		// Start new round immediately with the next expected round
+		nextRoundNumber := big.NewInt(0)
+		nextRoundNumber.SetUint64(tr.Round)
+		n.nextExpectedRound.Store(tr.Round)
+		
+		n.logger.WithContext(ctx).Info("Starting new round after repeat UC",
+			"nextRoundNumber", nextRoundNumber.String())
+		return n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+	}
+
+	// Log both partition and root rounds for better tracking
+	n.logger.WithContext(ctx).Info("Handling new unicity certificate",
+		"partitionRound", uc.GetRoundNumber(),
+		"rootRound", uc.GetRootRoundNumber(),
+		"prevPartitionRound", func() uint64 {
+			if prevLUC != nil {
+				return prevLUC.GetRoundNumber()
+			}
+			return 0
+		}(),
+		"prevRootRound", n.lastRootRound.Load())
+	
 	n.luc.Store(uc)
+	n.lastRootRound.Store(uc.GetRootRoundNumber())
 
 	nextRoundNumber := big.NewInt(0)
 	nextRoundNumber.SetUint64(tr.Round)
@@ -362,7 +439,8 @@ func (n *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 func (n *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.Block) error {
 	n.logger.WithContext(ctx).Info("CertificationRequest called",
 		"blockNumber", block.Index.String(),
-		"rootHash", block.RootHash.String())
+		"rootHash", block.RootHash.String(),
+		"lastRootRound", n.lastRootRound.Load())
 
 	// Always prefer the expected round number from root chain if available
 	expectedRound := n.nextExpectedRound.Load()

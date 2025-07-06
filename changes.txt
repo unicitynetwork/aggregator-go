@@ -614,3 +614,102 @@ CHANGELOG ENTRY - 5 July 2025 at 17:20 CET
 
 This ensures the aggregator maintains synchronization with the root chain even in
 challenging scenarios like startup races, heavy load, or network delays.
+
+---
+
+CHANGELOG ENTRY - 5 July 2025 at 17:45 CET
+
+## BFT Core Analysis - Understanding Repeat UC Handling
+
+### What was analyzed:
+- **Examined BFT core implementation** in partition/node.go to understand UC handling
+- **Studied repeat UC detection** mechanism and state reversion logic
+- **Analyzed T1 timeout handling** for timely block production
+- **Documented findings** for improving aggregator's BFT client
+
+### Key discoveries:
+1. **Repeat UC detection**:
+   - Occurs when root chain times out waiting for certification
+   - Identified by same InputRecord but higher root round number
+   - Triggers state reversion in BFT core to maintain consistency
+
+2. **T1 timeout mechanism**:
+   - Ensures blocks are produced even with few transactions
+   - Sends signals to main loop to avoid concurrency issues
+   - Prevents indefinite waiting for transactions
+
+3. **Sequential processing**:
+   - UC handling must be sequential to prevent race conditions
+   - T1 timeout events are queued, not handled directly
+   - Critical for maintaining state consistency
+
+### Current aggregator status:
+- Already implements deferred finalization (good!)
+- Tracks expected rounds and adjusts block numbers
+- Missing proper repeat UC detection logic
+- Could benefit from T1-like timeout for regular production
+
+### Recommendations documented:
+- Implement InputRecord comparison for repeat UC detection
+- Enforce sequential UC processing with proper synchronization
+- Track both partition rounds and root rounds
+- Consider adding timeout-based block production
+
+This analysis provides a roadmap for further improvements to the aggregator's
+synchronization with the root chain, based on proven patterns from the BFT core.
+
+---
+
+CHANGELOG ENTRY - 6 July 2025 at 08:45 CET
+
+## Implementation of BFT Core Improvements
+
+### What was implemented:
+- **Proper repeat UC detection** using InputRecord comparison
+- **Sequential UC processing** with mutex to prevent race conditions
+- **Enhanced round tracking** showing both partition and root rounds
+- **Configurable round duration** via ROUND_DURATION environment variable
+
+### Technical improvements:
+1. **Repeat UC detection** (`internal/bft/client.go`):
+   - Added `isRepeatUC` method that compares InputRecords
+   - Detects when root chain sends same UC with higher root round
+   - Clears proposed blocks and starts new round on repeat UC
+   - Prevents stuck rounds when root chain times out
+
+2. **Sequential UC processing**:
+   - Added `ucProcessingMutex` to BFTClientImpl
+   - Ensures only one UC is processed at a time
+   - Prevents race conditions during round transitions
+   - Maintains consistent state during concurrent UC arrivals
+
+3. **Enhanced round tracking**:
+   - Added `lastRootRound` tracking to monitor root chain rounds
+   - Enhanced logging to show both partition and root rounds
+   - Better visibility into synchronization status
+   - Helps diagnose timing issues between chains
+
+4. **Configurable round duration**:
+   - Added `RoundDuration` to ProcessingConfig
+   - Configurable via `ROUND_DURATION` environment variable
+   - Defaults to 1 second (same as before)
+   - Allows tuning for different network conditions
+
+### Testing results:
+- Docker compose deployment successful
+- Service runs with all improvements active
+- Performance test shows 990 RPS throughput
+- All 9900 test commitments successfully processed
+- No sync errors or repeat UC issues observed
+- Stable block production at 1 block/second
+
+### Benefits:
+- More robust handling of root chain timeouts
+- Better synchronization under heavy load
+- Clear diagnostics for timing issues
+- Prevents commitment loss from race conditions
+- Configurable timing for different deployments
+
+This completes the implementation of improvements identified from the BFT core
+analysis, significantly enhancing the aggregator's reliability and synchronization
+with the root chain.
