@@ -10,11 +10,13 @@ import (
 
 // AsyncLogger wraps a Logger to provide asynchronous logging capabilities
 type AsyncLogger struct {
-	logger     *Logger
-	entries    chan logEntry
-	wg         sync.WaitGroup
-	stopped    atomic.Bool
-	bufferSize int
+	logger       *Logger
+	entries      chan logEntry
+	wg           sync.WaitGroup
+	stopped      atomic.Bool
+	bufferSize   int
+	droppedLogs  atomic.Uint64 // Counter for dropped log entries
+	lastReported atomic.Uint64 // Last reported dropped count
 }
 
 type logEntry struct {
@@ -33,6 +35,11 @@ type AsyncLoggerWrapper struct {
 // Stop gracefully shuts down the async logger
 func (alw *AsyncLoggerWrapper) Stop() {
 	alw.asyncLogger.Stop()
+}
+
+// GetDroppedLogs returns the total number of dropped log entries
+func (alw *AsyncLoggerWrapper) GetDroppedLogs() uint64 {
+	return alw.asyncLogger.GetDroppedLogs()
 }
 
 // NewAsyncLogger creates a new async logger with the specified buffer size
@@ -75,6 +82,10 @@ func (al *AsyncLogger) worker() {
 	ticker := time.NewTicker(10 * time.Millisecond) // Flush every 10ms if batch not full
 	defer ticker.Stop()
 	
+	// Periodic reporting of dropped logs
+	reportTicker := time.NewTicker(30 * time.Second)
+	defer reportTicker.Stop()
+	
 	for {
 		select {
 		case entry, ok := <-al.entries:
@@ -97,6 +108,15 @@ func (al *AsyncLogger) worker() {
 			if len(batch) > 0 {
 				al.flushBatch(batch)
 				batch = batch[:0]
+			}
+			
+		case <-reportTicker.C:
+			// Periodic reporting of dropped logs
+			if dropped := al.droppedLogs.Load(); dropped > 0 {
+				last := al.lastReported.Load()
+				if dropped > last {
+					al.checkAndReportDropped()
+				}
 			}
 		}
 	}
@@ -124,6 +144,14 @@ func (al *AsyncLogger) Stop() {
 	if al.stopped.CompareAndSwap(false, true) {
 		close(al.entries)
 		al.wg.Wait()
+		
+		// Report final dropped count if any
+		if dropped := al.droppedLogs.Load(); dropped > 0 {
+			al.logger.Warn("Async logger shutdown - final dropped log count",
+				"droppedTotal", dropped,
+				"bufferSize", al.bufferSize,
+			)
+		}
 	}
 }
 
@@ -169,8 +197,10 @@ func (acl *AsyncContextLogger) log(level slog.Level, msg string, args ...any) {
 	}:
 		// Successfully queued
 	default:
-		// Buffer full, increment dropped counter and optionally log
-		// In production, you might want to track dropped logs
+		// Buffer full, increment dropped counter
+		acl.AsyncLogger.droppedLogs.Add(1)
+		// Report periodically (every 1000 drops)
+		acl.checkAndReportDropped()
 	}
 }
 
@@ -230,8 +260,10 @@ func (h *asyncHandler) Handle(ctx context.Context, record slog.Record) error {
 		// Successfully queued
 		return nil
 	default:
-		// Buffer full, drop the log
-		// In production, you might want to track dropped logs
+		// Buffer full, increment dropped counter
+		h.asyncLogger.droppedLogs.Add(1)
+		// Report periodically
+		h.asyncLogger.checkAndReportDropped()
 		return nil
 	}
 }
@@ -250,4 +282,33 @@ func (h *asyncHandler) WithGroup(name string) slog.Handler {
 		asyncLogger: h.asyncLogger,
 		baseHandler: h.baseHandler.WithGroup(name),
 	}
+}
+
+// checkAndReportDropped reports dropped logs periodically
+func (al *AsyncLogger) checkAndReportDropped() {
+	current := al.droppedLogs.Load()
+	last := al.lastReported.Load()
+	
+	// Report every 1000 drops or if it's the first drop
+	if current-last >= 1000 || (current > 0 && last == 0) {
+		// Try to update lastReported atomically
+		if al.lastReported.CompareAndSwap(last, current) {
+			// Log synchronously to ensure this critical metric is recorded
+			al.logger.Warn("Async logger buffer full, logs dropped",
+				"droppedTotal", current,
+				"droppedSinceLastReport", current-last,
+				"bufferSize", al.bufferSize,
+			)
+		}
+	}
+}
+
+// GetDroppedLogs returns the total number of dropped log entries
+func (al *AsyncLogger) GetDroppedLogs() uint64 {
+	return al.droppedLogs.Load()
+}
+
+// checkAndReportDropped on AsyncContextLogger delegates to AsyncLogger
+func (acl *AsyncContextLogger) checkAndReportDropped() {
+	acl.AsyncLogger.checkAndReportDropped()
 }
