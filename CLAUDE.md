@@ -224,9 +224,7 @@ This ensures documentation stays accurate and useful for future development sess
 - Performance test tracks only commitments submitted in the current run for accurate metrics
 
 ### Docker Compose Management
-- **Stop and clean**: `docker compose down`
-- **Clean data**: `rm -rf ./data`
-- **Start fresh**: `docker compose up --force-recreate -d --build`
-- These commands ensure a clean state when troubleshooting sync issues
+- **Clean rebuild**: `make docker-run-clean`
+- This stops containers, removes data, and rebuilds everything fresh
 
 This ensures documentation stays accurate and useful for future development sessions.

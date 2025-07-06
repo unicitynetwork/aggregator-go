@@ -445,29 +445,11 @@ make lint
 make clean
 ```
 
-### Docker Development
+### Docker
 
 ```bash
-# Build Docker image
-make docker-build
-
-# Start services (MongoDB + Aggregator)
-make docker-up
-
-# View service logs
-make docker-logs
-
-# Restart services
-make docker-restart
-
-# Rebuild and restart services
-make docker-rebuild
-
-# Stop services
-make docker-down
-
-# Clean up Docker resources
-make docker-clean
+# Clean rebuild (stops, removes data, rebuilds)
+make docker-run-clean
 ```
 
 ### Project Structure
