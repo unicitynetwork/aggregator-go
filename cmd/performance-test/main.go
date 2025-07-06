@@ -71,13 +71,13 @@ type GetBlockHeightResponse struct {
 const (
 	aggregatorURL  = "http://localhost:3000"
 	testDuration   = 10 * time.Second
-	workerCount    = 10  // Number of concurrent workers
-	requestsPerSec = 200 // Target requests per second
+	workerCount    = 20   // Number of concurrent workers
+	requestsPerSec = 1000 // Target requests per second
 )
 
 // BlockCommitmentInfo stores block number and commitment count
 type BlockCommitmentInfo struct {
-	BlockNumber int64
+	BlockNumber     int64
 	CommitmentCount int
 }
 
@@ -102,7 +102,7 @@ func (m *Metrics) addBlockCommitmentCount(blockNumber int64, count int) {
 	// Track all blocks including empty ones to show the real pattern
 	m.blockCommitmentCounts = append(m.blockCommitmentCounts, count)
 	m.blockCommitmentInfo = append(m.blockCommitmentInfo, BlockCommitmentInfo{
-		BlockNumber: blockNumber,
+		BlockNumber:     blockNumber,
 		CommitmentCount: count,
 	})
 	atomic.AddInt64(&m.totalBlockCommitments, int64(count))
@@ -443,7 +443,7 @@ func main() {
 			continue
 		}
 
-			// Count only commitments that we submitted
+		// Count only commitments that we submitted
 		ourCommitmentCount := 0
 		notOurs := 0
 		for _, commitment := range commitsResp.Commitments {
@@ -592,7 +592,7 @@ func main() {
 			fmt.Printf("  %d. %s\n", i+1, id)
 		}
 	}
-	
+
 	// Additional debug: check if we have the right block range
 	if len(metrics.blockCommitmentInfo) > 0 {
 		firstBlock := metrics.blockCommitmentInfo[0].BlockNumber
@@ -697,14 +697,14 @@ func main() {
 				fmt.Printf("    Block %d: %d commitments\n", info.BlockNumber, info.CommitmentCount)
 			}
 		}
-		
+
 		// Check for gaps in block numbers
 		var gaps []string
 		for i := 1; i < len(metrics.blockCommitmentInfo); i++ {
 			expected := metrics.blockCommitmentInfo[i-1].BlockNumber + 1
 			actual := metrics.blockCommitmentInfo[i].BlockNumber
 			if actual != expected {
-				gaps = append(gaps, fmt.Sprintf("Gap between blocks %d and %d (missing %d blocks)", 
+				gaps = append(gaps, fmt.Sprintf("Gap between blocks %d and %d (missing %d blocks)",
 					metrics.blockCommitmentInfo[i-1].BlockNumber, actual, actual-expected))
 			}
 		}
