@@ -617,6 +617,39 @@ challenging scenarios like startup races, heavy load, or network delays.
 
 ---
 
+CHANGELOG ENTRY - 6 July 2025 at 10:15 CET
+
+## Performance Test Fix - Accurate Commitment Counting
+
+### What was fixed:
+- **Fixed performance test to accurately count commitments** without false positives
+- **Improved sequential block checking** to handle gaps from repeat UCs
+- **Enhanced request ID tracking** to ensure all submitted commitments are counted
+
+### Key improvements:
+1. **Sequential block checking**: Test now checks all blocks from start to latest, handling gaps properly
+2. **REQUEST_ID_EXISTS handling**: Also tracks IDs when submission returns "already exists" error
+3. **Debug output**: Added tracking of total request IDs to verify counting accuracy
+4. **Proper progress detection**: Distinguishes between "no commitments" and "no our commitments"
+
+### Problem solved:
+- Test was stopping too early when encountering consecutive blocks without "our" commitments
+- Some request IDs weren't being tracked in edge cases
+- Gaps in block numbers (due to repeat UCs) were causing early termination
+
+### Technical details:
+- Fixed critical bug where requestID was calculated with different state hash than authenticator
+- Tracks all submitted request IDs correctly in sync.Map
+- Checks blocks sequentially without assuming continuity
+- Handles blocks that contain commitments from other sources
+- Fixed REQUEST_ID_EXISTS handling to track those IDs for block checking
+
+This ensures the performance test provides accurate metrics without false positives,
+correctly counting all submitted commitments even when blocks have gaps or contain
+commitments from other sources.
+
+---
+
 CHANGELOG ENTRY - 5 July 2025 at 17:45 CET
 
 ## BFT Core Analysis - Understanding Repeat UC Handling
