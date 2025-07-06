@@ -66,38 +66,9 @@ deps:
 	@go mod download
 	@go mod tidy
 
-# Development setup
-dev-setup: deps
-	@echo "Setting up development environment..."
-	@go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-
-# Docker commands
-docker-build:
-	@echo "Building Docker image..."
-	@docker build -t unicity-aggregator .
-
-docker-up:
-	@echo "Starting services with Docker Compose..."
-	@docker compose up -d
-
-docker-down:
-	@echo "Stopping services..."
+docker-run-clean:
+	@echo "Rebuilding services with clean state..."
 	@docker compose down
-
-docker-logs:
-	@echo "Showing logs..."
-	@docker compose logs -f
-
-docker-restart:
-	@echo "Restarting services..."
-	@docker compose restart
-
-# Combined commands
-docker-rebuild: docker-down docker-build docker-up
-	@echo "Services rebuilt and restarted"
-
-docker-clean:
-	@echo "Cleaning up Docker resources..."
-	@docker compose down -v
-	@docker image rm unicity-aggregator 2>/dev/null || true
-	@docker image rm aggregator-go-aggregator 2>/dev/null || true
+	@rm -rf ./data
+	@docker compose up --force-recreate -d --build
+	@echo "Services rebuilt with clean state"
