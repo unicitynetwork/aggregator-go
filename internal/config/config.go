@@ -73,7 +73,8 @@ type LoggingConfig struct {
 
 // ProcessingConfig holds batch processing configuration
 type ProcessingConfig struct {
-	BatchLimit int `mapstructure:"batch_limit"`
+	BatchLimit    int           `mapstructure:"batch_limit"`
+	RoundDuration time.Duration `mapstructure:"round_duration"`
 }
 
 type BFTConfig struct {
@@ -131,7 +132,8 @@ func Load() (*Config, error) {
 			AsyncBufferSize: getEnvIntOrDefault("LOG_ASYNC_BUFFER_SIZE", 10000),
 		},
 		Processing: ProcessingConfig{
-			BatchLimit: getEnvIntOrDefault("BATCH_LIMIT", 1000),
+			BatchLimit:    getEnvIntOrDefault("BATCH_LIMIT", 1000),
+			RoundDuration: getEnvDurationOrDefault("ROUND_DURATION", "1s"),
 		},
 	}
 	config.BFT = BFTConfig{

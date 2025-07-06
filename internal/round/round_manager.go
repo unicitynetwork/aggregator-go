@@ -85,7 +85,7 @@ func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfac
 		storage:       storage,
 		smt:           threadSafeSMT,
 		stopChan:      make(chan struct{}),
-		roundDuration: time.Second, // 1 second rounds
+		roundDuration: cfg.Processing.RoundDuration, // Configurable round duration (default 1s)
 	}
 
 	if cfg.BFT.Enabled {
@@ -103,7 +103,9 @@ func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfac
 
 // Start begins the round manager operation
 func (rm *RoundManager) Start(ctx context.Context) error {
-	rm.logger.WithContext(ctx).Info("Starting Round Manager")
+	rm.logger.WithContext(ctx).Info("Starting Round Manager",
+		"roundDuration", rm.roundDuration.String(),
+		"batchLimit", rm.config.Processing.BatchLimit)
 
 	// Ensure any previous timers are stopped
 	rm.roundMutex.Lock()

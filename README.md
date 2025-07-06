@@ -145,6 +145,7 @@ The service is configured via environment variables:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `BATCH_LIMIT` | Maximum number of commitments to process per batch | `1000` |
+| `ROUND_DURATION` | Duration between block creation rounds | `1s` |
 
 ## API Endpoints
 

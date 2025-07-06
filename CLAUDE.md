@@ -222,3 +222,11 @@ This ensures documentation stays accurate and useful for future development sess
 - **ALWAYS use `make performance-test`** to run the performance test, not the direct binary
 - The make target ensures proper environment setup and consistent execution
 - Performance test tracks only commitments submitted in the current run for accurate metrics
+
+### Docker Compose Management
+- **Stop and clean**: `docker compose down`
+- **Clean data**: `rm -rf ./data`
+- **Start fresh**: `docker compose up --force-recreate -d --build`
+- These commands ensure a clean state when troubleshooting sync issues
+
+This ensures documentation stays accurate and useful for future development sessions.
