@@ -187,30 +187,23 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		"rootHash", block.RootHash.String(),
 		"hasUnicityCertificate", block.UnicityCertificate != nil)
 
-	// Store block
-	rm.logger.WithContext(ctx).Debug("Storing block in database",
-		"blockNumber", block.Index.String())
-
-	if err := rm.storage.BlockStorage().Store(ctx, block); err != nil {
-		rm.logger.WithContext(ctx).Error("Failed to store block",
-			"blockNumber", block.Index.String(),
-			"error", err.Error())
-		return fmt.Errorf("failed to store block: %w", err)
+	// CRITICAL: Store all commitment data BEFORE storing the block to prevent race conditions
+	// where API returns partial block data
+	
+	// First, collect all request IDs that will be in this block
+	rm.roundMutex.Lock()
+	requestIds := make([]api.RequestID, 0)
+	if rm.currentRound != nil {
+		requestIds = make([]api.RequestID, 0, len(rm.currentRound.Commitments))
+		for _, commitment := range rm.currentRound.Commitments {
+			requestIds = append(requestIds, commitment.RequestID)
+		}
 	}
-
-	requestIds := make([]api.RequestID, 0, len(rm.currentRound.Commitments))
-	for _, commitment := range rm.currentRound.Commitments {
-		requestIds = append(requestIds, commitment.RequestID)
-	}
-
-	if err := rm.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds)); err != nil {
-		return fmt.Errorf("failed to store block record: %w", err)
-	}
-
-	// Now that block is stored, finalize commitments and aggregator records
+	rm.roundMutex.Unlock()
+	
 	rm.roundMutex.Lock()
 	if rm.currentRound != nil && len(rm.currentRound.Commitments) > 0 {
-		rm.logger.WithContext(ctx).Debug("Finalizing commitments and records after successful block storage",
+		rm.logger.WithContext(ctx).Debug("Preparing commitment data before block storage",
 			"roundNumber", rm.currentRound.Number.String(),
 			"commitmentCount", len(rm.currentRound.Commitments),
 			"recordCount", len(rm.currentRound.PendingRecords))
@@ -223,7 +216,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		pendingRecords := rm.currentRound.PendingRecords
 		rm.roundMutex.Unlock()
 
-		// Store aggregator records first
+		// Store aggregator records BEFORE storing the block
 		if len(pendingRecords) > 0 {
 			rm.logger.WithContext(ctx).Debug("Storing aggregator records",
 				"count", len(pendingRecords))
@@ -255,31 +248,47 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 			}
 		}
 
-		// Mark commitments as processed in storage
+		// Mark commitments as processed BEFORE storing the block
 		if err := rm.storage.CommitmentStorage().MarkProcessed(ctx, requestIDs); err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to mark commitments as processed after finalization",
+			rm.logger.WithContext(ctx).Error("Failed to mark commitments as processed",
 				"error", err.Error(),
 				"blockNumber", block.Index.String())
-			// This is a critical error but block is already stored
-			// Log it but don't fail the finalization
-		} else {
-			rm.logger.WithContext(ctx).Info("Successfully marked commitments as processed",
-				"count", len(requestIDs),
-				"blockNumber", block.Index.String())
+			return fmt.Errorf("failed to mark commitments as processed: %w", err)
 		}
+		
+		rm.logger.WithContext(ctx).Info("Successfully prepared all commitment data",
+			"count", len(requestIDs),
+			"blockNumber", block.Index.String())
 
-		// Update current round with finalized block
-		rm.roundMutex.Lock()
-		if rm.currentRound != nil {
-			rm.currentRound.Block = block
-			// Clear pending data as it's now finalized
-			rm.currentRound.PendingRecords = nil
-			rm.currentRound.PendingRootHash = ""
-		}
-		rm.roundMutex.Unlock()
 	} else {
 		rm.roundMutex.Unlock()
 	}
+
+	// NOW store the block - after all commitment data is in place
+	rm.logger.WithContext(ctx).Debug("Storing block in database",
+		"blockNumber", block.Index.String())
+
+	if err := rm.storage.BlockStorage().Store(ctx, block); err != nil {
+		rm.logger.WithContext(ctx).Error("Failed to store block",
+			"blockNumber", block.Index.String(),
+			"error", err.Error())
+		return fmt.Errorf("failed to store block: %w", err)
+	}
+
+	// Store block records mapping
+	if err := rm.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds)); err != nil {
+		return fmt.Errorf("failed to store block record: %w", err)
+	}
+
+	// Update current round with finalized block
+	rm.roundMutex.Lock()
+	if rm.currentRound != nil {
+		rm.currentRound.Block = block
+		// Clear pending data as it's now finalized
+		rm.currentRound.PendingRecords = nil
+		rm.currentRound.PendingRootHash = ""
+	}
+	rm.roundMutex.Unlock()
 
 	rm.logger.WithContext(ctx).Info("Block finalized and stored successfully",
 		"blockNumber", block.Index.String(),
