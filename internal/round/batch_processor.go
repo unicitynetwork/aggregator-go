@@ -23,9 +23,9 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 
 	for i, commitment := range commitments {
 		// Generate leaf path from requestID
-		path, ok := new(big.Int).SetString("0x01"+string(commitment.RequestID), 0)
-		if !ok {
-			return "", nil, fmt.Errorf("failed to convert requestID %s to path", commitment.RequestID)
+		path, err := commitment.RequestID.GetPath()
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to get path for requestID %s: %w", commitment.RequestID, err)
 		}
 
 		// Create leaf value (hash of commitment data)
@@ -169,7 +169,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 
 	// CRITICAL: Store all commitment data BEFORE storing the block to prevent race conditions
 	// where API returns partial block data
-	
+
 	// First, collect all request IDs that will be in this block
 	rm.roundMutex.Lock()
 	requestIds := make([]api.RequestID, 0)
@@ -180,7 +180,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		}
 	}
 	rm.roundMutex.Unlock()
-	
+
 	rm.roundMutex.Lock()
 	if rm.currentRound != nil && len(rm.currentRound.Commitments) > 0 {
 		rm.logger.WithContext(ctx).Debug("Preparing commitment data before block storage",
@@ -235,7 +235,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 				"blockNumber", block.Index.String())
 			return fmt.Errorf("failed to mark commitments as processed: %w", err)
 		}
-		
+
 		rm.logger.WithContext(ctx).Info("Successfully prepared all commitment data",
 			"count", len(requestIDs),
 			"blockNumber", block.Index.String())

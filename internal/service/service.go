@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"math/big"
 	"strconv"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
@@ -222,14 +221,11 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		return &api.GetInclusionProofResponse{Authenticator: nil, MerkleTreePath: nil, TransactionHash: nil}, nil
 	}
 
-	// Generate the Merkle tree path using the SMT's GetPath method
-	// Convert RequestID to big.Int for SMT path lookup
-	requestIDBigInt, ok := new(big.Int).SetString("0x01"+string(req.RequestID), 0)
-	if !ok {
-		return nil, fmt.Errorf("invalid request ID format: %s", req.RequestID)
+	path, err := req.RequestID.GetPath()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
 	}
-
-	merkleTreePath := as.roundManager.GetSMT().GetPath(requestIDBigInt)
+	merkleTreePath := as.roundManager.GetSMT().GetPath(path)
 
 	// Convert model authenticator to API authenticator
 	apiAuthenticator := &api.Authenticator{
