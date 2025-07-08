@@ -800,8 +800,8 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 			expected string
 		}{
 			{"Small path", big.NewInt(0b1), "1", "1"},
-			{"Medium path", big.NewInt(0b1010), "1010", "10"},         // decimal representation
-			{"Large path", big.NewInt(0b10000000), "10000000", "128"}, // decimal representation
+			{"Medium path", big.NewInt(0b1010), "1010", "10"},         // decimal: 10
+			{"Large path", big.NewInt(0b10000000), "10000000", "128"}, // decimal: 128
 			{"Zero path", big.NewInt(0), "0", "0"},
 		}
 
@@ -832,4 +832,175 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestAddLeavesToExistingTree tests that AddLeaves adds leaves to existing tree instead of replacing it
+func TestAddLeavesToExistingTree(t *testing.T) {
+	smt := NewSparseMerkleTree(SHA256)
+
+	// Add initial leaves to create a tree (using known-working paths)
+	initialLeaves := []*Leaf{
+		{Path: big.NewInt(0b10), Value: []byte("value2")},  // binary: 10 (decimal 2)
+		{Path: big.NewInt(0b101), Value: []byte("value5")}, // binary: 101 (decimal 5)
+	}
+
+	err := smt.AddLeaves(initialLeaves)
+	require.NoError(t, err)
+
+	// Verify initial leaves are in the tree
+	leaf2, err := smt.GetLeaf(big.NewInt(0b10))
+	require.NoError(t, err)
+	require.NotNil(t, leaf2)
+	require.Equal(t, []byte("value2"), leaf2.Value)
+
+	leaf5, err := smt.GetLeaf(big.NewInt(0b101))
+	require.NoError(t, err)
+	require.NotNil(t, leaf5)
+	require.Equal(t, []byte("value5"), leaf5.Value)
+
+	// Store the initial root hash
+	initialRootHash := smt.GetRootHashHex()
+
+	// Add more leaves to the existing tree (using known-working paths)
+	additionalLeaves := []*Leaf{
+		{Path: big.NewInt(0b110), Value: []byte("value6")},  // binary: 110 (decimal 6)
+		{Path: big.NewInt(0b1001), Value: []byte("value9")}, // binary: 1001 (decimal 9)
+	}
+
+	err = smt.AddLeaves(additionalLeaves)
+	require.NoError(t, err)
+
+	// Verify all leaves (initial + additional) are still in the tree
+	leaf2, err = smt.GetLeaf(big.NewInt(0b10))
+	require.NoError(t, err)
+	require.NotNil(t, leaf2)
+	require.Equal(t, []byte("value2"), leaf2.Value)
+
+	leaf5, err = smt.GetLeaf(big.NewInt(0b101))
+	require.NoError(t, err)
+	require.NotNil(t, leaf5)
+	require.Equal(t, []byte("value5"), leaf5.Value)
+
+	leaf6, err := smt.GetLeaf(big.NewInt(0b110))
+	require.NoError(t, err)
+	require.NotNil(t, leaf6)
+	require.Equal(t, []byte("value6"), leaf6.Value)
+
+	leaf9, err := smt.GetLeaf(big.NewInt(0b1001))
+	require.NoError(t, err)
+	require.NotNil(t, leaf9)
+	require.Equal(t, []byte("value9"), leaf9.Value)
+
+	// Verify the root hash changed (because we added new leaves)
+	finalRootHash := smt.GetRootHashHex()
+	require.NotEqual(t, initialRootHash, finalRootHash)
+}
+
+// TestAddLeavesEquivalentToSequentialAddLeaf tests that AddLeaves produces the same result as sequential AddLeaf calls
+func TestAddLeavesEquivalentToSequentialAddLeaf(t *testing.T) {
+	// Test data (using non-conflicting paths)
+	leaves := []*Leaf{
+		{Path: big.NewInt(2), Value: []byte("value2")},   // binary: 10
+		{Path: big.NewInt(5), Value: []byte("value5")},   // binary: 101
+		{Path: big.NewInt(6), Value: []byte("value6")},   // binary: 110
+		{Path: big.NewInt(17), Value: []byte("value17")}, // binary: 10001
+	}
+	// Create tree using AddLeaves
+	smt1 := NewSparseMerkleTree(SHA256)
+	err := smt1.AddLeaves(leaves)
+	require.NoError(t, err)
+
+	// Create tree using sequential AddLeaf
+	smt2 := NewSparseMerkleTree(SHA256)
+	for _, leaf := range leaves {
+		err := smt2.AddLeaf(leaf.Path, leaf.Value)
+		require.NoError(t, err)
+	}
+
+	// Both trees should have the same root hash
+	require.Equal(t, smt1.GetRootHashHex(), smt2.GetRootHashHex())
+
+	// Both trees should have the same leaves
+	for _, leaf := range leaves {
+		leaf1, err := smt1.GetLeaf(leaf.Path)
+		require.NoError(t, err)
+		require.NotNil(t, leaf1)
+
+		leaf2, err := smt2.GetLeaf(leaf.Path)
+		require.NoError(t, err)
+		require.NotNil(t, leaf2)
+
+		require.Equal(t, leaf1.Value, leaf2.Value)
+		require.Equal(t, leaf1.Path, leaf2.Path)
+	}
+}
+
+// TestAddLeavesWithExistingAndNewToExistingTree tests adding leaves to a tree that already has some leaves
+func TestAddLeavesWithExistingAndNewToExistingTree(t *testing.T) {
+	smt := NewSparseMerkleTree(SHA256)
+	// Add some initial leaves (using non-conflicting paths)
+	err := smt.AddLeaf(big.NewInt(4), []byte("initial4")) // binary: 100
+	require.NoError(t, err)
+	err = smt.AddLeaf(big.NewInt(9), []byte("initial9")) // binary: 1001
+	require.NoError(t, err)
+
+	initialRootHash := smt.GetRootHashHex()
+
+	// Add more leaves using AddLeaves (non-conflicting paths)
+	newLeaves := []*Leaf{
+		{Path: big.NewInt(6), Value: []byte("new6")},   // binary: 110
+		{Path: big.NewInt(10), Value: []byte("new10")}, // binary: 1010
+		{Path: big.NewInt(13), Value: []byte("new13")}, // binary: 1101
+	}
+	err = smt.AddLeaves(newLeaves)
+	require.NoError(t, err)
+
+	// Verify all leaves are present
+	leaf4, err := smt.GetLeaf(big.NewInt(4))
+	require.NoError(t, err)
+	require.Equal(t, []byte("initial4"), leaf4.Value)
+
+	leaf6, err := smt.GetLeaf(big.NewInt(6))
+	require.NoError(t, err)
+	require.Equal(t, []byte("new6"), leaf6.Value)
+
+	leaf9, err := smt.GetLeaf(big.NewInt(9))
+	require.NoError(t, err)
+	require.Equal(t, []byte("initial9"), leaf9.Value)
+
+	leaf10, err := smt.GetLeaf(big.NewInt(10))
+	require.NoError(t, err)
+	require.Equal(t, []byte("new10"), leaf10.Value)
+
+	leaf13, err := smt.GetLeaf(big.NewInt(13))
+	require.NoError(t, err)
+	require.Equal(t, []byte("new13"), leaf13.Value)
+
+	// Root hash should be different after adding new leaves
+	finalRootHash := smt.GetRootHashHex()
+	require.NotEqual(t, initialRootHash, finalRootHash)
+}
+
+// TestAddLeavesEmptyList tests that AddLeaves with empty list doesn't affect the tree
+func TestAddLeavesEmptyList(t *testing.T) {
+	smt := NewSparseMerkleTree(SHA256)
+
+	// Add initial leaf (using non-conflicting path)
+	err := smt.AddLeaf(big.NewInt(8), []byte("value8")) // binary: 1000
+	require.NoError(t, err)
+
+	initialRootHash := smt.GetRootHashHex()
+
+	// Add empty list of leaves
+	err = smt.AddLeaves([]*Leaf{})
+	require.NoError(t, err)
+
+	// Tree should be unchanged
+	finalRootHash := smt.GetRootHashHex()
+	require.Equal(t, initialRootHash, finalRootHash)
+
+	// Original leaf should still be there
+	leaf8, err := smt.GetLeaf(big.NewInt(8))
+	require.NoError(t, err)
+	require.Equal(t, []byte("value8"), leaf8.Value)
 }

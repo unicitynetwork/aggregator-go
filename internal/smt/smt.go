@@ -279,126 +279,24 @@ func (smt *SparseMerkleTree) AddLeaf(path *big.Int, value []byte) error {
 	return nil
 }
 
-// AddLeaves adds multiple leaves efficiently (batch operation for performance)
+// AddLeaves adds multiple leaves to the existing tree
 // This produces the EXACT same tree structure as sequential AddLeaf calls,
-// but optimizes by avoiding intermediate hash calculations
+// and maintains the existing tree structure when adding new leaves
 func (smt *SparseMerkleTree) AddLeaves(leaves []*Leaf) error {
 	if len(leaves) == 0 {
 		return nil
 	}
 
-	// Start with empty tree
-	smt.root = NewRootNode(smt.algorithm, nil, nil)
-
-	// Add leaves one by one using the same logic as AddLeaf
-	// but defer hash calculations for better performance
+	// Add leaves one by one to the existing tree using AddLeaf
+	// This ensures that new leaves are added to the existing tree structure
 	for _, leaf := range leaves {
-		err := smt.addLeafBatch(leaf.Path, leaf.Value)
+		err := smt.AddLeaf(leaf.Path, leaf.Value)
 		if err != nil {
 			return err
 		}
 	}
 
 	return nil
-}
-
-// addLeafBatch is optimized for batch operations using lazy hash calculation
-func (smt *SparseMerkleTree) addLeafBatch(path *big.Int, value []byte) error {
-	isRight := new(big.Int).And(path, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
-
-	var left, right Branch
-
-	if isRight {
-		left = smt.root.Left
-		if smt.root.Right != nil {
-			newRight, err := smt.buildTreeLazy(smt.root.Right, path, value)
-			if err != nil {
-				return err
-			}
-			right = newRight
-		} else {
-			right = NewLeafBranchLazy(smt.algorithm, path, value)
-		}
-	} else {
-		if smt.root.Left != nil {
-			newLeft, err := smt.buildTreeLazy(smt.root.Left, path, value)
-			if err != nil {
-				return err
-			}
-			left = newLeft
-		} else {
-			left = NewLeafBranchLazy(smt.algorithm, path, value)
-		}
-		right = smt.root.Right
-	}
-
-	smt.root = NewRootNode(smt.algorithm, left, right)
-	return nil
-}
-
-// buildTreeLazy matches TypeScript buildTree logic but uses lazy hash calculation
-func (smt *SparseMerkleTree) buildTreeLazy(branch Branch, remainingPath *big.Int, value []byte) (Branch, error) {
-	commonPath := calculateCommonPath(remainingPath, branch.GetPath())
-
-	// TypeScript: const isRight = (remainingPath >> commonPath.length) & 1n;
-	shifted := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
-	isRight := new(big.Int).And(shifted, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
-
-	if commonPath.path.Cmp(remainingPath) == 0 {
-		return nil, fmt.Errorf("Cannot add leaf inside branch")
-	}
-
-	// If a leaf must be split from the middle
-	if branch.IsLeaf() {
-		leafBranch := branch.(*LeafBranch)
-		if commonPath.path.Cmp(leafBranch.Path) == 0 {
-			return nil, fmt.Errorf("Cannot extend tree through leaf")
-		}
-
-		// TypeScript: branch.path >> commonPath.length
-		oldBranchPath := new(big.Int).Rsh(leafBranch.Path, uint(commonPath.length.Uint64()))
-		oldBranch := NewLeafBranchLazy(smt.algorithm, oldBranchPath, leafBranch.Value)
-
-		// TypeScript: remainingPath >> commonPath.length
-		newBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
-		newBranch := NewLeafBranchLazy(smt.algorithm, newBranchPath, value)
-
-		if isRight {
-			return NewNodeBranchLazy(smt.algorithm, commonPath.path, oldBranch, newBranch), nil
-		} else {
-			return NewNodeBranchLazy(smt.algorithm, commonPath.path, newBranch, oldBranch), nil
-		}
-	}
-
-	// If node branch is split in the middle
-	nodeBranch := branch.(*NodeBranch)
-	if commonPath.path.Cmp(nodeBranch.Path) < 0 {
-		newBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
-		newBranch := NewLeafBranchLazy(smt.algorithm, newBranchPath, value)
-
-		oldBranchPath := new(big.Int).Rsh(nodeBranch.Path, uint(commonPath.length.Uint64()))
-		oldBranch := NewNodeBranchLazy(smt.algorithm, oldBranchPath, nodeBranch.Left, nodeBranch.Right)
-
-		if isRight {
-			return NewNodeBranchLazy(smt.algorithm, commonPath.path, oldBranch, newBranch), nil
-		} else {
-			return NewNodeBranchLazy(smt.algorithm, commonPath.path, newBranch, oldBranch), nil
-		}
-	}
-
-	if isRight {
-		newRight, err := smt.buildTreeLazy(nodeBranch.Right, new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64())), value)
-		if err != nil {
-			return nil, err
-		}
-		return NewNodeBranchLazy(smt.algorithm, nodeBranch.Path, nodeBranch.Left, newRight), nil
-	} else {
-		newLeft, err := smt.buildTreeLazy(nodeBranch.Left, new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64())), value)
-		if err != nil {
-			return nil, err
-		}
-		return NewNodeBranchLazy(smt.algorithm, nodeBranch.Path, newLeft, nodeBranch.Right), nil
-	}
 }
 
 // GetRootHash returns the root hash as hex string with imprint
@@ -479,14 +377,14 @@ func (smt *SparseMerkleTree) buildTree(branch Branch, remainingPath *big.Int, va
 	isRight := new(big.Int).And(shifted, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
 
 	if commonPath.path.Cmp(remainingPath) == 0 {
-		return nil, fmt.Errorf("Cannot add leaf inside branch")
+		return nil, fmt.Errorf("cannot add leaf inside branch")
 	}
 
 	// If a leaf must be split from the middle
 	if branch.IsLeaf() {
 		leafBranch := branch.(*LeafBranch)
 		if commonPath.path.Cmp(leafBranch.Path) == 0 {
-			return nil, fmt.Errorf("Cannot extend tree through leaf")
+			return nil, fmt.Errorf("cannot extend tree through leaf")
 		}
 
 		// TypeScript: branch.path >> commonPath.length
