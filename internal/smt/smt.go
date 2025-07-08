@@ -2,6 +2,7 @@ package smt
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 )
@@ -605,8 +606,13 @@ func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, sibling
 
 	// Add branch hash if branch exists
 	if branch != nil {
-		branchHash := branch.CalculateHash(smt.algorithm)
-		step.Branch = []string{branchHash.ToHex()}
+		// If it's a LeafBranch, use the value instead of the hash
+		if leafBranch, ok := branch.(*LeafBranch); ok {
+			step.Branch = []string{hex.EncodeToString(leafBranch.Value)}
+		} else {
+			branchHash := branch.CalculateHash(smt.algorithm)
+			step.Branch = []string{branchHash.ToHex()}
+		}
 	}
 
 	// Add sibling hash if sibling exists
