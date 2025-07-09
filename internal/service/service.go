@@ -218,22 +218,24 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		}
 
 		// Commitment exists but not yet finalized
-		proof := api.NewInclusionProof(req.RequestID, nil, nil, []api.ProofNode{}, api.HexBytes{}, false)
-		return &api.GetInclusionProofResponse{InclusionProof: proof}, nil
+		return &api.GetInclusionProofResponse{Authenticator: nil, MerkleTreePath: nil, TransactionHash: nil}, nil
 	}
 
-	// TODO: Generate actual inclusion proof from SMT when available
-	// For now, return a basic proof indicating inclusion
-	proof := api.NewInclusionProof(
-		req.RequestID,
-		modelToAPIBigInt(record.BlockNumber),
-		modelToAPIBigInt(record.LeafIndex),
-		[]api.ProofNode{}, // TODO: Generate real proof path
-		api.NewHexBytes([]byte(as.roundManager.GetSMT().GetRootHash())),
-		true,
-	)
+	path, err := req.RequestID.GetPath()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
+	}
+	merkleTreePath := as.roundManager.GetSMT().GetPath(path)
 
-	return &api.GetInclusionProofResponse{InclusionProof: proof}, nil
+	// Convert model authenticator to API authenticator
+	apiAuthenticator := &api.Authenticator{
+		Algorithm: record.Authenticator.Algorithm,
+		PublicKey: record.Authenticator.PublicKey,
+		Signature: record.Authenticator.Signature,
+		StateHash: api.StateHash(record.Authenticator.StateHash.String()),
+	}
+
+	return &api.GetInclusionProofResponse{Authenticator: apiAuthenticator, MerkleTreePath: merkleTreePath, TransactionHash: &record.TransactionHash}, nil
 }
 
 // GetNoDeletionProof retrieves the global no-deletion proof
