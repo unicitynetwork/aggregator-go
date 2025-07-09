@@ -54,9 +54,12 @@ go build -o bin/aggregator ./cmd/aggregator
 
 ### Quick Start with Docker
 
-The easiest way to get started is using Docker Compose:
+The easiest way to get started is using Docker Compose. The setup includes automatic permission handling to avoid file ownership issues:
 
 ```bash
+# Setup proper user permissions (recommended first time)
+make docker-setup
+
 # Start both MongoDB and Aggregator services
 make docker-up
 
@@ -65,11 +68,23 @@ make docker-logs
 
 # Stop services
 make docker-down
+
+# Clean up all data (including volumes)
+make docker-clean
 ```
 
 This will start:
 - **MongoDB** on `localhost:27017` with admin credentials
 - **Aggregator** on `localhost:3333` with full functionality
+
+#### Permission Management
+
+The Docker setup now runs containers with your user permissions to avoid file ownership issues:
+
+- **Automatic User Mapping**: Containers run with your UID/GID to prevent root-owned files
+- **Setup Script**: Run `./scripts/setup.sh` to configure permissions properly
+- **Cleanup Script**: Use `./scripts/cleanup.sh` to safely remove all data directories
+- **Environment Variables**: UID/GID are automatically set in `.env` file
 
 ### Basic Usage (Local Development)
 
@@ -628,6 +643,77 @@ This Go implementation maintains API compatibility with the TypeScript version w
 - **Lower Memory Usage**: More efficient memory management
 - **Type Safety**: Compile-time type checking
 - **Easier Deployment**: Single binary deployment
+
+## Troubleshooting
+
+### Docker Permission Issues
+
+If you encounter permission issues with the `data/` folder or containers can't access configuration files:
+
+```bash
+# Problem: Cannot remove data/ folder, requires admin rights
+# Solution: Use the cleanup script
+./scripts/cleanup.sh
+
+# Problem: Containers can't read configuration files
+# Solution: Fix file permissions
+./scripts/fix-permissions.sh
+# or
+make docker-fix-permissions
+
+# Or manually with sudo (if needed)
+sudo rm -rf ./data/
+```
+
+**Root Cause**: Previous versions ran containers as root, creating files with root ownership and restrictive permissions.
+
+**Prevention**: Always run `./scripts/setup.sh` before starting containers for the first time.
+
+### Common Issues
+
+#### MongoDB Connection Failed
+```bash
+# Check if MongoDB is running
+docker-compose ps mongodb
+
+# Check MongoDB logs
+docker-compose logs mongodb
+```
+
+#### BFT Configuration Missing
+```bash
+# Ensure BFT configuration files exist
+ls -la data/genesis/
+```
+
+#### Container Permission Errors
+```bash
+# Problem: "Permission denied" errors when accessing config files
+# Solution: Fix file permissions
+./scripts/fix-permissions.sh
+docker-compose restart
+
+# Or use the Makefile
+make docker-fix-permissions
+```
+
+#### Container Restart Loop
+```bash
+# Check aggregator logs for permission errors
+docker-compose logs aggregator
+
+# If you see "can't open" or "Permission denied" errors:
+./scripts/fix-permissions.sh
+docker-compose restart
+```
+
+#### Port Already in Use
+```bash
+# Check what's using the port
+lsof -i :3000  # or :27017 for MongoDB
+
+# Stop conflicting services or change ports in docker-compose.yml
+```
 
 ## Contributing
 

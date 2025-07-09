@@ -1,4 +1,4 @@
-.PHONY: build test clean run lint fmt vet performance-test
+.PHONY: build test clean run lint fmt vet performance-test docker-setup docker-fix-permissions docker-up docker-logs docker-down docker-clean docker-run-clean
 
 # Build variables
 BINARY_NAME=aggregator
@@ -66,9 +66,32 @@ deps:
 	@go mod download
 	@go mod tidy
 
-docker-run-clean:
-	@echo "Rebuilding services with clean state..."
+# Docker commands
+docker-setup:
+	@echo "Setting up Docker environment with proper permissions..."
+	@./scripts/setup.sh
+
+docker-fix-permissions:
+	@echo "Fixing file permissions for Docker containers..."
+	@./scripts/fix-permissions.sh
+
+docker-up: docker-setup
+	@echo "Starting services..."
+	@docker compose up -d --build
+
+docker-logs:
+	@echo "Showing service logs..."
+	@docker compose logs -f
+
+docker-down:
+	@echo "Stopping services..."
 	@docker compose down
-	@rm -rf ./data
+
+docker-clean:
+	@echo "Cleaning up all data and containers..."
+	@./scripts/cleanup.sh
+
+docker-run-clean: docker-clean docker-setup
+	@echo "Rebuilding services with clean state..."
 	@docker compose up --force-recreate -d --build
 	@echo "Services rebuilt with clean state"

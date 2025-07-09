@@ -2,7 +2,7 @@ services:
   x-bft:
     &bft-base
     platform: linux/amd64
-    user: root
+    user: "${UID:-1000}:${GID:-1000}"
     # https://github.com/unicitynetwork/bft-core/pkgs/container/bft-core
     image: ghcr.io/unicitynetwork/bft-core:e1316ad51f4ecab1bc5406badec4c285fbdf14c7
 
@@ -19,6 +19,9 @@ services:
     entrypoint: ["/busybox/sh", "-c"]
     command:
       - |
+        # Ensure directories exist with proper permissions
+        mkdir -p /genesis/root /genesis
+        
         if [ -f /genesis/root/node-info.json ] && [ -f /genesis/trust-base.json ] && [ -f /genesis/root/trust-base-signed.json ]; then
           echo "Genesis files already exist, skipping initialization."
         else
@@ -27,7 +30,10 @@ services:
           echo "Creating root trust base..." &&
           ubft trust-base generate --home /genesis --network-id 3 --node-info /genesis/root/node-info.json &&
           echo "Signing root trust base..." &&
-          ubft trust-base sign --home /genesis/root --trust-base /genesis/trust-base.json
+          ubft trust-base sign --home /genesis/root --trust-base /genesis/trust-base.json &&
+          # Ensure files are readable by group
+          chmod 644 /genesis/trust-base.json 2>/dev/null || true
+          chmod -R 755 /genesis/root 2>/dev/null || true
         fi
         echo "Starting root node..." &&
         ubft root-node run --home /genesis/root --address "/ip4/$(hostname -i)/tcp/8000" --trust-base /genesis/trust-base.json --rpc-server-address "$(hostname -i):8002" &&
@@ -49,6 +55,9 @@ services:
     entrypoint: ["/busybox/sh", "-c"]
     command:
       - |
+        # Ensure directories exist with proper permissions
+        mkdir -p /genesis/aggregator /genesis
+        
         if [ -f /genesis/aggregator/node-info.json ] && [ -f /genesis/shard-conf-7_0.json ]; then
           echo "Aggregator genesis and config already exist, skipping initialization."
         else
@@ -57,12 +66,13 @@ services:
           echo "Creating aggregator partition configuration..." &&
           ubft shard-conf generate --home /genesis --network-id 3 --partition-id 7 --partition-type-id 7 --epoch-start 10 --node-info=/genesis/aggregator/node-info.json &&
           echo "Creating aggregator partition state..." &&
-          ubft shard-conf genesis --home "/genesis/aggregator" --shard-conf /genesis/shard-conf-7_0.json
+          ubft shard-conf genesis --home "/genesis/aggregator" --shard-conf /genesis/shard-conf-7_0.json &&
+          # Ensure files are readable by group
+          chmod 644 /genesis/shard-conf-7_0.json 2>/dev/null || true
+          chmod 644 /genesis/trust-base.json 2>/dev/null || true
+          chmod -R 755 /genesis/aggregator 2>/dev/null || true
         fi
-        chmod -R 777 /genesis/aggregator
-        chmod 777 /genesis/shard-conf-7_0.json
-        chmod 777 /genesis/trust-base.json
-        echo "Permissions fixed."
+        echo "Genesis generation completed."
         ls -l /genesis/aggregator &&
         ls -l /genesis/
 
@@ -87,6 +97,7 @@ services:
     image: mongo:7.0
     container_name: aggregator-mongodb
     restart: unless-stopped
+    user: "${UID:-1000}:${GID:-1000}"
     ports:
       - "27017:27017"
     networks:
@@ -110,6 +121,7 @@ services:
       dockerfile: Dockerfile
     container_name: aggregator-service
     restart: unless-stopped
+    user: "${UID:-1000}:${GID:-1000}"
     ports:
       - "3000:3000"
     networks:
