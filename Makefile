@@ -70,6 +70,6 @@ docker-run-clean:
 	@echo "Rebuilding services with clean state as current user..."
 	@docker compose down
 	@rm -rf ./data
-	@mkdir -p ./data && chmod -R 777 ./data
+	@mkdir -p ./data/genesis ./data/genesis-root ./data/mongodb_data && chmod -R 777 ./data
 	@USER_UID=$$(id -u) USER_GID=$$(id -g) docker compose up --force-recreate -d --build
 	@echo "Services rebuilt with user UID=$$(id -u):$$(id -g)"
