@@ -67,8 +67,9 @@ deps:
 	@go mod tidy
 
 docker-run-clean:
-	@echo "Rebuilding services with clean state..."
+	@mkdir -p ./data && chmod -R 777 ./data
+	@echo "Rebuilding services with clean state as current user..."
 	@docker compose down
 	@rm -rf ./data
-	@docker compose up --force-recreate -d --build
-	@echo "Services rebuilt with clean state"
+	@USER_UID=$$(id -u) USER_GID=$$(id -g) docker compose up --force-recreate -d --build
+	@echo "Services rebuilt with user UID=$$(id -u):$$(id -g)"
