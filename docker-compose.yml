@@ -2,7 +2,7 @@ services:
   x-bft:
     &bft-base
     platform: linux/amd64
-    user: root
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
     # https://github.com/unicitynetwork/bft-core/pkgs/container/bft-core
     image: ghcr.io/unicitynetwork/bft-core:e1316ad51f4ecab1bc5406badec4c285fbdf14c7
 
@@ -59,16 +59,17 @@ services:
           echo "Creating aggregator partition state..." &&
           ubft shard-conf genesis --home "/genesis/aggregator" --shard-conf /genesis/shard-conf-7_0.json
         fi
-        chmod -R 777 /genesis/aggregator
-        chmod 777 /genesis/shard-conf-7_0.json
-        chmod 777 /genesis/trust-base.json
+        chmod -R 755 /genesis/aggregator
+        chmod 644 /genesis/shard-conf-7_0.json
+        chmod 644 /genesis/trust-base.json
+        chmod -R 755 /genesis/root
         echo "Permissions fixed."
         ls -l /genesis/aggregator &&
         ls -l /genesis/
 
   upload-configurations:
     image: curlimages/curl:8.13.0
-    user: root
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
     depends_on:
       bft-root:
         condition: service_healthy
@@ -86,6 +87,7 @@ services:
   mongodb:
     image: mongo:7.0
     container_name: aggregator-mongodb
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
     restart: unless-stopped
     ports:
       - "27017:27017"
