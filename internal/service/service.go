@@ -206,22 +206,12 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		return nil, fmt.Errorf("failed to get aggregator record: %w", err)
 	}
 
+	path, err := req.RequestID.GetPath()
 	if record == nil {
-		// Check if commitment exists but not yet processed
-		commitment, err := as.storage.CommitmentStorage().GetByRequestID(ctx, req.RequestID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get commitment: %w", err)
-		}
-
-		if commitment == nil {
-			return nil, fmt.Errorf("commitment not found")
-		}
-
-		// Commitment exists but not yet finalized
-		return &api.GetInclusionProofResponse{Authenticator: nil, MerkleTreePath: nil, TransactionHash: nil}, nil
+		merkleTreePath := as.roundManager.GetSMT().GetPath(path)
+		return &api.GetInclusionProofResponse{Authenticator: nil, MerkleTreePath: merkleTreePath, TransactionHash: nil}, nil
 	}
 
-	path, err := req.RequestID.GetPath()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
 	}
