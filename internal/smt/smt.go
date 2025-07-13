@@ -2,6 +2,7 @@ package smt
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 )
@@ -13,11 +14,26 @@ const (
 	SHA256 HashAlgorithm = iota
 )
 
-// SparseMerkleTree implements a sparse merkle tree compatible with Unicity SDK
-type SparseMerkleTree struct {
-	algorithm HashAlgorithm
-	root      *RootNode
-}
+type (
+	// SparseMerkleTree implements a sparse merkle tree compatible with Unicity SDK
+	SparseMerkleTree struct {
+		algorithm HashAlgorithm
+		root      *RootNode
+	}
+
+	// MerkleTreeStep represents a single step in a Merkle tree path
+	MerkleTreeStep struct {
+		Branch  []string `json:"branch"`
+		Path    string   `json:"path"`
+		Sibling *string  `json:"sibling"`
+	}
+
+	// MerkleTreePath represents the path to verify inclusion in a Merkle tree
+	MerkleTreePath struct {
+		Root  string           `json:"root"`
+		Steps []MerkleTreeStep `json:"steps"`
+	}
+)
 
 // NewSparseMerkleTree creates a new sparse merkle tree
 func NewSparseMerkleTree(algorithm HashAlgorithm) *SparseMerkleTree {
@@ -77,23 +93,23 @@ func NewRootNode(algorithm HashAlgorithm, left, right Branch) *RootNode {
 // CalculateHash calculates root hash (matches TypeScript logic)
 func (r *RootNode) CalculateHash(algo HashAlgorithm) *DataHash {
 	var leftHash, rightHash []byte
-	
+
 	if r.Left != nil {
 		leftHash = r.Left.CalculateHash(algo).Data
 	} else {
 		leftHash = []byte{0} // TypeScript: new Uint8Array(1)
 	}
-	
+
 	if r.Right != nil {
 		rightHash = r.Right.CalculateHash(algo).Data
 	} else {
 		rightHash = []byte{0} // TypeScript: new Uint8Array(1)
 	}
-	
+
 	// Combine and hash: leftHash + rightHash
 	combined := append(leftHash, rightHash...)
 	hashData := sha256Hash(combined)
-	
+
 	return NewDataHash(algo, hashData)
 }
 
@@ -103,12 +119,12 @@ func NewLeafBranch(algorithm HashAlgorithm, path *big.Int, value []byte) *LeafBr
 		Path:  new(big.Int).Set(path),
 		Value: append([]byte(nil), value...),
 	}
-	
+
 	// Calculate hash: BigintConverter.encode(path) + value
 	pathBytes := bigintEncode(path)
 	data := append(pathBytes, value...)
 	hashData := sha256Hash(data)
-	
+
 	leaf.hash = NewDataHash(algorithm, hashData)
 	return leaf
 }
@@ -126,11 +142,11 @@ func (l *LeafBranch) CalculateHash(algo HashAlgorithm) *DataHash {
 	if l.hash != nil {
 		return l.hash
 	}
-	
+
 	pathBytes := bigintEncode(l.Path)
 	data := append(pathBytes, l.Value...)
 	hashData := sha256Hash(data)
-	
+
 	l.hash = NewDataHash(algo, hashData)
 	return l.hash
 }
@@ -151,20 +167,20 @@ func NewNodeBranch(algorithm HashAlgorithm, path *big.Int, left, right Branch) *
 		Left:      left,
 		Right:     right,
 	}
-	
+
 	// Calculate children hash first
 	leftHash := left.CalculateHash(algorithm).Data
 	rightHash := right.CalculateHash(algorithm).Data
 	combined := append(leftHash, rightHash...)
 	childrenHashData := sha256Hash(combined)
 	node.childrenHash = NewDataHash(algorithm, childrenHashData)
-	
+
 	// Calculate node hash: BigintConverter.encode(path) + childrenHash
 	pathBytes := bigintEncode(path)
 	data := append(pathBytes, childrenHashData...)
 	hashData := sha256Hash(data)
 	node.hash = NewDataHash(algorithm, hashData)
-	
+
 	return node
 }
 
@@ -184,19 +200,19 @@ func (n *NodeBranch) CalculateHash(algo HashAlgorithm) *DataHash {
 	if n.hash != nil {
 		return n.hash
 	}
-	
+
 	// Recalculate if needed
 	leftHash := n.Left.CalculateHash(algo).Data
 	rightHash := n.Right.CalculateHash(algo).Data
 	combined := append(leftHash, rightHash...)
 	childrenHashData := sha256Hash(combined)
 	n.childrenHash = NewDataHash(algo, childrenHashData)
-	
+
 	pathBytes := bigintEncode(n.Path)
 	data := append(pathBytes, childrenHashData...)
 	hashData := sha256Hash(data)
 	n.hash = NewDataHash(algo, hashData)
-	
+
 	return n.hash
 }
 
@@ -215,7 +231,7 @@ func NewDataHash(algorithm HashAlgorithm, data []byte) *DataHash {
 	imprint[0] = byte((int(algorithm) & 0xff00) >> 8)
 	imprint[1] = byte(int(algorithm) & 0xff)
 	copy(imprint[2:], data)
-	
+
 	return &DataHash{
 		Algorithm: algorithm,
 		Data:      append([]byte(nil), data...),
@@ -232,9 +248,9 @@ func (h *DataHash) ToHex() string {
 func (smt *SparseMerkleTree) AddLeaf(path *big.Int, value []byte) error {
 	// TypeScript: const isRight = path & 1n;
 	isRight := new(big.Int).And(path, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
-	
+
 	var left, right Branch
-	
+
 	if isRight {
 		left = smt.root.Left
 		if smt.root.Right != nil {
@@ -258,40 +274,37 @@ func (smt *SparseMerkleTree) AddLeaf(path *big.Int, value []byte) error {
 		}
 		right = smt.root.Right
 	}
-	
+
 	smt.root = NewRootNode(smt.algorithm, left, right)
 	return nil
 }
 
-// AddLeaves adds multiple leaves efficiently (batch operation for performance)
+// AddLeaves adds multiple leaves efficiently (batch operation for performance) to the existing tree
 // This produces the EXACT same tree structure as sequential AddLeaf calls,
-// but optimizes by avoiding intermediate hash calculations
+// and maintains the existing tree structure when adding new leaves
 func (smt *SparseMerkleTree) AddLeaves(leaves []*Leaf) error {
 	if len(leaves) == 0 {
 		return nil
 	}
-	
-	// Start with empty tree
-	smt.root = NewRootNode(smt.algorithm, nil, nil)
-	
-	// Add leaves one by one using the same logic as AddLeaf
-	// but defer hash calculations for better performance
+
+	// Add leaves one by one to the existing tree using AddLeaf
+	// This ensures that new leaves are added to the existing tree structure
 	for _, leaf := range leaves {
 		err := smt.addLeafBatch(leaf.Path, leaf.Value)
 		if err != nil {
 			return err
 		}
 	}
-	
+
 	return nil
 }
 
 // addLeafBatch is optimized for batch operations using lazy hash calculation
 func (smt *SparseMerkleTree) addLeafBatch(path *big.Int, value []byte) error {
 	isRight := new(big.Int).And(path, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
-	
+
 	var left, right Branch
-	
+
 	if isRight {
 		left = smt.root.Left
 		if smt.root.Right != nil {
@@ -315,7 +328,7 @@ func (smt *SparseMerkleTree) addLeafBatch(path *big.Int, value []byte) error {
 		}
 		right = smt.root.Right
 	}
-	
+
 	smt.root = NewRootNode(smt.algorithm, left, right)
 	return nil
 }
@@ -323,53 +336,53 @@ func (smt *SparseMerkleTree) addLeafBatch(path *big.Int, value []byte) error {
 // buildTreeLazy matches TypeScript buildTree logic but uses lazy hash calculation
 func (smt *SparseMerkleTree) buildTreeLazy(branch Branch, remainingPath *big.Int, value []byte) (Branch, error) {
 	commonPath := calculateCommonPath(remainingPath, branch.GetPath())
-	
+
 	// TypeScript: const isRight = (remainingPath >> commonPath.length) & 1n;
 	shifted := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
 	isRight := new(big.Int).And(shifted, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
-	
+
 	if commonPath.path.Cmp(remainingPath) == 0 {
-		return nil, fmt.Errorf("Cannot add leaf inside branch")
+		return nil, fmt.Errorf("cannot add leaf inside branch")
 	}
-	
+
 	// If a leaf must be split from the middle
 	if branch.IsLeaf() {
 		leafBranch := branch.(*LeafBranch)
 		if commonPath.path.Cmp(leafBranch.Path) == 0 {
-			return nil, fmt.Errorf("Cannot extend tree through leaf")
+			return nil, fmt.Errorf("cannot extend tree through leaf")
 		}
-		
+
 		// TypeScript: branch.path >> commonPath.length
 		oldBranchPath := new(big.Int).Rsh(leafBranch.Path, uint(commonPath.length.Uint64()))
 		oldBranch := NewLeafBranchLazy(smt.algorithm, oldBranchPath, leafBranch.Value)
-		
+
 		// TypeScript: remainingPath >> commonPath.length
 		newBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
 		newBranch := NewLeafBranchLazy(smt.algorithm, newBranchPath, value)
-		
+
 		if isRight {
 			return NewNodeBranchLazy(smt.algorithm, commonPath.path, oldBranch, newBranch), nil
 		} else {
 			return NewNodeBranchLazy(smt.algorithm, commonPath.path, newBranch, oldBranch), nil
 		}
 	}
-	
+
 	// If node branch is split in the middle
 	nodeBranch := branch.(*NodeBranch)
 	if commonPath.path.Cmp(nodeBranch.Path) < 0 {
 		newBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
 		newBranch := NewLeafBranchLazy(smt.algorithm, newBranchPath, value)
-		
+
 		oldBranchPath := new(big.Int).Rsh(nodeBranch.Path, uint(commonPath.length.Uint64()))
 		oldBranch := NewNodeBranchLazy(smt.algorithm, oldBranchPath, nodeBranch.Left, nodeBranch.Right)
-		
+
 		if isRight {
 			return NewNodeBranchLazy(smt.algorithm, commonPath.path, oldBranch, newBranch), nil
 		} else {
 			return NewNodeBranchLazy(smt.algorithm, commonPath.path, newBranch, oldBranch), nil
 		}
 	}
-	
+
 	if isRight {
 		newRight, err := smt.buildTreeLazy(nodeBranch.Right, new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64())), value)
 		if err != nil {
@@ -412,7 +425,7 @@ func (smt *SparseMerkleTree) findLeaf(node interface{}, targetPath *big.Int) (*L
 			return smt.findLeafInBranch(n.Left, targetPath)
 		}
 		return nil, fmt.Errorf("leaf not found")
-		
+
 	default:
 		return nil, fmt.Errorf("invalid node type")
 	}
@@ -426,29 +439,29 @@ func (smt *SparseMerkleTree) findLeafInBranch(branch Branch, targetPath *big.Int
 			return b, nil
 		}
 		return nil, fmt.Errorf("leaf not found")
-		
+
 	case *NodeBranch:
 		// Mirror the buildTree logic exactly
 		commonPath := calculateCommonPath(targetPath, b.Path)
-		
+
 		// Check if targetPath can be in this subtree
 		if commonPath.path.Cmp(targetPath) == 0 {
 			return nil, fmt.Errorf("leaf not found")
 		}
-		
+
 		// Navigate using the same logic as buildTree
 		shifted := new(big.Int).Rsh(targetPath, uint(commonPath.length.Uint64()))
 		isRight := new(big.Int).And(shifted, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
-		
+
 		// KEY FIX: Pass the shifted path to match tree construction
 		if isRight && b.Right != nil {
 			return smt.findLeafInBranch(b.Right, shifted)
 		} else if !isRight && b.Left != nil {
 			return smt.findLeafInBranch(b.Left, shifted)
 		}
-		
+
 		return nil, fmt.Errorf("leaf not found")
-		
+
 	default:
 		return nil, fmt.Errorf("invalid branch type")
 	}
@@ -457,53 +470,53 @@ func (smt *SparseMerkleTree) findLeafInBranch(branch Branch, targetPath *big.Int
 // buildTree matches TypeScript buildTree logic exactly
 func (smt *SparseMerkleTree) buildTree(branch Branch, remainingPath *big.Int, value []byte) (Branch, error) {
 	commonPath := calculateCommonPath(remainingPath, branch.GetPath())
-	
+
 	// TypeScript: const isRight = (remainingPath >> commonPath.length) & 1n;
 	shifted := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
 	isRight := new(big.Int).And(shifted, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
-	
+
 	if commonPath.path.Cmp(remainingPath) == 0 {
-		return nil, fmt.Errorf("Cannot add leaf inside branch")
+		return nil, fmt.Errorf("cannot add leaf inside branch")
 	}
-	
+
 	// If a leaf must be split from the middle
 	if branch.IsLeaf() {
 		leafBranch := branch.(*LeafBranch)
 		if commonPath.path.Cmp(leafBranch.Path) == 0 {
-			return nil, fmt.Errorf("Cannot extend tree through leaf")
+			return nil, fmt.Errorf("cannot extend tree through leaf")
 		}
-		
+
 		// TypeScript: branch.path >> commonPath.length
 		oldBranchPath := new(big.Int).Rsh(leafBranch.Path, uint(commonPath.length.Uint64()))
 		oldBranch := NewLeafBranch(smt.algorithm, oldBranchPath, leafBranch.Value)
-		
+
 		// TypeScript: remainingPath >> commonPath.length
 		newBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
 		newBranch := NewLeafBranch(smt.algorithm, newBranchPath, value)
-		
+
 		if isRight {
 			return NewNodeBranch(smt.algorithm, commonPath.path, oldBranch, newBranch), nil
 		} else {
 			return NewNodeBranch(smt.algorithm, commonPath.path, newBranch, oldBranch), nil
 		}
 	}
-	
+
 	// If node branch is split in the middle
 	nodeBranch := branch.(*NodeBranch)
 	if commonPath.path.Cmp(nodeBranch.Path) < 0 {
 		newBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
 		newBranch := NewLeafBranch(smt.algorithm, newBranchPath, value)
-		
+
 		oldBranchPath := new(big.Int).Rsh(nodeBranch.Path, uint(commonPath.length.Uint64()))
 		oldBranch := NewNodeBranch(smt.algorithm, oldBranchPath, nodeBranch.Left, nodeBranch.Right)
-		
+
 		if isRight {
 			return NewNodeBranch(smt.algorithm, commonPath.path, oldBranch, newBranch), nil
 		} else {
 			return NewNodeBranch(smt.algorithm, commonPath.path, newBranch, oldBranch), nil
 		}
 	}
-	
+
 	if isRight {
 		newRight, err := smt.buildTree(nodeBranch.Right, new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64())), value)
 		if err != nil {
@@ -519,6 +532,96 @@ func (smt *SparseMerkleTree) buildTree(branch Branch, remainingPath *big.Int, va
 	}
 }
 
+func (smt *SparseMerkleTree) GetPath(path *big.Int) *MerkleTreePath {
+	rootHash := smt.root.CalculateHash(smt.algorithm)
+	steps := smt.generatePath(path, smt.root.Left, smt.root.Right)
+
+	return &MerkleTreePath{
+		Root:  rootHash.ToHex(),
+		Steps: steps,
+	}
+}
+
+// generatePath recursively generates the Merkle tree path steps
+func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Branch) []MerkleTreeStep {
+	// Determine if we should go right (remainingPath & 1n)
+	isRight := new(big.Int).And(remainingPath, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
+
+	var branch, siblingBranch Branch
+	if isRight {
+		branch = right
+		siblingBranch = left
+	} else {
+		branch = left
+		siblingBranch = right
+	}
+
+	if branch == nil {
+		return []MerkleTreeStep{smt.createMerkleTreeStep(remainingPath, nil, siblingBranch)}
+	}
+
+	commonPath := calculateCommonPath(remainingPath, branch.GetPath())
+
+	if branch.GetPath().Cmp(commonPath.path) == 0 {
+		if branch.IsLeaf() {
+			return []MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
+		}
+
+		// If path has ended, return the current non-leaf branch data
+		shifted := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+		if shifted.Cmp(big.NewInt(1)) == 0 {
+			return []MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
+		}
+
+		// Continue recursively into the branch
+		nodeBranch, ok := branch.(*NodeBranch)
+		if !ok {
+			// Should not happen if IsLeaf() returned false
+			return []MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
+		}
+
+		// Recursively generate path for the shifted remaining path
+		shiftedRemaining := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+		recursiveSteps := smt.generatePath(shiftedRemaining, nodeBranch.Left, nodeBranch.Right)
+
+		// Append the current step without branch (since we went into it)
+		currentStep := smt.createMerkleTreeStep(branch.GetPath(), nil, siblingBranch)
+
+		return append(recursiveSteps, currentStep)
+	}
+
+	return []MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
+}
+
+// createMerkleTreeStep creates a MerkleTreeStep with proper branch and sibling handling
+func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, siblingBranch Branch) MerkleTreeStep {
+	step := MerkleTreeStep{
+		Path:    path.String(),
+		Branch:  []string{},
+		Sibling: nil,
+	}
+
+	// Add branch hash if branch exists
+	if branch != nil {
+		// If it's a LeafBranch, use the value instead of the hash
+		if leafBranch, ok := branch.(*LeafBranch); ok {
+			step.Branch = []string{hex.EncodeToString(leafBranch.Value)}
+		} else {
+			branchHash := branch.CalculateHash(smt.algorithm)
+			step.Branch = []string{branchHash.ToHex()}
+		}
+	}
+
+	// Add sibling hash if sibling exists
+	if siblingBranch != nil {
+		siblingHash := siblingBranch.CalculateHash(smt.algorithm)
+		siblingHex := siblingHash.ToHex()
+		step.Sibling = &siblingHex
+	}
+
+	return step
+}
+
 // calculateCommonPath matches TypeScript calculateCommonPath exactly
 func calculateCommonPath(path1, path2 *big.Int) struct {
 	length *big.Int
@@ -527,33 +630,33 @@ func calculateCommonPath(path1, path2 *big.Int) struct {
 	path := big.NewInt(1)
 	mask := big.NewInt(1)
 	length := big.NewInt(0)
-	
+
 	for {
 		// Check (path1 & mask) === (path2 & mask)
 		mask1 := new(big.Int).And(path1, mask)
 		mask2 := new(big.Int).And(path2, mask)
-		
+
 		if mask1.Cmp(mask2) != 0 {
 			break
 		}
-		
+
 		// Check path < path1 && path < path2
 		if path.Cmp(path1) >= 0 || path.Cmp(path2) >= 0 {
 			break
 		}
-		
+
 		// mask <<= 1n
 		mask.Lsh(mask, 1)
-		
+
 		// length += 1n
 		length.Add(length, big.NewInt(1))
-		
+
 		// path = mask | ((mask - 1n) & path1)
 		maskMinus1 := new(big.Int).Sub(mask, big.NewInt(1))
 		temp := new(big.Int).And(maskMinus1, path1)
 		path.Or(mask, temp)
 	}
-	
+
 	return struct {
 		length *big.Int
 		path   *big.Int
@@ -565,7 +668,7 @@ func bigintEncode(value *big.Int) []byte {
 	if value.Sign() == 0 {
 		return []byte{}
 	}
-	
+
 	// Convert to bytes in big-endian format (matches Unicity SDK)
 	return value.Bytes()
 }

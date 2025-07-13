@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -23,9 +24,9 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 
 	for i, commitment := range commitments {
 		// Generate leaf path from requestID
-		path, err := rm.generateLeafPath(commitment.RequestID)
+		path, err := commitment.RequestID.GetPath()
 		if err != nil {
-			return "", nil, fmt.Errorf("failed to generate leaf path for commitment %s: %w", commitment.RequestID, err)
+			return "", nil, fmt.Errorf("failed to get path for requestID %s: %w", commitment.RequestID, err)
 		}
 
 		// Create leaf value (hash of commitment data)
@@ -35,7 +36,7 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 		}
 
 		leaves[i] = &smt.Leaf{
-			Path:  big.NewInt(int64(path)),
+			Path:  path,
 			Value: leafValue,
 		}
 
@@ -66,52 +67,54 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 	return rootHash, records, nil
 }
 
-// generateLeafPath generates a uint64 path for the SMT from a RequestID
-func (rm *RoundManager) generateLeafPath(requestID api.RequestID) (uint64, error) {
-	// Convert RequestID to bytes
-	requestIDBytes, err := requestID.Bytes()
-	if err != nil {
-		return 0, fmt.Errorf("failed to convert requestID to bytes: %w", err)
-	}
-
-	// Hash the requestID to get a deterministic path
-	hash := sha256.Sum256(requestIDBytes)
-
-	// Use the first 8 bytes of the hash as a uint64 path
-	path := uint64(0)
-	for i := 0; i < 8 && i < len(hash); i++ {
-		path = (path << 8) | uint64(hash[i])
-	}
-
-	return path, nil
-}
-
 // createLeafValue creates the value to store in the SMT leaf for a commitment
+// This matches the TypeScript LeafValue.create() method exactly:
+// - CBOR encode the authenticator as an array [algorithm, publicKey, signature, stateHashImprint]
+// - Hash the CBOR-encoded authenticator and transaction hash imprint using SHA256
+// - Return as DataHash imprint format (2-byte algorithm prefix + hash)
 func (rm *RoundManager) createLeafValue(commitment *models.Commitment) ([]byte, error) {
-	// Create a deterministic value from commitment data
-	// This includes requestID, transactionHash, and authenticator data
-
-	requestIDBytes, err := commitment.RequestID.Bytes()
+	// Get the state hash imprint for CBOR encoding
+	stateHashImprint, err := commitment.Authenticator.StateHash.Imprint()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get requestID bytes: %w", err)
+		return nil, fmt.Errorf("failed to get state hash imprint: %w", err)
 	}
 
-	transactionHashBytes, err := commitment.TransactionHash.Bytes()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get transactionHash bytes: %w", err)
+	// CBOR encode the authenticator as an array (matching TypeScript authenticator.toCBOR())
+	// TypeScript: [algorithm, publicKey, signature.encode(), stateHash.imprint]
+	authenticatorArray := []interface{}{
+		commitment.Authenticator.Algorithm,         // algorithm as text string
+		[]byte(commitment.Authenticator.PublicKey), // publicKey as byte string
+		[]byte(commitment.Authenticator.Signature), // signature as byte string
+		stateHashImprint,                           // stateHash.imprint as byte string
 	}
 
-	// Combine all the data
-	data := make([]byte, 0, len(requestIDBytes)+len(transactionHashBytes)+len(commitment.Authenticator.StateHash)+len(commitment.Authenticator.PublicKey)+len(commitment.Authenticator.Signature))
-	data = append(data, requestIDBytes...)
-	data = append(data, transactionHashBytes...)
-	data = append(data, commitment.Authenticator.StateHash...)
-	data = append(data, commitment.Authenticator.PublicKey...)
-	data = append(data, commitment.Authenticator.Signature...)
+	authenticatorCBOR, err := cbor.Marshal(authenticatorArray)
+	if err != nil {
+		return nil, fmt.Errorf("failed to CBOR encode authenticator: %w", err)
+	}
 
-	// Hash the combined data to create a fixed-size leaf value
-	hash := sha256.Sum256(data)
-	return hash[:], nil
+	// Get the transaction hash imprint
+	transactionHashImprint, err := commitment.TransactionHash.Imprint()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get transaction hash imprint: %w", err)
+	}
+
+	// Create SHA256 hasher and update with CBOR-encoded authenticator and transaction hash imprint
+	// This matches the TypeScript DataHasher(SHA256).update(authenticator.toCBOR()).update(transactionHash.imprint).digest()
+	hasher := sha256.New()
+	hasher.Write(authenticatorCBOR)
+	hasher.Write(transactionHashImprint)
+
+	// Get the final hash
+	hash := hasher.Sum(nil)
+
+	// Return as DataHash imprint with SHA256 algorithm prefix (0x00, 0x00)
+	imprint := make([]byte, 2+len(hash))
+	imprint[0] = 0x00 // SHA256 algorithm high byte
+	imprint[1] = 0x00 // SHA256 algorithm low byte
+	copy(imprint[2:], hash[:])
+
+	return imprint, nil
 }
 
 // ProposeBlock creates and proposes a new block with the given data
@@ -189,7 +192,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 
 	// CRITICAL: Store all commitment data BEFORE storing the block to prevent race conditions
 	// where API returns partial block data
-	
+
 	// First, collect all request IDs that will be in this block
 	rm.roundMutex.Lock()
 	requestIds := make([]api.RequestID, 0)
@@ -200,7 +203,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		}
 	}
 	rm.roundMutex.Unlock()
-	
+
 	rm.roundMutex.Lock()
 	if rm.currentRound != nil && len(rm.currentRound.Commitments) > 0 {
 		rm.logger.WithContext(ctx).Debug("Preparing commitment data before block storage",
@@ -255,7 +258,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 				"blockNumber", block.Index.String())
 			return fmt.Errorf("failed to mark commitments as processed: %w", err)
 		}
-		
+
 		rm.logger.WithContext(ctx).Info("Successfully prepared all commitment data",
 			"count", len(requestIDs),
 			"blockNumber", block.Index.String())

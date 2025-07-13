@@ -11,8 +11,8 @@ import (
 // ThreadSafeSMT provides thread-safe access to SMT operations
 // It prevents concurrent access during batch operations and proof generation
 type ThreadSafeSMT struct {
-	smt    *smt.SparseMerkleTree
-	rwMux  sync.RWMutex // RWMutex allows multiple readers but exclusive writers
+	smt   *smt.SparseMerkleTree
+	rwMux sync.RWMutex // RWMutex allows multiple readers but exclusive writers
 }
 
 // NewThreadSafeSMT creates a new thread-safe SMT wrapper
@@ -55,7 +55,7 @@ func (ts *ThreadSafeSMT) GetRootHash() string {
 }
 
 // GetLeaf retrieves a leaf by path
-// This is a read operation that can be performed concurrently  
+// This is a read operation that can be performed concurrently
 func (ts *ThreadSafeSMT) GetLeaf(path *big.Int) (*smt.LeafBranch, error) {
 	ts.rwMux.RLock()
 	defer ts.rwMux.RUnlock()
@@ -63,15 +63,13 @@ func (ts *ThreadSafeSMT) GetLeaf(path *big.Int) (*smt.LeafBranch, error) {
 	return ts.smt.GetLeaf(path)
 }
 
-// TODO: Add inclusion proof methods when SMT supports them
-// GenerateInclusionProof generates an inclusion proof for a given path
-// This is a read operation that can be performed concurrently
-// However, it's blocked during batch operations to ensure consistency
-// func (ts *ThreadSafeSMT) GenerateInclusionProof(path uint64) (*smt.InclusionProof, error) {
-//     ts.rwMux.RLock()
-//     defer ts.rwMux.RUnlock()
-//     return ts.smt.GenerateInclusionProof(path)
-// }
+// GetPath generates a Merkle tree path for the given path
+// This is a read operation and allows concurrent access
+func (ts *ThreadSafeSMT) GetPath(path *big.Int) *smt.MerkleTreePath {
+	ts.rwMux.RLock()
+	defer ts.rwMux.RUnlock()
+	return ts.smt.GetPath(path)
+}
 
 // GetStats returns statistics about the SMT
 // This is a read operation that can be performed concurrently
@@ -81,9 +79,9 @@ func (ts *ThreadSafeSMT) GetStats() map[string]interface{} {
 
 	// Get basic stats from the underlying SMT
 	return map[string]interface{}{
-		"rootHash":   ts.smt.GetRootHashHex(),
-		"leafCount":  ts.getLeafCount(),
-		"isLocked":   false, // Could be enhanced to show lock status
+		"rootHash":  ts.smt.GetRootHashHex(),
+		"leafCount": ts.getLeafCount(),
+		"isLocked":  false, // Could be enhanced to show lock status
 	}
 }
 
