@@ -199,21 +199,29 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 }
 
 // GetInclusionProof retrieves inclusion proof for a commitment
-func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error) {
+func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, bool, error) {
 	// First check if commitment exists in aggregator records (finalized)
 	record, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, req.RequestID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get aggregator record: %w", err)
+		return nil, false, fmt.Errorf("failed to get aggregator record: %w", err)
 	}
 
+	if record != nil {
+		round := as.roundManager.GetCurrentRound().Number
+		as.logger.WithContext(ctx).Info(fmt.Sprintf("!!!GetInclusionProof: record round %s, block %s", record.BlockNumber, round))
+		if record.BlockNumber.String() == round.String() {
+			as.logger.WithContext(ctx).Info("GetInclusionProof: round still in progress", "requestId", req.RequestID, "blockNumber", record.BlockNumber)
+			return nil, true, fmt.Errorf("round still in progress, %s: %w", req.RequestID, record.BlockNumber)
+		}
+	}
 	path, err := req.RequestID.GetPath()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
+		return nil, false, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
 	}
 	merkleTreePath := as.roundManager.GetSMT().GetPath(path)
 
 	if record == nil {
-		return &api.GetInclusionProofResponse{Authenticator: nil, MerkleTreePath: merkleTreePath, TransactionHash: nil}, nil
+		return &api.GetInclusionProofResponse{Authenticator: nil, MerkleTreePath: merkleTreePath, TransactionHash: nil}, false, nil
 	}
 
 	// Convert model authenticator to API authenticator
@@ -224,7 +232,7 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		StateHash: api.StateHash(record.Authenticator.StateHash.String()),
 	}
 
-	return &api.GetInclusionProofResponse{Authenticator: apiAuthenticator, MerkleTreePath: merkleTreePath, TransactionHash: &record.TransactionHash}, nil
+	return &api.GetInclusionProofResponse{Authenticator: apiAuthenticator, MerkleTreePath: merkleTreePath, TransactionHash: &record.TransactionHash}, false, nil
 }
 
 // GetNoDeletionProof retrieves the global no-deletion proof

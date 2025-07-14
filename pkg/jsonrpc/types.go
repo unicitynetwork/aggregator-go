@@ -43,7 +43,7 @@ const (
 	MethodNotFoundCode = -32601
 	InvalidParamsCode  = -32602
 	InternalErrorCode  = -32603
-	
+
 	// Custom application error codes (starting from -32000)
 	ValidationErrorCode    = -32000
 	CommitmentExistsCode   = -32001
@@ -52,6 +52,7 @@ const (
 	DatabaseErrorCode      = -32004
 	ConsensusErrorCode     = -32005
 	ConcurrencyLimitCode   = -32006
+	BlockInProgress        = -32007
 )
 
 // Predefined errors
@@ -61,7 +62,7 @@ var (
 	ErrMethodNotFound = &Error{Code: MethodNotFoundCode, Message: "Method not found"}
 	ErrInvalidParams  = &Error{Code: InvalidParamsCode, Message: "Invalid params"}
 	ErrInternalError  = &Error{Code: InternalErrorCode, Message: "Internal error"}
-	
+
 	ErrConcurrencyLimit = &Error{Code: ConcurrencyLimitCode, Message: "Concurrency limit exceeded"}
 )
 
@@ -135,7 +136,7 @@ func NewRequest(method string, params interface{}, id interface{}) (*Request, er
 		}
 		paramsBytes = bytes
 	}
-	
+
 	return &Request{
 		JSONRPC: Version,
 		Method:  method,
@@ -167,11 +168,11 @@ func (r *Request) IsValidRequest() error {
 	if r.JSONRPC != Version {
 		return fmt.Errorf("invalid JSON-RPC version: %s", r.JSONRPC)
 	}
-	
+
 	if r.Method == "" {
 		return fmt.Errorf("method cannot be empty")
 	}
-	
+
 	return nil
 }
 
@@ -180,6 +181,6 @@ func (r *Request) UnmarshalParams(v interface{}) error {
 	if r.Params == nil {
 		return nil
 	}
-	
+
 	return json.Unmarshal(r.Params, v)
 }
