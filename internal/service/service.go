@@ -207,15 +207,14 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 	}
 
 	path, err := req.RequestID.GetPath()
-	if record == nil {
-		merkleTreePath := as.roundManager.GetSMT().GetPath(path)
-		return &api.GetInclusionProofResponse{Authenticator: nil, MerkleTreePath: merkleTreePath, TransactionHash: nil}, nil
-	}
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
 	}
 	merkleTreePath := as.roundManager.GetSMT().GetPath(path)
+
+	if record == nil {
+		return &api.GetInclusionProofResponse{Authenticator: nil, MerkleTreePath: merkleTreePath, TransactionHash: nil}, nil
+	}
 
 	// Convert model authenticator to API authenticator
 	apiAuthenticator := &api.Authenticator{
