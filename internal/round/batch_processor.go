@@ -40,14 +40,22 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 			Value: leafValue,
 		}
 
-		// Create aggregator record (block number will be set when finalized)
+		// Create aggregator record with the current block number
 		leafIndex := api.NewBigInt(big.NewInt(int64(i)))
-		records[i] = models.NewAggregatorRecord(commitment, nil, leafIndex)
+		records[i] = models.NewAggregatorRecord(commitment, blockNumber, leafIndex)
 
 		rm.logger.WithContext(ctx).Debug("Created SMT leaf for commitment",
 			"requestId", commitment.RequestID.String(),
 			"path", path,
 			"leafIndex", i)
+	}
+
+	// Store aggregator records BEFORE adding leaves to SMT
+	rm.logger.WithContext(ctx).Debug("Storing aggregator records before SMT update",
+		"recordCount", len(records))
+
+	if err := rm.storeAggregatorRecords(ctx, records); err != nil {
+		return "", nil, fmt.Errorf("failed to store aggregator records: %w", err)
 	}
 
 	// Add all leaves to SMT in a single batch operation
@@ -60,8 +68,8 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 		"rootHash", rootHash,
 		"commitmentCount", len(commitments))
 
-	// Don't store aggregator records yet - wait until block is finalized
-	rm.logger.WithContext(ctx).Debug("Deferring aggregator record storage until block finalization",
+	// Records have been stored during processing
+	rm.logger.WithContext(ctx).Debug("Aggregator records stored successfully during batch processing",
 		"recordCount", len(records))
 
 	return rootHash, records, nil
@@ -216,40 +224,11 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		for i, commitment := range rm.currentRound.Commitments {
 			requestIDs[i] = commitment.RequestID
 		}
-		pendingRecords := rm.currentRound.PendingRecords
 		rm.roundMutex.Unlock()
 
-		// Store aggregator records BEFORE storing the block
-		if len(pendingRecords) > 0 {
-			rm.logger.WithContext(ctx).Debug("Storing aggregator records",
-				"count", len(pendingRecords))
-			for _, record := range pendingRecords {
-				// Update block number to the actual finalized block
-				record.BlockNumber = block.Index
-
-				// Check if record already exists to prevent duplicate key errors
-				existing, err := rm.storage.AggregatorRecordStorage().GetByRequestID(ctx, record.RequestID)
-				if err != nil {
-					rm.logger.WithContext(ctx).Error("Failed to check existing aggregator record",
-						"requestId", record.RequestID.String(),
-						"error", err.Error())
-					continue
-				}
-
-				if existing != nil {
-					rm.logger.WithContext(ctx).Debug("Aggregator record already exists, skipping",
-						"requestId", record.RequestID.String())
-					continue
-				}
-
-				if err := rm.storage.AggregatorRecordStorage().Store(ctx, record); err != nil {
-					rm.logger.WithContext(ctx).Error("Failed to store aggregator record",
-						"requestId", record.RequestID.String(),
-						"error", err.Error())
-					// Continue with other records
-				}
-			}
-		}
+		// Note: Aggregator records are now stored during processBatch, not here
+		rm.logger.WithContext(ctx).Debug("Aggregator records already stored during batch processing",
+			"commitmentCount", len(requestIDs))
 
 		// Mark commitments as processed BEFORE storing the block
 		if err := rm.storage.CommitmentStorage().MarkProcessed(ctx, requestIDs); err != nil {
@@ -259,7 +238,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 			return fmt.Errorf("failed to mark commitments as processed: %w", err)
 		}
 
-		rm.logger.WithContext(ctx).Info("Successfully prepared all commitment data",
+		rm.logger.WithContext(ctx).Info("Successfully prepared commitment data",
 			"count", len(requestIDs),
 			"blockNumber", block.Index.String())
 
@@ -297,5 +276,38 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String())
 
+	return nil
+}
+
+func (rm *RoundManager) storeAggregatorRecords(ctx context.Context, records []*models.AggregatorRecord) error {
+	for _, record := range records {
+		// Check if record already exists to prevent duplicate key errors
+		existing, err := rm.storage.AggregatorRecordStorage().GetByRequestID(ctx, record.RequestID)
+		if err != nil {
+			return fmt.Errorf("failed to check existing aggregator record for %s: %w", record.RequestID, err)
+		}
+
+		if existing != nil {
+			rm.logger.WithContext(ctx).Debug("Aggregator record already exists, skipping",
+				"requestId", record.RequestID.String())
+			continue
+		}
+
+		if err := rm.storage.AggregatorRecordStorage().Store(ctx, record); err != nil {
+			return fmt.Errorf("failed to store aggregator record for %s: %w", record.RequestID, err)
+		}
+		existing, err = rm.storage.AggregatorRecordStorage().GetByRequestID(ctx, record.RequestID)
+		if err != nil {
+			rm.logger.WithContext(ctx).Error("Failed to check existing aggregator record",
+				"requestId", record.RequestID.String(),
+				"error", err.Error())
+		}
+		if existing == nil {
+			rm.logger.WithContext(ctx).Error("Stored aggregator record not found after storage",
+				"requestId", record.RequestID.String())
+		}
+	}
+	rm.logger.WithContext(ctx).Info("Successfully stored aggregator records",
+		"recordCount", len(records))
 	return nil
 }
