@@ -29,7 +29,7 @@ type Server struct {
 // Service represents the business logic service interface
 type Service interface {
 	SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error)
-	GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, bool, error)
+	GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error)
 	GetNoDeletionProof(ctx context.Context) (*api.GetNoDeletionProofResponse, error)
 	GetBlockHeight(ctx context.Context) (*api.GetBlockHeightResponse, error)
 	GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error)

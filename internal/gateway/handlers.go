@@ -48,14 +48,12 @@ func (s *Server) handleGetInclusionProof(ctx context.Context, params json.RawMes
 	}
 
 	// Call service
-	response, roundInProgress, err := s.service.GetInclusionProof(ctx, &req)
+	response, err := s.service.GetInclusionProof(ctx, &req)
 	if err != nil {
-		if roundInProgress {
-			return nil, jsonrpc.NewError(jsonrpc.BlockInProgress, "Round in progress, try again later", err.Error())
-		}
 		s.logger.WithContext(ctx).Error("Failed to get inclusion proof", "error", err.Error())
 		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to get inclusion proof", err.Error())
 	}
+
 	return response, nil
 }
 
