@@ -3,9 +3,12 @@ package smt
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 )
+
+var ErrLeafExists = errors.New("smt: leaf already exists")
 
 // HashAlgorithm represents the hashing algorithm to use
 type HashAlgorithm int
@@ -292,6 +295,10 @@ func (smt *SparseMerkleTree) AddLeaves(leaves []*Leaf) error {
 	for _, leaf := range leaves {
 		err := smt.addLeafBatch(leaf.Path, leaf.Value)
 		if err != nil {
+			if errors.Is(err, ErrLeafExists) {
+				fmt.Printf("Skipping duplicate leaf: %v\n", err)
+				continue
+			}
 			return err
 		}
 	}
@@ -333,69 +340,79 @@ func (smt *SparseMerkleTree) addLeafBatch(path *big.Int, value []byte) error {
 	return nil
 }
 
-// buildTreeLazy matches TypeScript buildTree logic but uses lazy hash calculation
+// buildTreeLazy correctly handles all insertion scenarios for a "no-overwrite" SMT.
 func (smt *SparseMerkleTree) buildTreeLazy(branch Branch, remainingPath *big.Int, value []byte) (Branch, error) {
-	commonPath := calculateCommonPath(remainingPath, branch.GetPath())
-
-	// TypeScript: const isRight = (remainingPath >> commonPath.length) & 1n;
-	shifted := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
-	isRight := new(big.Int).And(shifted, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
-
-	if commonPath.path.Cmp(remainingPath) == 0 {
-		return nil, fmt.Errorf("cannot add leaf inside branch")
-	}
-
-	// If a leaf must be split from the middle
+	// --- Case 1: The existing branch is a LEAF ---
 	if branch.IsLeaf() {
 		leafBranch := branch.(*LeafBranch)
-		if commonPath.path.Cmp(leafBranch.Path) == 0 {
-			return nil, fmt.Errorf("cannot extend tree through leaf")
+
+		// Case 1a: DUPLICATE path. This is an error in a no-overwrite tree.
+		if remainingPath.Cmp(leafBranch.Path) == 0 {
+			return nil, fmt.Errorf("path '%s': %w", remainingPath, ErrLeafExists)
 		}
 
-		// TypeScript: branch.path >> commonPath.length
+		// Case 1b: Paths are different, a SPLIT is required.
+		commonPath := calculateCommonPath(remainingPath, leafBranch.Path)
+
+		newBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+		newBranch := NewLeafBranchLazy(smt.algorithm, newBranchPath, value)
+
 		oldBranchPath := new(big.Int).Rsh(leafBranch.Path, uint(commonPath.length.Uint64()))
 		oldBranch := NewLeafBranchLazy(smt.algorithm, oldBranchPath, leafBranch.Value)
 
-		// TypeScript: remainingPath >> commonPath.length
-		newBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
-		newBranch := NewLeafBranchLazy(smt.algorithm, newBranchPath, value)
+		shiftedRemaining := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+		isNewBranchRight := new(big.Int).And(shiftedRemaining, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
 
-		if isRight {
+		if isNewBranchRight {
 			return NewNodeBranchLazy(smt.algorithm, commonPath.path, oldBranch, newBranch), nil
-		} else {
-			return NewNodeBranchLazy(smt.algorithm, commonPath.path, newBranch, oldBranch), nil
 		}
+		return NewNodeBranchLazy(smt.algorithm, commonPath.path, newBranch, oldBranch), nil
 	}
 
-	// If node branch is split in the middle
+	// --- Case 2: The existing branch is an internal NODE ---
 	nodeBranch := branch.(*NodeBranch)
-	if commonPath.path.Cmp(nodeBranch.Path) < 0 {
-		newBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
-		newBranch := NewLeafBranchLazy(smt.algorithm, newBranchPath, value)
+	commonPath := calculateCommonPath(remainingPath, nodeBranch.Path)
 
-		oldBranchPath := new(big.Int).Rsh(nodeBranch.Path, uint(commonPath.length.Uint64()))
-		oldBranch := NewNodeBranchLazy(smt.algorithm, oldBranchPath, nodeBranch.Left, nodeBranch.Right)
+	// Case 2a: The Node's path is a prefix of the new leaf's path. Go deeper.
+	if commonPath.path.Cmp(nodeBranch.Path) == 0 {
+		shiftedRemaining := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+		isRight := new(big.Int).And(shiftedRemaining, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
 
 		if isRight {
-			return NewNodeBranchLazy(smt.algorithm, commonPath.path, oldBranch, newBranch), nil
-		} else {
-			return NewNodeBranchLazy(smt.algorithm, commonPath.path, newBranch, oldBranch), nil
+			if nodeBranch.Right == nil {
+				return NewNodeBranchLazy(smt.algorithm, nodeBranch.Path, nodeBranch.Left, NewLeafBranchLazy(smt.algorithm, shiftedRemaining, value)), nil
+			}
+			newRight, err := smt.buildTreeLazy(nodeBranch.Right, shiftedRemaining, value)
+			if err != nil {
+				return nil, err
+			}
+			return NewNodeBranchLazy(smt.algorithm, nodeBranch.Path, nodeBranch.Left, newRight), nil
 		}
-	}
-
-	if isRight {
-		newRight, err := smt.buildTreeLazy(nodeBranch.Right, new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64())), value)
-		if err != nil {
-			return nil, err
+		// Go left
+		if nodeBranch.Left == nil {
+			return NewNodeBranchLazy(smt.algorithm, nodeBranch.Path, NewLeafBranchLazy(smt.algorithm, shiftedRemaining, value), nodeBranch.Right), nil
 		}
-		return NewNodeBranchLazy(smt.algorithm, nodeBranch.Path, nodeBranch.Left, newRight), nil
-	} else {
-		newLeft, err := smt.buildTreeLazy(nodeBranch.Left, new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64())), value)
+		newLeft, err := smt.buildTreeLazy(nodeBranch.Left, shiftedRemaining, value)
 		if err != nil {
 			return nil, err
 		}
 		return NewNodeBranchLazy(smt.algorithm, nodeBranch.Path, newLeft, nodeBranch.Right), nil
 	}
+
+	// Case 2b: Paths diverge before the end of the Node's path. Split the node.
+	newLeafBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+	newLeafBranch := NewLeafBranchLazy(smt.algorithm, newLeafBranchPath, value)
+
+	oldNodeBranchPath := new(big.Int).Rsh(nodeBranch.Path, uint(commonPath.length.Uint64()))
+	oldNodeBranch := NewNodeBranchLazy(smt.algorithm, oldNodeBranchPath, nodeBranch.Left, nodeBranch.Right)
+
+	shiftedRemaining := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+	isNewBranchRight := new(big.Int).And(shiftedRemaining, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
+
+	if isNewBranchRight {
+		return NewNodeBranchLazy(smt.algorithm, commonPath.path, oldNodeBranch, newLeafBranch), nil
+	}
+	return NewNodeBranchLazy(smt.algorithm, commonPath.path, newLeafBranch, oldNodeBranch), nil
 }
 
 // GetRootHash returns the root hash as hex string with imprint
@@ -476,7 +493,7 @@ func (smt *SparseMerkleTree) buildTree(branch Branch, remainingPath *big.Int, va
 	isRight := new(big.Int).And(shifted, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
 
 	if commonPath.path.Cmp(remainingPath) == 0 {
-		return nil, fmt.Errorf("cannot add leaf inside branch")
+		return nil, fmt.Errorf("cannot add leaf inside branch, commonPath: '%s', remainingPath: '%s'", commonPath.path, remainingPath)
 	}
 
 	// If a leaf must be split from the middle

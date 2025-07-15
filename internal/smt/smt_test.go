@@ -3,6 +3,7 @@ package smt
 import (
 	"encoding/hex"
 	"fmt"
+	"github.com/stretchr/testify/assert"
 	"math/big"
 	"testing"
 	"time"
@@ -1003,4 +1004,82 @@ func TestAddLeavesEmptyList(t *testing.T) {
 	leaf11, err := smt.GetLeaf(big.NewInt(0b1011))
 	require.NoError(t, err)
 	require.Equal(t, []byte("value11"), leaf11.Value)
+}
+
+// In smt_test.go
+
+// TestAddLeaves_PrefixPathHandledCorrectly specifically tests the lazy-build logic for the prefix-path case.
+func TestAddLeaves_PrefixPathHandledCorrectly(t *testing.T) {
+	smt := NewSparseMerkleTree(SHA256)
+	longPath := big.NewInt(45)
+	shortPath := big.NewInt(13)
+
+	// First, add the long path leaf in a batch
+	leaf1 := []*Leaf{NewLeaf(longPath, []byte("long"))}
+	err := smt.AddLeaves(leaf1)
+	require.NoError(t, err, "Adding the first leaf via batch should succeed")
+
+	// Now, add the short path leaf in a second batch. This forces a tree restructure.
+	// This call will fail if buildTreeLazy has the prefix-path bug.
+	leaf2 := []*Leaf{NewLeaf(shortPath, []byte("short"))}
+	err = smt.AddLeaves(leaf2)
+	require.NoError(t, err, "Adding a prefix-path leaf via batch should succeed")
+}
+
+// TestAddLeaves_DuplicatePathError specifically tests the lazy-build logic for duplicate leaves.
+func TestAddLeaves_DuplicatePathError(t *testing.T) {
+	smt := NewSparseMerkleTree(SHA256)
+	path := big.NewInt(42)
+
+	// Create a batch containing two leaves with the exact same path.
+	leaves := []*Leaf{
+		NewLeaf(path, []byte("value1")),
+		NewLeaf(path, []byte("value2")),
+	}
+
+	// The AddLeaves loop will add the first one, then fail on the second.
+	err := smt.AddLeaves(leaves)
+	require.Error(t, err, "AddLeaves should fail when a batch contains a duplicate path")
+	assert.Contains(t, err.Error(), "leaf with path '42' already exists")
+}
+
+// Replace TestAddLeaves_DuplicatePathError with this new, more comprehensive test.
+func TestAddLeaves_SkipsDuplicatesAndContinues(t *testing.T) {
+	smt := NewSparseMerkleTree(SHA256)
+
+	// Setup: Add an initial leaf to the tree.
+	initialPath := big.NewInt(100)
+	initialValue := []byte("initial_value")
+	err := smt.AddLeaf(initialPath, initialValue)
+	require.NoError(t, err)
+
+	// Create a batch that contains:
+	// 1. A new, valid leaf.
+	// 2. A leaf that is a duplicate of one already in the tree.
+	// 3. Another new, valid leaf.
+	batch := []*Leaf{
+		NewLeaf(big.NewInt(200), []byte("new_value_A")), // Should be added
+		NewLeaf(initialPath, []byte("duplicate_value")), // Should be SKIPPED
+		NewLeaf(big.NewInt(300), []byte("new_value_B")), // Should be added
+	}
+
+	// Action: Process the batch. This function should now SUCCEED.
+	err = smt.AddLeaves(batch)
+	require.NoError(t, err, "AddLeaves should not return an error for batches containing duplicates")
+
+	// Verification: Check the final state of the tree.
+
+	// 1. Check that the new, valid leaves were added.
+	leafA, errA := smt.GetLeaf(big.NewInt(200))
+	require.NoError(t, errA)
+	assert.Equal(t, []byte("new_value_A"), leafA.Value)
+
+	leafB, errB := smt.GetLeaf(big.NewInt(300))
+	require.NoError(t, errB)
+	assert.Equal(t, []byte("new_value_B"), leafB.Value)
+
+	// 2. Check that the duplicate leaf was SKIPPED by verifying the value was NOT overwritten.
+	originalLeaf, errOrig := smt.GetLeaf(initialPath)
+	require.NoError(t, errOrig)
+	assert.Equal(t, initialValue, originalLeaf.Value, "The value of the original leaf should not have been changed by the duplicate in the batch")
 }
