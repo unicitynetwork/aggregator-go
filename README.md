@@ -57,19 +57,23 @@ go build -o bin/aggregator ./cmd/aggregator
 The easiest way to get started is using Docker Compose:
 
 ```bash
-# Start both MongoDB and Aggregator services
-make docker-up
+# Start all services (MongoDB, BFT nodes, and Aggregator)
+docker compose up -d
+
+# Start with clean state (removes old data)
+make docker-run-clean
 
 # View logs
-make docker-logs
+docker compose logs -f aggregator
 
 # Stop services
-make docker-down
+docker compose down
 ```
 
 This will start:
 - **MongoDB** on `localhost:27017` with admin credentials
-- **Aggregator** on `localhost:3333` with full functionality
+- **BFT Root Node** - Consensus root node  
+- **Aggregator** on `localhost:3000` with full BFT integration
 
 ### Basic Usage (Local Development)
 
@@ -87,7 +91,7 @@ export LOG_LEVEL="debug"
 ./bin/aggregator
 ```
 
-The service will start on `http://localhost:3000` by default (or `localhost:3333` with Docker).
+The service will start on `http://localhost:3000` by default.
 
 > **⚠️ BFT Configuration Required**: For the aggregator to run properly, BFT configuration is required. This includes setting up BFT configuration files and bootstrap node addresses. See [bft-support.md](bft-support.md) for detailed setup instructions.
 
@@ -450,6 +454,7 @@ make clean
 ```bash
 # Clean rebuild (stops, removes data, rebuilds)
 make docker-run-clean
+# This command automatically uses current user's UID/GID on Linux/macOS
 ```
 
 ### Project Structure
@@ -498,11 +503,8 @@ All collections include proper indexes for efficient querying.
 The service includes a built-in performance testing tool that generates cryptographically valid commitments:
 
 ```bash
-# Build the performance test
-go build -o performance-test cmd/performance-test/main.go
-
 # Run performance test (requires aggregator running on localhost:3000)
-./performance-test
+make performance-test
 ```
 
 **Performance Test Features:**
