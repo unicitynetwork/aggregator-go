@@ -160,7 +160,7 @@ func (n *BFTClientImpl) loop(ctx context.Context) error {
 			if !ok {
 				return errors.New("network received channel is closed")
 			}
-			n.logger.WithContext(ctx).Debug("received message %T", m)
+			n.logger.WithContext(ctx).Debug("received message", "type", fmt.Sprintf("%T", m))
 			n.handleMessage(ctx, m)
 		}
 	}
@@ -196,7 +196,7 @@ func (n *BFTClientImpl) isRepeatUC(prevUC, newUC *types.UnicityCertificate) bool
 	if prevUC == nil || newUC == nil {
 		return false
 	}
-	
+
 	// Check if InputRecords are equal (same partition round, state hash, etc.)
 	if prevUC.InputRecord.RoundNumber != newUC.InputRecord.RoundNumber {
 		return false
@@ -210,7 +210,7 @@ func (n *BFTClientImpl) isRepeatUC(prevUC, newUC *types.UnicityCertificate) bool
 	if !bytes.Equal(prevUC.InputRecord.BlockHash, newUC.InputRecord.BlockHash) {
 		return false
 	}
-	
+
 	// If InputRecords match but root round is higher, it's a repeat UC
 	return prevUC.UnicitySeal.RootChainRoundNumber < newUC.UnicitySeal.RootChainRoundNumber
 }
@@ -219,11 +219,11 @@ func (n *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 	// Ensure sequential processing of UCs to prevent race conditions
 	n.ucProcessingMutex.Lock()
 	defer n.ucProcessingMutex.Unlock()
-	
+
 	n.logger.WithContext(ctx).Debug("Acquired UC processing lock",
 		"ucRound", uc.GetRoundNumber(),
 		"rootRound", uc.GetRootRoundNumber())
-	
+
 	prevLUC := n.luc.Load()
 	// as we can be connected to several root nodes, we can receive the same UC multiple times
 	if uc.IsDuplicate(prevLUC) {
@@ -237,23 +237,23 @@ func (n *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 			"partitionRound", uc.GetRoundNumber(),
 			"prevRootRound", prevLUC.GetRootRoundNumber(),
 			"newRootRound", uc.GetRootRoundNumber())
-		
+
 		// Store the repeat UC and update root round tracking
 		n.luc.Store(uc)
 		n.lastRootRound.Store(uc.GetRootRoundNumber())
-		
+
 		// Clear any proposed block as it wasn't accepted in time
 		if n.proposedBlock != nil {
 			n.logger.WithContext(ctx).Info("Clearing proposed block due to repeat UC",
 				"proposedBlockNumber", n.proposedBlock.Index.String())
 			n.proposedBlock = nil
 		}
-		
+
 		// Start new round immediately with the next expected round
 		nextRoundNumber := big.NewInt(0)
 		nextRoundNumber.SetUint64(tr.Round)
 		n.nextExpectedRound.Store(tr.Round)
-		
+
 		n.logger.WithContext(ctx).Info("Starting new round after repeat UC",
 			"nextRoundNumber", nextRoundNumber.String())
 		return n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
@@ -270,7 +270,7 @@ func (n *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 			return 0
 		}(),
 		"prevRootRound", n.lastRootRound.Load())
-	
+
 	n.luc.Store(uc)
 	n.lastRootRound.Store(uc.GetRootRoundNumber())
 
@@ -319,7 +319,7 @@ func (n *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 				// to stay in sync with root chain. Clear our proposed block and
 				// start fresh with the root chain's expected round
 				n.proposedBlock = nil
-				
+
 				// Start new round immediately with root chain's next round
 				n.logger.WithContext(ctx).Info("Starting new round to sync with root chain",
 					"nextRoundNumber", nextRoundNumber.String())
@@ -347,7 +347,7 @@ func (n *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		// 1. We just started and haven't proposed a block yet
 		// 2. We cleared the proposed block due to sync issues
 		// 3. The root chain advanced without us sending a certification request
-		
+
 		// Start the next round directly
 		err := n.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
 		if err != nil {
@@ -450,7 +450,7 @@ func (n *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.
 			n.logger.WithContext(ctx).Warn("Adjusting block number to match root chain expectations",
 				"originalBlockNumber", originalBlockNumber,
 				"adjustedBlockNumber", expectedRound,
-				"difference", int64(expectedRound) - int64(originalBlockNumber))
+				"difference", int64(expectedRound)-int64(originalBlockNumber))
 		} else {
 			n.logger.WithContext(ctx).Debug("Block number matches root chain expectations",
 				"blockNumber", expectedRound)
