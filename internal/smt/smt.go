@@ -199,16 +199,17 @@ func NewNodeBranchLazy(algorithm HashAlgorithm, path *big.Int, left, right Branc
 	}
 }
 
+func (n *NodeBranch) childrenHashData() []byte {
+	return sha256Hash(append(n.Left.CalculateHash(n.Algorithm).Data, n.Right.CalculateHash(n.Algorithm).Data...))
+}
+
 func (n *NodeBranch) CalculateHash(algo HashAlgorithm) *DataHash {
 	if n.hash != nil {
 		return n.hash
 	}
 
 	// Recalculate if needed
-	leftHash := n.Left.CalculateHash(algo).Data
-	rightHash := n.Right.CalculateHash(algo).Data
-	combined := append(leftHash, rightHash...)
-	childrenHashData := sha256Hash(combined)
+	childrenHashData := n.childrenHashData()
 	n.childrenHash = NewDataHash(algo, childrenHashData)
 
 	pathBytes := bigintEncode(n.Path)
@@ -624,8 +625,8 @@ func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, sibling
 		if leafBranch, ok := branch.(*LeafBranch); ok {
 			step.Branch = []string{hex.EncodeToString(leafBranch.Value)}
 		} else {
-			branchHash := branch.CalculateHash(smt.algorithm)
-			step.Branch = []string{branchHash.ToHex()}
+			// Otherwise use branch children hash data (data that is input for hash algorithm)
+			step.Branch = []string{hex.EncodeToString(branch.(*NodeBranch).childrenHashData())}
 		}
 	}
 
