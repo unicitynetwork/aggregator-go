@@ -46,7 +46,7 @@ type Round struct {
 	Commitments []*models.Commitment
 	Block       *models.Block
 	// Track commitments that have been added to SMT but not yet finalized in a block
-	PendingRecords []*models.AggregatorRecord
+	PendingRecords  []*models.AggregatorRecord
 	PendingRootHash string
 }
 
@@ -76,7 +76,7 @@ type RoundManager struct {
 // NewRoundManager creates a new round manager
 func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*RoundManager, error) {
 	// Initialize SMT with thread-safe wrapper
-	smtInstance := smt.NewSparseMerkleTree(smt.SHA256)
+	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
 	threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 	rm := &RoundManager{
@@ -239,7 +239,7 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
 	rm.logger.WithContext(ctx).Info("StartNewRound called",
 		"roundNumber", roundNumber.String())
-	
+
 	rm.roundMutex.Lock()
 	defer rm.roundMutex.Unlock()
 
@@ -249,7 +249,7 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 			"previousRoundNumber", rm.currentRound.Number.String(),
 			"previousRoundState", rm.currentRound.State.String(),
 			"previousRoundAge", time.Since(rm.currentRound.StartTime).String())
-		
+
 		// Check if we're skipping rounds (root chain timeout scenario)
 		if rm.currentRound.Number != nil && roundNumber.Cmp(rm.currentRound.Number.Int) > 1 {
 			skippedRounds := new(big.Int).Sub(roundNumber.Int, rm.currentRound.Number.Int)
@@ -297,7 +297,7 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 // processCurrentRound processes the current round and creates a block
 func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	rm.logger.WithContext(ctx).Info("processCurrentRound called")
-	
+
 	rm.roundMutex.Lock()
 	if rm.currentRound == nil {
 		rm.roundMutex.Unlock()
@@ -353,13 +353,13 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 			rm.logger.WithContext(ctx).Error("Failed to process batch", "error", err.Error())
 			return fmt.Errorf("failed to process batch: %w", err)
 		}
-		
+
 		// Store pending data in the round for later finalization
 		rm.roundMutex.Lock()
 		rm.currentRound.PendingRecords = records
 		rm.currentRound.PendingRootHash = rootHash
 		rm.roundMutex.Unlock()
-		
+
 		rm.logger.WithContext(ctx).Info("Batch processed and added to SMT, awaiting finalization",
 			"roundNumber", roundNumber.String(),
 			"commitmentCount", len(rm.currentRound.Commitments),
@@ -375,7 +375,7 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 		"roundNumber", roundNumber.String(),
 		"rootHash", rootHash,
 		"recordCount", len(records))
-		
+
 	if err := rm.proposeBlock(ctx, roundNumber, rootHash, records); err != nil {
 		rm.logger.WithContext(ctx).Error("Failed to propose block",
 			"roundNumber", roundNumber.String(),
@@ -386,7 +386,7 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	// Update stats
 	rm.totalRounds++
 	rm.totalCommitments += int64(len(rm.currentRound.Commitments))
-	
+
 	rm.logger.WithContext(ctx).Info("Round processing completed successfully",
 		"roundNumber", roundNumber.String(),
 		"totalRounds", rm.totalRounds,

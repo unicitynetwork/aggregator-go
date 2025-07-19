@@ -100,3 +100,13 @@ func (b *BigInt) UnmarshalBSONValue(bsonType bsontype.Type, data []byte) error {
 	b.Int = i
 	return nil
 }
+
+// BigintEncode matches TypeScript BigintConverter.encode
+func BigintEncode(value *big.Int) []byte {
+	if value.Sign() == 0 {
+		return []byte{}
+	}
+
+	// Convert to bytes in big-endian format (matches Unicity SDK)
+	return value.Bytes()
+}
