@@ -1,45 +1,25 @@
 package smt
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"math/big"
 )
 
 var ErrLeafExists = errors.New("smt: leaf already exists")
 
-// HashAlgorithm represents the hashing algorithm to use
-type HashAlgorithm int
-
-const (
-	SHA256 HashAlgorithm = iota
-)
-
 type (
 	// SparseMerkleTree implements a sparse merkle tree compatible with Unicity SDK
 	SparseMerkleTree struct {
-		algorithm HashAlgorithm
+		algorithm api.HashAlgorithm
 		root      *RootNode
-	}
-
-	// MerkleTreeStep represents a single step in a Merkle tree path
-	MerkleTreeStep struct {
-		Branch  []string `json:"branch"`
-		Path    string   `json:"path"`
-		Sibling *string  `json:"sibling"`
-	}
-
-	// MerkleTreePath represents the path to verify inclusion in a Merkle tree
-	MerkleTreePath struct {
-		Root  string           `json:"root"`
-		Steps []MerkleTreeStep `json:"steps"`
 	}
 )
 
 // NewSparseMerkleTree creates a new sparse merkle tree
-func NewSparseMerkleTree(algorithm HashAlgorithm) *SparseMerkleTree {
+func NewSparseMerkleTree(algorithm api.HashAlgorithm) *SparseMerkleTree {
 	return &SparseMerkleTree{
 		algorithm: algorithm,
 		root:      NewRootNode(algorithm, nil, nil),
@@ -55,7 +35,7 @@ type RootNode struct {
 
 // Branch interface for tree nodes (matches TypeScript Branch interface)
 type Branch interface {
-	CalculateHash(algo HashAlgorithm) *DataHash
+	CalculateHash(algo api.HashAlgorithm) *api.DataHash
 	GetPath() *big.Int
 	IsLeaf() bool
 }
@@ -64,28 +44,21 @@ type Branch interface {
 type LeafBranch struct {
 	Path  *big.Int
 	Value []byte
-	hash  *DataHash
+	hash  *api.DataHash
 }
 
 // NodeBranch represents an internal node (matches TypeScript NodeBranch)
 type NodeBranch struct {
-	Algorithm    HashAlgorithm
+	Algorithm    api.HashAlgorithm
 	Path         *big.Int
 	Left         Branch
 	Right        Branch
-	childrenHash *DataHash
-	hash         *DataHash
-}
-
-// DataHash represents a hash with algorithm imprint (matches TypeScript DataHash)
-type DataHash struct {
-	Algorithm HashAlgorithm
-	Data      []byte
-	Imprint   []byte
+	childrenHash *api.DataHash
+	hash         *api.DataHash
 }
 
 // NewRootNode creates a new root node
-func NewRootNode(algorithm HashAlgorithm, left, right Branch) *RootNode {
+func NewRootNode(algorithm api.HashAlgorithm, left, right Branch) *RootNode {
 	return &RootNode{
 		Left:  left,
 		Right: right,
@@ -94,7 +67,7 @@ func NewRootNode(algorithm HashAlgorithm, left, right Branch) *RootNode {
 }
 
 // CalculateHash calculates root hash (matches TypeScript logic)
-func (r *RootNode) CalculateHash(algo HashAlgorithm) *DataHash {
+func (r *RootNode) CalculateHash(algo api.HashAlgorithm) *api.DataHash {
 	var leftHash, rightHash []byte
 
 	if r.Left != nil {
@@ -111,29 +84,29 @@ func (r *RootNode) CalculateHash(algo HashAlgorithm) *DataHash {
 
 	// Combine and hash: leftHash + rightHash
 	combined := append(leftHash, rightHash...)
-	hashData := sha256Hash(combined)
+	hashData := api.Sha256Hash(combined)
 
-	return NewDataHash(algo, hashData)
+	return api.NewDataHash(algo, hashData)
 }
 
 // NewLeafBranch creates a leaf branch
-func NewLeafBranch(algorithm HashAlgorithm, path *big.Int, value []byte) *LeafBranch {
+func NewLeafBranch(algorithm api.HashAlgorithm, path *big.Int, value []byte) *LeafBranch {
 	leaf := &LeafBranch{
 		Path:  new(big.Int).Set(path),
 		Value: append([]byte(nil), value...),
 	}
 
 	// Calculate hash: BigintConverter.encode(path) + value
-	pathBytes := bigintEncode(path)
+	pathBytes := api.BigintEncode(path)
 	data := append(pathBytes, value...)
-	hashData := sha256Hash(data)
+	hashData := api.Sha256Hash(data)
 
-	leaf.hash = NewDataHash(algorithm, hashData)
+	leaf.hash = api.NewDataHash(algorithm, hashData)
 	return leaf
 }
 
 // NewLeafBranchLazy creates a leaf branch without calculating hash (for batch operations)
-func NewLeafBranchLazy(algorithm HashAlgorithm, path *big.Int, value []byte) *LeafBranch {
+func NewLeafBranchLazy(algorithm api.HashAlgorithm, path *big.Int, value []byte) *LeafBranch {
 	return &LeafBranch{
 		Path:  new(big.Int).Set(path),
 		Value: append([]byte(nil), value...),
@@ -141,16 +114,16 @@ func NewLeafBranchLazy(algorithm HashAlgorithm, path *big.Int, value []byte) *Le
 	}
 }
 
-func (l *LeafBranch) CalculateHash(algo HashAlgorithm) *DataHash {
+func (l *LeafBranch) CalculateHash(algo api.HashAlgorithm) *api.DataHash {
 	if l.hash != nil {
 		return l.hash
 	}
 
-	pathBytes := bigintEncode(l.Path)
+	pathBytes := api.BigintEncode(l.Path)
 	data := append(pathBytes, l.Value...)
-	hashData := sha256Hash(data)
+	hashData := api.Sha256Hash(data)
 
-	l.hash = NewDataHash(algo, hashData)
+	l.hash = api.NewDataHash(algo, hashData)
 	return l.hash
 }
 
@@ -163,7 +136,7 @@ func (l *LeafBranch) IsLeaf() bool {
 }
 
 // NewNodeBranch creates a node branch
-func NewNodeBranch(algorithm HashAlgorithm, path *big.Int, left, right Branch) *NodeBranch {
+func NewNodeBranch(algorithm api.HashAlgorithm, path *big.Int, left, right Branch) *NodeBranch {
 	node := &NodeBranch{
 		Algorithm: algorithm,
 		Path:      new(big.Int).Set(path),
@@ -175,20 +148,20 @@ func NewNodeBranch(algorithm HashAlgorithm, path *big.Int, left, right Branch) *
 	leftHash := left.CalculateHash(algorithm).Data
 	rightHash := right.CalculateHash(algorithm).Data
 	combined := append(leftHash, rightHash...)
-	childrenHashData := sha256Hash(combined)
-	node.childrenHash = NewDataHash(algorithm, childrenHashData)
+	childrenHashData := api.Sha256Hash(combined)
+	node.childrenHash = api.NewDataHash(algorithm, childrenHashData)
 
 	// Calculate node hash: BigintConverter.encode(path) + childrenHash
-	pathBytes := bigintEncode(path)
+	pathBytes := api.BigintEncode(path)
 	data := append(pathBytes, childrenHashData...)
-	hashData := sha256Hash(data)
-	node.hash = NewDataHash(algorithm, hashData)
+	hashData := api.Sha256Hash(data)
+	node.hash = api.NewDataHash(algorithm, hashData)
 
 	return node
 }
 
 // NewNodeBranchLazy creates a node branch without calculating hashes (for batch operations)
-func NewNodeBranchLazy(algorithm HashAlgorithm, path *big.Int, left, right Branch) *NodeBranch {
+func NewNodeBranchLazy(algorithm api.HashAlgorithm, path *big.Int, left, right Branch) *NodeBranch {
 	return &NodeBranch{
 		Algorithm:    algorithm,
 		Path:         new(big.Int).Set(path),
@@ -200,22 +173,22 @@ func NewNodeBranchLazy(algorithm HashAlgorithm, path *big.Int, left, right Branc
 }
 
 func (n *NodeBranch) childrenHashData() []byte {
-	return sha256Hash(append(n.Left.CalculateHash(n.Algorithm).Data, n.Right.CalculateHash(n.Algorithm).Data...))
+	return api.Sha256Hash(append(n.Left.CalculateHash(n.Algorithm).Data, n.Right.CalculateHash(n.Algorithm).Data...))
 }
 
-func (n *NodeBranch) CalculateHash(algo HashAlgorithm) *DataHash {
+func (n *NodeBranch) CalculateHash(algo api.HashAlgorithm) *api.DataHash {
 	if n.hash != nil {
 		return n.hash
 	}
 
 	// Recalculate if needed
 	childrenHashData := n.childrenHashData()
-	n.childrenHash = NewDataHash(algo, childrenHashData)
+	n.childrenHash = api.NewDataHash(algo, childrenHashData)
 
-	pathBytes := bigintEncode(n.Path)
+	pathBytes := api.BigintEncode(n.Path)
 	data := append(pathBytes, childrenHashData...)
-	hashData := sha256Hash(data)
-	n.hash = NewDataHash(algo, hashData)
+	hashData := api.Sha256Hash(data)
+	n.hash = api.NewDataHash(algo, hashData)
 
 	return n.hash
 }
@@ -226,26 +199,6 @@ func (n *NodeBranch) GetPath() *big.Int {
 
 func (n *NodeBranch) IsLeaf() bool {
 	return false
-}
-
-// NewDataHash creates a DataHash with algorithm imprint
-func NewDataHash(algorithm HashAlgorithm, data []byte) *DataHash {
-	imprint := make([]byte, len(data)+2)
-	// Set algorithm bytes (SHA256 = 0, so 0x0000)
-	imprint[0] = byte((int(algorithm) & 0xff00) >> 8)
-	imprint[1] = byte(int(algorithm) & 0xff)
-	copy(imprint[2:], data)
-
-	return &DataHash{
-		Algorithm: algorithm,
-		Data:      append([]byte(nil), data...),
-		Imprint:   imprint,
-	}
-}
-
-// ToHex returns hex string of imprint (for compatibility)
-func (h *DataHash) ToHex() string {
-	return fmt.Sprintf("%x", h.Imprint)
 }
 
 // AddLeaf adds a single leaf to the tree (matches TypeScript addLeaf)
@@ -550,18 +503,18 @@ func (smt *SparseMerkleTree) buildTree(branch Branch, remainingPath *big.Int, va
 	}
 }
 
-func (smt *SparseMerkleTree) GetPath(path *big.Int) *MerkleTreePath {
+func (smt *SparseMerkleTree) GetPath(path *big.Int) *api.MerkleTreePath {
 	rootHash := smt.root.CalculateHash(smt.algorithm)
 	steps := smt.generatePath(path, smt.root.Left, smt.root.Right)
 
-	return &MerkleTreePath{
+	return &api.MerkleTreePath{
 		Root:  rootHash.ToHex(),
 		Steps: steps,
 	}
 }
 
 // generatePath recursively generates the Merkle tree path steps
-func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Branch) []MerkleTreeStep {
+func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Branch) []api.MerkleTreeStep {
 	// Determine if we should go right (remainingPath & 1n)
 	isRight := new(big.Int).And(remainingPath, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
 
@@ -575,27 +528,27 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Br
 	}
 
 	if branch == nil {
-		return []MerkleTreeStep{smt.createMerkleTreeStep(remainingPath, nil, siblingBranch)}
+		return []api.MerkleTreeStep{smt.createMerkleTreeStep(remainingPath, nil, siblingBranch)}
 	}
 
 	commonPath := calculateCommonPath(remainingPath, branch.GetPath())
 
 	if branch.GetPath().Cmp(commonPath.path) == 0 {
 		if branch.IsLeaf() {
-			return []MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
+			return []api.MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
 		}
 
 		// If path has ended, return the current non-leaf branch data
 		shifted := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
 		if shifted.Cmp(big.NewInt(1)) == 0 {
-			return []MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
+			return []api.MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
 		}
 
 		// Continue recursively into the branch
 		nodeBranch, ok := branch.(*NodeBranch)
 		if !ok {
 			// Should not happen if IsLeaf() returned false
-			return []MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
+			return []api.MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
 		}
 
 		// Recursively generate path for the shifted remaining path
@@ -608,12 +561,12 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Br
 		return append(recursiveSteps, currentStep)
 	}
 
-	return []MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
+	return []api.MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
 }
 
-// createMerkleTreeStep creates a MerkleTreeStep with proper branch and sibling handling
-func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, siblingBranch Branch) MerkleTreeStep {
-	step := MerkleTreeStep{
+// createMerkleTreeStep creates a api.MerkleTreeStep with proper branch and sibling handling
+func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, siblingBranch Branch) api.MerkleTreeStep {
+	step := api.MerkleTreeStep{
 		Path:    path.String(),
 		Branch:  []string{},
 		Sibling: nil,
@@ -679,22 +632,6 @@ func calculateCommonPath(path1, path2 *big.Int) struct {
 		length *big.Int
 		path   *big.Int
 	}{length, path}
-}
-
-// bigintEncode matches TypeScript BigintConverter.encode
-func bigintEncode(value *big.Int) []byte {
-	if value.Sign() == 0 {
-		return []byte{}
-	}
-
-	// Convert to bytes in big-endian format (matches Unicity SDK)
-	return value.Bytes()
-}
-
-// sha256Hash performs SHA256 hashing
-func sha256Hash(data []byte) []byte {
-	hash := sha256.Sum256(data)
-	return hash[:]
 }
 
 // Leaf represents a leaf to be inserted (for batch operations)
