@@ -1,0 +1,164 @@
+package api
+
+import (
+	"crypto/sha256"
+	"fmt"
+	"math/big"
+)
+
+type (
+	// MerkleTreeStep represents a single step in a Merkle tree path
+	MerkleTreeStep struct {
+		Branch  []string `json:"branch"`
+		Path    string   `json:"path"`
+		Sibling *string  `json:"sibling"`
+	}
+
+	// MerkleTreePath represents the path to verify inclusion in a Merkle tree
+	MerkleTreePath struct {
+		Root  string           `json:"root"`
+		Steps []MerkleTreeStep `json:"steps"`
+	}
+)
+
+// HashAlgorithm represents the hashing algorithm to use
+type HashAlgorithm int
+
+const (
+	SHA256 HashAlgorithm = iota
+)
+
+// DataHash represents a hash with algorithm imprint (matches TypeScript DataHash)
+type DataHash struct {
+	Algorithm HashAlgorithm
+	Data      []byte
+	Imprint   []byte
+}
+
+// NewDataHash creates a api.DataHash with algorithm imprint
+func NewDataHash(algorithm HashAlgorithm, data []byte) *DataHash {
+	imprint := make([]byte, len(data)+2)
+	// Set algorithm bytes (SHA256 = 0, so 0x0000)
+	imprint[0] = byte((int(algorithm) & 0xff00) >> 8)
+	imprint[1] = byte(int(algorithm) & 0xff)
+	copy(imprint[2:], data)
+
+	return &DataHash{
+		Algorithm: algorithm,
+		Data:      append([]byte(nil), data...),
+		Imprint:   imprint,
+	}
+}
+
+// ToHex returns hex string of imprint (for compatibility)
+func (h *DataHash) ToHex() string {
+	return fmt.Sprintf("%x", h.Imprint)
+}
+
+//  public async verify(requestId: bigint): Promise<PathVerificationResult> {
+//    let currentPath = 1n;
+//    let currentHash: DataHash | null = null;
+//
+//    for (let i = 0; i < this.steps.length; i++) {
+//      const step = this.steps[i];
+//      let hash: Uint8Array;
+//      if (step.branch === null) {
+//        hash = new Uint8Array(1);
+//      } else {
+//        const bytes = i === 0 ? step.branch.value : currentHash?.data;
+//        const digest = await new DataHasher(HashAlgorithm.SHA256)
+//          .update(BigintConverter.encode(step.path))
+//          .update(bytes ?? new Uint8Array(1))
+//          .digest();
+//        hash = digest.data;
+//
+//        const length = BigInt(step.path.toString(2).length - 1);
+//        currentPath = (currentPath << length) | (step.path & ((1n << length) - 1n));
+//      }
+//
+//      const siblingHash = step.sibling?.data ?? new Uint8Array(1);
+//      const isRight = step.path & 1n;
+//      currentHash = await new DataHasher(HashAlgorithm.SHA256)
+//        .update(isRight ? siblingHash : hash)
+//        .update(isRight ? hash : siblingHash)
+//        .digest();
+//    }
+//
+//    return new PathVerificationResult(!!currentHash && this.root.equals(currentHash), requestId === currentPath);
+//  }
+
+type PathVerificationResult struct {
+	PathValid    bool
+	PathIncluded bool
+	Result       bool
+}
+
+func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, error) {
+	currentPath := big.NewInt(1)
+	var currentHash []byte
+
+	for i, step := range m.Steps {
+		var hash []byte
+		path, ok := new(big.Int).SetString(step.Path, 10)
+		if !ok {
+			return nil, fmt.Errorf("invalid path '%s'", step.Path)
+		}
+		if step.Branch == nil {
+			hash = []byte{0} // Empty branch case
+		} else {
+			var bytes []byte
+			if i == 0 {
+				_hex, err := NewImprintHexString(step.Branch[0])
+				if err != nil {
+					return nil, fmt.Errorf("invalid branch hash '%s': %w", step.Branch[0], err)
+				}
+				bytes, err = _hex.DataBytes()
+				if err != nil {
+					return nil, fmt.Errorf("failed to decode branch hash '%s': %w", step.Branch[0], err)
+				}
+			} else if currentHash != nil {
+				bytes = currentHash
+			} else {
+				bytes = []byte{0}
+			}
+
+			pathBytes := BigintEncode(path)
+			hash = Sha256Hash(append(pathBytes, bytes...))
+
+			length := len(new(big.Int).Text(2)) - 1                                // Length of binary representation minus 1
+			currentPath = new(big.Int).Lsh(currentPath, uint(length))              // Shift left by path length
+			currentPath.Or(currentPath, path.And(path, big.NewInt((1<<length)-1))) // OR with the last bits of the path
+		}
+
+		siblingHash := []byte{0} // Default empty sibling hash
+		if step.Sibling != nil {
+			_hex, err := NewImprintHexString(*step.Sibling)
+			if err != nil {
+				return nil, fmt.Errorf("invalid sibling hash '%s': %w", *step.Sibling, err)
+			}
+			siblingHash, err = _hex.DataBytes() // or _hex.Imprint()?
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode sibling hash '%s': %w", *step.Sibling, err)
+			}
+		}
+		isRight := path.And(path, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
+
+		if isRight {
+			currentHash = Sha256Hash(append(siblingHash, hash...))
+		} else {
+			currentHash = Sha256Hash(append(hash, siblingHash...))
+		}
+	}
+
+	return &PathVerificationResult{
+		PathValid:    currentHash != nil && m.Root == NewDataHash(SHA256, currentHash).ToHex(),
+		PathIncluded: requestId.Cmp(currentPath) == 0,
+	}, nil
+
+}
+
+// sha256Hash performs SHA256 hashing
+func Sha256Hash(data []byte) []byte {
+	hash := sha256.Sum256(data)
+	return hash[:]
+}

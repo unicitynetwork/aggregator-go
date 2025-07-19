@@ -2,6 +2,7 @@ package round
 
 import (
 	"fmt"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"math/big"
 	"sync"
 
@@ -65,7 +66,7 @@ func (ts *ThreadSafeSMT) GetLeaf(path *big.Int) (*smt.LeafBranch, error) {
 
 // GetPath generates a Merkle tree path for the given path
 // This is a read operation and allows concurrent access
-func (ts *ThreadSafeSMT) GetPath(path *big.Int) *smt.MerkleTreePath {
+func (ts *ThreadSafeSMT) GetPath(path *big.Int) *api.MerkleTreePath {
 	ts.rwMux.RLock()
 	defer ts.rwMux.RUnlock()
 	return ts.smt.GetPath(path)
