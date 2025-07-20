@@ -103,16 +103,17 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 		if !ok {
 			return nil, fmt.Errorf("invalid path '%s'", step.Path)
 		}
+
 		if step.Branch == nil {
-			hash = []byte{0} // Empty branch case
+			hash = []byte{0} // Null branch case
 		} else {
 			var bytes []byte
-			if i == 0 {
+			if i == 0 { //&& len(step.Branch) > 0
 				_hex, err := NewImprintHexString(step.Branch[0])
 				if err != nil {
 					return nil, fmt.Errorf("invalid branch hash '%s': %w", step.Branch[0], err)
 				}
-				bytes, err = _hex.DataBytes()
+				bytes, err = _hex.Imprint()
 				if err != nil {
 					return nil, fmt.Errorf("failed to decode branch hash '%s': %w", step.Branch[0], err)
 				}
@@ -124,10 +125,17 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 
 			pathBytes := BigintEncode(path)
 			hash = Sha256Hash(append(pathBytes, bytes...))
+		}
 
-			length := len(new(big.Int).Text(2)) - 1                                // Length of binary representation minus 1
-			currentPath = new(big.Int).Lsh(currentPath, uint(length))              // Shift left by path length
-			currentPath.Or(currentPath, path.And(path, big.NewInt((1<<length)-1))) // OR with the last bits of the path
+		// Update currentPath for non-null branches
+		if step.Branch != nil {
+			length := len(path.Text(2)) - 1
+			// Shift left by path length
+			currentPath = new(big.Int).Lsh(currentPath, uint(length))
+			// ((1n << length) - 1n)
+			mask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), uint(length)), big.NewInt(1))
+			// (currentPath << length) | (step.path & ((1n << length) - 1n))
+			currentPath.Or(currentPath, new(big.Int).And(path, mask))
 		}
 
 		siblingHash := []byte{0} // Default empty sibling hash
@@ -136,12 +144,12 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 			if err != nil {
 				return nil, fmt.Errorf("invalid sibling hash '%s': %w", *step.Sibling, err)
 			}
-			siblingHash, err = _hex.DataBytes() // or _hex.Imprint()?
+			siblingHash, err = _hex.DataBytes() // Use data bytes, not imprint
 			if err != nil {
 				return nil, fmt.Errorf("failed to decode sibling hash '%s': %w", *step.Sibling, err)
 			}
 		}
-		isRight := path.And(path, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
+		isRight := new(big.Int).And(path, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
 
 		if isRight {
 			currentHash = Sha256Hash(append(siblingHash, hash...))
@@ -150,9 +158,13 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 		}
 	}
 
+	pathValid := currentHash != nil && m.Root == NewDataHash(SHA256, currentHash).ToHex()
+	pathIncluded := requestId.Cmp(currentPath) == 0
+
 	return &PathVerificationResult{
-		PathValid:    currentHash != nil && m.Root == NewDataHash(SHA256, currentHash).ToHex(),
-		PathIncluded: requestId.Cmp(currentPath) == 0,
+		PathValid:    pathValid,
+		PathIncluded: pathIncluded,
+		Result:       pathValid && pathIncluded,
 	}, nil
 
 }

@@ -91,5 +91,11 @@ func TestAddLeaves_DebugInvalidPath(t *testing.T) {
 		require.NoError(t, err)
 		merkleTreePath := _smt.GetPath(path)
 		require.NotNil(t, merkleTreePath, "Expected non-nil Merkle tree path for valid request ID")
+		
+		res, err := merkleTreePath.Verify(path)
+		require.NoError(t, err, "Expected no error verifying Merkle tree path")
+		
+		require.True(t, res.PathIncluded)
+		require.True(t, res.PathValid)
 	}
 }
