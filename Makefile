@@ -73,3 +73,10 @@ docker-run-clean:
 	@mkdir -p ./data/genesis ./data/genesis-root ./data/mongodb_data && chmod -R 777 ./data
 	@USER_UID=$$(id -u) USER_GID=$$(id -g) docker compose up --force-recreate -d --build
 	@echo "Services rebuilt with user UID=$$(id -u):$$(id -g)"
+
+docker-restart-aggregator:
+	@echo "Rebuilding and restarting aggregator service..."
+	@docker compose stop aggregator
+	@docker compose build aggregator
+	@docker compose up -d aggregator
+	@echo "Aggregator service restarted"
