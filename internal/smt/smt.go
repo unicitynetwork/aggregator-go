@@ -4,8 +4,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"math/big"
+	
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 var ErrLeafExists = errors.New("smt: leaf already exists")
@@ -250,7 +251,7 @@ func (smt *SparseMerkleTree) AddLeaves(leaves []*Leaf) error {
 		err := smt.addLeafBatch(leaf.Path, leaf.Value)
 		if err != nil {
 			if errors.Is(err, ErrLeafExists) {
-				fmt.Printf("Skipping duplicate leaf: %v\n", err)
+				// Skip duplicate leaves silently
 				continue
 			}
 			return err
@@ -528,7 +529,18 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Br
 	}
 
 	if branch == nil {
-		return []api.MerkleTreeStep{smt.createMerkleTreeStep(remainingPath, nil, siblingBranch)}
+		// No branch exists at this position - create step without branch
+		step := api.MerkleTreeStep{
+			Path:    remainingPath.String(),
+			Branch:  nil, // nil indicates no branch exists
+			Sibling: nil,
+		}
+		if siblingBranch != nil {
+			siblingHash := siblingBranch.CalculateHash(smt.algorithm)
+			siblingHex := siblingHash.ToHex()
+			step.Sibling = &siblingHex
+		}
+		return []api.MerkleTreeStep{step}
 	}
 
 	commonPath := calculateCommonPath(remainingPath, branch.GetPath())
@@ -555,10 +567,14 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Br
 		shiftedRemaining := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
 		recursiveSteps := smt.generatePath(shiftedRemaining, nodeBranch.Left, nodeBranch.Right)
 
-		// Append the current step without branch (since we went into it)
+		// Create the current step without branch (since we went into it)
 		currentStep := smt.createMerkleTreeStep(branch.GetPath(), nil, siblingBranch)
 
-		return append(recursiveSteps, currentStep)
+		// Prepend recursive steps to current step (TypeScript: [...recursiveSteps, currentStep])
+		steps := make([]api.MerkleTreeStep, 0, len(recursiveSteps)+1)
+		steps = append(steps, recursiveSteps...)
+		steps = append(steps, currentStep)
+		return steps
 	}
 
 	return []api.MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
@@ -568,19 +584,26 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Br
 func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, siblingBranch Branch) api.MerkleTreeStep {
 	step := api.MerkleTreeStep{
 		Path:    path.String(),
-		Branch:  []string{},
+		Branch:  nil, // Initialize as nil
 		Sibling: nil,
 	}
 
-	// Add branch hash if branch exists
+	// Add branch data
 	if branch != nil {
-		// If it's a LeafBranch, use the value instead of the hash
+		// Branch exists, add its data
+		step.Branch = []string{}
 		if leafBranch, ok := branch.(*LeafBranch); ok {
 			step.Branch = []string{hex.EncodeToString(leafBranch.Value)}
 		} else {
-			// Otherwise use branch children hash data (data that is input for hash algorithm)
+			// Otherwise use branch children hash data
 			step.Branch = []string{hex.EncodeToString(branch.(*NodeBranch).childrenHashData())}
 		}
+	} else {
+		// No branch, but we need to distinguish between:
+		// - TypeScript's createWithoutBranch (branch = null) 
+		// - TypeScript's create with null value (branch = empty)
+		// Based on the TypeScript code, when we pass null to create, it creates empty branch
+		step.Branch = []string{}
 	}
 
 	// Add sibling hash if sibling exists

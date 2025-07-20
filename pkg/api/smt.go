@@ -2,6 +2,7 @@ package api
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 )
@@ -105,31 +106,41 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 		}
 
 		if step.Branch == nil {
-			hash = []byte{0} // Null branch case
+			// TypeScript: if (step.branch === null) { hash = new Uint8Array(1); }
+			hash = []byte{0}
+			// Don't update currentPath for null branches
 		} else {
+			// Branch is not nil (could be empty or have value)
+			// TypeScript: const bytes = i === 0 ? step.branch.value : currentHash?.data;
 			var bytes []byte
-			if i == 0 { //&& len(step.Branch) > 0
-				_hex, err := NewImprintHexString(step.Branch[0])
+			
+			if i == 0 && len(step.Branch) > 0 && step.Branch[0] != "" {
+				// First step with branch value
+				var err error
+				bytes, err = hex.DecodeString(step.Branch[0])
 				if err != nil {
-					return nil, fmt.Errorf("invalid branch hash '%s': %w", step.Branch[0], err)
-				}
-				bytes, err = _hex.Imprint()
-				if err != nil {
-					return nil, fmt.Errorf("failed to decode branch hash '%s': %w", step.Branch[0], err)
+					return nil, fmt.Errorf("failed to decode branch hex '%s': %w", step.Branch[0], err)
 				}
 			} else if currentHash != nil {
+				// Use currentHash for subsequent steps or when no branch value
 				bytes = currentHash
 			} else {
+				// Default to empty byte
 				bytes = []byte{0}
 			}
 
+			// Always calculate hash for non-null branches
 			pathBytes := BigintEncode(path)
 			hash = Sha256Hash(append(pathBytes, bytes...))
-		}
 
-		// Update currentPath for non-null branches
-		if step.Branch != nil {
-			length := len(path.Text(2)) - 1
+			// Update currentPath for all non-null branches (even empty ones)
+			// TypeScript: const length = BigInt(step.path.toString(2).length - 1);
+			// Note: path.Text(2) returns "0" for 0, which has length 1
+			binaryStr := path.Text(2)
+			length := len(binaryStr) - 1
+			if length < 0 {
+				length = 0 // Protect against negative length
+			}
 			// Shift left by path length
 			currentPath = new(big.Int).Lsh(currentPath, uint(length))
 			// ((1n << length) - 1n)
