@@ -785,3 +785,14 @@ CHANGELOG ENTRY - 6 July 2025 at 08:45 CET
 This completes the implementation of improvements identified from the BFT core
 analysis, significantly enhancing the aggregator's reliability and synchronization
 with the root chain.
+CHANGELOG ENTRY - Sunday July 20, 2025 at 05:49 PM CET
+Fixed MerkleTreePath.Verify() implementation to be compatible with TypeScript's verify() from commons library:
+- Fixed variable shadowing bug where bytes variable was incorrectly scoped
+- Fixed branch initialization to properly distinguish between null and empty branches
+- Fixed hash calculation for empty branches to use path + currentHash instead of just [0]
+- Fixed branch value decoding - values are hex-encoded, not imprint hex
+- Path reconstruction now correctly preserves all bits of the requestId
+- Verification now passes for complex 273-bit paths matching TypeScript behavior
+
+CHANGELOG ENTRY - Monday January 20, 2025 at 11:30 AM PST
+Fixed deterministic behavior in NonExistentPath test case for SMT verification. The issue was that when no branch exists at a position (branch == nil in generatePath), we need to create a MerkleTreeStep with Branch=nil rather than Branch=[] to properly indicate "no branch exists". This distinction is important because during verification, nil branches don't update the currentPath, while empty array branches do. Updated the path generation to handle this case correctly by creating the step directly when branch is nil rather than using createMerkleTreeStep.
