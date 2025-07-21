@@ -41,18 +41,19 @@ func apiToModelBigInt(apiBigInt *api.BigInt) *api.BigInt {
 
 func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.AggregatorRecord {
 	return &api.AggregatorRecord{
-		RequestID:       modelRecord.RequestID,
-		TransactionHash: modelRecord.TransactionHash,
+		RequestID:             modelRecord.RequestID,
+		TransactionHash:       modelRecord.TransactionHash,
 		Authenticator: api.Authenticator{
 			Algorithm: modelRecord.Authenticator.Algorithm,
 			PublicKey: modelRecord.Authenticator.PublicKey,
 			Signature: modelRecord.Authenticator.Signature,
 			StateHash: api.StateHash(modelRecord.Authenticator.StateHash.String()),
 		},
-		BlockNumber: modelToAPIBigInt(modelRecord.BlockNumber),
-		LeafIndex:   modelToAPIBigInt(modelRecord.LeafIndex),
-		CreatedAt:   modelRecord.CreatedAt,
-		FinalizedAt: modelRecord.FinalizedAt,
+		AggregateRequestCount: modelRecord.AggregateRequestCount,
+		BlockNumber:           modelToAPIBigInt(modelRecord.BlockNumber),
+		LeafIndex:             modelToAPIBigInt(modelRecord.LeafIndex),
+		CreatedAt:             modelRecord.CreatedAt,
+		FinalizedAt:           modelRecord.FinalizedAt,
 	}
 }
 
@@ -125,13 +126,23 @@ func (as *AggregatorService) Stop(ctx context.Context) error {
 
 // SubmitCommitment handles commitment submission
 func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error) {
-	// Create commitment for validation
-	commitment := models.NewCommitment(req.RequestID, req.TransactionHash, models.Authenticator{
-		Algorithm: req.Authenticator.Algorithm,
-		PublicKey: req.Authenticator.PublicKey,
-		Signature: req.Authenticator.Signature,
-		StateHash: req.Authenticator.StateHash,
-	})
+	// Create commitment with aggregate count
+	aggregateCount := req.AggregateRequestCount
+	if aggregateCount == 0 {
+		aggregateCount = 1 // Default to 1 if not specified
+	}
+	
+	commitment := models.NewCommitmentWithAggregate(
+		req.RequestID, 
+		req.TransactionHash, 
+		models.Authenticator{
+			Algorithm: req.Authenticator.Algorithm,
+			PublicKey: req.Authenticator.PublicKey,
+			Signature: req.Authenticator.Signature,
+			StateHash: req.Authenticator.StateHash,
+		},
+		aggregateCount,
+	)
 
 	// Validate commitment signature and request ID
 	validationResult := as.commitmentValidator.ValidateCommitment(commitment)
@@ -285,7 +296,21 @@ func (as *AggregatorService) GetBlock(ctx context.Context, req *api.GetBlockRequ
 		return nil, fmt.Errorf("block not found")
 	}
 
-	return &api.GetBlockResponse{Block: modelToAPIBlock(block)}, nil
+	// Calculate total commitments by summing up AggregateRequestCount from all records in this block
+	records, err := as.storage.AggregatorRecordStorage().GetByBlockNumber(ctx, block.Index)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get block commitments: %w", err)
+	}
+
+	var totalCommitments uint64
+	for _, record := range records {
+		totalCommitments += record.AggregateRequestCount
+	}
+
+	return &api.GetBlockResponse{
+		Block:            modelToAPIBlock(block),
+		TotalCommitments: totalCommitments,
+	}, nil
 }
 
 // GetBlockCommitments retrieves all commitments in a block
