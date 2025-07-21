@@ -26,20 +26,33 @@ type Authenticator struct {
 
 // Commitment represents a state transition request
 type Commitment struct {
-	RequestID       RequestID       `json:"requestId"`
-	TransactionHash TransactionHash `json:"transactionHash"`
-	Authenticator   Authenticator   `json:"authenticator"`
-	CreatedAt       *Timestamp      `json:"createdAt"`
-	ProcessedAt     *Timestamp      `json:"processedAt,omitempty"`
+	RequestID             RequestID       `json:"requestId"`
+	TransactionHash       TransactionHash `json:"transactionHash"`
+	Authenticator         Authenticator   `json:"authenticator"`
+	AggregateRequestCount uint64          `json:"aggregateRequestCount,string"`
+	CreatedAt             *Timestamp      `json:"createdAt"`
+	ProcessedAt           *Timestamp      `json:"processedAt,omitempty"`
 }
 
 // NewCommitment creates a new commitment
 func NewCommitment(requestID RequestID, transactionHash TransactionHash, authenticator Authenticator) *Commitment {
 	return &Commitment{
-		RequestID:       requestID,
-		TransactionHash: transactionHash,
-		Authenticator:   authenticator,
-		CreatedAt:       Now(),
+		RequestID:             requestID,
+		TransactionHash:       transactionHash,
+		Authenticator:         authenticator,
+		AggregateRequestCount: 1, // Default to 1 for direct requests
+		CreatedAt:             Now(),
+	}
+}
+
+// NewCommitmentWithAggregate creates a new commitment with aggregate count
+func NewCommitmentWithAggregate(requestID RequestID, transactionHash TransactionHash, authenticator Authenticator, aggregateCount uint64) *Commitment {
+	return &Commitment{
+		RequestID:             requestID,
+		TransactionHash:       transactionHash,
+		Authenticator:         authenticator,
+		AggregateRequestCount: aggregateCount,
+		CreatedAt:             Now(),
 	}
 }
 
@@ -110,25 +123,27 @@ func (t *Timestamp) UnmarshalBSONValue(bsonType bsontype.Type, data []byte) erro
 
 // AggregatorRecord represents a finalized commitment with proof data
 type AggregatorRecord struct {
-	RequestID       RequestID       `json:"requestId"`
-	TransactionHash TransactionHash `json:"transactionHash"`
-	Authenticator   Authenticator   `json:"authenticator"`
-	BlockNumber     *BigInt         `json:"blockNumber"`
-	LeafIndex       *BigInt         `json:"leafIndex"`
-	CreatedAt       *Timestamp      `json:"createdAt"`
-	FinalizedAt     *Timestamp      `json:"finalizedAt"`
+	RequestID             RequestID       `json:"requestId"`
+	TransactionHash       TransactionHash `json:"transactionHash"`
+	Authenticator         Authenticator   `json:"authenticator"`
+	AggregateRequestCount uint64          `json:"aggregateRequestCount,string"`
+	BlockNumber           *BigInt         `json:"blockNumber"`
+	LeafIndex             *BigInt         `json:"leafIndex"`
+	CreatedAt             *Timestamp      `json:"createdAt"`
+	FinalizedAt           *Timestamp      `json:"finalizedAt"`
 }
 
 // NewAggregatorRecord creates a new aggregator record from a commitment
 func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *BigInt) *AggregatorRecord {
 	return &AggregatorRecord{
-		RequestID:       commitment.RequestID,
-		TransactionHash: commitment.TransactionHash,
-		Authenticator:   commitment.Authenticator,
-		BlockNumber:     blockNumber,
-		LeafIndex:       leafIndex,
-		CreatedAt:       commitment.CreatedAt,
-		FinalizedAt:     Now(),
+		RequestID:             commitment.RequestID,
+		TransactionHash:       commitment.TransactionHash,
+		Authenticator:         commitment.Authenticator,
+		AggregateRequestCount: commitment.AggregateRequestCount,
+		BlockNumber:           blockNumber,
+		LeafIndex:             leafIndex,
+		CreatedAt:             commitment.CreatedAt,
+		FinalizedAt:           Now(),
 	}
 }
 
@@ -210,10 +225,11 @@ func NewReceipt(commitment *Commitment, algorithm string, publicKey, signature H
 
 // SubmitCommitmentRequest represents the submit_commitment JSON-RPC request
 type SubmitCommitmentRequest struct {
-	RequestID       RequestID       `json:"requestId"`
-	TransactionHash TransactionHash `json:"transactionHash"`
-	Authenticator   Authenticator   `json:"authenticator"`
-	Receipt         *bool           `json:"receipt,omitempty"`
+	RequestID             RequestID       `json:"requestId"`
+	TransactionHash       TransactionHash `json:"transactionHash"`
+	Authenticator         Authenticator   `json:"authenticator"`
+	Receipt               *bool           `json:"receipt,omitempty"`
+	AggregateRequestCount uint64          `json:"aggregateRequestCount,string"`
 }
 
 // SubmitCommitmentResponse represents the submit_commitment JSON-RPC response
@@ -251,7 +267,8 @@ type GetBlockRequest struct {
 
 // GetBlockResponse represents the get_block JSON-RPC response
 type GetBlockResponse struct {
-	Block *Block `json:"block"`
+	Block            *Block `json:"block"`
+	TotalCommitments uint64 `json:"totalCommitments,string"`
 }
 
 // GetBlockCommitmentsRequest represents the get_block_commitments JSON-RPC request

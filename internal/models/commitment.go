@@ -18,56 +18,72 @@ type Authenticator struct {
 
 // Commitment represents a state transition request
 type Commitment struct {
-	RequestID       api.RequestID       `json:"requestId" bson:"requestId"`
-	TransactionHash api.TransactionHash `json:"transactionHash" bson:"transactionHash"`
-	Authenticator   Authenticator       `json:"authenticator" bson:"authenticator"`
-	CreatedAt       *api.Timestamp      `json:"createdAt" bson:"createdAt"`
-	ProcessedAt     *api.Timestamp      `json:"processedAt,omitempty" bson:"processedAt,omitempty"`
+	RequestID             api.RequestID       `json:"requestId" bson:"requestId"`
+	TransactionHash       api.TransactionHash `json:"transactionHash" bson:"transactionHash"`
+	Authenticator         Authenticator       `json:"authenticator" bson:"authenticator"`
+	AggregateRequestCount uint64              `json:"aggregateRequestCount" bson:"aggregateRequestCount"`
+	CreatedAt             *api.Timestamp      `json:"createdAt" bson:"createdAt"`
+	ProcessedAt           *api.Timestamp      `json:"processedAt,omitempty" bson:"processedAt,omitempty"`
 }
 
 // NewCommitment creates a new commitment
 func NewCommitment(requestID api.RequestID, transactionHash api.TransactionHash, authenticator Authenticator) *Commitment {
 	return &Commitment{
-		RequestID:       requestID,
-		TransactionHash: transactionHash,
-		Authenticator:   authenticator,
-		CreatedAt:       api.Now(),
+		RequestID:             requestID,
+		TransactionHash:       transactionHash,
+		Authenticator:         authenticator,
+		AggregateRequestCount: 1, // Default to 1 for direct requests
+		CreatedAt:             api.Now(),
+	}
+}
+
+// NewCommitmentWithAggregate creates a new commitment with aggregate count
+func NewCommitmentWithAggregate(requestID api.RequestID, transactionHash api.TransactionHash, authenticator Authenticator, aggregateCount uint64) *Commitment {
+	return &Commitment{
+		RequestID:             requestID,
+		TransactionHash:       transactionHash,
+		Authenticator:         authenticator,
+		AggregateRequestCount: aggregateCount,
+		CreatedAt:             api.Now(),
 	}
 }
 
 // AggregatorRecord represents a finalized commitment with proof data
 type AggregatorRecord struct {
-	RequestID       api.RequestID       `json:"requestId" bson:"requestId"`
-	TransactionHash api.TransactionHash `json:"transactionHash" bson:"transactionHash"`
-	Authenticator   Authenticator       `json:"authenticator" bson:"authenticator"`
-	BlockNumber     *api.BigInt         `json:"blockNumber" bson:"blockNumber"`
-	LeafIndex       *api.BigInt         `json:"leafIndex" bson:"leafIndex"`
-	CreatedAt       *api.Timestamp      `json:"createdAt" bson:"createdAt"`
-	FinalizedAt     *api.Timestamp      `json:"finalizedAt" bson:"finalizedAt"`
+	RequestID             api.RequestID       `json:"requestId" bson:"requestId"`
+	TransactionHash       api.TransactionHash `json:"transactionHash" bson:"transactionHash"`
+	Authenticator         Authenticator       `json:"authenticator" bson:"authenticator"`
+	AggregateRequestCount uint64              `json:"aggregateRequestCount" bson:"aggregateRequestCount"`
+	BlockNumber           *api.BigInt         `json:"blockNumber" bson:"blockNumber"`
+	LeafIndex             *api.BigInt         `json:"leafIndex" bson:"leafIndex"`
+	CreatedAt             *api.Timestamp      `json:"createdAt" bson:"createdAt"`
+	FinalizedAt           *api.Timestamp      `json:"finalizedAt" bson:"finalizedAt"`
 }
 
 // NewAggregatorRecord creates a new aggregator record from a commitment
 func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *api.BigInt) *AggregatorRecord {
 	return &AggregatorRecord{
-		RequestID:       commitment.RequestID,
-		TransactionHash: commitment.TransactionHash,
-		Authenticator:   commitment.Authenticator,
-		BlockNumber:     blockNumber,
-		LeafIndex:       leafIndex,
-		CreatedAt:       commitment.CreatedAt,
-		FinalizedAt:     api.Now(),
+		RequestID:             commitment.RequestID,
+		TransactionHash:       commitment.TransactionHash,
+		Authenticator:         commitment.Authenticator,
+		AggregateRequestCount: commitment.AggregateRequestCount,
+		BlockNumber:           blockNumber,
+		LeafIndex:             leafIndex,
+		CreatedAt:             commitment.CreatedAt,
+		FinalizedAt:           api.Now(),
 	}
 }
 
 // AggregatorRecordBSON represents the BSON version of AggregatorRecord for MongoDB storage
 type AggregatorRecordBSON struct {
-	RequestID       string            `bson:"requestId"`
-	TransactionHash string            `bson:"transactionHash"`
-	Authenticator   AuthenticatorBSON `bson:"authenticator"`
-	BlockNumber     string            `bson:"blockNumber"`
-	LeafIndex       string            `bson:"leafIndex"`
-	CreatedAt       string            `bson:"createdAt"`
-	FinalizedAt     string            `bson:"finalizedAt"`
+	RequestID             string            `bson:"requestId"`
+	TransactionHash       string            `bson:"transactionHash"`
+	Authenticator         AuthenticatorBSON `bson:"authenticator"`
+	AggregateRequestCount uint64            `bson:"aggregateRequestCount"`
+	BlockNumber           string            `bson:"blockNumber"`
+	LeafIndex             string            `bson:"leafIndex"`
+	CreatedAt             string            `bson:"createdAt"`
+	FinalizedAt           string            `bson:"finalizedAt"`
 }
 
 // AuthenticatorBSON represents the BSON version of Authenticator
@@ -89,10 +105,11 @@ func (ar *AggregatorRecord) ToBSON() *AggregatorRecordBSON {
 			Signature: ar.Authenticator.Signature.String(),
 			StateHash: ar.Authenticator.StateHash.String(),
 		},
-		BlockNumber: ar.BlockNumber.String(),
-		LeafIndex:   ar.LeafIndex.String(),
-		CreatedAt:   strconv.FormatInt(ar.CreatedAt.UnixMilli(), 10),
-		FinalizedAt: strconv.FormatInt(ar.FinalizedAt.UnixMilli(), 10),
+		AggregateRequestCount: ar.AggregateRequestCount,
+		BlockNumber:           ar.BlockNumber.String(),
+		LeafIndex:             ar.LeafIndex.String(),
+		CreatedAt:             strconv.FormatInt(ar.CreatedAt.UnixMilli(), 10),
+		FinalizedAt:           strconv.FormatInt(ar.FinalizedAt.UnixMilli(), 10),
 	}
 }
 
@@ -145,18 +162,25 @@ func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
 	}
 	finalizedAt := &api.Timestamp{Time: time.UnixMilli(finalizedAtMillis)}
 
+	// Default AggregateRequestCount to 1 if not present (backward compatibility)
+	aggregateRequestCount := arb.AggregateRequestCount
+	if aggregateRequestCount == 0 {
+		aggregateRequestCount = 1
+	}
+
 	return &AggregatorRecord{
-		RequestID:       api.RequestID(arb.RequestID),
-		TransactionHash: api.TransactionHash(arb.TransactionHash),
+		RequestID:             api.RequestID(arb.RequestID),
+		TransactionHash:       api.TransactionHash(arb.TransactionHash),
 		Authenticator: Authenticator{
 			Algorithm: arb.Authenticator.Algorithm,
 			PublicKey: publicKey,
 			Signature: signature,
 			StateHash: api.StateHash(arb.Authenticator.StateHash),
 		},
-		BlockNumber: blockNumber,
-		LeafIndex:   leafIndex,
-		CreatedAt:   createdAt,
-		FinalizedAt: finalizedAt,
+		AggregateRequestCount: aggregateRequestCount,
+		BlockNumber:           blockNumber,
+		LeafIndex:             leafIndex,
+		CreatedAt:             createdAt,
+		FinalizedAt:           finalizedAt,
 	}, nil
 }

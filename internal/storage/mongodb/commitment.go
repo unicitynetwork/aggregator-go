@@ -46,6 +46,10 @@ func (cs *CommitmentStorage) GetByRequestID(ctx context.Context, requestID api.R
 		}
 		return nil, fmt.Errorf("failed to get commitment by request ID: %w", err)
 	}
+	// Handle backward compatibility: default to 1 if AggregateRequestCount is 0
+	if commitment.AggregateRequestCount == 0 {
+		commitment.AggregateRequestCount = 1
+	}
 	return &commitment, nil
 }
 
@@ -67,6 +71,10 @@ func (cs *CommitmentStorage) GetUnprocessedBatch(ctx context.Context, limit int)
 		var commitment models.Commitment
 		if err := cursor.Decode(&commitment); err != nil {
 			return nil, fmt.Errorf("failed to decode commitment: %w", err)
+		}
+		// Handle backward compatibility: default to 1 if AggregateRequestCount is 0
+		if commitment.AggregateRequestCount == 0 {
+			commitment.AggregateRequestCount = 1
 		}
 		commitments = append(commitments, &commitment)
 	}
