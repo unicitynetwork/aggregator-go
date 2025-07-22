@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -150,27 +151,9 @@ func NewRootNode(algorithm api.HashAlgorithm, left, right Branch) *RootNode {
 	}
 }
 
-// CalculateHash calculates root hash (matches TypeScript logic)
+// CalculateHash calculates root hash with adaptive parallel processing
 func (r *RootNode) CalculateHash(algo api.HashAlgorithm) *api.DataHash {
-	var leftHash, rightHash []byte
-
-	if r.Left != nil {
-		leftHash = r.Left.CalculateHash(algo).Data
-	} else {
-		leftHash = []byte{0} // TypeScript: new Uint8Array(1)
-	}
-
-	if r.Right != nil {
-		rightHash = r.Right.CalculateHash(algo).Data
-	} else {
-		rightHash = []byte{0} // TypeScript: new Uint8Array(1)
-	}
-
-	// Combine and hash: leftHash + rightHash
-	combined := append(leftHash, rightHash...)
-	hashData := api.Sha256Hash(combined)
-
-	return api.NewDataHash(algo, hashData)
+	return api.NewDataHash(algo, calculateHashData(r.Left, r.Right, algo))
 }
 
 // NewLeafBranch creates a leaf branch
@@ -257,7 +240,44 @@ func NewNodeBranchLazy(algorithm api.HashAlgorithm, path *big.Int, left, right B
 }
 
 func (n *NodeBranch) childrenHashData() []byte {
-	return api.Sha256Hash(append(n.Left.CalculateHash(n.Algorithm).Data, n.Right.CalculateHash(n.Algorithm).Data...))
+	return calculateHashData(n.Left, n.Right, n.Algorithm)
+}
+
+func calculateHashData(left, right Branch, algorithm api.HashAlgorithm) []byte {
+	var leftData, rightData []byte
+
+	// Only use a goroutine if both children exist (real parallel work)
+	if left != nil && right != nil {
+		var wg sync.WaitGroup
+
+		// Calculate left child hash in new goroutine
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			leftData = left.CalculateHash(algorithm).Data
+		}()
+
+		// Calculate right child hash in current goroutine (no extra goroutine needed)
+		rightData = right.CalculateHash(algorithm).Data
+
+		// Wait for the left goroutine to complete
+		wg.Wait()
+	} else {
+		// Sequential processing when only one or no children exist
+		if left != nil {
+			leftData = left.CalculateHash(algorithm).Data
+		} else {
+			leftData = []byte{0}
+		}
+
+		if right != nil {
+			rightData = right.CalculateHash(algorithm).Data
+		} else {
+			rightData = []byte{0}
+		}
+	}
+
+	return api.Sha256Hash(append(leftData, rightData...))
 }
 
 func (n *NodeBranch) CalculateHash(algo api.HashAlgorithm) *api.DataHash {
