@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"runtime"
 	"sync"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -13,6 +14,52 @@ import (
 var (
 	ErrLeafExists = errors.New("smt: leaf already exists")
 )
+
+// goroutineLimiter is a semaphore to limit the number of concurrent goroutines
+// during hash calculations to prevent resource exhaustion with large trees
+var goroutineLimiter chan struct{}
+
+// calculateDefaultGoroutineLimit calculates the CPU-based default goroutine limit
+func calculateDefaultGoroutineLimit() int {
+	// Default: Limit to 2x CPU cores, with a minimum of 8 and maximum of 512
+	numCPU := runtime.GOMAXPROCS(0)
+	maxGoroutines := numCPU * 2
+	if maxGoroutines < 8 {
+		maxGoroutines = 8
+	}
+	if maxGoroutines > 512 {
+		maxGoroutines = 512
+	}
+	return maxGoroutines
+}
+
+// init initializes the goroutine limiter with a reasonable default
+func init() {
+	goroutineLimiter = make(chan struct{}, calculateDefaultGoroutineLimit())
+}
+
+// SetMaxConcurrentGoroutines allows configuring the maximum number of goroutines
+// used during hash calculations. This should be called before creating trees or
+// calculating hashes. Setting to 0 will use sequential processing. Setting to a
+// negative value will reset to CPU-based defaults.
+func SetMaxConcurrentGoroutines(maxGoroutines int) {
+	if maxGoroutines < 0 {
+		// Reset to CPU-based defaults
+		goroutineLimiter = make(chan struct{}, calculateDefaultGoroutineLimit())
+	} else if maxGoroutines == 0 {
+		// Disable concurrent processing
+		goroutineLimiter = make(chan struct{})
+	} else {
+		goroutineLimiter = make(chan struct{}, maxGoroutines)
+	}
+}
+
+// GetMaxConcurrentGoroutines returns the current maximum number of goroutines
+// that can be used concurrently for hash calculations. Returns 0 if sequential
+// processing is enabled.
+func GetMaxConcurrentGoroutines() int {
+	return cap(goroutineLimiter)
+}
 
 type (
 	// SparseMerkleTree implements a sparse merkle tree compatible with Unicity SDK
@@ -250,18 +297,27 @@ func calculateHashData(left, right Branch, algorithm api.HashAlgorithm) []byte {
 	if left != nil && right != nil {
 		var wg sync.WaitGroup
 
-		// Calculate left child hash in new goroutine
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		// Try to acquire a slot in the goroutine limiter
+		select {
+		case goroutineLimiter <- struct{}{}:
+			// Successfully acquired a slot, use goroutine for left child
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() { <-goroutineLimiter }() // Release the slot when done
+				leftData = left.CalculateHash(algorithm).Data
+			}()
+
+			// Calculate right child hash in current goroutine (no extra goroutine needed)
+			rightData = right.CalculateHash(algorithm).Data
+
+			// Wait for the left goroutine to complete
+			wg.Wait()
+		default:
+			// No available slots, fall back to sequential processing
 			leftData = left.CalculateHash(algorithm).Data
-		}()
-
-		// Calculate right child hash in current goroutine (no extra goroutine needed)
-		rightData = right.CalculateHash(algorithm).Data
-
-		// Wait for the left goroutine to complete
-		wg.Wait()
+			rightData = right.CalculateHash(algorithm).Data
+		}
 	} else {
 		// Sequential processing when only one or no children exist
 		if left != nil {

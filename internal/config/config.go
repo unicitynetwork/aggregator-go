@@ -63,18 +63,19 @@ type HAConfig struct {
 
 // LoggingConfig holds logging configuration
 type LoggingConfig struct {
-	Level            string `mapstructure:"level"`
-	Format           string `mapstructure:"format"`
-	Output           string `mapstructure:"output"`
-	EnableJSON       bool   `mapstructure:"enable_json"`
-	EnableAsync      bool   `mapstructure:"enable_async"`
-	AsyncBufferSize  int    `mapstructure:"async_buffer_size"`
+	Level           string `mapstructure:"level"`
+	Format          string `mapstructure:"format"`
+	Output          string `mapstructure:"output"`
+	EnableJSON      bool   `mapstructure:"enable_json"`
+	EnableAsync     bool   `mapstructure:"enable_async"`
+	AsyncBufferSize int    `mapstructure:"async_buffer_size"`
 }
 
 // ProcessingConfig holds batch processing configuration
 type ProcessingConfig struct {
-	BatchLimit    int           `mapstructure:"batch_limit"`
-	RoundDuration time.Duration `mapstructure:"round_duration"`
+	BatchLimit       int           `mapstructure:"batch_limit"`
+	RoundDuration    time.Duration `mapstructure:"round_duration"`
+	SMTMaxGoroutines int           `mapstructure:"smt_max_goroutines"`
 }
 
 type BFTConfig struct {
@@ -132,8 +133,9 @@ func Load() (*Config, error) {
 			AsyncBufferSize: getEnvIntOrDefault("LOG_ASYNC_BUFFER_SIZE", 10000),
 		},
 		Processing: ProcessingConfig{
-			BatchLimit:    getEnvIntOrDefault("BATCH_LIMIT", 1000),
-			RoundDuration: getEnvDurationOrDefault("ROUND_DURATION", "1s"),
+			BatchLimit:       getEnvIntOrDefault("BATCH_LIMIT", 1000),
+			RoundDuration:    getEnvDurationOrDefault("ROUND_DURATION", "1s"),
+			SMTMaxGoroutines: getEnvIntOrDefault("SMT_MAX_GOROUTINES", -1), // -1 means, CPU-based (2×cores, min 8, max 512)
 		},
 	}
 	config.BFT = BFTConfig{

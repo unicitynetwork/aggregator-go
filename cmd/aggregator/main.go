@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/service"
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 )
 
@@ -22,6 +23,9 @@ func main() {
 		fmt.Printf("Failed to load configuration: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Configure SMT goroutine limits from configuration
+	smt.SetMaxConcurrentGoroutines(cfg.Processing.SMTMaxGoroutines)
 
 	// Initialize logger
 	baseLogger, err := logger.New(
@@ -45,7 +49,7 @@ func main() {
 		}
 		asyncLogger = logger.NewAsyncLogger(baseLogger, bufferSize)
 		log = asyncLogger.Logger
-		log.WithComponent("main").Info("Async logging enabled", 
+		log.WithComponent("main").Info("Async logging enabled",
 			"bufferSize", bufferSize)
 	} else {
 		log = baseLogger
@@ -126,7 +130,7 @@ func main() {
 	}
 
 	log.WithComponent("main").Info("Aggregator shut down successfully")
-	
+
 	// Stop async logger if enabled
 	if asyncLogger != nil {
 		asyncLogger.Stop()
