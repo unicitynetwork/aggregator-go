@@ -50,21 +50,30 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 			"leafIndex", i)
 	}
 
-	// Store aggregator records BEFORE adding leaves to SMT
-	rm.logger.WithContext(ctx).Debug("Storing aggregator records before SMT update",
+	// Store aggregator records BEFORE adding leaves to SMT snapshot
+	rm.logger.WithContext(ctx).Debug("Storing aggregator records before SMT snapshot update",
 		"recordCount", len(records))
 
 	if err := rm.storeAggregatorRecords(ctx, records); err != nil {
 		return "", nil, fmt.Errorf("failed to store aggregator records: %w", err)
 	}
 
-	// Add all leaves to SMT in a single batch operation
-	rootHash, err := rm.smt.AddLeaves(leaves)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to add batch to SMT: %w", err)
+	// Get the current round's snapshot
+	rm.roundMutex.RLock()
+	snapshot := rm.currentRound.Snapshot
+	rm.roundMutex.RUnlock()
+
+	if snapshot == nil {
+		return "", nil, fmt.Errorf("no snapshot available for current round")
 	}
 
-	rm.logger.WithContext(ctx).Info("Successfully processed commitment batch",
+	// Add all leaves to the round's SMT snapshot (not the main SMT yet)
+	rootHash, err := snapshot.AddLeaves(leaves)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to add batch to SMT snapshot: %w", err)
+	}
+
+	rm.logger.WithContext(ctx).Info("Successfully processed commitment batch to snapshot",
 		"rootHash", rootHash,
 		"commitmentCount", len(commitments))
 
@@ -246,7 +255,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		rm.roundMutex.Unlock()
 	}
 
-	// NOW store the block - after all commitment data is in place
+	// Store the block first - before committing the snapshot
 	rm.logger.WithContext(ctx).Debug("Storing block in database",
 		"blockNumber", block.Index.String())
 
@@ -262,6 +271,29 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		return fmt.Errorf("failed to store block record: %w", err)
 	}
 
+	// CRITICAL: Commit the snapshot to the main SMT AFTER storing the block successfully
+	// This ensures the SMT state only reflects successfully persisted blocks
+	rm.roundMutex.Lock()
+	snapshot := rm.currentRound.Snapshot
+	rm.roundMutex.Unlock()
+
+	if snapshot != nil {
+		rm.logger.WithContext(ctx).Info("Committing snapshot to main SMT after successful block storage",
+			"blockNumber", block.Index.String())
+
+		if err := snapshot.Commit(rm.smt); err != nil {
+			rm.logger.WithContext(ctx).Error("Failed to commit snapshot to SMT",
+				"blockNumber", block.Index.String(),
+				"error", err.Error())
+			// Note: Block is already stored, but SMT is inconsistent
+			// This is a critical error that needs manual intervention
+			return fmt.Errorf("CRITICAL: block stored but snapshot commit failed - SMT inconsistent: %w", err)
+		}
+
+		rm.logger.WithContext(ctx).Info("Successfully committed snapshot to main SMT",
+			"blockNumber", block.Index.String())
+	}
+
 	// Update current round with finalized block
 	rm.roundMutex.Lock()
 	if rm.currentRound != nil {
@@ -269,6 +301,8 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		// Clear pending data as it's now finalized
 		rm.currentRound.PendingRecords = nil
 		rm.currentRound.PendingRootHash = ""
+		// Clear the snapshot as it has been committed to the main SMT
+		rm.currentRound.Snapshot = nil
 	}
 	rm.roundMutex.Unlock()
 
