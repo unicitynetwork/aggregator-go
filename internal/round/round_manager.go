@@ -48,6 +48,8 @@ type Round struct {
 	// Track commitments that have been added to SMT but not yet finalized in a block
 	PendingRecords  []*models.AggregatorRecord
 	PendingRootHash string
+	// SMT snapshot for this round - allows accumulating changes before committing
+	Snapshot *ThreadSafeSmtSnapshot
 }
 
 // RoundManager handles the creation of blocks and processing of commitments
@@ -272,6 +274,7 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 		StartTime:   time.Now(),
 		State:       RoundStateCollecting,
 		Commitments: make([]*models.Commitment, 0),
+		Snapshot:    rm.smt.CreateSnapshot(), // Create snapshot for this round
 	}
 
 	// Start round timer

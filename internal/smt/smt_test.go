@@ -3,11 +3,12 @@ package smt
 import (
 	"encoding/hex"
 	"fmt"
-	"github.com/stretchr/testify/assert"
-	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"math/big"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 
 	"github.com/stretchr/testify/require"
 )
@@ -1085,4 +1086,126 @@ func TestAddLeaves_SkipsDuplicatesAndContinues(t *testing.T) {
 	originalLeaf, errOrig := smt.GetLeaf(initialPath)
 	require.NoError(t, errOrig)
 	assert.Equal(t, initialValue, originalLeaf.Value, "The value of the original leaf should not have been changed by the duplicate in the batch")
+}
+
+// TestSMTSnapshot tests the snapshot functionality with copy-on-write semantics
+func TestSMTSnapshot(t *testing.T) {
+	t.Run("BasicSnapshotOperations", func(t *testing.T) {
+		// Create original tree and add some initial data
+		original := NewSparseMerkleTree(api.SHA256)
+
+		// Create a snapshot to add initial data (since original tree can't be modified directly)
+		initialSnapshot := original.CreateSnapshot()
+		err := initialSnapshot.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3})
+		require.NoError(t, err)
+		err = initialSnapshot.AddLeaf(big.NewInt(0b101), []byte{4, 5, 6})
+		require.NoError(t, err)
+		initialSnapshot.Commit()
+
+		originalHash := original.GetRootHashHex()
+
+		// Create snapshot and verify it has the same hash initially
+		snapshot := original.CreateSnapshot()
+		snapshotHash := snapshot.GetRootHashHex()
+		assert.Equal(t, originalHash, snapshotHash, "Snapshot should have same hash as original initially")
+
+		// Add a leaf to snapshot
+		err = snapshot.AddLeaf(big.NewInt(0b111), []byte{7, 8, 9})
+		require.NoError(t, err)
+
+		// Verify original tree is unchanged
+		assert.Equal(t, originalHash, original.GetRootHashHex(), "Original tree should be unchanged")
+
+		// Verify snapshot has different hash
+		newSnapshotHash := snapshot.GetRootHashHex()
+		assert.NotEqual(t, originalHash, newSnapshotHash, "Snapshot should have different hash after modification")
+
+		// Commit snapshot and verify original tree is updated
+		snapshot.Commit()
+		assert.Equal(t, newSnapshotHash, original.GetRootHashHex(), "Original tree should match snapshot after commit")
+	})
+
+	t.Run("CannotModifyOriginalTree", func(t *testing.T) {
+		original := NewSparseMerkleTree(api.SHA256)
+
+		// Original tree can be modified directly (backward compatibility)
+		err := original.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3})
+		require.NoError(t, err, "Should be able to modify original tree directly for backward compatibility")
+
+		// Verify CanModify method
+		assert.False(t, original.CanModify(), "Original tree should report false for CanModify")
+
+		// Create snapshot and verify it can be modified
+		snapshot := original.CreateSnapshot()
+		assert.True(t, snapshot.CanModify(), "Snapshot should be modifiable")
+
+		// Verify snapshot methods work
+		err = snapshot.AddLeaf(big.NewInt(0b101), []byte{4, 5, 6})
+		require.NoError(t, err, "Should be able to add leaf to snapshot")
+	})
+
+	t.Run("MultipleSnapshots", func(t *testing.T) {
+		// Create original tree with initial data
+		original := NewSparseMerkleTree(api.SHA256)
+		initialSnapshot := original.CreateSnapshot()
+		err := initialSnapshot.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3}) // path 2
+		require.NoError(t, err)
+		initialSnapshot.Commit()
+
+		originalHash := original.GetRootHashHex()
+
+		// Create two snapshots
+		snapshot1 := original.CreateSnapshot()
+		snapshot2 := original.CreateSnapshot()
+
+		// Modify each snapshot differently with paths that don't conflict
+		err = snapshot1.AddLeaf(big.NewInt(0b101), []byte{4, 5, 6}) // path 5
+		require.NoError(t, err)
+
+		err = snapshot2.AddLeaf(big.NewInt(0b111), []byte{7, 8, 9}) // path 7
+		require.NoError(t, err)
+
+		// Verify original is unchanged
+		assert.Equal(t, originalHash, original.GetRootHashHex(), "Original should be unchanged")
+
+		// Verify snapshots have different hashes
+		hash1 := snapshot1.GetRootHashHex()
+		hash2 := snapshot2.GetRootHashHex()
+		assert.NotEqual(t, originalHash, hash1, "Snapshot1 should differ from original")
+		assert.NotEqual(t, originalHash, hash2, "Snapshot2 should differ from original")
+		assert.NotEqual(t, hash1, hash2, "Snapshots should differ from each other")
+
+		// Commit first snapshot
+		snapshot1.Commit()
+		assert.Equal(t, hash1, original.GetRootHashHex(), "Original should match snapshot1 after commit")
+
+		// Second snapshot should still work independently (though now based on old state)
+		assert.Equal(t, hash2, snapshot2.GetRootHashHex(), "Snapshot2 should retain its hash")
+	})
+
+	t.Run("SnapshotMemoryEfficiency", func(t *testing.T) {
+		// This test verifies that snapshots share memory with the original tree
+		original := NewSparseMerkleTree(api.SHA256)
+
+		// Add initial data with well-spaced paths that don't conflict
+		initialSnapshot := original.CreateSnapshot()
+		err := initialSnapshot.AddLeaf(big.NewInt(0b10), []byte{1}) // path 2
+		require.NoError(t, err)
+		err = initialSnapshot.AddLeaf(big.NewInt(0b101), []byte{2}) // path 5
+		require.NoError(t, err)
+		initialSnapshot.Commit()
+
+		// Create snapshot - should share root with original initially
+		snapshot := original.CreateSnapshot()
+
+		// Verify root is shared (pointer equality)
+		assert.Same(t, original.root, snapshot.root, "Snapshot should share root with original initially")
+
+		// Modify snapshot - this should trigger copy-on-write
+		err = snapshot.AddLeaf(big.NewInt(0b111), []byte{3}) // path 7
+		require.NoError(t, err)
+
+		// Verify root is no longer shared
+		assert.NotSame(t, original.root, snapshot.root, "Snapshot should have its own root after modification")
+	})
 }

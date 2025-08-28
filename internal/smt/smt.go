@@ -5,25 +5,108 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	
+
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-var ErrLeafExists = errors.New("smt: leaf already exists")
+var (
+	ErrLeafExists = errors.New("smt: leaf already exists")
+)
 
 type (
 	// SparseMerkleTree implements a sparse merkle tree compatible with Unicity SDK
 	SparseMerkleTree struct {
-		algorithm api.HashAlgorithm
-		root      *RootNode
+		algorithm  api.HashAlgorithm
+		root       *RootNode
+		isSnapshot bool              // true if this is a snapshot, false if original tree
+		original   *SparseMerkleTree // reference to original tree (nil for original)
+	}
+
+	// SmtSnapshot represents a snapshot of the SMT with copy-on-write semantics
+	SmtSnapshot struct {
+		*SparseMerkleTree
 	}
 )
 
 // NewSparseMerkleTree creates a new sparse merkle tree
 func NewSparseMerkleTree(algorithm api.HashAlgorithm) *SparseMerkleTree {
 	return &SparseMerkleTree{
-		algorithm: algorithm,
-		root:      NewRootNode(algorithm, nil, nil),
+		algorithm:  algorithm,
+		root:       NewRootNode(algorithm, nil, nil),
+		isSnapshot: false,
+		original:   nil,
+	}
+}
+
+// CreateSnapshot creates a snapshot of the current SMT state
+// The snapshot shares nodes with the original tree (copy-on-write)
+func (smt *SparseMerkleTree) CreateSnapshot() *SmtSnapshot {
+	snapshot := &SparseMerkleTree{
+		algorithm:  smt.algorithm,
+		root:       smt.root, // Share the root initially
+		isSnapshot: true,
+		original:   smt,
+	}
+	return &SmtSnapshot{SparseMerkleTree: snapshot}
+}
+
+// Commit commits the snapshot changes back to the original tree
+func (snapshot *SmtSnapshot) Commit() {
+	if snapshot.original != nil {
+		snapshot.original.root = snapshot.root
+	}
+}
+
+// AddLeaf adds a single leaf to the snapshot
+func (snapshot *SmtSnapshot) AddLeaf(path *big.Int, value []byte) error {
+	return snapshot.SparseMerkleTree.AddLeaf(path, value)
+}
+
+// AddLeaves adds multiple leaves to the snapshot
+func (snapshot *SmtSnapshot) AddLeaves(leaves []*Leaf) error {
+	return snapshot.SparseMerkleTree.AddLeaves(leaves)
+}
+
+// GetRootHash returns the current root hash of the snapshot
+func (snapshot *SmtSnapshot) GetRootHash() []byte {
+	return snapshot.SparseMerkleTree.GetRootHash()
+}
+
+// GetRootHashHex returns the current root hash of the snapshot as hex string
+func (snapshot *SmtSnapshot) GetRootHashHex() string {
+	return snapshot.SparseMerkleTree.GetRootHashHex()
+}
+
+// CanModify returns true if the tree can be modified (i.e., it's a snapshot)
+func (smt *SparseMerkleTree) CanModify() bool {
+	return smt.isSnapshot
+}
+
+// copyOnWriteRoot creates a new root if this snapshot is sharing it with the original
+func (smt *SparseMerkleTree) copyOnWriteRoot() *RootNode {
+	if smt.original != nil && smt.root == smt.original.root {
+		// Root is shared with original, create a copy
+		return &RootNode{
+			Left:  smt.root.Left,
+			Right: smt.root.Right,
+			Path:  new(big.Int).Set(smt.root.Path),
+		}
+	}
+	return smt.root
+}
+
+// cloneBranch creates a deep copy of a branch for copy-on-write
+func (smt *SparseMerkleTree) cloneBranch(branch Branch) Branch {
+	if branch == nil {
+		return nil
+	}
+
+	if branch.IsLeaf() {
+		leafBranch := branch.(*LeafBranch)
+		return NewLeafBranch(smt.algorithm, leafBranch.Path, leafBranch.Value)
+	} else {
+		nodeBranch := branch.(*NodeBranch)
+		return NewNodeBranch(smt.algorithm, nodeBranch.Path, nodeBranch.Left, nodeBranch.Right)
 	}
 }
 
@@ -202,8 +285,13 @@ func (n *NodeBranch) IsLeaf() bool {
 	return false
 }
 
-// AddLeaf adds a single leaf to the tree (matches TypeScript addLeaf)
+// AddLeaf adds a single leaf to the tree
 func (smt *SparseMerkleTree) AddLeaf(path *big.Int, value []byte) error {
+	// Implement copy-on-write for snapshots only
+	if smt.isSnapshot {
+		smt.root = smt.copyOnWriteRoot()
+	}
+
 	// TypeScript: const isRight = path & 1n;
 	isRight := new(big.Int).And(path, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
 
@@ -212,7 +300,14 @@ func (smt *SparseMerkleTree) AddLeaf(path *big.Int, value []byte) error {
 	if isRight {
 		left = smt.root.Left
 		if smt.root.Right != nil {
-			newRight, err := smt.buildTree(smt.root.Right, path, value)
+			// Clone the branch before modifying it if this is a snapshot
+			var rightBranch Branch
+			if smt.isSnapshot {
+				rightBranch = smt.cloneBranch(smt.root.Right)
+			} else {
+				rightBranch = smt.root.Right
+			}
+			newRight, err := smt.buildTree(rightBranch, path, value)
 			if err != nil {
 				return err
 			}
@@ -222,7 +317,14 @@ func (smt *SparseMerkleTree) AddLeaf(path *big.Int, value []byte) error {
 		}
 	} else {
 		if smt.root.Left != nil {
-			newLeft, err := smt.buildTree(smt.root.Left, path, value)
+			// Clone the branch before modifying it if this is a snapshot
+			var leftBranch Branch
+			if smt.isSnapshot {
+				leftBranch = smt.cloneBranch(smt.root.Left)
+			} else {
+				leftBranch = smt.root.Left
+			}
+			newLeft, err := smt.buildTree(leftBranch, path, value)
 			if err != nil {
 				return err
 			}
@@ -245,6 +347,11 @@ func (smt *SparseMerkleTree) AddLeaves(leaves []*Leaf) error {
 		return nil
 	}
 
+	// Implement copy-on-write for snapshots only
+	if smt.isSnapshot {
+		smt.root = smt.copyOnWriteRoot()
+	}
+
 	// Add leaves one by one to the existing tree using AddLeaf
 	// This ensures that new leaves are added to the existing tree structure
 	for _, leaf := range leaves {
@@ -263,6 +370,11 @@ func (smt *SparseMerkleTree) AddLeaves(leaves []*Leaf) error {
 
 // addLeafBatch is optimized for batch operations using lazy hash calculation
 func (smt *SparseMerkleTree) addLeafBatch(path *big.Int, value []byte) error {
+	// Copy-on-write for snapshots only
+	if smt.isSnapshot {
+		smt.root = smt.copyOnWriteRoot()
+	}
+
 	isRight := new(big.Int).And(path, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
 
 	var left, right Branch
@@ -270,7 +382,14 @@ func (smt *SparseMerkleTree) addLeafBatch(path *big.Int, value []byte) error {
 	if isRight {
 		left = smt.root.Left
 		if smt.root.Right != nil {
-			newRight, err := smt.buildTreeLazy(smt.root.Right, path, value)
+			// Clone the branch before modifying it if this is a snapshot
+			var rightBranch Branch
+			if smt.isSnapshot {
+				rightBranch = smt.cloneBranch(smt.root.Right)
+			} else {
+				rightBranch = smt.root.Right
+			}
+			newRight, err := smt.buildTreeLazy(rightBranch, path, value)
 			if err != nil {
 				return err
 			}
@@ -280,7 +399,14 @@ func (smt *SparseMerkleTree) addLeafBatch(path *big.Int, value []byte) error {
 		}
 	} else {
 		if smt.root.Left != nil {
-			newLeft, err := smt.buildTreeLazy(smt.root.Left, path, value)
+			// Clone the branch before modifying it if this is a snapshot
+			var leftBranch Branch
+			if smt.isSnapshot {
+				leftBranch = smt.cloneBranch(smt.root.Left)
+			} else {
+				leftBranch = smt.root.Left
+			}
+			newLeft, err := smt.buildTreeLazy(leftBranch, path, value)
 			if err != nil {
 				return err
 			}
@@ -601,7 +727,7 @@ func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, sibling
 		}
 	} else {
 		// No branch, but we need to distinguish between:
-		// - TypeScript's createWithoutBranch (branch = null) 
+		// - TypeScript's createWithoutBranch (branch = null)
 		// - TypeScript's create with null value (branch = empty)
 		// Based on the TypeScript code, when we pass null to create, it creates empty branch
 		step.Branch = []string{}
