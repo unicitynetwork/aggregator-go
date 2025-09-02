@@ -78,5 +78,5 @@ docker-restart-aggregator:
 	@echo "Rebuilding and restarting aggregator service..."
 	@docker compose stop aggregator
 	@docker compose build aggregator
-	@docker compose up -d --no-recreate --no-deps aggregator
+	@docker compose up -d --force-recreate --no-deps aggregator
 	@echo "Aggregator service restarted"
