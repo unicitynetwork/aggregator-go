@@ -4,7 +4,7 @@ services:
     platform: linux/amd64
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
     # https://github.com/unicitynetwork/bft-core/pkgs/container/bft-core
-    image: ghcr.io/unicitynetwork/bft-core:e1316ad51f4ecab1bc5406badec4c285fbdf14c7
+    image: ghcr.io/unicitynetwork/bft-core:49d48f8fd3686aff1066d98eff2512e5fc71713c
 
   bft-root:
     <<: *bft-base
@@ -55,7 +55,7 @@ services:
           echo "Creating aggregator genesis..." &&
           ubft shard-node init --home /genesis/aggregator --generate &&
           echo "Creating aggregator partition configuration..." &&
-          ubft shard-conf generate --home /genesis --network-id 3 --partition-id 7 --partition-type-id 7 --epoch-start 10 --node-info=/genesis/aggregator/node-info.json &&
+          ubft shard-conf generate --home /genesis --t2-timeout 5000 --network-id 3 --partition-id 7 --partition-type-id 7 --epoch-start 10 --node-info=/genesis/aggregator/node-info.json &&
           echo "Creating aggregator partition state..." &&
           ubft shard-conf genesis --home "/genesis/aggregator" --shard-conf /genesis/shard-conf-7_0.json
         fi

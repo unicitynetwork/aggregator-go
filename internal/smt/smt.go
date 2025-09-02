@@ -302,6 +302,7 @@ func (smt *SparseMerkleTree) buildTreeLazy(branch Branch, remainingPath *big.Int
 		leafBranch := branch.(*LeafBranch)
 
 		// Case 1a: DUPLICATE path. This is an error in a no-overwrite tree.
+		// TODO: if values don't match, return a different error
 		if remainingPath.Cmp(leafBranch.Path) == 0 {
 			return nil, fmt.Errorf("path '%s': %w", remainingPath, ErrLeafExists)
 		}
