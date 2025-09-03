@@ -29,7 +29,7 @@ type Commitment struct {
 	RequestID             RequestID       `json:"requestId"`
 	TransactionHash       TransactionHash `json:"transactionHash"`
 	Authenticator         Authenticator   `json:"authenticator"`
-	AggregateRequestCount uint64          `json:"aggregateRequestCount,string"`
+	AggregateRequestCount uint64          `json:"aggregateRequestCount,omitempty,string"`
 	CreatedAt             *Timestamp      `json:"createdAt"`
 	ProcessedAt           *Timestamp      `json:"processedAt,omitempty"`
 }
@@ -126,7 +126,7 @@ type AggregatorRecord struct {
 	RequestID             RequestID       `json:"requestId"`
 	TransactionHash       TransactionHash `json:"transactionHash"`
 	Authenticator         Authenticator   `json:"authenticator"`
-	AggregateRequestCount uint64          `json:"aggregateRequestCount,string"`
+	AggregateRequestCount uint64          `json:"aggregateRequestCount,omitempty,string"`
 	BlockNumber           *BigInt         `json:"blockNumber"`
 	LeafIndex             *BigInt         `json:"leafIndex"`
 	CreatedAt             *Timestamp      `json:"createdAt"`
@@ -229,7 +229,7 @@ type SubmitCommitmentRequest struct {
 	TransactionHash       TransactionHash `json:"transactionHash"`
 	Authenticator         Authenticator   `json:"authenticator"`
 	Receipt               *bool           `json:"receipt,omitempty"`
-	AggregateRequestCount uint64          `json:"aggregateRequestCount,string"`
+	AggregateRequestCount uint64          `json:"aggregateRequestCount,omitempty,string"`
 }
 
 // SubmitCommitmentResponse represents the submit_commitment JSON-RPC response
