@@ -48,8 +48,7 @@ func TestSnapshotWorkflowIntegration(t *testing.T) {
 		assert.Equal(t, rootHash, currentSnapshotHash, "Snapshot hash should match returned hash")
 
 		// Commit snapshot (simulating FinalizeBlock)
-		err = snapshot.Commit(threadSafeSMT)
-		require.NoError(t, err, "Should commit snapshot successfully")
+		snapshot.Commit(threadSafeSMT)
 
 		// Verify main SMT now has the changes
 		finalMainHash := threadSafeSMT.GetRootHash()
