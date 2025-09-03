@@ -26,8 +26,7 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 		require.NoError(t, err, "Should be able to add second leaf to initial snapshot")
 
 		// Commit initial data
-		err = initialSnapshot.Commit(threadSafeSMT)
-		require.NoError(t, err, "Should be able to commit initial snapshot")
+		initialSnapshot.Commit(threadSafeSMT)
 
 		originalHash := threadSafeSMT.GetRootHash()
 
@@ -48,8 +47,7 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 		assert.NotEqual(t, originalHash, newSnapshotHash, "Snapshot should have different hash after modification")
 
 		// Commit snapshot and verify original SMT is updated
-		err = snapshot.Commit(threadSafeSMT)
-		require.NoError(t, err, "Should be able to commit snapshot")
+		snapshot.Commit(threadSafeSMT)
 		assert.Equal(t, newSnapshotHash, threadSafeSMT.GetRootHash(), "Original SMT should match snapshot after commit")
 	})
 
@@ -74,8 +72,7 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 		assert.NotEmpty(t, rootHash, "Root hash should not be empty")
 
 		// Commit and verify
-		err = snapshot.Commit(threadSafeSMT)
-		require.NoError(t, err, "Should be able to commit batch operations")
+		snapshot.Commit(threadSafeSMT)
 		assert.Equal(t, rootHash, threadSafeSMT.GetRootHash(), "SMT hash should match snapshot hash after commit")
 
 		// Verify we can retrieve the leaves from the original SMT after commit
@@ -95,8 +92,7 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 		initialSnapshot := threadSafeSMT.CreateSnapshot()
 		err := initialSnapshot.AddLeaf(big.NewInt(0b10), []byte{1})
 		require.NoError(t, err)
-		err = initialSnapshot.Commit(threadSafeSMT)
-		require.NoError(t, err)
+		initialSnapshot.Commit(threadSafeSMT)
 
 		originalHash := threadSafeSMT.GetRootHash()
 
@@ -163,8 +159,7 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 		assert.NotEmpty(t, rootHash, "Root hash should not be empty after adding leaves")
 
 		// Commit and verify the original SMT has the data
-		err = snapshot.Commit(threadSafeSMT)
-		require.NoError(t, err, "Should be able to commit snapshot")
+		snapshot.Commit(threadSafeSMT)
 
 		// Verify we can read from the original SMT after commit
 		leaf, err := threadSafeSMT.GetLeaf(path)
