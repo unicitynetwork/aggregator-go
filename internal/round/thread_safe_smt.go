@@ -193,7 +193,7 @@ func (tss *ThreadSafeSmtSnapshot) GetStats() map[string]interface{} {
 // Commit commits the snapshot changes back to the original ThreadSafeSMT
 // This operation requires write locks on both the snapshot and the original SMT
 // to ensure atomicity of the commit operation
-func (tss *ThreadSafeSmtSnapshot) Commit(originalSMT *ThreadSafeSMT) error {
+func (tss *ThreadSafeSmtSnapshot) Commit(originalSMT *ThreadSafeSMT) {
 	// Acquire locks in a consistent order to prevent deadlocks
 	// Lock the snapshot first, then the original SMT
 	tss.rwMux.Lock()
@@ -203,7 +203,7 @@ func (tss *ThreadSafeSmtSnapshot) Commit(originalSMT *ThreadSafeSMT) error {
 	defer originalSMT.rwMux.Unlock()
 
 	tss.snapshot.Commit()
-	return nil
+	return
 }
 
 // WithWriteLock executes a function while holding a write lock on the snapshot

@@ -281,14 +281,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		rm.logger.WithContext(ctx).Info("Committing snapshot to main SMT after successful block storage",
 			"blockNumber", block.Index.String())
 
-		if err := snapshot.Commit(rm.smt); err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to commit snapshot to SMT",
-				"blockNumber", block.Index.String(),
-				"error", err.Error())
-			// Note: Block is already stored, but SMT is inconsistent
-			// This is a critical error that needs manual intervention
-			return fmt.Errorf("CRITICAL: block stored but snapshot commit failed - SMT inconsistent: %w", err)
-		}
+		snapshot.Commit(rm.smt)
 
 		rm.logger.WithContext(ctx).Info("Successfully committed snapshot to main SMT",
 			"blockNumber", block.Index.String())
