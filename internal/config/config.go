@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -135,7 +136,7 @@ func Load() (*Config, error) {
 		Processing: ProcessingConfig{
 			BatchLimit:       getEnvIntOrDefault("BATCH_LIMIT", 1000),
 			RoundDuration:    getEnvDurationOrDefault("ROUND_DURATION", "1s"),
-			SMTMaxGoroutines: getEnvIntOrDefault("SMT_MAX_GOROUTINES", -1), // -1 means, CPU-based (2×cores, min 8, max 512)
+			SMTMaxGoroutines: getEnvIntOrDefault("SMT_MAX_GOROUTINES", 0), // 0 means sequential (no goroutines)
 		},
 	}
 	config.BFT = BFTConfig{
@@ -158,6 +159,11 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("failed to load trust base configuration: %w", err)
 		}
 		config.BFT.TrustBase = &trustBaseV1
+	}
+
+	// Handle SMT_MAX_GOROUTINES special value -1 (calculate CPU-based default)
+	if config.Processing.SMTMaxGoroutines == -1 {
+		config.Processing.SMTMaxGoroutines = calculateDefaultGoroutineLimit()
 	}
 
 	if err := config.Validate(); err != nil {
@@ -202,6 +208,13 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid log level: %s", c.Logging.Level)
 	}
 
+	// Validate SMTMaxGoroutines
+	// 0 means no goroutines (sequential), 1-512 for specific limit
+	// Note: -1 is handled in Load() and converted to CPU-based value
+	if c.Processing.SMTMaxGoroutines < 0 || c.Processing.SMTMaxGoroutines > 512 {
+		return fmt.Errorf("SMT_MAX_GOROUTINES must be 0 (sequential) or between 1-512, got: %d", c.Processing.SMTMaxGoroutines)
+	}
+
 	return nil
 }
 
@@ -239,6 +252,20 @@ func getEnvDurationOrDefault(key string, defaultValue string) time.Duration {
 	}
 	duration, _ := time.ParseDuration(defaultValue)
 	return duration
+}
+
+// calculateDefaultGoroutineLimit calculates the CPU-based default goroutine limit for SMT
+func calculateDefaultGoroutineLimit() int {
+	// Default: Limit to 2x CPU cores, with a minimum of 8 and maximum of 512
+	numCPU := runtime.GOMAXPROCS(0)
+	maxGoroutines := numCPU * 2
+	if maxGoroutines < 8 {
+		maxGoroutines = 8
+	}
+	if maxGoroutines > 512 {
+		maxGoroutines = 512
+	}
+	return maxGoroutines
 }
 
 func generateServerID() string {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"runtime"
 	"sync"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -17,39 +16,25 @@ var (
 
 // goroutineLimiter is a semaphore to limit the number of concurrent goroutines
 // during hash calculations to prevent resource exhaustion with large trees
+// Default is sequential processing (no goroutines)
 var goroutineLimiter chan struct{}
 
-// calculateDefaultGoroutineLimit calculates the CPU-based default goroutine limit
-func calculateDefaultGoroutineLimit() int {
-	// Default: Limit to 2x CPU cores, with a minimum of 8 and maximum of 512
-	numCPU := runtime.GOMAXPROCS(0)
-	maxGoroutines := numCPU * 2
-	if maxGoroutines < 8 {
-		maxGoroutines = 8
-	}
-	if maxGoroutines > 512 {
-		maxGoroutines = 512
-	}
-	return maxGoroutines
-}
-
-// init initializes the goroutine limiter with a reasonable default
+// init initializes the goroutine limiter to default (sequential processing)
 func init() {
-	goroutineLimiter = make(chan struct{}, calculateDefaultGoroutineLimit())
+	// Default to sequential processing (no concurrent goroutines)
+	goroutineLimiter = make(chan struct{})
 }
 
 // SetMaxConcurrentGoroutines allows configuring the maximum number of goroutines
 // used during hash calculations. This should be called before creating trees or
-// calculating hashes. Setting to 0 will use sequential processing. Setting to a
-// negative value will reset to CPU-based defaults.
+// calculating hashes. Setting to 0 will use sequential processing.
+// Note: The -1 value (CPU-based default) is handled in config loading.
 func SetMaxConcurrentGoroutines(maxGoroutines int) {
-	if maxGoroutines < 0 {
-		// Reset to CPU-based defaults
-		goroutineLimiter = make(chan struct{}, calculateDefaultGoroutineLimit())
-	} else if maxGoroutines == 0 {
-		// Disable concurrent processing
+	if maxGoroutines == 0 {
+		// Disable concurrent processing (sequential)
 		goroutineLimiter = make(chan struct{})
 	} else {
+		// Set specific limit
 		goroutineLimiter = make(chan struct{}, maxGoroutines)
 	}
 }
