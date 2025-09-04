@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,13 +43,17 @@ type JSONRPCError struct {
 
 // Use the public API types
 
+type GetBlockRequest struct {
+	BlockNumber string `json:"blockNumber"`
+}
+
 type GetBlockResponse struct {
 	Block Block `json:"block"`
 }
 
 type Block struct {
 	Index     string `json:"index"`
-	Timestamp string `json:"timestamp"`
+	CreatedAt string `json:"createdAt"`
 }
 
 type GetBlockCommitmentsRequest struct {
@@ -79,6 +85,7 @@ const (
 type BlockCommitmentInfo struct {
 	BlockNumber     int64
 	CommitmentCount int
+	CreatedAt       time.Time // Timestamp when the block was created
 }
 
 // Metrics
@@ -96,7 +103,7 @@ type Metrics struct {
 	mutex                 sync.RWMutex          // For protecting blockCommitmentCounts slice
 }
 
-func (m *Metrics) addBlockCommitmentCount(blockNumber int64, count int) {
+func (m *Metrics) addBlockCommitmentCount(blockNumber int64, count int, createdAt time.Time) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 	// Track all blocks including empty ones to show the real pattern
@@ -104,8 +111,21 @@ func (m *Metrics) addBlockCommitmentCount(blockNumber int64, count int) {
 	m.blockCommitmentInfo = append(m.blockCommitmentInfo, BlockCommitmentInfo{
 		BlockNumber:     blockNumber,
 		CommitmentCount: count,
+		CreatedAt:       createdAt,
 	})
 	atomic.AddInt64(&m.totalBlockCommitments, int64(count))
+}
+
+// findBlockByNumber looks for a block with the given block number in our records
+func (m *Metrics) findBlockByNumber(blockNumber int64) *BlockCommitmentInfo {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	for _, block := range m.blockCommitmentInfo {
+		if block.BlockNumber == blockNumber {
+			return &block
+		}
+	}
+	return nil
 }
 
 func (m *Metrics) getAverageCommitments() float64 {
@@ -461,13 +481,64 @@ func main() {
 			fmt.Printf("  [DEBUG] Block %d has %d commitments not from our test\n", currentCheckBlock, notOurs)
 		}
 
+		// Fetch the block to get CreatedAt timestamp
+		blockReq := GetBlockRequest{
+			BlockNumber: fmt.Sprintf("%d", currentCheckBlock),
+		}
+		blockResp, err := waitClient.call("get_block", blockReq)
+		var blockCreatedAt time.Time
+		if err == nil && blockResp.Error == nil {
+			var blockData GetBlockResponse
+			blockRespBytes, _ := json.Marshal(blockResp.Result)
+			if err := json.Unmarshal(blockRespBytes, &blockData); err == nil {
+				// Parse the timestamp from the block (Unix milliseconds as string)
+				if ms, err := strconv.ParseInt(blockData.Block.CreatedAt, 10, 64); err == nil {
+					blockCreatedAt = time.Unix(ms/1000, (ms%1000)*1000000)
+				}
+				// If we can't parse, blockCreatedAt remains zero value
+			}
+		}
+		// blockCreatedAt will be zero if we couldn't fetch or parse the timestamp
+
 		// Track block and update counts
-		metrics.addBlockCommitmentCount(currentCheckBlock, ourCommitmentCount)
+		metrics.addBlockCommitmentCount(currentCheckBlock, ourCommitmentCount, blockCreatedAt)
 		processedCount += int64(ourCommitmentCount)
 
 		if ourCommitmentCount > 0 {
-			fmt.Printf("Block %d: %d our commitments (total in block: %d, running total: %d/%d)\n",
-				currentCheckBlock, ourCommitmentCount, len(commitsResp.Commitments), processedCount, successful)
+			// Calculate finalization time - need to get the previous block (N-1)
+			finalizationTime := ""
+			prevBlockNum := currentCheckBlock - 1
+			prevBlock := metrics.findBlockByNumber(prevBlockNum)
+
+			// If we don't have the previous block in our records, try to fetch it
+			if prevBlock == nil && prevBlockNum >= metrics.startingBlockNumber {
+				prevBlockReq := GetBlockRequest{
+					BlockNumber: fmt.Sprintf("%d", prevBlockNum),
+				}
+				prevBlockResp, err := waitClient.call("get_block", prevBlockReq)
+				if err == nil && prevBlockResp.Error == nil {
+					var prevBlockData GetBlockResponse
+					prevBlockRespBytes, _ := json.Marshal(prevBlockResp.Result)
+					if err := json.Unmarshal(prevBlockRespBytes, &prevBlockData); err == nil {
+						// Parse the timestamp from the block (Unix milliseconds as string)
+						if ms, err := strconv.ParseInt(prevBlockData.Block.CreatedAt, 10, 64); err == nil {
+							prevBlockCreatedAt := time.Unix(ms/1000, (ms%1000)*1000000)
+							// Store this block for future reference
+							metrics.addBlockCommitmentCount(prevBlockNum, 0, prevBlockCreatedAt)
+							prevBlock = metrics.findBlockByNumber(prevBlockNum)
+						}
+					}
+				}
+			}
+
+			if prevBlock != nil && !blockCreatedAt.IsZero() && !prevBlock.CreatedAt.IsZero() {
+				duration := blockCreatedAt.Sub(prevBlock.CreatedAt)
+				finalizationTime = fmt.Sprintf(" (finalized in %.2fs)", duration.Seconds())
+			} else if prevBlock != nil || prevBlockNum >= metrics.startingBlockNumber {
+				finalizationTime = " (finalized in unknown)"
+			}
+			fmt.Printf("Block %d: %d our commitments (total in block: %d, running total: %d/%d)%s\n",
+				currentCheckBlock, ourCommitmentCount, len(commitsResp.Commitments), processedCount, successful, finalizationTime)
 			blocksWithOurCommitments++
 		} else if len(commitsResp.Commitments) > 0 {
 			// Block has commitments but none are ours
@@ -537,10 +608,62 @@ func main() {
 						}
 
 						if ourCommitmentCount > 0 {
-							metrics.addBlockCommitmentCount(currentCheckBlock, ourCommitmentCount)
+							// Fetch the block to get CreatedAt timestamp
+							blockReq := GetBlockRequest{
+								BlockNumber: fmt.Sprintf("%d", currentCheckBlock),
+							}
+							blockResp, err := waitClient.call("get_block", blockReq)
+							var blockCreatedAt time.Time
+							if err == nil && blockResp.Error == nil {
+								var blockData GetBlockResponse
+								blockRespBytes, _ := json.Marshal(blockResp.Result)
+								if err := json.Unmarshal(blockRespBytes, &blockData); err == nil {
+									// Parse the timestamp from the block (Unix milliseconds as string)
+									if ms, err := strconv.ParseInt(blockData.Block.CreatedAt, 10, 64); err == nil {
+										blockCreatedAt = time.Unix(ms/1000, (ms%1000)*1000000)
+									}
+									// If we can't parse, blockCreatedAt remains zero value
+								}
+							}
+							// blockCreatedAt will be zero if we couldn't fetch or parse the timestamp
+
+							metrics.addBlockCommitmentCount(currentCheckBlock, ourCommitmentCount, blockCreatedAt)
 							processedCount += int64(ourCommitmentCount)
-							fmt.Printf("Block %d: %d our commitments (total in block: %d, running total: %d/%d)\n",
-								currentCheckBlock, ourCommitmentCount, len(commitsResp.Commitments), processedCount, successful)
+
+							// Calculate finalization time - need to get the previous block (N-1)
+							finalizationTime := ""
+							prevBlockNum := currentCheckBlock - 1
+							prevBlock := metrics.findBlockByNumber(prevBlockNum)
+
+							// If we don't have the previous block in our records, try to fetch it
+							if prevBlock == nil && prevBlockNum >= metrics.startingBlockNumber {
+								prevBlockReq := GetBlockRequest{
+									BlockNumber: fmt.Sprintf("%d", prevBlockNum),
+								}
+								prevBlockResp, err := waitClient.call("get_block", prevBlockReq)
+								if err == nil && prevBlockResp.Error == nil {
+									var prevBlockData GetBlockResponse
+									prevBlockRespBytes, _ := json.Marshal(prevBlockResp.Result)
+									if err := json.Unmarshal(prevBlockRespBytes, &prevBlockData); err == nil {
+										// Parse the timestamp from the block (Unix milliseconds as string)
+										if ms, err := strconv.ParseInt(prevBlockData.Block.CreatedAt, 10, 64); err == nil {
+											prevBlockCreatedAt := time.Unix(ms/1000, (ms%1000)*1000000)
+											// Store this block for future reference
+											metrics.addBlockCommitmentCount(prevBlockNum, 0, prevBlockCreatedAt)
+											prevBlock = metrics.findBlockByNumber(prevBlockNum)
+										}
+									}
+								}
+							}
+
+							if prevBlock != nil && !blockCreatedAt.IsZero() && !prevBlock.CreatedAt.IsZero() {
+								duration := blockCreatedAt.Sub(prevBlock.CreatedAt)
+								finalizationTime = fmt.Sprintf(" (finalized in %.2fs)", duration.Seconds())
+							} else if prevBlock != nil || prevBlockNum >= metrics.startingBlockNumber {
+								finalizationTime = " (finalized in unknown)"
+							}
+							fmt.Printf("Block %d: %d our commitments (total in block: %d, running total: %d/%d)%s\n",
+								currentCheckBlock, ourCommitmentCount, len(commitsResp.Commitments), processedCount, successful, finalizationTime)
 							lastProgressTime = time.Now()
 						} else if len(commitsResp.Commitments) > 0 {
 							// Block has commitments but none are ours - don't count as "no progress"
@@ -681,31 +804,65 @@ func main() {
 		if len(metrics.blockCommitmentInfo) <= 20 {
 			// Print all blocks if 20 or fewer
 			for _, info := range metrics.blockCommitmentInfo {
-				fmt.Printf("  Block %d: %d commitments\n", info.BlockNumber, info.CommitmentCount)
+				finalizationTime := ""
+				prevBlockNum := info.BlockNumber - 1
+				prevBlock := metrics.findBlockByNumber(prevBlockNum)
+				if prevBlock != nil && !info.CreatedAt.IsZero() && !prevBlock.CreatedAt.IsZero() {
+					duration := info.CreatedAt.Sub(prevBlock.CreatedAt)
+					finalizationTime = fmt.Sprintf(" (finalized in %.2fs)", duration.Seconds())
+				} else if prevBlock != nil || prevBlockNum >= metrics.startingBlockNumber {
+					finalizationTime = " (finalized in unknown)"
+				}
+				fmt.Printf("  Block %d: %d commitments%s\n", info.BlockNumber, info.CommitmentCount, finalizationTime)
 			}
 		} else {
 			// Print first 10 and last 10 if more than 20
 			fmt.Printf("  First 10 blocks:\n")
 			for i := 0; i < 10; i++ {
 				info := metrics.blockCommitmentInfo[i]
-				fmt.Printf("    Block %d: %d commitments\n", info.BlockNumber, info.CommitmentCount)
+				finalizationTime := ""
+				prevBlockNum := info.BlockNumber - 1
+				prevBlock := metrics.findBlockByNumber(prevBlockNum)
+				if prevBlock != nil && !info.CreatedAt.IsZero() && !prevBlock.CreatedAt.IsZero() {
+					duration := info.CreatedAt.Sub(prevBlock.CreatedAt)
+					finalizationTime = fmt.Sprintf(" (finalized in %.2fs)", duration.Seconds())
+				} else if prevBlock != nil || prevBlockNum >= metrics.startingBlockNumber {
+					finalizationTime = " (finalized in unknown)"
+				}
+				fmt.Printf("    Block %d: %d commitments%s\n", info.BlockNumber, info.CommitmentCount, finalizationTime)
 			}
 			fmt.Printf("  ...\n")
 			fmt.Printf("  Last 10 blocks:\n")
 			for i := len(metrics.blockCommitmentInfo) - 10; i < len(metrics.blockCommitmentInfo); i++ {
 				info := metrics.blockCommitmentInfo[i]
-				fmt.Printf("    Block %d: %d commitments\n", info.BlockNumber, info.CommitmentCount)
+				finalizationTime := ""
+				prevBlockNum := info.BlockNumber - 1
+				prevBlock := metrics.findBlockByNumber(prevBlockNum)
+				if prevBlock != nil && !info.CreatedAt.IsZero() && !prevBlock.CreatedAt.IsZero() {
+					duration := info.CreatedAt.Sub(prevBlock.CreatedAt)
+					finalizationTime = fmt.Sprintf(" (finalized in %.2fs)", duration.Seconds())
+				} else if prevBlock != nil || prevBlockNum >= metrics.startingBlockNumber {
+					finalizationTime = " (finalized in unknown)"
+				}
+				fmt.Printf("    Block %d: %d commitments%s\n", info.BlockNumber, info.CommitmentCount, finalizationTime)
 			}
 		}
 
-		// Check for gaps in block numbers
+		// Check for gaps in block numbers - first need to sort blocks by number
+		sortedBlocks := make([]BlockCommitmentInfo, len(metrics.blockCommitmentInfo))
+		copy(sortedBlocks, metrics.blockCommitmentInfo)
+		sort.Slice(sortedBlocks, func(i, j int) bool {
+			return sortedBlocks[i].BlockNumber < sortedBlocks[j].BlockNumber
+		})
+
 		var gaps []string
-		for i := 1; i < len(metrics.blockCommitmentInfo); i++ {
-			expected := metrics.blockCommitmentInfo[i-1].BlockNumber + 1
-			actual := metrics.blockCommitmentInfo[i].BlockNumber
+		for i := 1; i < len(sortedBlocks); i++ {
+			expected := sortedBlocks[i-1].BlockNumber + 1
+			actual := sortedBlocks[i].BlockNumber
 			if actual != expected {
+				gapSize := actual - expected
 				gaps = append(gaps, fmt.Sprintf("Gap between blocks %d and %d (missing %d blocks)",
-					metrics.blockCommitmentInfo[i-1].BlockNumber, actual, actual-expected))
+					sortedBlocks[i-1].BlockNumber, actual, gapSize))
 			}
 		}
 		if len(gaps) > 0 {
