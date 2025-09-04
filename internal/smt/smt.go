@@ -664,7 +664,7 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Br
 		}
 		if siblingBranch != nil {
 			siblingHash := siblingBranch.CalculateHash(smt.algorithm)
-			siblingHex := siblingHash.ToHex()
+			siblingHex := fmt.Sprintf("%x", siblingHash.Data) // Use only hash data without algorithm prefix
 			step.Sibling = &siblingHex
 		}
 		return []api.MerkleTreeStep{step}
@@ -736,7 +736,7 @@ func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, sibling
 	// Add sibling hash if sibling exists
 	if siblingBranch != nil {
 		siblingHash := siblingBranch.CalculateHash(smt.algorithm)
-		siblingHex := siblingHash.ToHex()
+		siblingHex := fmt.Sprintf("%x", siblingHash.Data) // Use only hash data without algorithm prefix
 		step.Sibling = &siblingHex
 	}
 
