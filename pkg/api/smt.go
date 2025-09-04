@@ -12,7 +12,7 @@ type (
 	MerkleTreeStep struct {
 		Branch  []string `json:"branch"`
 		Path    string   `json:"path"`
-		Sibling *string  `json:"sibling"`
+		Sibling []string `json:"sibling,omitempty"`
 	}
 
 	// MerkleTreePath represents the path to verify inclusion in a Merkle tree
@@ -150,12 +150,12 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 		}
 
 		siblingHash := []byte{0} // Default empty sibling hash
-		if step.Sibling != nil {
+		if len(step.Sibling) > 0 && step.Sibling[0] != "" {
 			// Sibling is now just hash data without algorithm prefix, decode directly
 			var err error
-			siblingHash, err = hex.DecodeString(*step.Sibling)
+			siblingHash, err = hex.DecodeString(step.Sibling[0])
 			if err != nil {
-				return nil, fmt.Errorf("failed to decode sibling hash '%s': %w", *step.Sibling, err)
+				return nil, fmt.Errorf("failed to decode sibling hash '%s': %w", step.Sibling[0], err)
 			}
 		}
 		isRight := new(big.Int).And(path, big.NewInt(1)).Cmp(big.NewInt(0)) != 0

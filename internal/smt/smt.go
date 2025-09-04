@@ -658,15 +658,15 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Br
 	if branch == nil {
 		// No branch exists at this position - create step without branch
 		step := api.MerkleTreeStep{
-			Path:    remainingPath.String(),
-			Branch:  nil, // nil indicates no branch exists
-			Sibling: nil,
+			Path:   remainingPath.String(),
+			Branch: nil, // nil indicates no branch exists
 		}
 		if siblingBranch != nil {
 			siblingHash := siblingBranch.CalculateHash(smt.algorithm)
 			siblingHex := fmt.Sprintf("%x", siblingHash.Data) // Use only hash data without algorithm prefix
-			step.Sibling = &siblingHex
+			step.Sibling = []string{siblingHex}
 		}
+		// If siblingBranch is nil, leave Sibling as nil (omitempty will exclude it from JSON)
 		return []api.MerkleTreeStep{step}
 	}
 
@@ -737,8 +737,9 @@ func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, sibling
 	if siblingBranch != nil {
 		siblingHash := siblingBranch.CalculateHash(smt.algorithm)
 		siblingHex := fmt.Sprintf("%x", siblingHash.Data) // Use only hash data without algorithm prefix
-		step.Sibling = &siblingHex
+		step.Sibling = []string{siblingHex}
 	}
+	// If siblingBranch is nil, leave Sibling as nil (omitempty will exclude it from JSON)
 
 	return step
 }
