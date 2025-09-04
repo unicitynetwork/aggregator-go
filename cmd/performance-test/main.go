@@ -855,6 +855,38 @@ func main() {
 			return sortedBlocks[i].BlockNumber < sortedBlocks[j].BlockNumber
 		})
 
+		// Calculate average finalization time for non-empty blocks
+		var validFinalizationTimes []float64
+		for i := 1; i < len(sortedBlocks); i++ {
+			currentBlock := sortedBlocks[i]
+
+			// Skip empty blocks
+			if currentBlock.CommitmentCount == 0 {
+				continue
+			}
+
+			// Find previous block (N-1)
+			prevBlockNum := currentBlock.BlockNumber - 1
+			prevBlock := metrics.findBlockByNumber(prevBlockNum)
+
+			if prevBlock != nil && !currentBlock.CreatedAt.IsZero() && !prevBlock.CreatedAt.IsZero() {
+				finalizationTime := currentBlock.CreatedAt.Sub(prevBlock.CreatedAt).Seconds()
+				if finalizationTime > 0 {
+					validFinalizationTimes = append(validFinalizationTimes, finalizationTime)
+				}
+			}
+		}
+
+		avgFinalizationTime := 0.0
+		if len(validFinalizationTimes) > 0 {
+			sum := 0.0
+			for _, t := range validFinalizationTimes {
+				sum += t
+			}
+			avgFinalizationTime = sum / float64(len(validFinalizationTimes))
+			fmt.Printf("\nAverage block finalization time: %.2fs (calculated from %d non-empty blocks)\n", avgFinalizationTime, len(validFinalizationTimes))
+		}
+
 		var gaps []string
 		for i := 1; i < len(sortedBlocks); i++ {
 			expected := sortedBlocks[i-1].BlockNumber + 1

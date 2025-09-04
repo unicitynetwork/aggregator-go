@@ -122,6 +122,7 @@ services:
       # Server Configuration
       PORT: "3000"
       HOST: "0.0.0.0"
+      SMT_MAX_GOROUTINES: "0"
       CONCURRENCY_LIMIT: "1000"
       ENABLE_DOCS: "true"
       ENABLE_CORS: "true"
