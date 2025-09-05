@@ -12,7 +12,7 @@ type (
 	MerkleTreeStep struct {
 		Branch  []string `json:"branch"`
 		Path    string   `json:"path"`
-		Sibling *string  `json:"sibling"`
+		Sibling []string `json:"sibling,omitempty"`
 	}
 
 	// MerkleTreePath represents the path to verify inclusion in a Merkle tree
@@ -113,7 +113,7 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 			// Branch is not nil (could be empty or have value)
 			// TypeScript: const bytes = i === 0 ? step.branch.value : currentHash?.data;
 			var bytes []byte
-			
+
 			if i == 0 && len(step.Branch) > 0 && step.Branch[0] != "" {
 				// First step with branch value
 				var err error
@@ -150,14 +150,12 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 		}
 
 		siblingHash := []byte{0} // Default empty sibling hash
-		if step.Sibling != nil {
-			_hex, err := NewImprintHexString(*step.Sibling)
+		if len(step.Sibling) > 0 && step.Sibling[0] != "" {
+			// Sibling is now just hash data without algorithm prefix, decode directly
+			var err error
+			siblingHash, err = hex.DecodeString(step.Sibling[0])
 			if err != nil {
-				return nil, fmt.Errorf("invalid sibling hash '%s': %w", *step.Sibling, err)
-			}
-			siblingHash, err = _hex.DataBytes() // Use data bytes, not imprint
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode sibling hash '%s': %w", *step.Sibling, err)
+				return nil, fmt.Errorf("failed to decode sibling hash '%s': %w", step.Sibling[0], err)
 			}
 		}
 		isRight := new(big.Int).And(path, big.NewInt(1)).Cmp(big.NewInt(0)) != 0

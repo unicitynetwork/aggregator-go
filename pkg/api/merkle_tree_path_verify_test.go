@@ -22,14 +22,14 @@ func createLeaf(path int64, value []byte) *smt.Leaf {
 func TestMerkleTreePathVerify(t *testing.T) {
 	t.Run("SingleLeaf", func(t *testing.T) {
 		tree := smt.NewSparseMerkleTree(api.SHA256)
-		
+
 		leaf := createLeaf(42, []byte("test"))
 		err := tree.AddLeaves([]*smt.Leaf{leaf})
 		require.NoError(t, err)
-		
+
 		path := tree.GetPath(big.NewInt(42))
 		require.NotNil(t, path)
-		
+
 		result, err := path.Verify(big.NewInt(42))
 		require.NoError(t, err)
 		require.True(t, result.PathIncluded, "Path should be included")
@@ -38,19 +38,19 @@ func TestMerkleTreePathVerify(t *testing.T) {
 
 	t.Run("TwoLeaves", func(t *testing.T) {
 		tree := smt.NewSparseMerkleTree(api.SHA256)
-		
+
 		leaves := []*smt.Leaf{
 			createLeaf(10, []byte("leaf10")),
 			createLeaf(20, []byte("leaf20")),
 		}
 		err := tree.AddLeaves(leaves)
 		require.NoError(t, err)
-		
+
 		// Verify both paths
 		for _, leafPath := range []int64{10, 20} {
 			path := tree.GetPath(big.NewInt(leafPath))
 			require.NotNil(t, path)
-			
+
 			result, err := path.Verify(big.NewInt(leafPath))
 			require.NoError(t, err)
 			require.True(t, result.PathIncluded, "Path %d should be included", leafPath)
@@ -60,22 +60,22 @@ func TestMerkleTreePathVerify(t *testing.T) {
 
 	t.Run("MultipleLeaves", func(t *testing.T) {
 		tree := smt.NewSparseMerkleTree(api.SHA256)
-		
+
 		// Add multiple leaves with various paths
 		paths := []int64{1, 100, 1000, 10000, 100000}
 		var leaves []*smt.Leaf
 		for _, p := range paths {
 			leaves = append(leaves, createLeaf(p, []byte("leaf"+string(rune(p)))))
 		}
-		
+
 		err := tree.AddLeaves(leaves)
 		require.NoError(t, err)
-		
+
 		// Verify each path
 		for _, p := range paths {
 			path := tree.GetPath(big.NewInt(p))
 			require.NotNil(t, path)
-			
+
 			result, err := path.Verify(big.NewInt(p))
 			require.NoError(t, err)
 			require.True(t, result.PathIncluded, "Path %d should be included", p)
@@ -85,32 +85,32 @@ func TestMerkleTreePathVerify(t *testing.T) {
 
 	t.Run("LargePaths", func(t *testing.T) {
 		tree := smt.NewSparseMerkleTree(api.SHA256)
-		
+
 		// Test with the actual large paths from the failing test
 		mintPath, _ := new(big.Int).SetString("7588607046638288532898314259371162887598150843702815116345200719347816808430746270", 10)
 		transferPath, _ := new(big.Int).SetString("7588595804959218369815512972651793411311840553453637142956782535261123804631684864", 10)
-		
+
 		leaves := []*smt.Leaf{
 			{Path: mintPath, Value: []byte("mint")},
 			{Path: transferPath, Value: []byte("transfer")},
 		}
-		
+
 		err := tree.AddLeaves(leaves)
 		require.NoError(t, err)
-		
+
 		// Verify transfer path
 		path := tree.GetPath(transferPath)
 		require.NotNil(t, path)
-		
+
 		result, err := path.Verify(transferPath)
 		require.NoError(t, err)
 		require.True(t, result.PathIncluded, "Transfer path should be included")
 		require.True(t, result.PathValid, "Transfer path should be valid")
-		
+
 		// Verify mint path
 		pathMint := tree.GetPath(mintPath)
 		require.NotNil(t, pathMint)
-		
+
 		resultMint, err := pathMint.Verify(mintPath)
 		require.NoError(t, err)
 		require.True(t, resultMint.PathIncluded, "Mint path should be included")
@@ -119,31 +119,31 @@ func TestMerkleTreePathVerify(t *testing.T) {
 
 	t.Run("NonExistentPath", func(t *testing.T) {
 		tree := smt.NewSparseMerkleTree(api.SHA256)
-		
+
 		leaves := []*smt.Leaf{
 			createLeaf(10, []byte("exists")),
 		}
 		err := tree.AddLeaves(leaves)
 		require.NoError(t, err)
-		
+
 		// For a sparse merkle tree, getting a path for a non-existent leaf returns
 		// a valid path showing where that leaf would be inserted. Since leaf 10 goes
 		// left (bit 0 = 0) and 999 would go right (bit 0 = 1), we get a path to the
 		// empty right branch with the left subtree as sibling.
 		path := tree.GetPath(big.NewInt(999))
 		require.NotNil(t, path)
-		
+
 		// Deterministic assertions:
 		require.Equal(t, 1, len(path.Steps))
 		require.Equal(t, "999", path.Steps[0].Path)
-		
+
 		// Branch should be nil (no leaf at this position)
 		require.Nil(t, path.Steps[0].Branch)
-		
+
 		// Sibling should be the hash of the left subtree containing leaf 10
 		require.NotNil(t, path.Steps[0].Sibling)
 		// The sibling hash is deterministic based on leaf 10's data
-		
+
 		// When we verify this path with requestId 999:
 		// - PathIncluded should be false (999 is not in the tree)
 		// - PathValid should be true (the path is cryptographically valid)
@@ -155,17 +155,17 @@ func TestMerkleTreePathVerify(t *testing.T) {
 
 	t.Run("CrossVerification", func(t *testing.T) {
 		tree := smt.NewSparseMerkleTree(api.SHA256)
-		
+
 		leaves := []*smt.Leaf{
 			createLeaf(5, []byte("five")),
 			createLeaf(15, []byte("fifteen")),
 		}
 		err := tree.AddLeaves(leaves)
 		require.NoError(t, err)
-		
+
 		// Get path for 5
 		path5 := tree.GetPath(big.NewInt(5))
-		
+
 		// Try to verify with wrong requestId
 		result, err := path5.Verify(big.NewInt(15))
 		require.NoError(t, err)
@@ -178,7 +178,7 @@ func TestMerkleTreePathVerify(t *testing.T) {
 
 	t.Run("EmptyBranch", func(t *testing.T) {
 		tree := smt.NewSparseMerkleTree(api.SHA256)
-		
+
 		// Create a tree structure that results in empty branches
 		leaves := []*smt.Leaf{
 			createLeaf(2, []byte("two")),
@@ -186,7 +186,7 @@ func TestMerkleTreePathVerify(t *testing.T) {
 		}
 		err := tree.AddLeaves(leaves)
 		require.NoError(t, err)
-		
+
 		// Verify paths work correctly with empty branches
 		for _, p := range []int64{2, 4} {
 			path := tree.GetPath(big.NewInt(p))
@@ -208,19 +208,19 @@ func TestMerkleTreePathVerify(t *testing.T) {
 			{"sparse", []int64{1, 1000, 1000000}},
 			{"mixed", []int64{7, 15, 31, 63, 127}}, // patterns with multiple 1s
 		}
-		
+
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				tree := smt.NewSparseMerkleTree(api.SHA256)
-				
+
 				var leaves []*smt.Leaf
 				for _, p := range tc.paths {
 					leaves = append(leaves, createLeaf(p, []byte("data")))
 				}
-				
+
 				err := tree.AddLeaves(leaves)
 				require.NoError(t, err)
-				
+
 				for _, p := range tc.paths {
 					path := tree.GetPath(big.NewInt(p))
 					result, err := path.Verify(big.NewInt(p))
@@ -235,21 +235,21 @@ func TestMerkleTreePathVerify(t *testing.T) {
 	t.Run("RealRequestIDs", func(t *testing.T) {
 		// Test with actual requestID format (34-byte with algorithm prefix)
 		tree := smt.NewSparseMerkleTree(api.SHA256)
-		
+
 		// Create requestIDs with proper format
 		requestID1 := "00007d535ade796772c5088b095e79a18e282437ee8d8238f5aa9d9c61694948ba9e"
 		requestID2 := "00006478ca42f6949cfbd4b9e4a41b9a384ea78261c1776808da70cf21e98c345700"
-		
+
 		req1, err := api.NewImprintHexString(requestID1)
 		require.NoError(t, err)
 		path1, err := req1.GetPath()
 		require.NoError(t, err)
-		
+
 		req2, err := api.NewImprintHexString(requestID2)
 		require.NoError(t, err)
 		path2, err := req2.GetPath()
 		require.NoError(t, err)
-		
+
 		// Add to tree
 		leaves := []*smt.Leaf{
 			{Path: path1, Value: []byte("value1")},
@@ -257,14 +257,14 @@ func TestMerkleTreePathVerify(t *testing.T) {
 		}
 		err = tree.AddLeaves(leaves)
 		require.NoError(t, err)
-		
+
 		// Verify paths
 		treePath1 := tree.GetPath(path1)
 		result1, err := treePath1.Verify(path1)
 		require.NoError(t, err)
 		require.True(t, result1.PathIncluded && result1.PathValid,
 			"RequestID1 path should be valid")
-		
+
 		treePath2 := tree.GetPath(path2)
 		result2, err := treePath2.Verify(path2)
 		require.NoError(t, err)
@@ -274,13 +274,13 @@ func TestMerkleTreePathVerify(t *testing.T) {
 
 	t.Run("ConsistencyAfterMultipleAdds", func(t *testing.T) {
 		tree := smt.NewSparseMerkleTree(api.SHA256)
-		
+
 		// Add leaves incrementally
 		for i := int64(1); i <= 5; i++ {
 			leaf := createLeaf(i*10, []byte("leaf"))
 			err := tree.AddLeaves([]*smt.Leaf{leaf})
 			require.NoError(t, err)
-			
+
 			// Verify all previously added leaves still work
 			for j := int64(1); j <= i; j++ {
 				path := tree.GetPath(big.NewInt(j * 10))
@@ -302,7 +302,7 @@ func TestMerkleTreePathVerifyEdgeCases(t *testing.T) {
 				{Path: "invalid", Branch: []string{}, Sibling: nil},
 			},
 		}
-		
+
 		_, err := path.Verify(big.NewInt(1))
 		require.Error(t, err, "Should error on invalid path string")
 	})
@@ -314,7 +314,7 @@ func TestMerkleTreePathVerifyEdgeCases(t *testing.T) {
 				{Path: "1", Branch: []string{"notahex"}, Sibling: nil},
 			},
 		}
-		
+
 		_, err := path.Verify(big.NewInt(1))
 		require.Error(t, err, "Should error on invalid branch hex")
 	})
@@ -324,10 +324,10 @@ func TestMerkleTreePathVerifyEdgeCases(t *testing.T) {
 		path := &api.MerkleTreePath{
 			Root: "0000abcd",
 			Steps: []api.MerkleTreeStep{
-				{Path: "1", Branch: []string{"ab"}, Sibling: &invalidSibling},
+				{Path: "1", Branch: []string{"ab"}, Sibling: []string{invalidSibling}},
 			},
 		}
-		
+
 		_, err := path.Verify(big.NewInt(1))
 		require.Error(t, err, "Should error on invalid sibling hex")
 	})
@@ -337,7 +337,7 @@ func TestMerkleTreePathVerifyEdgeCases(t *testing.T) {
 			Root:  "0000abcd",
 			Steps: []api.MerkleTreeStep{},
 		}
-		
+
 		result, err := path.Verify(big.NewInt(1))
 		require.NoError(t, err)
 		require.False(t, result.PathValid, "Empty steps should not be valid")
@@ -347,24 +347,24 @@ func TestMerkleTreePathVerifyEdgeCases(t *testing.T) {
 // TestMerkleTreePathVerifyDuplicates tests handling of duplicate leaves
 func TestMerkleTreePathVerifyDuplicates(t *testing.T) {
 	tree := smt.NewSparseMerkleTree(api.SHA256)
-	
+
 	// Add a leaf
 	leaf1 := createLeaf(100, []byte("original"))
 	err := tree.AddLeaves([]*smt.Leaf{leaf1})
 	require.NoError(t, err)
-	
+
 	// Try to add duplicate (should be skipped)
 	leaf2 := createLeaf(100, []byte("duplicate"))
 	err = tree.AddLeaves([]*smt.Leaf{leaf2})
 	require.NoError(t, err) // Should not error, just skip
-	
+
 	// Verify the original value is still there
 	path := tree.GetPath(big.NewInt(100))
 	result, err := path.Verify(big.NewInt(100))
 	require.NoError(t, err)
 	require.True(t, result.PathIncluded && result.PathValid,
 		"Original leaf should still be valid")
-	
+
 	// The leaf value should be the original
 	require.Equal(t, 1, len(path.Steps))
 	if len(path.Steps[0].Branch) > 0 {

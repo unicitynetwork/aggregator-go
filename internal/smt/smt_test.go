@@ -744,9 +744,9 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 				}
 
 				// If sibling exists, it should be a valid hex hash
-				if step.Sibling != nil {
-					require.Regexp(t, "^[0-9a-f]+$", *step.Sibling, "Sibling hash should be valid hex")
-					require.True(t, len(*step.Sibling) > 0, "Sibling hash should not be empty")
+				if len(step.Sibling) > 0 {
+					require.Regexp(t, "^[0-9a-f]+$", step.Sibling[0], "Sibling hash should be valid hex")
+					require.True(t, len(step.Sibling[0]) > 0, "Sibling hash should not be empty")
 				}
 			}
 
