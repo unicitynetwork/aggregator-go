@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"sort"
 	"sync"
 	"time"
 
@@ -79,6 +80,12 @@ type RoundManager struct {
 func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*RoundManager, error) {
 	// Initialize SMT with thread-safe wrapper
 	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
+
+	// Restore SMT from storage
+	if err := restoreSmtFromStorage(context.Background(), smtInstance, storage, logger); err != nil {
+		return nil, fmt.Errorf("failed to restore SMT from storage: %w", err)
+	}
+
 	threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 	rm := &RoundManager{
@@ -414,4 +421,88 @@ func (rm *RoundManager) roundProcessor(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// restoreSmtFromStorage restores the SMT tree from persisted nodes in storage
+func restoreSmtFromStorage(ctx context.Context, smtInstance *smt.SparseMerkleTree, storage interfaces.Storage, logger *logger.Logger) error {
+	logger.Info("Starting SMT restoration from storage")
+
+	// Get total count for progress tracking
+	totalCount, err := storage.SmtStorage().Count(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get SMT node count: %w", err)
+	}
+
+	if totalCount == 0 {
+		logger.Info("No SMT nodes found in storage, starting with empty tree")
+		return nil
+	}
+
+	logger.Info("Found SMT nodes in storage, starting restoration", "totalNodes", totalCount)
+
+	const chunkSize = 1000
+	offset := 0
+	restoredCount := 0
+
+	for {
+		// Load chunk of nodes
+		nodes, err := storage.SmtStorage().GetChunked(ctx, offset, chunkSize)
+		if err != nil {
+			return fmt.Errorf("failed to load SMT chunk at offset %d: %w", offset, err)
+		}
+
+		if len(nodes) == 0 {
+			break // No more data
+		}
+
+		// Convert storage nodes to SMT leaves
+		leaves := make([]*smt.Leaf, len(nodes))
+		for i, node := range nodes {
+			// Convert key bytes back to big.Int path
+			path := new(big.Int).SetBytes(node.Key)
+			leaves[i] = &smt.Leaf{
+				Path:  path,
+				Value: node.Value,
+			}
+		}
+
+		// Sort leaves by path to ensure consistent ordering
+		sort.Slice(leaves, func(i, j int) bool {
+			return leaves[i].Path.Cmp(leaves[j].Path) < 0
+		})
+
+		// Add leaves to SMT
+		if err := smtInstance.AddLeaves(leaves); err != nil {
+			return fmt.Errorf("failed to restore SMT leaves at offset %d: %w", offset, err)
+		}
+
+		restoredCount += len(nodes)
+		logger.Info("Restored SMT chunk",
+			"offset", offset,
+			"chunkSize", len(nodes),
+			"restoredCount", restoredCount,
+			"totalCount", totalCount,
+			"progress", fmt.Sprintf("%.1f%%", float64(restoredCount)/float64(totalCount)*100))
+
+		offset += len(nodes)
+
+		if len(nodes) < chunkSize {
+			break // Last chunk
+		}
+	}
+
+	// Log final state
+	finalRootHash := smtInstance.GetRootHashHex()
+	logger.Info("SMT restoration complete",
+		"restoredNodes", restoredCount,
+		"totalNodes", totalCount,
+		"finalRootHash", finalRootHash)
+
+	if restoredCount != int(totalCount) {
+		logger.Warn("SMT restoration count mismatch",
+			"expected", totalCount,
+			"restored", restoredCount)
+	}
+
+	return nil
 }
