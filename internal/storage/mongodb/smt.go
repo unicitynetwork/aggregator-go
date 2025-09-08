@@ -129,7 +129,7 @@ func (ss *SmtStorage) GetChunked(ctx context.Context, offset, limit int) ([]*mod
 	opts := options.Find().
 		SetSkip(int64(offset)).
 		SetLimit(int64(limit)).
-		SetSort(bson.D{{Key: "createdAt", Value: 1}}) // Consistent ordering by creation time
+		SetSort(bson.D{{Key: "_id", Value: 1}}) // Deterministic ordering by insertion order
 
 	cursor, err := ss.collection.Find(ctx, bson.M{}, opts)
 	if err != nil {
