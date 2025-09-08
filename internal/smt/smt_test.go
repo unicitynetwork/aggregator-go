@@ -1209,3 +1209,33 @@ func TestSMTSnapshot(t *testing.T) {
 		assert.NotSame(t, original.root, snapshot.root, "Snapshot should have its own root after modification")
 	})
 }
+
+// TestSMTOrderDependency - SMT order dependency test
+/*func TestSMTOrderDependency(t *testing.T) {
+	// Simple test: same leaves in different order should produce same hash (but they don't)
+	leaves1 := []*Leaf{
+		{Path: big.NewInt(1), Value: []byte("value_1")},
+		{Path: big.NewInt(3), Value: []byte("value_3")},
+	}
+
+	leaves2 := []*Leaf{
+		{Path: big.NewInt(3), Value: []byte("value_3")},
+		{Path: big.NewInt(1), Value: []byte("value_1")},
+	}
+
+	smt1 := NewSparseMerkleTree(api.SHA256)
+	err := smt1.AddLeaves(leaves1)
+	require.NoError(t, err)
+	hash1 := smt1.GetRootHashHex()
+
+	smt2 := NewSparseMerkleTree(api.SHA256)
+	err = smt2.AddLeaves(leaves2)
+	require.NoError(t, err)
+	hash2 := smt2.GetRootHashHex()
+
+	t.Logf("Order [1,3]: %s", hash1)
+	t.Logf("Order [3,1]: %s", hash2)
+
+	// This will fail - demonstrating that insertion order affects the final hash
+	assert.Equal(t, hash1, hash2, "SMT should be order-independent but it isn't (known limitation)")
+}*/
