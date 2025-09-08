@@ -41,8 +41,8 @@ func apiToModelBigInt(apiBigInt *api.BigInt) *api.BigInt {
 
 func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.AggregatorRecord {
 	return &api.AggregatorRecord{
-		RequestID:             modelRecord.RequestID,
-		TransactionHash:       modelRecord.TransactionHash,
+		RequestID:       modelRecord.RequestID,
+		TransactionHash: modelRecord.TransactionHash,
 		Authenticator: api.Authenticator{
 			Algorithm: modelRecord.Authenticator.Algorithm,
 			PublicKey: modelRecord.Authenticator.PublicKey,
@@ -101,6 +101,21 @@ func NewAggregatorService(cfg *config.Config, logger *logger.Logger, storage int
 func (as *AggregatorService) Start(ctx context.Context) error {
 	as.logger.WithContext(ctx).Info("Starting Aggregator Service")
 
+	// Log SMT configuration
+	smtMaxGoroutines := as.config.Processing.SMTMaxGoroutines
+	var smtConfigMsg string
+	switch smtMaxGoroutines {
+	case -1:
+		smtConfigMsg = "default (auto-calculated based on CPU cores)"
+	case 0:
+		smtConfigMsg = "sequential (no parallelism)"
+	default:
+		smtConfigMsg = fmt.Sprintf("%d goroutines", smtMaxGoroutines)
+	}
+	as.logger.WithContext(ctx).Info("SMT configuration",
+		"SMT_MAX_GOROUTINES", smtMaxGoroutines,
+		"mode", smtConfigMsg)
+
 	// Start the round manager
 	if err := as.roundManager.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start round manager: %w", err)
@@ -131,10 +146,10 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 	if aggregateCount == 0 {
 		aggregateCount = 1 // Default to 1 if not specified
 	}
-	
+
 	commitment := models.NewCommitmentWithAggregate(
-		req.RequestID, 
-		req.TransactionHash, 
+		req.RequestID,
+		req.TransactionHash,
 		models.Authenticator{
 			Algorithm: req.Authenticator.Algorithm,
 			PublicKey: req.Authenticator.PublicKey,

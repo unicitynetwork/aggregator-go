@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -12,6 +13,38 @@ import (
 var (
 	ErrLeafExists = errors.New("smt: leaf already exists")
 )
+
+// goroutineLimiter is a semaphore to limit the number of concurrent goroutines
+// during hash calculations to prevent resource exhaustion with large trees
+// Default is sequential processing (no goroutines)
+var goroutineLimiter chan struct{}
+
+// init initializes the goroutine limiter to default (sequential processing)
+func init() {
+	// Default to sequential processing (no concurrent goroutines)
+	goroutineLimiter = make(chan struct{})
+}
+
+// SetMaxConcurrentGoroutines allows configuring the maximum number of goroutines
+// used during hash calculations. This should be called before creating trees or
+// calculating hashes. Setting to 0 will use sequential processing.
+// Note: The -1 value (CPU-based default) is handled in config loading.
+func SetMaxConcurrentGoroutines(maxGoroutines int) {
+	if maxGoroutines == 0 {
+		// Disable concurrent processing (sequential)
+		goroutineLimiter = make(chan struct{})
+	} else {
+		// Set specific limit
+		goroutineLimiter = make(chan struct{}, maxGoroutines)
+	}
+}
+
+// GetMaxConcurrentGoroutines returns the current maximum number of goroutines
+// that can be used concurrently for hash calculations. Returns 0 if sequential
+// processing is enabled.
+func GetMaxConcurrentGoroutines() int {
+	return cap(goroutineLimiter)
+}
 
 type (
 	// SparseMerkleTree implements a sparse merkle tree compatible with Unicity SDK
@@ -150,27 +183,9 @@ func NewRootNode(algorithm api.HashAlgorithm, left, right Branch) *RootNode {
 	}
 }
 
-// CalculateHash calculates root hash (matches TypeScript logic)
+// CalculateHash calculates root hash with adaptive parallel processing
 func (r *RootNode) CalculateHash(algo api.HashAlgorithm) *api.DataHash {
-	var leftHash, rightHash []byte
-
-	if r.Left != nil {
-		leftHash = r.Left.CalculateHash(algo).Data
-	} else {
-		leftHash = []byte{0} // TypeScript: new Uint8Array(1)
-	}
-
-	if r.Right != nil {
-		rightHash = r.Right.CalculateHash(algo).Data
-	} else {
-		rightHash = []byte{0} // TypeScript: new Uint8Array(1)
-	}
-
-	// Combine and hash: leftHash + rightHash
-	combined := append(leftHash, rightHash...)
-	hashData := api.Sha256Hash(combined)
-
-	return api.NewDataHash(algo, hashData)
+	return api.NewDataHash(algo, calculateHashData(r.Left, r.Right, algo))
 }
 
 // NewLeafBranch creates a leaf branch
@@ -257,7 +272,53 @@ func NewNodeBranchLazy(algorithm api.HashAlgorithm, path *big.Int, left, right B
 }
 
 func (n *NodeBranch) childrenHashData() []byte {
-	return api.Sha256Hash(append(n.Left.CalculateHash(n.Algorithm).Data, n.Right.CalculateHash(n.Algorithm).Data...))
+	return calculateHashData(n.Left, n.Right, n.Algorithm)
+}
+
+func calculateHashData(left, right Branch, algorithm api.HashAlgorithm) []byte {
+	var leftData, rightData []byte
+
+	// Only use a goroutine if both children exist (real parallel work)
+	if left != nil && right != nil {
+		var wg sync.WaitGroup
+
+		// Try to acquire a slot in the goroutine limiter
+		select {
+		case goroutineLimiter <- struct{}{}:
+			// Successfully acquired a slot, use goroutine for left child
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() { <-goroutineLimiter }() // Release the slot when done
+				leftData = left.CalculateHash(algorithm).Data
+			}()
+
+			// Calculate right child hash in current goroutine (no extra goroutine needed)
+			rightData = right.CalculateHash(algorithm).Data
+
+			// Wait for the left goroutine to complete
+			wg.Wait()
+		default:
+			// No available slots, fall back to sequential processing
+			leftData = left.CalculateHash(algorithm).Data
+			rightData = right.CalculateHash(algorithm).Data
+		}
+	} else {
+		// Sequential processing when only one or no children exist
+		if left != nil {
+			leftData = left.CalculateHash(algorithm).Data
+		} else {
+			leftData = []byte{0}
+		}
+
+		if right != nil {
+			rightData = right.CalculateHash(algorithm).Data
+		} else {
+			rightData = []byte{0}
+		}
+	}
+
+	return api.Sha256Hash(append(leftData, rightData...))
 }
 
 func (n *NodeBranch) CalculateHash(algo api.HashAlgorithm) *api.DataHash {

@@ -77,6 +77,9 @@ type RoundManager struct {
 
 // NewRoundManager creates a new round manager
 func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*RoundManager, error) {
+	// Configure SMT goroutine limits based on config
+	smt.SetMaxConcurrentGoroutines(cfg.Processing.SMTMaxGoroutines)
+
 	// Initialize SMT with thread-safe wrapper
 	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
 	threadSafeSMT := NewThreadSafeSMT(smtInstance)
