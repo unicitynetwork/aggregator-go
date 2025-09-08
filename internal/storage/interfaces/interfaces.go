@@ -95,6 +95,9 @@ type SmtStorage interface {
 
 	// GetAll retrieves all SMT nodes (use with caution)
 	GetAll(ctx context.Context) ([]*models.SmtNode, error)
+
+	// GetChunked retrieves SMT nodes in chunks for efficient loading
+	GetChunked(ctx context.Context, offset, limit int) ([]*models.SmtNode, error)
 }
 
 // BlockRecordsStorage handles block to request ID mappings

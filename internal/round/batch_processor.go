@@ -67,6 +67,11 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 		return "", nil, fmt.Errorf("no snapshot available for current round")
 	}
 
+	// Persist SMT nodes to storage before adding to snapshot
+	if err := rm.persistSmtNodes(ctx, leaves); err != nil {
+		return "", nil, fmt.Errorf("failed to persist SMT nodes: %w", err)
+	}
+
 	// Add all leaves to the round's SMT snapshot (not the main SMT yet)
 	rootHash, err := snapshot.AddLeaves(leaves)
 	if err != nil {
@@ -336,5 +341,36 @@ func (rm *RoundManager) storeAggregatorRecords(ctx context.Context, records []*m
 	}
 	rm.logger.WithContext(ctx).Info("Successfully stored aggregator records",
 		"recordCount", len(records))
+	return nil
+}
+
+// persistSmtNodes persists SMT leaves to storage for permanent retention
+func (rm *RoundManager) persistSmtNodes(ctx context.Context, leaves []*smt.Leaf) error {
+	if len(leaves) == 0 {
+		return nil
+	}
+
+	// Convert SMT leaves to storage models
+	smtNodes := make([]*models.SmtNode, len(leaves))
+	for i, leaf := range leaves {
+		// Create the key from the path (convert big.Int to bytes)
+		keyBytes := leaf.Path.Bytes()
+		key := api.NewHexBytes(keyBytes)
+
+		// Create the value
+		value := api.NewHexBytes(leaf.Value)
+
+		// Calculate hash of the leaf value for indexing and verification
+		hash := sha256.Sum256(leaf.Value)
+		leafHash := api.NewHexBytes(hash[:])
+
+		smtNodes[i] = models.NewSmtNode(key, value, leafHash)
+	}
+
+	// Store batch to database
+	if err := rm.storage.SmtStorage().StoreBatch(ctx, smtNodes); err != nil {
+		return fmt.Errorf("failed to store SMT nodes batch: %w", err)
+	}
+
 	return nil
 }

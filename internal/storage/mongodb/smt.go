@@ -57,7 +57,7 @@ func (ss *SmtStorage) StoreBatch(ctx context.Context, nodes []*models.SmtNode) e
 // GetByKey retrieves an SMT node by key
 func (ss *SmtStorage) GetByKey(ctx context.Context, key api.HexBytes) (*models.SmtNode, error) {
 	var node models.SmtNode
-	err := ss.collection.FindOne(ctx, bson.M{"key": key.String()}).Decode(&node)
+	err := ss.collection.FindOne(ctx, bson.M{"key": key}).Decode(&node)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
@@ -69,7 +69,7 @@ func (ss *SmtStorage) GetByKey(ctx context.Context, key api.HexBytes) (*models.S
 
 // Delete removes an SMT node
 func (ss *SmtStorage) Delete(ctx context.Context, key api.HexBytes) error {
-	_, err := ss.collection.DeleteOne(ctx, bson.M{"key": key.String()})
+	_, err := ss.collection.DeleteOne(ctx, bson.M{"key": key})
 	if err != nil {
 		return fmt.Errorf("failed to delete SMT node: %w", err)
 	}
@@ -82,12 +82,7 @@ func (ss *SmtStorage) DeleteBatch(ctx context.Context, keys []api.HexBytes) erro
 		return nil
 	}
 
-	keyStrings := make([]string, len(keys))
-	for i, key := range keys {
-		keyStrings[i] = key.String()
-	}
-
-	filter := bson.M{"key": bson.M{"$in": keyStrings}}
+	filter := bson.M{"key": bson.M{"$in": keys}}
 	_, err := ss.collection.DeleteMany(ctx, filter)
 	if err != nil {
 		return fmt.Errorf("failed to delete SMT nodes batch: %w", err)
@@ -110,6 +105,35 @@ func (ss *SmtStorage) GetAll(ctx context.Context) ([]*models.SmtNode, error) {
 	cursor, err := ss.collection.Find(ctx, bson.M{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to find all SMT nodes: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var nodes []*models.SmtNode
+	for cursor.Next(ctx) {
+		var node models.SmtNode
+		if err := cursor.Decode(&node); err != nil {
+			return nil, fmt.Errorf("failed to decode SMT node: %w", err)
+		}
+		nodes = append(nodes, &node)
+	}
+
+	if err := cursor.Err(); err != nil {
+		return nil, fmt.Errorf("cursor error: %w", err)
+	}
+
+	return nodes, nil
+}
+
+// GetChunked retrieves SMT nodes in chunks for efficient loading
+func (ss *SmtStorage) GetChunked(ctx context.Context, offset, limit int) ([]*models.SmtNode, error) {
+	opts := options.Find().
+		SetSkip(int64(offset)).
+		SetLimit(int64(limit)).
+		SetSort(bson.D{{Key: "createdAt", Value: 1}}) // Consistent ordering by creation time
+
+	cursor, err := ss.collection.Find(ctx, bson.M{}, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find SMT nodes chunk: %w", err)
 	}
 	defer cursor.Close(ctx)
 
