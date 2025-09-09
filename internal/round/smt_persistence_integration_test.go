@@ -288,6 +288,103 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	}
 }
 
+// TestSmtRestorationWithBlockVerification tests that SMT restoration verifies against existing blocks
+func TestSmtRestorationWithBlockVerification(t *testing.T) {
+	storage, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	testLogger, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+
+	// Create test data
+	testLeaves := []*smt.Leaf{
+		{Path: big.NewInt(10), Value: []byte("block_test_value_10")},
+		{Path: big.NewInt(20), Value: []byte("block_test_value_20")},
+		{Path: big.NewInt(30), Value: []byte("block_test_value_30")},
+	}
+
+	// Create fresh SMT to get expected root hash
+	freshSmt := smt.NewSparseMerkleTree(api.SHA256)
+	err = freshSmt.AddLeaves(testLeaves)
+	require.NoError(t, err, "Fresh SMT should accept leaves")
+	expectedRootHash := freshSmt.GetRootHashHex()
+	expectedRootHashBytes := freshSmt.GetRootHash()
+
+	// Create a block with the expected root hash
+	block := &models.Block{
+		Index:               api.NewBigInt(big.NewInt(1)),
+		ChainID:             "test-chain",
+		Version:             "1.0.0",
+		ForkID:              "test-fork",
+		RootHash:            api.HexBytes(expectedRootHashBytes), // Use bytes, not hex string
+		PreviousBlockHash:   api.HexBytes("0000000000000000000000000000000000000000000000000000000000000000"),
+		NoDeletionProofHash: api.HexBytes(""),
+		CreatedAt:           api.NewTimestamp(time.Now()),
+		UnicityCertificate:  api.HexBytes("certificate_data"),
+	}
+
+	// Store the block
+	err = storage.BlockStorage().Store(ctx, block)
+	require.NoError(t, err, "Should store test block")
+
+	// Create RoundManager and persist SMT nodes
+	cfg := &config.Config{
+		Processing: config.ProcessingConfig{RoundDuration: time.Second},
+	}
+	rm, err := NewRoundManager(cfg, testLogger, storage)
+	require.NoError(t, err, "Should create RoundManager")
+
+	// Persist SMT nodes to storage
+	err = rm.persistSmtNodes(ctx, testLeaves)
+	require.NoError(t, err, "Should persist SMT nodes")
+
+	// Test 1: Successful verification (matching root hash)
+	t.Run("SuccessfulVerification", func(t *testing.T) {
+		successRm, err := NewRoundManager(cfg, testLogger, storage)
+		require.NoError(t, err, "Should create RoundManager")
+
+		err = successRm.Start(ctx)
+		require.NoError(t, err, "SMT restoration should succeed when root hashes match")
+		defer func() {
+			if err := successRm.Stop(ctx); err != nil {
+				t.Logf("Failed to stop RoundManager: %v", err)
+			}
+		}()
+
+		// Verify the restored SMT has the correct hash
+		restoredHash := successRm.smt.GetRootHash()
+		assert.Equal(t, expectedRootHash, restoredHash, "Restored SMT should have expected root hash")
+	})
+
+	// Test 2: Failed verification (mismatched root hash)
+	t.Run("FailedVerification", func(t *testing.T) {
+		// Create a block with a different root hash to simulate mismatch
+		wrongBlock := &models.Block{
+			Index:               api.NewBigInt(big.NewInt(2)),
+			ChainID:             "test-chain",
+			Version:             "1.0.0",
+			ForkID:              "test-fork",
+			RootHash:            api.HexBytes("wrong_root_hash_value"), // Intentionally wrong hash
+			PreviousBlockHash:   api.HexBytes("0000000000000000000000000000000000000000000000000000000000000001"),
+			NoDeletionProofHash: api.HexBytes(""),
+			CreatedAt:           api.NewTimestamp(time.Now()),
+			UnicityCertificate:  api.HexBytes("certificate_data"),
+		}
+
+		// Store the wrong block (this will become the "latest" block)
+		err = storage.BlockStorage().Store(ctx, wrongBlock)
+		require.NoError(t, err, "Should store wrong test block")
+
+		failRm, err := NewRoundManager(cfg, testLogger, storage)
+		require.NoError(t, err, "Should create RoundManager")
+
+		// This should fail because the restored SMT root hash doesn't match the latest block
+		err = failRm.Start(ctx)
+		require.Error(t, err, "SMT restoration should fail when root hashes don't match")
+	})
+}
+
 // createTestCommitment creates a valid, signed commitment for testing
 func createTestCommitment(t *testing.T, baseData string) *models.Commitment {
 	privateKey, err := btcec.NewPrivateKey()
