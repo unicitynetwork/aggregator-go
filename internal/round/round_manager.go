@@ -78,14 +78,8 @@ type RoundManager struct {
 
 // NewRoundManager creates a new round manager
 func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*RoundManager, error) {
-	// Initialize SMT with thread-safe wrapper
+	// Initialize SMT with empty tree - will be replaced with restored tree in Start()
 	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
-
-	// Restore SMT from storage
-	if err := restoreSmtFromStorage(context.Background(), smtInstance, storage, logger); err != nil {
-		return nil, fmt.Errorf("failed to restore SMT from storage: %w", err)
-	}
-
 	threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 	rm := &RoundManager{
@@ -115,6 +109,11 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 	rm.logger.WithContext(ctx).Info("Starting Round Manager",
 		"roundDuration", rm.roundDuration.String(),
 		"batchLimit", rm.config.Processing.BatchLimit)
+
+	// Restore SMT from storage - this will populate the existing empty SMT
+	if err := rm.restoreSmtFromStorage(ctx); err != nil {
+		return fmt.Errorf("failed to restore SMT from storage: %w", err)
+	}
 
 	// Ensure any previous timers are stopped
 	rm.roundMutex.Lock()
@@ -424,21 +423,21 @@ func (rm *RoundManager) roundProcessor(ctx context.Context) {
 }
 
 // restoreSmtFromStorage restores the SMT tree from persisted nodes in storage
-func restoreSmtFromStorage(ctx context.Context, smtInstance *smt.SparseMerkleTree, storage interfaces.Storage, logger *logger.Logger) error {
-	logger.Info("Starting SMT restoration from storage")
+func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) error {
+	rm.logger.Info("Starting SMT restoration from storage")
 
 	// Get total count for progress tracking
-	totalCount, err := storage.SmtStorage().Count(ctx)
+	totalCount, err := rm.storage.SmtStorage().Count(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get SMT node count: %w", err)
 	}
 
 	if totalCount == 0 {
-		logger.Info("No SMT nodes found in storage, starting with empty tree")
+		rm.logger.Info("No SMT nodes found in storage, starting with empty tree")
 		return nil
 	}
 
-	logger.Info("Found SMT nodes in storage, starting restoration", "totalNodes", totalCount)
+	rm.logger.Info("Found SMT nodes in storage, starting restoration", "totalNodes", totalCount)
 
 	const chunkSize = 1000
 	offset := 0
@@ -446,7 +445,7 @@ func restoreSmtFromStorage(ctx context.Context, smtInstance *smt.SparseMerkleTre
 
 	for {
 		// Load chunk of nodes
-		nodes, err := storage.SmtStorage().GetChunked(ctx, offset, chunkSize)
+		nodes, err := rm.storage.SmtStorage().GetChunked(ctx, offset, chunkSize)
 		if err != nil {
 			return fmt.Errorf("failed to load SMT chunk at offset %d: %w", offset, err)
 		}
@@ -471,13 +470,12 @@ func restoreSmtFromStorage(ctx context.Context, smtInstance *smt.SparseMerkleTre
 			return leaves[i].Path.Cmp(leaves[j].Path) < 0
 		})
 
-		// Add leaves to SMT
-		if err := smtInstance.AddLeaves(leaves); err != nil {
+		if _, err := rm.smt.AddLeaves(leaves); err != nil {
 			return fmt.Errorf("failed to restore SMT leaves at offset %d: %w", offset, err)
 		}
 
 		restoredCount += len(nodes)
-		logger.Info("Restored SMT chunk",
+		rm.logger.Info("Restored SMT chunk",
 			"offset", offset,
 			"chunkSize", len(nodes),
 			"restoredCount", restoredCount,
@@ -492,14 +490,14 @@ func restoreSmtFromStorage(ctx context.Context, smtInstance *smt.SparseMerkleTre
 	}
 
 	// Log final state
-	finalRootHash := smtInstance.GetRootHashHex()
-	logger.Info("SMT restoration complete",
+	finalRootHash := rm.smt.GetRootHash()
+	rm.logger.Info("SMT restoration complete",
 		"restoredNodes", restoredCount,
 		"totalNodes", totalCount,
 		"finalRootHash", finalRootHash)
 
 	if restoredCount != int(totalCount) {
-		logger.Warn("SMT restoration count mismatch",
+		rm.logger.Warn("SMT restoration count mismatch",
 			"expected", totalCount,
 			"restored", restoredCount)
 	}

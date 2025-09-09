@@ -106,15 +106,16 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 		{Path: big.NewInt(16), Value: []byte("test_value_16")},
 	}
 
-	cfg := &config.Config{}
+	cfg := &config.Config{
+		Processing: config.ProcessingConfig{
+			RoundDuration: time.Second,
+		},
+	}
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm := &RoundManager{
-		config:  cfg,
-		logger:  testLogger,
-		storage: storage,
-	}
+	rm, err := NewRoundManager(cfg, testLogger, storage)
+	require.NoError(t, err, "Should create RoundManager")
 
 	// Test persistence
 	err = rm.persistSmtNodes(ctx, testLeaves)
@@ -131,16 +132,24 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 	require.NoError(t, err, "Fresh SMT should accept leaves")
 	freshHash := freshSmt.GetRootHashHex()
 
-	restoredSmt := smt.NewSparseMerkleTree(api.SHA256)
-	err = restoreSmtFromStorage(ctx, restoredSmt, storage, testLogger)
+	// Create RoundManager and call Start() to trigger restoration
+	restoredRm, err := NewRoundManager(cfg, testLogger, storage)
+	require.NoError(t, err, "Should create RoundManager")
+
+	err = restoredRm.Start(ctx)
 	require.NoError(t, err, "SMT restoration should succeed")
-	restoredHash := restoredSmt.GetRootHashHex()
+	defer func() {
+		if err := restoredRm.Stop(ctx); err != nil {
+			t.Logf("Failed to stop restored RoundManager: %v", err)
+		}
+	}()
+	restoredHash := restoredRm.smt.GetRootHash()
 
 	assert.Equal(t, freshHash, restoredHash, "Restored SMT should have same root hash as fresh SMT")
 
 	// Verify inclusion proofs work
 	for _, leaf := range testLeaves {
-		merkleTreePath := restoredSmt.GetPath(leaf.Path)
+		merkleTreePath := restoredRm.smt.GetPath(leaf.Path)
 		require.NotNil(t, merkleTreePath, "Should be able to get Merkle path")
 		assert.NotEmpty(t, merkleTreePath.Root, "Merkle path should have root hash")
 	}
@@ -188,12 +197,19 @@ func TestLargeSmtRestoration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(testNodeCount), count, "Should have stored all nodes")
 
-	// Create new SMT and restore from storage (uses multiple chunks)
-	newSmt := smt.NewSparseMerkleTree(api.SHA256)
-	err = restoreSmtFromStorage(ctx, newSmt, storage, testLogger)
-	require.NoError(t, err, "Large SMT restoration should succeed")
+	// Create new RoundManager and call Start() to restore from storage (uses multiple chunks)
+	newRm, err := NewRoundManager(cfg, testLogger, storage)
+	require.NoError(t, err, "Should create new RoundManager")
 
-	restoredHash := newSmt.GetRootHashHex()
+	err = newRm.Start(ctx)
+	require.NoError(t, err, "Large SMT restoration should succeed")
+	defer func() {
+		if err := newRm.Stop(ctx); err != nil {
+			t.Logf("Failed to stop new RoundManager: %v", err)
+		}
+	}()
+
+	restoredHash := newRm.smt.GetRootHash()
 
 	// Critical test: multi-chunk restoration should match single-batch creation
 	assert.Equal(t, freshHash, restoredHash, "Multi-chunk restoration should produce same hash as fresh SMT")
@@ -222,14 +238,8 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm := &RoundManager{
-		config:  cfg,
-		logger:  testLogger,
-		storage: storage,
-	}
-
-	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
-	rm.smt = NewThreadSafeSMT(smtInstance)
+	rm, err := NewRoundManager(cfg, testLogger, storage)
+	require.NoError(t, err, "Should create RoundManager")
 
 	rm.currentRound = &Round{
 		Number:      api.NewBigInt(big.NewInt(1)),
@@ -250,8 +260,17 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	assert.Equal(t, int64(len(testCommitments)), count, "Should have persisted SMT nodes for all commitments")
 
 	// Simulate service restart with new round manager
-	newRm, err := NewRoundManager(&config.Config{}, testLogger, storage)
+	newRm, err := NewRoundManager(&config.Config{Processing: config.ProcessingConfig{RoundDuration: time.Second}}, testLogger, storage)
 	require.NoError(t, err, "NewRoundManager should succeed after restart")
+
+	// Call Start() to trigger SMT restoration
+	err = newRm.Start(ctx)
+	require.NoError(t, err, "Start should succeed and restore SMT")
+	defer func() {
+		if err := newRm.Stop(ctx); err != nil {
+			t.Logf("Failed to stop restarted RoundManager: %v", err)
+		}
+	}()
 
 	// Verify restored SMT has correct data
 	restoredRootHash := newRm.smt.GetRootHash()
