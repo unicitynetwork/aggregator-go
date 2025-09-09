@@ -502,5 +502,26 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) error {
 			"restored", restoredCount)
 	}
 
+	// Verify restored SMT root hash matches latest block's root hash
+	latestBlock, err := rm.storage.BlockStorage().GetLatest(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get latest block for SMT verification: %w", err)
+	} else if latestBlock == nil {
+		rm.logger.Info("No latest block found, skipping SMT verification")
+	} else {
+		expectedRootHash := latestBlock.RootHash.String()
+		if finalRootHash != expectedRootHash {
+			rm.logger.Error("SMT restoration verification failed - root hash mismatch",
+				"restoredRootHash", finalRootHash,
+				"expectedRootHash", expectedRootHash,
+				"latestBlockNumber", latestBlock.Index)
+			return fmt.Errorf("SMT restoration verification failed: restored root hash %s does not match latest block root hash %s",
+				finalRootHash, expectedRootHash)
+		}
+		rm.logger.Info("SMT restoration verified successfully - root hash matches latest block",
+			"rootHash", finalRootHash,
+			"latestBlockNumber", latestBlock.Index)
+	}
+
 	return nil
 }
