@@ -1254,3 +1254,33 @@ func TestSMTOrderDependencyBatch(t *testing.T) {
 
 	assert.Equal(t, hash1, hash2, "SMT additions should be order-independent")
 }
+
+// TestSMTAddingNodeUnderLeaf - Test that the SMT does not allow adding child nodes under existing leaves
+func TestSMTAddingNodeUnderLeaf(t *testing.T) {
+	smt1 := NewSparseMerkleTree(api.SHA256)
+	require.NoError(t, smt1.AddLeaf(big.NewInt(2), []byte("leaf_1")))
+	require.Error(t, smt1.AddLeaf(big.NewInt(4), []byte("child_under_leaf_1")), "SMT should now allow adding child nodes under leaves")
+
+	t.Skip("TODO: SMT should now allow adding child nodes under leaves, but currently does allow in a batch")
+	smt2 := NewSparseMerkleTree(api.SHA256)
+	leaves2 := []*Leaf{
+		{Path: big.NewInt(2), Value: []byte("leaf_1")},
+		{Path: big.NewInt(4), Value: []byte("child_under_leaf_1")},
+	}
+	require.Error(t, smt2.AddLeaves(leaves2), "SMT should now allow adding child nodes under leaves, even in a batch")
+}
+
+// TestSMTAddingLeafAboveNode - Test that the SMT does not allow adding leaves above existing nodes
+func TestSMTAddingLeafAboveNode(t *testing.T) {
+	smt1 := NewSparseMerkleTree(api.SHA256)
+	require.NoError(t, smt1.AddLeaf(big.NewInt(4), []byte("leaf_1")))
+	require.Error(t, smt1.AddLeaf(big.NewInt(2), []byte("node_above_leaf_1")), "SMT should now allow adding leaves above existing nodes")
+
+	t.Skip("TODO: SMT should now allow adding leaves above existing nodes, but currently does allow in a batch")
+	smt2 := NewSparseMerkleTree(api.SHA256)
+	leaves2 := []*Leaf{
+		{Path: big.NewInt(4), Value: []byte("leaf_1")},
+		{Path: big.NewInt(2), Value: []byte("node_above_leaf_1")},
+	}
+	require.Error(t, smt2.AddLeaves(leaves2), "SMT should now allow adding leaves above existing nodes, even in a batch")
+}
