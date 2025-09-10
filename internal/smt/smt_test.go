@@ -1222,7 +1222,7 @@ func TestSMTOrderDependencyOneByOne(t *testing.T) {
 	require.NoError(t, smt2.AddLeaf(big.NewInt(6), []byte("value_2")))
 	require.NoError(t, smt2.AddLeaf(big.NewInt(5), []byte("value_1")))
 	hash2 := smt2.GetRootHashHex()
-	t.Logf("Order [3, 1]: %s", hash2)
+	t.Logf("Order [3,1]: %s", hash2)
 
 	assert.Equal(t, hash1, hash2, "SMT additions should be order-independent")
 }
