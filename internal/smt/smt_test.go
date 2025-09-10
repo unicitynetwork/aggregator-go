@@ -1216,13 +1216,13 @@ func TestSMTOrderDependencyOneByOne(t *testing.T) {
 	require.NoError(t, smt1.AddLeaf(big.NewInt(5), []byte("value_1")))
 	require.NoError(t, smt1.AddLeaf(big.NewInt(6), []byte("value_2")))
 	hash1 := smt1.GetRootHashHex()
-	t.Logf("Order [1,3]: %s", hash1)
+	t.Logf("Order [5,6]: %s", hash1)
 
 	smt2 := NewSparseMerkleTree(api.SHA256)
 	require.NoError(t, smt2.AddLeaf(big.NewInt(6), []byte("value_2")))
 	require.NoError(t, smt2.AddLeaf(big.NewInt(5), []byte("value_1")))
 	hash2 := smt2.GetRootHashHex()
-	t.Logf("Order [3,1]: %s", hash2)
+	t.Logf("Order [6,5]: %s", hash2)
 
 	assert.Equal(t, hash1, hash2, "SMT additions should be order-independent")
 }
