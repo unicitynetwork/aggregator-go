@@ -1249,8 +1249,8 @@ func TestSMTOrderDependencyBatch(t *testing.T) {
 	require.NoError(t, err)
 	hash2 := smt2.GetRootHashHex()
 
-	t.Logf("Order [1,3]: %s", hash1)
-	t.Logf("Order [3,1]: %s", hash2)
+	t.Logf("Order [5,6]: %s", hash1)
+	t.Logf("Order [6,5]: %s", hash2)
 
 	assert.Equal(t, hash1, hash2, "SMT additions should be order-independent")
 }
