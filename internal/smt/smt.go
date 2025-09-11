@@ -436,13 +436,13 @@ func (smt *SparseMerkleTree) buildTreeLazy(branch Branch, remainingPath *big.Int
 		// Case 1b: Paths are different, a SPLIT is required.
 		commonPath := calculateCommonPath(remainingPath, leafBranch.Path)
 
-		newBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+		newBranchPath := new(big.Int).Rsh(remainingPath, commonPath.length)
 		newBranch := NewLeafBranchLazy(smt.algorithm, newBranchPath, value)
 
-		oldBranchPath := new(big.Int).Rsh(leafBranch.Path, uint(commonPath.length.Uint64()))
+		oldBranchPath := new(big.Int).Rsh(leafBranch.Path, commonPath.length)
 		oldBranch := NewLeafBranchLazy(smt.algorithm, oldBranchPath, leafBranch.Value)
 
-		shiftedRemaining := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+		shiftedRemaining := new(big.Int).Rsh(remainingPath, commonPath.length)
 		isNewBranchRight := shiftedRemaining.Bit(0) == 1
 
 		if isNewBranchRight {
@@ -457,7 +457,7 @@ func (smt *SparseMerkleTree) buildTreeLazy(branch Branch, remainingPath *big.Int
 
 	// Case 2a: The Node's path is a prefix of the new leaf's path. Go deeper.
 	if commonPath.path.Cmp(nodeBranch.Path) == 0 {
-		shiftedRemaining := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+		shiftedRemaining := new(big.Int).Rsh(remainingPath, commonPath.length)
 		isRight := shiftedRemaining.Bit(0) == 1
 
 		if isRight {
@@ -482,13 +482,13 @@ func (smt *SparseMerkleTree) buildTreeLazy(branch Branch, remainingPath *big.Int
 	}
 
 	// Case 2b: Paths diverge before the end of the Node's path. Split the node.
-	newLeafBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+	newLeafBranchPath := new(big.Int).Rsh(remainingPath, commonPath.length)
 	newLeafBranch := NewLeafBranchLazy(smt.algorithm, newLeafBranchPath, value)
 
-	oldNodeBranchPath := new(big.Int).Rsh(nodeBranch.Path, uint(commonPath.length.Uint64()))
+	oldNodeBranchPath := new(big.Int).Rsh(nodeBranch.Path, commonPath.length)
 	oldNodeBranch := NewNodeBranchLazy(smt.algorithm, oldNodeBranchPath, nodeBranch.Left, nodeBranch.Right)
 
-	shiftedRemaining := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+	shiftedRemaining := new(big.Int).Rsh(remainingPath, commonPath.length)
 	isNewBranchRight := shiftedRemaining.Bit(0) == 1
 
 	if isNewBranchRight {
@@ -549,7 +549,7 @@ func (smt *SparseMerkleTree) findLeafInBranch(branch Branch, targetPath *big.Int
 		}
 
 		// Navigate using the same logic as buildTree
-		shifted := new(big.Int).Rsh(targetPath, uint(commonPath.length.Uint64()))
+		shifted := new(big.Int).Rsh(targetPath, commonPath.length)
 		isRight := shifted.Bit(0) == 1
 
 		// KEY FIX: Pass the shifted path to match tree construction
@@ -571,7 +571,7 @@ func (smt *SparseMerkleTree) buildTree(branch Branch, remainingPath *big.Int, va
 	commonPath := calculateCommonPath(remainingPath, branch.GetPath())
 
 	// TypeScript: const isRight = (remainingPath >> commonPath.length) & 1n;
-	shifted := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+	shifted := new(big.Int).Rsh(remainingPath, commonPath.length)
 	isRight := shifted.Bit(0) == 1
 
 	if commonPath.path.Cmp(remainingPath) == 0 {
@@ -586,11 +586,11 @@ func (smt *SparseMerkleTree) buildTree(branch Branch, remainingPath *big.Int, va
 		}
 
 		// TypeScript: branch.path >> commonPath.length
-		oldBranchPath := new(big.Int).Rsh(leafBranch.Path, uint(commonPath.length.Uint64()))
+		oldBranchPath := new(big.Int).Rsh(leafBranch.Path, commonPath.length)
 		oldBranch := NewLeafBranch(smt.algorithm, oldBranchPath, leafBranch.Value)
 
 		// TypeScript: remainingPath >> commonPath.length
-		newBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+		newBranchPath := new(big.Int).Rsh(remainingPath, commonPath.length)
 		newBranch := NewLeafBranch(smt.algorithm, newBranchPath, value)
 
 		if isRight {
@@ -603,10 +603,10 @@ func (smt *SparseMerkleTree) buildTree(branch Branch, remainingPath *big.Int, va
 	// If node branch is split in the middle
 	nodeBranch := branch.(*NodeBranch)
 	if commonPath.path.Cmp(nodeBranch.Path) < 0 {
-		newBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+		newBranchPath := new(big.Int).Rsh(remainingPath, commonPath.length)
 		newBranch := NewLeafBranch(smt.algorithm, newBranchPath, value)
 
-		oldBranchPath := new(big.Int).Rsh(nodeBranch.Path, uint(commonPath.length.Uint64()))
+		oldBranchPath := new(big.Int).Rsh(nodeBranch.Path, commonPath.length)
 		oldBranch := NewNodeBranch(smt.algorithm, oldBranchPath, nodeBranch.Left, nodeBranch.Right)
 
 		if isRight {
@@ -617,13 +617,13 @@ func (smt *SparseMerkleTree) buildTree(branch Branch, remainingPath *big.Int, va
 	}
 
 	if isRight {
-		newRight, err := smt.buildTree(nodeBranch.Right, new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64())), value)
+		newRight, err := smt.buildTree(nodeBranch.Right, new(big.Int).Rsh(remainingPath, commonPath.length), value)
 		if err != nil {
 			return nil, err
 		}
 		return NewNodeBranch(smt.algorithm, nodeBranch.Path, nodeBranch.Left, newRight), nil
 	} else {
-		newLeft, err := smt.buildTree(nodeBranch.Left, new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64())), value)
+		newLeft, err := smt.buildTree(nodeBranch.Left, new(big.Int).Rsh(remainingPath, commonPath.length), value)
 		if err != nil {
 			return nil, err
 		}
@@ -678,7 +678,7 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Br
 		}
 
 		// If path has ended, return the current non-leaf branch data
-		shifted := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+		shifted := new(big.Int).Rsh(remainingPath, commonPath.length)
 		if shifted.Cmp(big.NewInt(1)) == 0 {
 			return []api.MerkleTreeStep{smt.createMerkleTreeStep(branch.GetPath(), branch, siblingBranch)}
 		}
@@ -691,7 +691,7 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Br
 		}
 
 		// Recursively generate path for the shifted remaining path
-		shiftedRemaining := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
+		shiftedRemaining := new(big.Int).Rsh(remainingPath, commonPath.length)
 		recursiveSteps := smt.generatePath(shiftedRemaining, nodeBranch.Left, nodeBranch.Right)
 
 		// Create the current step without branch (since we went into it)
@@ -746,12 +746,12 @@ func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, sibling
 
 // calculateCommonPath matches TypeScript calculateCommonPath exactly
 func calculateCommonPath(path1, path2 *big.Int) struct {
-	length *big.Int
+	length uint
 	path   *big.Int
 } {
 	path := big.NewInt(1)
 	mask := big.NewInt(1)
-	length := big.NewInt(0)
+	length := uint(0)
 
 	for {
 		// Check (path1 & mask) === (path2 & mask)
@@ -771,7 +771,7 @@ func calculateCommonPath(path1, path2 *big.Int) struct {
 		mask.Lsh(mask, 1)
 
 		// length += 1n
-		length.Add(length, big.NewInt(1))
+		length += 1
 
 		// path = mask | ((mask - 1n) & path1)
 		maskMinus1 := new(big.Int).Sub(mask, big.NewInt(1))
@@ -780,7 +780,7 @@ func calculateCommonPath(path1, path2 *big.Int) struct {
 	}
 
 	return struct {
-		length *big.Int
+		length uint
 		path   *big.Int
 	}{length, path}
 }

@@ -196,24 +196,18 @@ func TestSMTCommonPath(t *testing.T) {
 	testCases := []struct {
 		path1   *big.Int
 		path2   *big.Int
-		expLen  int64
-		expPath int64
+		expLen  uint
+		expPath *big.Int
 	}{
-		{big.NewInt(0b11), big.NewInt(0b111101111), 1, 0b11},
-		{big.NewInt(0b111101111), big.NewInt(0b11), 1, 0b11},
-		{big.NewInt(0b110010000), big.NewInt(0b100010000), 7, 0b10010000},
+		{big.NewInt(0b11), big.NewInt(0b111101111), 1, big.NewInt(0b11)},
+		{big.NewInt(0b111101111), big.NewInt(0b11), 1, big.NewInt(0b11)},
+		{big.NewInt(0b110010000), big.NewInt(0b100010000), 7, big.NewInt(0b10010000)},
 	}
 
 	for i, tc := range testCases {
 		result := calculateCommonPath(tc.path1, tc.path2)
-
-		if result.length.Int64() != tc.expLen {
-			t.Errorf("Test %d: expected length %d, got %d", i, tc.expLen, result.length.Int64())
-		}
-
-		if result.path.Int64() != tc.expPath {
-			t.Errorf("Test %d: expected path %d, got %d", i, tc.expPath, result.path.Int64())
-		}
+		assert.Equal(t, result.length, tc.expLen, "Test %d: length mismatch", i)
+		assert.Equal(t, result.path, tc.expPath, "Test %d: path mismatch", i)
 	}
 }
 
