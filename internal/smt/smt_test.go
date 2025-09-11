@@ -206,8 +206,8 @@ func TestSMTCommonPath(t *testing.T) {
 
 	for i, tc := range testCases {
 		result := calculateCommonPath(tc.path1, tc.path2)
-		assert.Equal(t, result.length, tc.expLen, "Test %d: length mismatch", i)
-		assert.Equal(t, result.path, tc.expPath, "Test %d: path mismatch", i)
+		assert.Equal(t, tc.expLen, result.length, "Test %d: length mismatch", i)
+		assert.Equal(t, tc.expPath, result.path, "Test %d: path mismatch", i)
 	}
 }
 
@@ -799,7 +799,6 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 			{"Small path", big.NewInt(0b1), "1", "1"},
 			{"Medium path", big.NewInt(0b1010), "1010", "10"},         // decimal: 10
 			{"Large path", big.NewInt(0b10000000), "10000000", "128"}, // decimal: 128
-			{"Zero path", big.NewInt(0), "0", "0"},
 		}
 
 		for _, tc := range testCases {

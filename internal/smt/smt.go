@@ -744,45 +744,31 @@ func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, sibling
 	return step
 }
 
-// calculateCommonPath matches TypeScript calculateCommonPath exactly
+// calculateCommonPath computes the longest common prefix of path1 and path2
 func calculateCommonPath(path1, path2 *big.Int) struct {
 	length uint
 	path   *big.Int
 } {
-	path := big.NewInt(1)
-	mask := big.NewInt(1)
-	length := uint(0)
-
-	for {
-		// Check (path1 & mask) === (path2 & mask)
-		mask1 := new(big.Int).And(path1, mask)
-		mask2 := new(big.Int).And(path2, mask)
-
-		if mask1.Cmp(mask2) != 0 {
-			break
-		}
-
-		// Check path < path1 && path < path2
-		if path.Cmp(path1) >= 0 || path.Cmp(path2) >= 0 {
-			break
-		}
-
-		// mask <<= 1n
-		mask.Lsh(mask, 1)
-
-		// length += 1n
-		length += 1
-
-		// path = mask | ((mask - 1n) & path1)
-		maskMinus1 := new(big.Int).Sub(mask, big.NewInt(1))
-		temp := new(big.Int).And(maskMinus1, path1)
-		path.Or(mask, temp)
+	if path1.Sign() != 1 || path2.Sign() != 1 {
+		panic("Non-positive path value")
 	}
+
+	maxPos := min(path1.BitLen(), path2.BitLen()) - 1
+	pos := 0
+	for pos < maxPos && path1.Bit(pos) == path2.Bit(pos) {
+		pos++
+	}
+
+	var mask, res big.Int
+	mask.SetBit(big.NewInt(0), pos, 1)
+	res.Sub(&mask, big.NewInt(1))
+	res.And(&res, path1)
+	res.Or(&res, &mask)
 
 	return struct {
 		length uint
 		path   *big.Int
-	}{length, path}
+	}{uint(pos), &res}
 }
 
 // Leaf represents a leaf to be inserted (for batch operations)
