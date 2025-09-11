@@ -293,7 +293,7 @@ func (smt *SparseMerkleTree) AddLeaf(path *big.Int, value []byte) error {
 	}
 
 	// TypeScript: const isRight = path & 1n;
-	isRight := new(big.Int).And(path, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
+	isRight := path.Bit(0) == 1
 
 	var left, right Branch
 
@@ -375,7 +375,7 @@ func (smt *SparseMerkleTree) addLeafBatch(path *big.Int, value []byte) error {
 		smt.root = smt.copyOnWriteRoot()
 	}
 
-	isRight := new(big.Int).And(path, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
+	isRight := path.Bit(0) == 1
 
 	var left, right Branch
 
@@ -443,7 +443,7 @@ func (smt *SparseMerkleTree) buildTreeLazy(branch Branch, remainingPath *big.Int
 		oldBranch := NewLeafBranchLazy(smt.algorithm, oldBranchPath, leafBranch.Value)
 
 		shiftedRemaining := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
-		isNewBranchRight := new(big.Int).And(shiftedRemaining, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
+		isNewBranchRight := shiftedRemaining.Bit(0) == 1
 
 		if isNewBranchRight {
 			return NewNodeBranchLazy(smt.algorithm, commonPath.path, oldBranch, newBranch), nil
@@ -458,7 +458,7 @@ func (smt *SparseMerkleTree) buildTreeLazy(branch Branch, remainingPath *big.Int
 	// Case 2a: The Node's path is a prefix of the new leaf's path. Go deeper.
 	if commonPath.path.Cmp(nodeBranch.Path) == 0 {
 		shiftedRemaining := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
-		isRight := new(big.Int).And(shiftedRemaining, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
+		isRight := shiftedRemaining.Bit(0) == 1
 
 		if isRight {
 			if nodeBranch.Right == nil {
@@ -489,7 +489,7 @@ func (smt *SparseMerkleTree) buildTreeLazy(branch Branch, remainingPath *big.Int
 	oldNodeBranch := NewNodeBranchLazy(smt.algorithm, oldNodeBranchPath, nodeBranch.Left, nodeBranch.Right)
 
 	shiftedRemaining := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
-	isNewBranchRight := new(big.Int).And(shiftedRemaining, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
+	isNewBranchRight := shiftedRemaining.Bit(0) == 1
 
 	if isNewBranchRight {
 		return NewNodeBranchLazy(smt.algorithm, commonPath.path, oldNodeBranch, newLeafBranch), nil
@@ -517,7 +517,7 @@ func (smt *SparseMerkleTree) findLeaf(node interface{}, targetPath *big.Int) (*L
 	switch n := node.(type) {
 	case *RootNode:
 		// At root, use bit 0 to navigate (same as AddLeaf)
-		isRight := new(big.Int).And(targetPath, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
+		isRight := targetPath.Bit(0) == 1
 		if isRight && n.Right != nil {
 			return smt.findLeafInBranch(n.Right, targetPath)
 		} else if !isRight && n.Left != nil {
@@ -550,7 +550,7 @@ func (smt *SparseMerkleTree) findLeafInBranch(branch Branch, targetPath *big.Int
 
 		// Navigate using the same logic as buildTree
 		shifted := new(big.Int).Rsh(targetPath, uint(commonPath.length.Uint64()))
-		isRight := new(big.Int).And(shifted, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
+		isRight := shifted.Bit(0) == 1
 
 		// KEY FIX: Pass the shifted path to match tree construction
 		if isRight && b.Right != nil {
@@ -572,7 +572,7 @@ func (smt *SparseMerkleTree) buildTree(branch Branch, remainingPath *big.Int, va
 
 	// TypeScript: const isRight = (remainingPath >> commonPath.length) & 1n;
 	shifted := new(big.Int).Rsh(remainingPath, uint(commonPath.length.Uint64()))
-	isRight := new(big.Int).And(shifted, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
+	isRight := shifted.Bit(0) == 1
 
 	if commonPath.path.Cmp(remainingPath) == 0 {
 		return nil, fmt.Errorf("cannot add leaf inside branch, commonPath: '%s', remainingPath: '%s'", commonPath.path, remainingPath)
@@ -644,7 +644,7 @@ func (smt *SparseMerkleTree) GetPath(path *big.Int) *api.MerkleTreePath {
 // generatePath recursively generates the Merkle tree path steps
 func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Branch) []api.MerkleTreeStep {
 	// Determine if we should go right (remainingPath & 1n)
-	isRight := new(big.Int).And(remainingPath, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
+	isRight := remainingPath.Bit(0) == 1
 
 	var branch, siblingBranch Branch
 	if isRight {
