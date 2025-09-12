@@ -158,7 +158,7 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 				return nil, fmt.Errorf("failed to decode sibling hash '%s': %w", step.Sibling[0], err)
 			}
 		}
-		isRight := new(big.Int).And(path, big.NewInt(1)).Cmp(big.NewInt(0)) != 0
+		isRight := path.Bit(0) == 1
 
 		if isRight {
 			currentHash = Sha256Hash(append(siblingHash, hash...))
