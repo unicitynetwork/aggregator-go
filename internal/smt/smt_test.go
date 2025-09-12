@@ -2,6 +2,7 @@ package smt
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"testing"
@@ -1003,8 +1004,6 @@ func TestAddLeavesEmptyList(t *testing.T) {
 
 // TestAddLeaves_DuplicatePathError specifically tests the lazy-build logic for duplicate leaves.
 func TestAddLeaves_DuplicatePathError(t *testing.T) {
-	t.SkipNow()
-
 	smt := NewSparseMerkleTree(api.SHA256)
 	path := big.NewInt(42)
 
@@ -1017,7 +1016,7 @@ func TestAddLeaves_DuplicatePathError(t *testing.T) {
 	// The AddLeaves loop will add the first one, then fail on the second.
 	err := smt.AddLeaves(leaves)
 	require.Error(t, err, "AddLeaves should fail when a batch contains a duplicate path")
-	assert.Contains(t, err.Error(), "leaf with path '42' already exists")
+	require.True(t, errors.Is(err, ErrLeafModification))
 }
 
 // Replace TestAddLeaves_DuplicatePathError with this new, more comprehensive test.
@@ -1234,7 +1233,6 @@ func TestSMTAddingNodeUnderLeaf(t *testing.T) {
 	require.NoError(t, smt1.AddLeaf(big.NewInt(2), []byte("leaf_1")))
 	require.Error(t, smt1.AddLeaf(big.NewInt(4), []byte("child_under_leaf_1")), "SMT should not allow adding child nodes under leaves")
 
-	t.Skip("TODO: SMT should not allow adding child nodes under leaves, but currently does allow in a batch")
 	smt2 := NewSparseMerkleTree(api.SHA256)
 	leaves2 := []*Leaf{
 		{Path: big.NewInt(2), Value: []byte("leaf_1")},
@@ -1249,7 +1247,6 @@ func TestSMTAddingLeafAboveNode(t *testing.T) {
 	require.NoError(t, smt1.AddLeaf(big.NewInt(4), []byte("leaf_1")))
 	require.Error(t, smt1.AddLeaf(big.NewInt(2), []byte("node_above_leaf_1")), "SMT should not allow adding leaves above existing nodes")
 
-	t.Skip("TODO: SMT should not allow adding leaves above existing nodes, but currently does allow in a batch")
 	smt2 := NewSparseMerkleTree(api.SHA256)
 	leaves2 := []*Leaf{
 		{Path: big.NewInt(4), Value: []byte("leaf_1")},
