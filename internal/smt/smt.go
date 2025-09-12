@@ -1,6 +1,7 @@
 package smt
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -10,7 +11,8 @@ import (
 )
 
 var (
-	ErrLeafExists = errors.New("smt: leaf already exists")
+	ErrDuplicateLeaf    = errors.New("smt: duplicate leaf")
+	ErrLeafModification = errors.New("smt: attempt to modify an existing leaf")
 )
 
 type (
@@ -175,26 +177,10 @@ func (r *RootNode) CalculateHash(algo api.HashAlgorithm) *api.DataHash {
 
 // NewLeafBranch creates a leaf branch
 func NewLeafBranch(algorithm api.HashAlgorithm, path *big.Int, value []byte) *LeafBranch {
-	leaf := &LeafBranch{
-		Path:  new(big.Int).Set(path),
-		Value: append([]byte(nil), value...),
-	}
-
-	// Calculate hash: BigintConverter.encode(path) + value
-	pathBytes := api.BigintEncode(path)
-	data := append(pathBytes, value...)
-	hashData := api.Sha256Hash(data)
-
-	leaf.hash = api.NewDataHash(algorithm, hashData)
-	return leaf
-}
-
-// NewLeafBranchLazy creates a leaf branch without calculating hash (for batch operations)
-func NewLeafBranchLazy(algorithm api.HashAlgorithm, path *big.Int, value []byte) *LeafBranch {
 	return &LeafBranch{
 		Path:  new(big.Int).Set(path),
 		Value: append([]byte(nil), value...),
-		hash:  nil, // Hash will be calculated on demand
+		// Hash will be computed on demand
 	}
 }
 
@@ -221,38 +207,12 @@ func (l *LeafBranch) IsLeaf() bool {
 
 // NewNodeBranch creates a node branch
 func NewNodeBranch(algorithm api.HashAlgorithm, path *big.Int, left, right Branch) *NodeBranch {
-	node := &NodeBranch{
+	return &NodeBranch{
 		Algorithm: algorithm,
 		Path:      new(big.Int).Set(path),
 		Left:      left,
 		Right:     right,
-	}
-
-	// Calculate children hash first
-	leftHash := left.CalculateHash(algorithm).Data
-	rightHash := right.CalculateHash(algorithm).Data
-	combined := append(leftHash, rightHash...)
-	childrenHashData := api.Sha256Hash(combined)
-	node.childrenHash = api.NewDataHash(algorithm, childrenHashData)
-
-	// Calculate node hash: BigintConverter.encode(path) + childrenHash
-	pathBytes := api.BigintEncode(path)
-	data := append(pathBytes, childrenHashData...)
-	hashData := api.Sha256Hash(data)
-	node.hash = api.NewDataHash(algorithm, hashData)
-
-	return node
-}
-
-// NewNodeBranchLazy creates a node branch without calculating hashes (for batch operations)
-func NewNodeBranchLazy(algorithm api.HashAlgorithm, path *big.Int, left, right Branch) *NodeBranch {
-	return &NodeBranch{
-		Algorithm:    algorithm,
-		Path:         new(big.Int).Set(path),
-		Left:         left,
-		Right:        right,
-		childrenHash: nil, // Hashes will be calculated on demand
-		hash:         nil,
+		// Hashes will be computed on demand
 	}
 }
 
@@ -339,25 +299,16 @@ func (smt *SparseMerkleTree) AddLeaf(path *big.Int, value []byte) error {
 	return nil
 }
 
-// AddLeaves adds multiple leaves efficiently (batch operation for performance) to the existing tree
-// This produces the EXACT same tree structure as sequential AddLeaf calls,
-// and maintains the existing tree structure when adding new leaves
+// AddLeaves adds multiple leaves to the tree
 func (smt *SparseMerkleTree) AddLeaves(leaves []*Leaf) error {
 	if len(leaves) == 0 {
 		return nil
 	}
 
-	// Implement copy-on-write for snapshots only
-	if smt.isSnapshot {
-		smt.root = smt.copyOnWriteRoot()
-	}
-
-	// Add leaves one by one to the existing tree using AddLeaf
-	// This ensures that new leaves are added to the existing tree structure
 	for _, leaf := range leaves {
-		err := smt.addLeafBatch(leaf.Path, leaf.Value)
+		err := smt.AddLeaf(leaf.Path, leaf.Value)
 		if err != nil {
-			if errors.Is(err, ErrLeafExists) {
+			if errors.Is(err, ErrDuplicateLeaf) {
 				// Skip duplicate leaves silently
 				continue
 			}
@@ -368,136 +319,7 @@ func (smt *SparseMerkleTree) AddLeaves(leaves []*Leaf) error {
 	return nil
 }
 
-// addLeafBatch is optimized for batch operations using lazy hash calculation
-func (smt *SparseMerkleTree) addLeafBatch(path *big.Int, value []byte) error {
-	// Copy-on-write for snapshots only
-	if smt.isSnapshot {
-		smt.root = smt.copyOnWriteRoot()
-	}
-
-	isRight := path.Bit(0) == 1
-
-	var left, right Branch
-
-	if isRight {
-		left = smt.root.Left
-		if smt.root.Right != nil {
-			// Clone the branch before modifying it if this is a snapshot
-			var rightBranch Branch
-			if smt.isSnapshot {
-				rightBranch = smt.cloneBranch(smt.root.Right)
-			} else {
-				rightBranch = smt.root.Right
-			}
-			newRight, err := smt.buildTreeLazy(rightBranch, path, value)
-			if err != nil {
-				return err
-			}
-			right = newRight
-		} else {
-			right = NewLeafBranchLazy(smt.algorithm, path, value)
-		}
-	} else {
-		if smt.root.Left != nil {
-			// Clone the branch before modifying it if this is a snapshot
-			var leftBranch Branch
-			if smt.isSnapshot {
-				leftBranch = smt.cloneBranch(smt.root.Left)
-			} else {
-				leftBranch = smt.root.Left
-			}
-			newLeft, err := smt.buildTreeLazy(leftBranch, path, value)
-			if err != nil {
-				return err
-			}
-			left = newLeft
-		} else {
-			left = NewLeafBranchLazy(smt.algorithm, path, value)
-		}
-		right = smt.root.Right
-	}
-
-	smt.root = NewRootNode(smt.algorithm, left, right)
-	return nil
-}
-
-// buildTreeLazy correctly handles all insertion scenarios for a "no-overwrite" SMT.
-func (smt *SparseMerkleTree) buildTreeLazy(branch Branch, remainingPath *big.Int, value []byte) (Branch, error) {
-	// --- Case 1: The existing branch is a LEAF ---
-	if branch.IsLeaf() {
-		leafBranch := branch.(*LeafBranch)
-
-		// Case 1a: DUPLICATE path. This is an error in a no-overwrite tree.
-		// TODO: if values don't match, return a different error
-		if remainingPath.Cmp(leafBranch.Path) == 0 {
-			return nil, fmt.Errorf("path '%s': %w", remainingPath, ErrLeafExists)
-		}
-
-		// Case 1b: Paths are different, a SPLIT is required.
-		commonPath := calculateCommonPath(remainingPath, leafBranch.Path)
-
-		newBranchPath := new(big.Int).Rsh(remainingPath, commonPath.length)
-		newBranch := NewLeafBranchLazy(smt.algorithm, newBranchPath, value)
-
-		oldBranchPath := new(big.Int).Rsh(leafBranch.Path, commonPath.length)
-		oldBranch := NewLeafBranchLazy(smt.algorithm, oldBranchPath, leafBranch.Value)
-
-		shiftedRemaining := new(big.Int).Rsh(remainingPath, commonPath.length)
-		isNewBranchRight := shiftedRemaining.Bit(0) == 1
-
-		if isNewBranchRight {
-			return NewNodeBranchLazy(smt.algorithm, commonPath.path, oldBranch, newBranch), nil
-		}
-		return NewNodeBranchLazy(smt.algorithm, commonPath.path, newBranch, oldBranch), nil
-	}
-
-	// --- Case 2: The existing branch is an internal NODE ---
-	nodeBranch := branch.(*NodeBranch)
-	commonPath := calculateCommonPath(remainingPath, nodeBranch.Path)
-
-	// Case 2a: The Node's path is a prefix of the new leaf's path. Go deeper.
-	if commonPath.path.Cmp(nodeBranch.Path) == 0 {
-		shiftedRemaining := new(big.Int).Rsh(remainingPath, commonPath.length)
-		isRight := shiftedRemaining.Bit(0) == 1
-
-		if isRight {
-			if nodeBranch.Right == nil {
-				return NewNodeBranchLazy(smt.algorithm, nodeBranch.Path, nodeBranch.Left, NewLeafBranchLazy(smt.algorithm, shiftedRemaining, value)), nil
-			}
-			newRight, err := smt.buildTreeLazy(nodeBranch.Right, shiftedRemaining, value)
-			if err != nil {
-				return nil, err
-			}
-			return NewNodeBranchLazy(smt.algorithm, nodeBranch.Path, nodeBranch.Left, newRight), nil
-		}
-		// Go left
-		if nodeBranch.Left == nil {
-			return NewNodeBranchLazy(smt.algorithm, nodeBranch.Path, NewLeafBranchLazy(smt.algorithm, shiftedRemaining, value), nodeBranch.Right), nil
-		}
-		newLeft, err := smt.buildTreeLazy(nodeBranch.Left, shiftedRemaining, value)
-		if err != nil {
-			return nil, err
-		}
-		return NewNodeBranchLazy(smt.algorithm, nodeBranch.Path, newLeft, nodeBranch.Right), nil
-	}
-
-	// Case 2b: Paths diverge before the end of the Node's path. Split the node.
-	newLeafBranchPath := new(big.Int).Rsh(remainingPath, commonPath.length)
-	newLeafBranch := NewLeafBranchLazy(smt.algorithm, newLeafBranchPath, value)
-
-	oldNodeBranchPath := new(big.Int).Rsh(nodeBranch.Path, commonPath.length)
-	oldNodeBranch := NewNodeBranchLazy(smt.algorithm, oldNodeBranchPath, nodeBranch.Left, nodeBranch.Right)
-
-	shiftedRemaining := new(big.Int).Rsh(remainingPath, commonPath.length)
-	isNewBranchRight := shiftedRemaining.Bit(0) == 1
-
-	if isNewBranchRight {
-		return NewNodeBranchLazy(smt.algorithm, commonPath.path, oldNodeBranch, newLeafBranch), nil
-	}
-	return NewNodeBranchLazy(smt.algorithm, commonPath.path, newLeafBranch, oldNodeBranch), nil
-}
-
-// GetRootHash returns the root hash as hex string with imprint
+// GetRootHash returns the root hash as imprint
 func (smt *SparseMerkleTree) GetRootHash() []byte {
 	return smt.root.CalculateHash(smt.algorithm).Imprint
 }
@@ -568,9 +390,17 @@ func (smt *SparseMerkleTree) findLeafInBranch(branch Branch, targetPath *big.Int
 
 // buildTree matches TypeScript buildTree logic exactly
 func (smt *SparseMerkleTree) buildTree(branch Branch, remainingPath *big.Int, value []byte) (Branch, error) {
-	commonPath := calculateCommonPath(remainingPath, branch.GetPath())
+	// Special checks for adding a leaf that already exists in the tree
+	if branch.IsLeaf() && branch.GetPath().Cmp(remainingPath) == 0 {
+		leafBranch := branch.(*LeafBranch)
+		if bytes.Equal(leafBranch.Value, value) {
+			return nil, ErrDuplicateLeaf
+		} else {
+			return nil, ErrLeafModification
+		}
+	}
 
-	// TypeScript: const isRight = (remainingPath >> commonPath.length) & 1n;
+	commonPath := calculateCommonPath(remainingPath, branch.GetPath())
 	shifted := new(big.Int).Rsh(remainingPath, commonPath.length)
 	isRight := shifted.Bit(0) == 1
 

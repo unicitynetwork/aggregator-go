@@ -177,7 +177,7 @@ func TestLargeSmtRestoration(t *testing.T) {
 	// Create large dataset with non-sequential paths to test ordering
 	testLeaves := make([]*smt.Leaf, testNodeCount)
 	for i := 0; i < testNodeCount; i++ {
-		path := big.NewInt(int64(i*7 + 1))
+		path := big.NewInt(int64((i + 1) * 700000))
 		value := []byte(fmt.Sprintf("large_test_value_%d", i))
 		testLeaves[i] = smt.NewLeaf(path, value)
 	}

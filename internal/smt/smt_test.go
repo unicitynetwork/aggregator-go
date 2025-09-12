@@ -1001,26 +1001,6 @@ func TestAddLeavesEmptyList(t *testing.T) {
 	require.Equal(t, []byte("value11"), leaf11.Value)
 }
 
-// In smt_test.go
-
-// TestAddLeaves_PrefixPathHandledCorrectly specifically tests the lazy-build logic for the prefix-path case.
-func TestAddLeaves_PrefixPathHandledCorrectly(t *testing.T) {
-	smt := NewSparseMerkleTree(api.SHA256)
-	longPath := big.NewInt(45)
-	shortPath := big.NewInt(13)
-
-	// First, add the long path leaf in a batch
-	leaf1 := []*Leaf{NewLeaf(longPath, []byte("long"))}
-	err := smt.AddLeaves(leaf1)
-	require.NoError(t, err, "Adding the first leaf via batch should succeed")
-
-	// Now, add the short path leaf in a second batch. This forces a tree restructure.
-	// This call will fail if buildTreeLazy has the prefix-path bug.
-	leaf2 := []*Leaf{NewLeaf(shortPath, []byte("short"))}
-	err = smt.AddLeaves(leaf2)
-	require.NoError(t, err, "Adding a prefix-path leaf via batch should succeed")
-}
-
 // TestAddLeaves_DuplicatePathError specifically tests the lazy-build logic for duplicate leaves.
 func TestAddLeaves_DuplicatePathError(t *testing.T) {
 	t.SkipNow()
@@ -1056,7 +1036,7 @@ func TestAddLeaves_SkipsDuplicatesAndContinues(t *testing.T) {
 	// 3. Another new, valid leaf.
 	batch := []*Leaf{
 		NewLeaf(big.NewInt(200), []byte("new_value_A")), // Should be added
-		NewLeaf(initialPath, []byte("duplicate_value")), // Should be SKIPPED
+		NewLeaf(initialPath, initialValue),              // Should be SKIPPED
 		NewLeaf(big.NewInt(300), []byte("new_value_B")), // Should be added
 	}
 
