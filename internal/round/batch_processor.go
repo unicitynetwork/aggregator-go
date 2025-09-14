@@ -179,12 +179,17 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 	}
 
 	// Create block (simplified for now)
+	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
+	if err != nil {
+		return fmt.Errorf("failed to parse root hash %s: %w", rootHash, err)
+	}
+
 	block := models.NewBlock(
 		blockNumber,
 		"unicity",
 		"1.0",
 		"mainnet",
-		api.NewHexBytes([]byte(rootHash)),
+		rootHashBytes,
 		parentHash,
 	)
 
