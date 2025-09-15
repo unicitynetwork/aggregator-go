@@ -2,7 +2,6 @@ package smt
 
 import (
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"math/big"
 	"testing"
@@ -998,7 +997,7 @@ func TestAddLeaves_DuplicatePathError(t *testing.T) {
 	// The AddLeaves loop will add the first one, then fail on the second.
 	err := smt.AddLeaves(leaves)
 	require.Error(t, err, "AddLeaves should fail when a batch contains a duplicate path")
-	require.True(t, errors.Is(err, ErrLeafModification))
+	require.ErrorIs(t, err, ErrLeafModification)
 }
 
 // Replace TestAddLeaves_DuplicatePathError with this new, more comprehensive test.

@@ -98,7 +98,7 @@ func (smt *SparseMerkleTree) copyOnWriteRoot() *RootNode {
 }
 
 // cloneBranch creates a deep copy of a branch for copy-on-write
-func (smt *SparseMerkleTree) cloneBranch(branch Branch) Branch {
+func (smt *SparseMerkleTree) cloneBranch(branch branch) branch {
 	if branch == nil {
 		return nil
 	}
@@ -114,13 +114,13 @@ func (smt *SparseMerkleTree) cloneBranch(branch Branch) Branch {
 
 // RootNode represents the root of the tree
 type RootNode struct {
-	Left  Branch
-	Right Branch
+	Left  branch
+	Right branch
 	Path  *big.Int
 }
 
 // Branch interface for tree nodes (matches TypeScript Branch interface)
-type Branch interface {
+type branch interface {
 	calculateHash(hasher *api.DataHasher) *api.DataHash
 	getPath() *big.Int
 	isLeaf() bool
@@ -136,14 +136,14 @@ type LeafBranch struct {
 // NodeBranch represents an internal node (matches TypeScript NodeBranch)
 type NodeBranch struct {
 	Path         *big.Int
-	Left         Branch
-	Right        Branch
+	Left         branch
+	Right        branch
 	childrenHash *api.DataHash
 	hash         *api.DataHash
 }
 
 // NewRootNode creates a new root node
-func newRootNode(left, right Branch) *RootNode {
+func newRootNode(left, right branch) *RootNode {
 	return &RootNode{
 		Left:  left,
 		Right: right,
@@ -199,7 +199,7 @@ func (l *LeafBranch) isLeaf() bool {
 }
 
 // NewNodeBranch creates a node branch
-func newNodeBranch(path *big.Int, left, right Branch) *NodeBranch {
+func newNodeBranch(path *big.Int, left, right branch) *NodeBranch {
 	return &NodeBranch{
 		Path:  new(big.Int).Set(path),
 		Left:  left,
@@ -244,13 +244,13 @@ func (smt *SparseMerkleTree) AddLeaf(path *big.Int, value []byte) error {
 	// TypeScript: const isRight = path & 1n;
 	isRight := path.Bit(0) == 1
 
-	var left, right Branch
+	var left, right branch
 
 	if isRight {
 		left = smt.root.Left
 		if smt.root.Right != nil {
 			// Clone the branch before modifying it if this is a snapshot
-			var rightBranch Branch
+			var rightBranch branch
 			if smt.isSnapshot {
 				rightBranch = smt.cloneBranch(smt.root.Right)
 			} else {
@@ -267,7 +267,7 @@ func (smt *SparseMerkleTree) AddLeaf(path *big.Int, value []byte) error {
 	} else {
 		if smt.root.Left != nil {
 			// Clone the branch before modifying it if this is a snapshot
-			var leftBranch Branch
+			var leftBranch branch
 			if smt.isSnapshot {
 				leftBranch = smt.cloneBranch(smt.root.Left)
 			} else {
@@ -342,7 +342,7 @@ func (smt *SparseMerkleTree) findLeaf(node interface{}, targetPath *big.Int) (*L
 }
 
 // findLeafInBranch searches within a branch, handling path shifting correctly
-func (smt *SparseMerkleTree) findLeafInBranch(branch Branch, targetPath *big.Int) (*LeafBranch, error) {
+func (smt *SparseMerkleTree) findLeafInBranch(branch branch, targetPath *big.Int) (*LeafBranch, error) {
 	switch b := branch.(type) {
 	case *LeafBranch:
 		if b.Path.Cmp(targetPath) == 0 {
@@ -378,7 +378,7 @@ func (smt *SparseMerkleTree) findLeafInBranch(branch Branch, targetPath *big.Int
 }
 
 // buildTree matches TypeScript buildTree logic exactly
-func (smt *SparseMerkleTree) buildTree(branch Branch, remainingPath *big.Int, value []byte) (Branch, error) {
+func (smt *SparseMerkleTree) buildTree(branch branch, remainingPath *big.Int, value []byte) (branch, error) {
 	// Special checks for adding a leaf that already exists in the tree
 	if branch.isLeaf() && branch.getPath().Cmp(remainingPath) == 0 {
 		leafBranch := branch.(*LeafBranch)
@@ -461,11 +461,11 @@ func (smt *SparseMerkleTree) GetPath(path *big.Int) *api.MerkleTreePath {
 }
 
 // generatePath recursively generates the Merkle tree path steps
-func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Branch) []api.MerkleTreeStep {
+func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right branch) []api.MerkleTreeStep {
 	// Determine if we should go right (remainingPath & 1n)
 	isRight := remainingPath.Bit(0) == 1
 
-	var branch, siblingBranch Branch
+	var branch, siblingBranch branch
 	if isRight {
 		branch = right
 		siblingBranch = left
@@ -527,7 +527,7 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right Br
 }
 
 // createMerkleTreeStep creates a api.MerkleTreeStep with proper branch and sibling handling
-func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, siblingBranch Branch) api.MerkleTreeStep {
+func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, siblingBranch branch) api.MerkleTreeStep {
 	step := api.MerkleTreeStep{
 		Path:    path.String(),
 		Branch:  nil, // Initialize as nil
