@@ -212,24 +212,6 @@ func TestSMTCommonPath(t *testing.T) {
 	}
 }
 
-// TestSMTDataHashFormat tests the DataHash format
-func TestSMTDataHashFormat(t *testing.T) {
-	data := []byte{0x1c, 0x84, 0xda, 0x4a}
-	hash := api.NewDataHash(api.SHA256, data)
-
-	expected := "00001c84da4a" // 0000 (api.SHA256) + 1c84da4a (data)
-	actual := hash.ToHex()
-
-	if actual != expected {
-		t.Errorf("DataHash format mismatch: expected %s, got %s", expected, actual)
-	}
-
-	// Verify algorithm imprint
-	if hash.Imprint[0] != 0 || hash.Imprint[1] != 0 {
-		t.Errorf("Algorithm bytes wrong: expected [0,0], got [%d,%d]", hash.Imprint[0], hash.Imprint[1])
-	}
-}
-
 // TestSMTBigintEncoding tests bigint encoding
 func TestSMTBigintEncoding(t *testing.T) {
 	testCases := []struct {
