@@ -12,21 +12,26 @@ import (
 
 type (
 	BFTClientStub struct {
-		logger       *logger.Logger
-		roundManager RoundManager
+		logger          *logger.Logger
+		roundManager    RoundManager
+		nextRoundNumber *api.BigInt
 	}
 )
 
-func NewBFTClientStub(logger *logger.Logger, roundManager RoundManager) *BFTClientStub {
+func NewBFTClientStub(logger *logger.Logger, roundManager RoundManager, nextRoundNumber *api.BigInt) *BFTClientStub {
 	logger.Info("Using BFT Client Stub")
 	return &BFTClientStub{
-		logger:       logger,
-		roundManager: roundManager,
+		logger:          logger,
+		roundManager:    roundManager,
+		nextRoundNumber: nextRoundNumber,
 	}
 }
 
-func (n *BFTClientStub) Start(ctx context.Context, nextRoundNumber *api.BigInt) error {
-	return n.roundManager.StartNewRound(ctx, nextRoundNumber)
+func (n *BFTClientStub) Start(ctx context.Context) error {
+	return n.roundManager.StartNewRound(ctx, n.nextRoundNumber)
+}
+
+func (n *BFTClientStub) Stop() {
 }
 
 func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.Block) error {
@@ -36,5 +41,6 @@ func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.
 	nextRoundNumber := api.NewBigInt(nil)
 	nextRoundNumber.Set(block.Index.Int)
 	nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
+	n.nextRoundNumber = nextRoundNumber
 	return n.roundManager.StartNewRound(ctx, nextRoundNumber)
 }

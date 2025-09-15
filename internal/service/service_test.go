@@ -6,22 +6,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/mongodb"
-	"github.com/testcontainers/testcontainers-go/wait"
-	"github.com/unicitynetwork/aggregator-go/internal/config"
-	"github.com/unicitynetwork/aggregator-go/internal/gateway"
-	"github.com/unicitynetwork/aggregator-go/internal/logger"
-	mongodbStorage "github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
-	"github.com/unicitynetwork/aggregator-go/pkg/api"
-	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 	"net/http"
 	"os"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/modules/mongodb"
+	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/gateway"
+	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/round"
+	mongodbStorage "github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
+	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
 
 func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func()) {
@@ -64,12 +67,15 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	require.NoError(t, err)
 
 	// Initialize storage
-	mongoStorage, err := mongodbStorage.NewStorage(&cfg.Database)
+	mongoStorage, err := mongodbStorage.NewStorage(*cfg)
+	require.NoError(t, err)
+
+	// Initialize round manager
+	roundManager, err := round.NewRoundManager(ctx, cfg, log, mongoStorage, nil)
 	require.NoError(t, err)
 
 	// Initialize service
-	aggregatorService, err := NewAggregatorService(cfg, log, mongoStorage)
-	require.NoError(t, err)
+	aggregatorService := NewAggregatorService(cfg, log, roundManager, mongoStorage, nil)
 
 	// Start the aggregator service
 	err = aggregatorService.Start(ctx)
@@ -88,7 +94,7 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	// Wait for the server to be ready
 	serverAddr := fmt.Sprintf("http://%s:%s", cfg.Server.Host, cfg.Server.Port)
 	t.Logf("Waiting for server at %s", serverAddr)
-	
+
 	require.Eventually(t, func() bool {
 		resp, err := http.Get(serverAddr + "/health")
 		if err != nil {

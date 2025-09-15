@@ -7,6 +7,7 @@ import (
 	"math/big"
 
 	"github.com/fxamacker/cbor/v2"
+
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -210,7 +211,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 	return nil
 }
 
-// finalizeBlock creates and persists a new block with the given data
+// FinalizeBlock creates and persists a new block with the given data
 func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) error {
 	rm.logger.WithContext(ctx).Info("FinalizeBlock called",
 		"blockNumber", block.Index.String(),
@@ -312,6 +313,8 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	rm.logger.WithContext(ctx).Info("Block finalized and stored successfully",
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String())
+
+	rm.setLastSyncedRoundNumber(block.Index.Int)
 
 	return nil
 }

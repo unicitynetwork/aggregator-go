@@ -134,6 +134,7 @@ The service is configured via environment variables:
 | `LEADER_HEARTBEAT_INTERVAL` | Leader heartbeat frequency | `10s` |
 | `LEADER_ELECTION_POLLING_INTERVAL` | Follower polling frequency | `5s` |
 | `SERVER_ID` | Unique server identifier | `{hostname}-{pid}` |
+| `LOCK_ID`                          | Unique lock identifier     | `aggregator_leader_lock` |
 
 ### Logging Configuration
 | Variable | Description | Default |

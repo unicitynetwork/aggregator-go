@@ -64,42 +64,59 @@ type RoundManager struct {
 	currentRound *Round
 	roundMutex   sync.RWMutex
 	roundTimer   *time.Timer
-	stopChan     chan struct{}
-	wg           sync.WaitGroup
+
+	lastSyncedRoundNumber      *big.Int
+	lastSyncedRoundNumberMutex sync.Mutex // mutex to protect the lastSyncedRoundNumber
 
 	// Round duration (configurable, default 1 second)
 	roundDuration time.Duration
+
+	// optional HA leader selector
+	leaderSelector    LeaderSelector
+	blockSyncCancelFn context.CancelFunc
 
 	// Metrics
 	totalRounds      int64
 	totalCommitments int64
 }
 
+type LeaderSelector interface {
+	IsLeader(ctx context.Context) (bool, error)
+}
+
 // NewRoundManager creates a new round manager
-func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*RoundManager, error) {
+func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, storage interfaces.Storage, leaderSelector LeaderSelector) (*RoundManager, error) {
 	// Initialize SMT with empty tree - will be replaced with restored tree in Start()
 	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
 	threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 	rm := &RoundManager{
-		config:        cfg,
-		logger:        logger,
-		storage:       storage,
-		smt:           threadSafeSMT,
-		stopChan:      make(chan struct{}),
-		roundDuration: cfg.Processing.RoundDuration, // Configurable round duration (default 1s)
+		config:         cfg,
+		logger:         logger,
+		storage:        storage,
+		smt:            threadSafeSMT,
+		leaderSelector: leaderSelector,
+		roundDuration:  cfg.Processing.RoundDuration, // Configurable round duration (default 1s)
 	}
 
 	if cfg.BFT.Enabled {
 		var err error
-		rm.bftClient, err = bft.NewBFTClient(context.Background(), &cfg.BFT, logger, rm)
+		rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create BFT client: %w", err)
 		}
 	} else {
-		rm.bftClient = bft.NewBFTClientStub(logger, rm)
+		nextBlockNumber := api.NewBigInt(nil)
+		lastBlockNumber, err := rm.storage.BlockStorage().GetLatestNumber(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch latest block number: %w", err)
+		}
+		if lastBlockNumber == nil {
+			lastBlockNumber = api.NewBigInt(big.NewInt(0))
+		}
+		nextBlockNumber.Add(lastBlockNumber.Int, big.NewInt(1))
+		rm.bftClient = bft.NewBFTClientStub(logger, rm, lastBlockNumber)
 	}
-
 	return rm, nil
 }
 
@@ -110,8 +127,21 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 		"batchLimit", rm.config.Processing.BatchLimit)
 
 	// Restore SMT from storage - this will populate the existing empty SMT
-	if err := rm.restoreSmtFromStorage(ctx); err != nil {
+	_, err := rm.restoreSmtFromStorage(ctx)
+	if err != nil {
 		return fmt.Errorf("failed to restore SMT from storage: %w", err)
+	}
+
+	if rm.config.HA.Enabled {
+		blockSyncCtx, cancel := context.WithCancel(ctx)
+		rm.blockSyncCancelFn = cancel
+		go func() {
+			rm.logger.WithContext(blockSyncCtx).Info("block sync goroutine started")
+			if err := rm.blockSync(blockSyncCtx); err != nil {
+				rm.logger.WithContext(blockSyncCtx).Error("block sync error", "error", err.Error())
+			}
+			rm.logger.WithContext(blockSyncCtx).Info("block sync goroutine finished")
+		}()
 	}
 
 	// Ensure any previous timers are stopped
@@ -122,63 +152,12 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 	}
 	rm.roundMutex.Unlock()
 
-	// Get latest block number to determine starting round
-	latestBlockNumber, err := rm.storage.BlockStorage().GetLatestNumber(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get latest block number: %w", err)
-	}
-
-	// Initialize first round (start from next block number)
-	nextRoundNumber := api.NewBigInt(nil)
-	if latestBlockNumber != nil && latestBlockNumber.Int != nil {
-		// If blocks exist, start from latest + 1
-		nextRoundNumber.Set(latestBlockNumber.Int)
-		nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
-		rm.logger.WithContext(ctx).Info("Starting from existing blockchain state",
-			"latestBlock", latestBlockNumber.String(),
-			"nextRound", nextRoundNumber.String())
-	} else {
-		// If no blocks exist, start from 1 (not 0)
-		nextRoundNumber.SetInt64(1)
-		rm.logger.WithContext(ctx).Info("No existing blocks found, starting from block 1")
-	}
-
-	// Keep checking until we find a block number that doesn't exist
-	for {
-		existingBlock, err := rm.storage.BlockStorage().GetByNumber(ctx, nextRoundNumber)
-		if err != nil {
-			return fmt.Errorf("failed to check if block %s exists: %w", nextRoundNumber.String(), err)
-		}
-		if existingBlock == nil {
-			// Found a gap - this is our next block number
-			break
-		}
-
-		rm.logger.WithContext(ctx).Debug("Block already exists, incrementing to find next available number",
-			"blockNumber", nextRoundNumber.String())
-		nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
-	}
-
-	rm.logger.WithContext(ctx).Info("Found next available block number for new round",
-		"finalRoundNumber", nextRoundNumber.String())
-
-	if err := rm.bftClient.Start(ctx, nextRoundNumber); err != nil {
-		return fmt.Errorf("failed to start BFT client: %w", err)
-	}
-
-	// Start the round processing goroutine
-	rm.wg.Add(1)
-	go rm.roundProcessor(ctx)
-
 	return nil
 }
 
 // Stop gracefully stops the round manager
 func (rm *RoundManager) Stop(ctx context.Context) error {
 	rm.logger.WithContext(ctx).Info("Stopping Round Manager")
-
-	// Signal stop
-	close(rm.stopChan)
 
 	// Stop current round timer
 	rm.roundMutex.Lock()
@@ -187,8 +166,9 @@ func (rm *RoundManager) Stop(ctx context.Context) error {
 	}
 	rm.roundMutex.Unlock()
 
-	// Wait for goroutines to finish
-	rm.wg.Wait()
+	if rm.blockSyncCancelFn != nil {
+		rm.blockSyncCancelFn()
+	}
 
 	rm.logger.WithContext(ctx).Info("Round Manager stopped")
 	return nil
@@ -244,9 +224,7 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 
 // StartNewRound initializes a new round
 func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
-	rm.logger.WithContext(ctx).Info("StartNewRound called",
-		"roundNumber", roundNumber.String())
-
+	rm.logger.WithContext(ctx).Info("StartNewRound called", "roundNumber", roundNumber.String())
 	rm.roundMutex.Lock()
 	defer rm.roundMutex.Unlock()
 
@@ -403,37 +381,19 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	return nil
 }
 
-// roundProcessor is the main goroutine that handles round processing
-func (rm *RoundManager) roundProcessor(ctx context.Context) {
-	defer rm.wg.Done()
-
-	rm.logger.WithContext(ctx).Info("Round processor started")
-
-	for {
-		select {
-		case <-rm.stopChan:
-			rm.logger.WithContext(ctx).Info("Round processor stopping")
-			return
-		case <-ctx.Done():
-			rm.logger.WithContext(ctx).Info("Round processor context cancelled")
-			return
-		}
-	}
-}
-
 // restoreSmtFromStorage restores the SMT tree from persisted nodes in storage
-func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) error {
+func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt, error) {
 	rm.logger.Info("Starting SMT restoration from storage")
 
 	// Get total count for progress tracking
 	totalCount, err := rm.storage.SmtStorage().Count(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get SMT node count: %w", err)
+		return nil, fmt.Errorf("failed to get SMT node count: %w", err)
 	}
 
 	if totalCount == 0 {
 		rm.logger.Info("No SMT nodes found in storage, starting with empty tree")
-		return nil
+		return nil, nil
 	}
 
 	rm.logger.Info("Found SMT nodes in storage, starting restoration", "totalNodes", totalCount)
@@ -446,7 +406,7 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) error {
 		// Load chunk of nodes
 		nodes, err := rm.storage.SmtStorage().GetChunked(ctx, offset, chunkSize)
 		if err != nil {
-			return fmt.Errorf("failed to load SMT chunk at offset %d: %w", offset, err)
+			return nil, fmt.Errorf("failed to load SMT chunk at offset %d: %w", offset, err)
 		}
 
 		if len(nodes) == 0 {
@@ -465,7 +425,7 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) error {
 		}
 
 		if _, err := rm.smt.AddLeaves(leaves); err != nil {
-			return fmt.Errorf("failed to restore SMT leaves at offset %d: %w", offset, err)
+			return nil, fmt.Errorf("failed to restore SMT leaves at offset %d: %w", offset, err)
 		}
 
 		restoredCount += len(nodes)
@@ -499,9 +459,10 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) error {
 	// Verify restored SMT root hash matches latest block's root hash
 	latestBlock, err := rm.storage.BlockStorage().GetLatest(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get latest block for SMT verification: %w", err)
+		return nil, fmt.Errorf("failed to get latest block for SMT verification: %w", err)
 	} else if latestBlock == nil {
 		rm.logger.Info("No latest block found, skipping SMT verification")
+		return nil, nil
 	} else {
 		expectedRootHash := latestBlock.RootHash.String()
 		rm.logger.Info("SMT verification starting",
@@ -514,13 +475,163 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) error {
 				"restoredRootHash", finalRootHash,
 				"expectedRootHash", expectedRootHash,
 				"latestBlockNumber", latestBlock.Index.String())
-			return fmt.Errorf("SMT restoration verification failed: restored root hash %s does not match latest block root hash %s",
+			return nil, fmt.Errorf("SMT restoration verification failed: restored root hash %s does not match latest block root hash %s",
 				finalRootHash, expectedRootHash)
 		}
 		rm.logger.Info("SMT restoration verified successfully - root hash matches latest block",
 			"rootHash", finalRootHash,
 			"latestBlockNumber", latestBlock.Index.String())
+
+		rm.setLastSyncedRoundNumber(latestBlock.Index.Int)
 	}
 
+	return latestBlock.Index, nil
+}
+
+func (rm *RoundManager) blockSync(ctx context.Context) error {
+	ticker := time.NewTicker(rm.roundDuration)
+	defer ticker.Stop()
+
+	wasLeader := false
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			// start/stop BFT client based on leadership status
+			isLeader, err := rm.leaderSelector.IsLeader(ctx)
+			if err != nil {
+				return fmt.Errorf("error on leader selection: %w", err)
+			}
+			if isLeader && wasLeader {
+				continue
+			}
+			// sync smt to latest block regardless of leadership status
+			// (freshly promoted leader could still be behind etc.)
+			if err := rm.syncSmtToLatestBlock(ctx); err != nil {
+				return fmt.Errorf("failed to sync smt to latest block: %w", err)
+			}
+			// if we became leader => start BFTClient
+			if !wasLeader && isLeader {
+				if err := rm.bftClient.Start(ctx); err != nil {
+					return fmt.Errorf("failed to start BFT client: %w", err)
+				}
+			}
+			// if we became follower => stop BFTClient
+			if wasLeader && !isLeader {
+				rm.bftClient.Stop()
+			}
+			wasLeader = isLeader
+		}
+	}
+}
+
+func (rm *RoundManager) syncSmtToLatestBlock(ctx context.Context) error {
+	// fetch last synced smt block number and last stored block number
+	currBlock := rm.getLastSyncedRoundNumber()
+	endBlock, err := rm.getLastStoredBlockNumber(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to fetch last stored block number: %w", err)
+	}
+	for currBlock.Cmp(endBlock) < 0 {
+		// 1. fetch the next block record
+		b, err := rm.storage.BlockRecordsStorage().GetNextBlock(ctx, api.NewBigInt(currBlock))
+		if err != nil {
+			return fmt.Errorf("failed to fetch next block: %w", err)
+		}
+		currBlock = b.BlockNumber.Int
+
+		// skip empty blocks
+		if len(b.RequestIDs) == 0 {
+			continue
+		}
+
+		// 2. apply changes from block record to SMT
+		smtRootHash, err := rm.updateSMTForBlock(ctx, b)
+		if err != nil {
+			return fmt.Errorf("failed to update SMT: %w", err)
+		}
+
+		// 3. verify SMT root hash matches block store root hash
+		if err := rm.verifySMTForBlock(ctx, smtRootHash, b.BlockNumber); err != nil {
+			return fmt.Errorf("failed to verify SMT: %w", err)
+		}
+		rm.logger.Info("SMT updated for round", "roundNumber", currBlock.String())
+	}
+	// update last synced block round number
+	rm.setLastSyncedRoundNumber(currBlock)
 	return nil
+}
+
+func (rm *RoundManager) verifySMTForBlock(ctx context.Context, smtRootHash string, blockNumber *api.BigInt) error {
+	block, err := rm.storage.BlockStorage().GetByNumber(ctx, blockNumber)
+	if err != nil {
+		return fmt.Errorf("failed to fetch block: %w", err)
+	}
+	if block == nil {
+		rm.logger.Warn("block not found, skipping SMT verification", "blockNumber", blockNumber.String())
+		return nil
+	}
+	expectedRootHash := block.RootHash.String()
+	if smtRootHash != expectedRootHash {
+		return fmt.Errorf("smt root hash %s does not match latest block root hash %s",
+			smtRootHash, expectedRootHash)
+	}
+	rm.logger.Info("SMT successfully verified", "roundNumber", blockNumber.String())
+	return nil
+}
+
+func (rm *RoundManager) updateSMTForBlock(ctx context.Context, blockRecord *models.BlockRecords) (string, error) {
+	leaves := make([]*smt.Leaf, len(blockRecord.RequestIDs))
+	leafIDs := make([]api.HexBytes, len(blockRecord.RequestIDs))
+	// build leaf ids
+	for i, reqID := range blockRecord.RequestIDs {
+		path, err := reqID.GetPath()
+		if err != nil {
+			return "", fmt.Errorf("failed to get path: %w", err)
+		}
+		leafIDs[i] = api.NewHexBytes(path.Bytes())
+	}
+	// load smt nodes by ids
+	smtNodes, err := rm.storage.SmtStorage().GetByKeys(ctx, leafIDs)
+	if err != nil {
+		return "", fmt.Errorf("failed to load smt nodes by keys: %w", err)
+	}
+	// convert smt nodes to leaves
+	for i, smtNode := range smtNodes {
+		leaves[i] = smt.NewLeaf(new(big.Int).SetBytes(smtNode.Key), smtNode.Value)
+	}
+	// apply changes to SMT
+	smtRootHash, err := rm.smt.AddLeaves(leaves)
+	if err != nil {
+		return "", fmt.Errorf("failed to apply SMT updates for block %s: %w", blockRecord.BlockNumber.String(), err)
+	}
+	return smtRootHash, nil
+}
+
+func (rm *RoundManager) setLastSyncedRoundNumber(roundNumber *big.Int) {
+	rm.lastSyncedRoundNumberMutex.Lock()
+	defer rm.lastSyncedRoundNumberMutex.Unlock()
+	rm.lastSyncedRoundNumber = roundNumber
+}
+
+func (rm *RoundManager) getLastSyncedRoundNumber() *big.Int {
+	rm.lastSyncedRoundNumberMutex.Lock()
+	defer rm.lastSyncedRoundNumberMutex.Unlock()
+	if rm.lastSyncedRoundNumber == nil {
+		return big.NewInt(0)
+	}
+	return rm.lastSyncedRoundNumber
+}
+
+func (rm *RoundManager) getLastStoredBlockNumber(ctx context.Context) (*big.Int, error) {
+	num, err := rm.storage.BlockStorage().GetLatestNumber(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch latest block number: %w", err)
+	}
+	if num == nil {
+		return big.NewInt(0), nil
+	}
+	return num.Int, nil
 }

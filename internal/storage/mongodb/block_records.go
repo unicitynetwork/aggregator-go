@@ -78,6 +78,26 @@ func (brs *BlockRecordsStorage) Count(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
+func (brs *BlockRecordsStorage) GetNextBlock(ctx context.Context, blockNumber *api.BigInt) (*models.BlockRecords, error) {
+	var filter bson.M
+	if blockNumber != nil {
+		filter = bson.M{"blockNumber": bson.M{"$gt": blockNumber.String()}}
+	} else {
+		filter = bson.M{}
+	}
+	opts := options.FindOne().SetSort(bson.D{{Key: "blockNumber", Value: 1}})
+
+	var records models.BlockRecords
+	err := brs.collection.FindOne(ctx, filter, opts).Decode(&records)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get next block: %w", err)
+	}
+	return &records, nil
+}
+
 // CreateIndexes creates necessary indexes for the block records collection
 func (brs *BlockRecordsStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{

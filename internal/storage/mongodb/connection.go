@@ -28,7 +28,8 @@ type Storage struct {
 }
 
 // NewStorage creates a new MongoDB storage instance
-func NewStorage(cfg *config.DatabaseConfig) (*Storage, error) {
+func NewStorage(config config.Config) (*Storage, error) {
+	cfg := config.Database
 	// Create client options
 	clientOpts := options.Client().
 		ApplyURI(cfg.URI).
@@ -58,7 +59,7 @@ func NewStorage(cfg *config.DatabaseConfig) (*Storage, error) {
 	storage := &Storage{
 		client:   client,
 		database: database,
-		config:   cfg,
+		config:   &cfg,
 	}
 
 	// Initialize storage implementations
@@ -67,7 +68,7 @@ func NewStorage(cfg *config.DatabaseConfig) (*Storage, error) {
 	storage.blockStorage = NewBlockStorage(database)
 	storage.smtStorage = NewSmtStorage(database)
 	storage.blockRecordsStorage = NewBlockRecordsStorage(database)
-	storage.leadershipStorage = NewLeadershipStorage(database)
+	storage.leadershipStorage = NewLeadershipStorage(database, config.HA.LockTTLSeconds)
 
 	// Create indexes
 	if err := storage.createIndexes(context.Background()); err != nil {

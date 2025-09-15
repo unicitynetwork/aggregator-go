@@ -58,17 +58,18 @@ type HAConfig struct {
 	LockTTLSeconds                int           `mapstructure:"lock_ttl_seconds"`
 	LeaderHeartbeatInterval       time.Duration `mapstructure:"leader_heartbeat_interval"`
 	LeaderElectionPollingInterval time.Duration `mapstructure:"leader_election_polling_interval"`
+	LockID                        string        `mapstructure:"lock_id"`
 	ServerID                      string        `mapstructure:"server_id"`
 }
 
 // LoggingConfig holds logging configuration
 type LoggingConfig struct {
-	Level            string `mapstructure:"level"`
-	Format           string `mapstructure:"format"`
-	Output           string `mapstructure:"output"`
-	EnableJSON       bool   `mapstructure:"enable_json"`
-	EnableAsync      bool   `mapstructure:"enable_async"`
-	AsyncBufferSize  int    `mapstructure:"async_buffer_size"`
+	Level           string `mapstructure:"level"`
+	Format          string `mapstructure:"format"`
+	Output          string `mapstructure:"output"`
+	EnableJSON      bool   `mapstructure:"enable_json"`
+	EnableAsync     bool   `mapstructure:"enable_async"`
+	AsyncBufferSize int    `mapstructure:"async_buffer_size"`
 }
 
 // ProcessingConfig holds batch processing configuration
@@ -121,6 +122,7 @@ func Load() (*Config, error) {
 			LockTTLSeconds:                getEnvIntOrDefault("LOCK_TTL_SECONDS", 30),
 			LeaderHeartbeatInterval:       getEnvDurationOrDefault("LEADER_HEARTBEAT_INTERVAL", "10s"),
 			LeaderElectionPollingInterval: getEnvDurationOrDefault("LEADER_ELECTION_POLLING_INTERVAL", "5s"),
+			LockID:                        getEnvOrDefault("LOCK_ID", "aggregator_leader_lock"),
 			ServerID:                      getEnvOrDefault("SERVER_ID", generateServerID()),
 		},
 		Logging: LoggingConfig{
