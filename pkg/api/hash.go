@@ -2,6 +2,7 @@ package api
 
 import (
 	"crypto/sha256"
+	"crypto/sha3"
 	"fmt"
 	"hash"
 	"log"
@@ -12,7 +13,8 @@ type HashAlgorithm int
 
 // Identifiers of known/supported hashing algorithms
 const (
-	SHA256 HashAlgorithm = 0 // SHA-2-256
+	SHA256   HashAlgorithm = 0 // SHA-2-256
+	SHA3_256 HashAlgorithm = 1 // SHA-3-256
 )
 
 // DataHash represents a hash value combined with the algorithm identifier
@@ -63,6 +65,11 @@ func NewDataHasher(algorithm HashAlgorithm) *DataHasher {
 		return &DataHasher{
 			algorithm: algorithm,
 			hasher:    sha256.New(),
+		}
+	case SHA3_256:
+		return &DataHasher{
+			algorithm: algorithm,
+			hasher:    sha3.New256(),
 		}
 	default:
 		log.Printf("Unknown hash algorithm identifier %d\n", algorithm)

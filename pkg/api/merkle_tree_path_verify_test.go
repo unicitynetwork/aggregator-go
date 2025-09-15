@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/hex"
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -349,5 +350,29 @@ func TestMerkleTreePathVerifyDuplicates(t *testing.T) {
 	if len(path.Steps[0].Branch) > 0 {
 		value, _ := hex.DecodeString(path.Steps[0].Branch[0])
 		require.Equal(t, []byte("original"), value, "Should have original value")
+	}
+}
+
+func TestMerkleTreePathVerifyAlternateAlgorithm(t *testing.T) {
+	leaves := []*smt.Leaf{
+		createLeaf(0b10101, []byte{1, 0, 1, 0}),
+		createLeaf(0b11010, []byte{0, 1, 0, 1}),
+	}
+
+	for _, algo := range []api.HashAlgorithm{api.SHA256, api.SHA3_256} {
+		t.Run(fmt.Sprintf("Algorithm %d", algo), func(t *testing.T) {
+			tree := smt.NewSparseMerkleTree(algo)
+			tree.AddLeaves(leaves)
+			root := tree.GetRootHashHex()
+			require.Equal(t, root[:4], fmt.Sprintf("%04x", algo))
+
+			for _, leaf := range leaves {
+				path := tree.GetPath(leaf.Path)
+				require.Equal(t, root, path.Root)
+				res, err := path.Verify(leaf.Path)
+				require.NoError(t, err)
+				require.True(t, res.Result)
+			}
+		})
 	}
 }
