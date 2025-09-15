@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math/big"
-	"sort"
 	"sync"
 	"time"
 
@@ -465,11 +464,6 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) error {
 			}
 		}
 
-		// Sort leaves by path to ensure consistent ordering
-		sort.Slice(leaves, func(i, j int) bool {
-			return leaves[i].Path.Cmp(leaves[j].Path) < 0
-		})
-
 		if _, err := rm.smt.AddLeaves(leaves); err != nil {
 			return fmt.Errorf("failed to restore SMT leaves at offset %d: %w", offset, err)
 		}
@@ -510,17 +504,22 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) error {
 		rm.logger.Info("No latest block found, skipping SMT verification")
 	} else {
 		expectedRootHash := latestBlock.RootHash.String()
+		rm.logger.Info("SMT verification starting",
+			"restoredRootHash", finalRootHash,
+			"expectedRootHash", expectedRootHash,
+			"latestBlockNumber", latestBlock.Index.String())
+
 		if finalRootHash != expectedRootHash {
 			rm.logger.Error("SMT restoration verification failed - root hash mismatch",
 				"restoredRootHash", finalRootHash,
 				"expectedRootHash", expectedRootHash,
-				"latestBlockNumber", latestBlock.Index)
+				"latestBlockNumber", latestBlock.Index.String())
 			return fmt.Errorf("SMT restoration verification failed: restored root hash %s does not match latest block root hash %s",
 				finalRootHash, expectedRootHash)
 		}
 		rm.logger.Info("SMT restoration verified successfully - root hash matches latest block",
 			"rootHash", finalRootHash,
-			"latestBlockNumber", latestBlock.Index)
+			"latestBlockNumber", latestBlock.Index.String())
 	}
 
 	return nil

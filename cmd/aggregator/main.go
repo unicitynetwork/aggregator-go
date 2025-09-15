@@ -15,6 +15,14 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 )
 
+// gracefulExit flushes async logger and exits with the given code
+func gracefulExit(asyncLogger *logger.AsyncLoggerWrapper, code int) {
+	if asyncLogger != nil {
+		asyncLogger.Stop()
+	}
+	os.Exit(code)
+}
+
 func main() {
 	// Load configuration
 	cfg, err := config.Load()
@@ -45,7 +53,7 @@ func main() {
 		}
 		asyncLogger = logger.NewAsyncLogger(baseLogger, bufferSize)
 		log = asyncLogger.Logger
-		log.WithComponent("main").Info("Async logging enabled", 
+		log.WithComponent("main").Info("Async logging enabled",
 			"bufferSize", bufferSize)
 	} else {
 		log = baseLogger
@@ -57,7 +65,7 @@ func main() {
 	storage, err := mongodb.NewStorage(&cfg.Database)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to initialize storage", "error", err.Error())
-		os.Exit(1)
+		gracefulExit(asyncLogger, 1)
 	}
 
 	// Test database connection
@@ -65,7 +73,7 @@ func main() {
 	if err := storage.Ping(ctx); err != nil {
 		cancel()
 		log.WithComponent("main").Error("Failed to connect to database", "error", err.Error())
-		os.Exit(1)
+		gracefulExit(asyncLogger, 1)
 	}
 	cancel()
 
@@ -75,12 +83,12 @@ func main() {
 	aggregatorService, err := service.NewAggregatorService(cfg, log, storage)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to initialize aggregator service", "error", err.Error())
-		os.Exit(1)
+		gracefulExit(asyncLogger, 1)
 	}
 	// Start the aggregator service
 	if err := aggregatorService.Start(context.Background()); err != nil {
 		log.WithComponent("main").Error("Failed to start aggregator service", "error", err.Error())
-		os.Exit(1)
+		gracefulExit(asyncLogger, 1)
 	}
 
 	// Initialize gateway server
@@ -126,7 +134,7 @@ func main() {
 	}
 
 	log.WithComponent("main").Info("Aggregator shut down successfully")
-	
+
 	// Stop async logger if enabled
 	if asyncLogger != nil {
 		asyncLogger.Stop()

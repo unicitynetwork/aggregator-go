@@ -27,27 +27,48 @@ func NewSmtStorage(db *mongo.Database) *SmtStorage {
 	}
 }
 
-// Store stores a new SMT node
+// Store stores a new SMT node using upsert to handle duplicates gracefully
 func (ss *SmtStorage) Store(ctx context.Context, node *models.SmtNode) error {
-	_, err := ss.collection.InsertOne(ctx, node)
+	filter := bson.M{"key": node.Key}
+	update := bson.M{
+		"$setOnInsert": bson.M{
+			"key":       node.Key,
+			"value":     node.Value,
+			"hash":      node.Hash,
+			"createdAt": node.CreatedAt,
+		},
+	}
+	opts := options.Update().SetUpsert(true)
+
+	_, err := ss.collection.UpdateOne(ctx, filter, update, opts)
 	if err != nil {
 		return fmt.Errorf("failed to store SMT node: %w", err)
 	}
 	return nil
 }
 
-// StoreBatch stores multiple SMT nodes
+// StoreBatch stores multiple SMT nodes using bulk upsert operations
 func (ss *SmtStorage) StoreBatch(ctx context.Context, nodes []*models.SmtNode) error {
 	if len(nodes) == 0 {
 		return nil
 	}
 
-	docs := make([]interface{}, len(nodes))
+	operations := make([]mongo.WriteModel, len(nodes))
 	for i, node := range nodes {
-		docs[i] = node
+		filter := bson.M{"key": node.Key}
+		update := bson.M{
+			"$setOnInsert": bson.M{
+				"key":       node.Key,
+				"value":     node.Value,
+				"hash":      node.Hash,
+				"createdAt": node.CreatedAt,
+			},
+		}
+		operations[i] = mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true)
 	}
 
-	_, err := ss.collection.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
+	opts := options.BulkWrite().SetOrdered(false)
+	_, err := ss.collection.BulkWrite(ctx, operations, opts)
 	if err != nil {
 		return fmt.Errorf("failed to store SMT nodes batch: %w", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
@@ -27,6 +28,16 @@ func NewBlockStorage(db *mongo.Database) *BlockStorage {
 	}
 }
 
+// bigIntToDecimal128 converts a BigInt to Decimal128 for MongoDB queries
+func bigIntToDecimal128(bigInt *api.BigInt) primitive.Decimal128 {
+	decimal, err := primitive.ParseDecimal128(bigInt.String())
+	if err != nil {
+		// Fallback to zero if parsing fails (should never happen with valid BigInt)
+		return primitive.NewDecimal128(0, 0)
+	}
+	return decimal
+}
+
 // Store stores a new block
 func (bs *BlockStorage) Store(ctx context.Context, block *models.Block) error {
 	// Convert to BSON format for storage
@@ -42,7 +53,8 @@ func (bs *BlockStorage) Store(ctx context.Context, block *models.Block) error {
 // GetByNumber retrieves a block by number
 func (bs *BlockStorage) GetByNumber(ctx context.Context, blockNumber *api.BigInt) (*models.Block, error) {
 	var blockBSON models.BlockBSON
-	err := bs.collection.FindOne(ctx, bson.M{"index": blockNumber.String()}).Decode(&blockBSON)
+	indexDecimal := bigIntToDecimal128(blockNumber)
+	err := bs.collection.FindOne(ctx, bson.M{"index": indexDecimal}).Decode(&blockBSON)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
@@ -79,40 +91,28 @@ func (bs *BlockStorage) GetLatest(ctx context.Context) (*models.Block, error) {
 
 // GetLatestNumber retrieves the latest block number
 func (bs *BlockStorage) GetLatestNumber(ctx context.Context) (*api.BigInt, error) {
-	// Get all block indices and find the maximum numerically
-	opts := options.Find().SetProjection(bson.M{"index": 1})
-	cursor, err := bs.collection.Find(ctx, bson.M{}, opts)
+	opts := options.FindOne().
+		SetProjection(bson.M{"index": 1}).
+		SetSort(bson.M{"index": -1})
+
+	var result struct {
+		Index primitive.Decimal128 `bson:"index"`
+	}
+
+	err := bs.collection.FindOne(ctx, bson.M{}, opts).Decode(&result)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find blocks: %w", err)
-	}
-	defer cursor.Close(ctx)
-
-	var maxBlockNumber *api.BigInt
-
-	for cursor.Next(ctx) {
-		var result struct {
-			Index string `bson:"index"`
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
 		}
-
-		if err := cursor.Decode(&result); err != nil {
-			return nil, fmt.Errorf("failed to decode block: %w", err)
-		}
-
-		blockNumber, err := api.NewBigIntFromString(result.Index)
-		if err != nil {
-			continue // Skip invalid block numbers
-		}
-
-		if maxBlockNumber == nil || blockNumber.Cmp(maxBlockNumber.Int) > 0 {
-			maxBlockNumber = blockNumber
-		}
+		return nil, fmt.Errorf("failed to get latest block number: %w", err)
 	}
 
-	if err := cursor.Err(); err != nil {
-		return nil, fmt.Errorf("cursor error: %w", err)
+	blockNumber, err := api.NewBigIntFromString(result.Index.String())
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse latest block number: %w", err)
 	}
 
-	return maxBlockNumber, nil
+	return blockNumber, nil
 }
 
 // Count returns the total number of blocks
@@ -126,10 +126,13 @@ func (bs *BlockStorage) Count(ctx context.Context) (int64, error) {
 
 // GetRange retrieves blocks in a range
 func (bs *BlockStorage) GetRange(ctx context.Context, fromBlock, toBlock *api.BigInt) ([]*models.Block, error) {
+	fromDecimal := bigIntToDecimal128(fromBlock)
+	toDecimal := bigIntToDecimal128(toBlock)
+
 	filter := bson.M{
 		"index": bson.M{
-			"$gte": fromBlock.String(),
-			"$lte": toBlock.String(),
+			"$gte": fromDecimal,
+			"$lte": toDecimal,
 		},
 	}
 
@@ -167,9 +170,6 @@ func (bs *BlockStorage) CreateIndexes(ctx context.Context) error {
 		{
 			Keys:    bson.D{{Key: "index", Value: 1}},
 			Options: options.Index().SetUnique(true),
-		},
-		{
-			Keys: bson.D{{Key: "timestamp", Value: -1}},
 		},
 		{
 			Keys: bson.D{{Key: "createdAt", Value: -1}},

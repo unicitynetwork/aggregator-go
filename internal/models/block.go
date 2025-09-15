@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 // Block represents a blockchain block
@@ -23,21 +24,27 @@ type Block struct {
 
 // BlockBSON represents the BSON version of Block for MongoDB storage
 type BlockBSON struct {
-	Index               string `bson:"index"`
-	ChainID             string `bson:"chainId"`
-	Version             string `bson:"version"`
-	ForkID              string `bson:"forkId"`
-	RootHash            string `bson:"rootHash"`
-	PreviousBlockHash   string `bson:"previousBlockHash"`
-	NoDeletionProofHash string `bson:"noDeletionProofHash,omitempty"`
-	CreatedAt           string `bson:"createdAt"`
-	UnicityCertificate  string `bson:"unicityCertificate"`
+	Index               primitive.Decimal128 `bson:"index"`
+	ChainID             string               `bson:"chainId"`
+	Version             string               `bson:"version"`
+	ForkID              string               `bson:"forkId"`
+	RootHash            string               `bson:"rootHash"`
+	PreviousBlockHash   string               `bson:"previousBlockHash"`
+	NoDeletionProofHash string               `bson:"noDeletionProofHash,omitempty"`
+	CreatedAt           string               `bson:"createdAt"`
+	UnicityCertificate  string               `bson:"unicityCertificate"`
 }
 
 // ToBSON converts Block to BlockBSON for MongoDB storage
 func (b *Block) ToBSON() *BlockBSON {
+	indexDecimal, err := primitive.ParseDecimal128(b.Index.String())
+	if err != nil {
+		// This should never happen with valid BigInt, but fallback to zero
+		indexDecimal = primitive.NewDecimal128(0, 0)
+	}
+
 	blockBSON := &BlockBSON{
-		Index:               b.Index.String(),
+		Index:               indexDecimal,
 		ChainID:             b.ChainID,
 		Version:             b.Version,
 		ForkID:              b.ForkID,
@@ -53,7 +60,7 @@ func (b *Block) ToBSON() *BlockBSON {
 
 // FromBSON converts BlockBSON back to Block
 func (bb *BlockBSON) FromBSON() (*Block, error) {
-	index, err := api.NewBigIntFromString(bb.Index)
+	index, err := api.NewBigIntFromString(bb.Index.String())
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse index: %w", err)
 	}
