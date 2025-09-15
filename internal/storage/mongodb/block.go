@@ -172,9 +172,6 @@ func (bs *BlockStorage) CreateIndexes(ctx context.Context) error {
 			Options: options.Index().SetUnique(true),
 		},
 		{
-			Keys: bson.D{{Key: "timestamp", Value: -1}},
-		},
-		{
 			Keys: bson.D{{Key: "createdAt", Value: -1}},
 		},
 		{
