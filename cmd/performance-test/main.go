@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -69,10 +70,10 @@ type GetBlockHeightResponse struct {
 
 // Test configuration
 const (
-	aggregatorURL  = "http://localhost:3000"
-	testDuration   = 10 * time.Second
-	workerCount    = 20   // Number of concurrent workers
-	requestsPerSec = 1000 // Target requests per second
+	defaultAggregatorURL = "http://localhost:3000"
+	testDuration         = 10 * time.Second
+	workerCount          = 20   // Number of concurrent workers
+	requestsPerSec       = 1000 // Target requests per second
 )
 
 // BlockCommitmentInfo stores block number and commitment count
@@ -137,13 +138,15 @@ func (m *Metrics) getAverageCommitments() float64 {
 type JSONRPCClient struct {
 	httpClient *http.Client
 	url        string
+	authHeader string
 	requestID  int64
 }
 
-func NewJSONRPCClient(url string) *JSONRPCClient {
+func NewJSONRPCClient(url string, authHeader string) *JSONRPCClient {
 	return &JSONRPCClient{
-		httpClient: &http.Client{Timeout: 5 * time.Second},
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 		url:        url,
+		authHeader: authHeader,
 	}
 }
 
@@ -162,7 +165,18 @@ func (c *JSONRPCClient) call(method string, params interface{}) (*JSONRPCRespons
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	resp, err := c.httpClient.Post(c.url, "application/json", bytes.NewBuffer(reqBody))
+	req, err := http.NewRequest("POST", c.url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Add auth header if provided
+	if c.authHeader != "" {
+		req.Header.Set("Authorization", c.authHeader)
+	}
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
@@ -300,8 +314,19 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 }
 
 func main() {
+	// Get URL and auth header from environment variables
+	aggregatorURL := os.Getenv("AGGREGATOR_URL")
+	if aggregatorURL == "" {
+		aggregatorURL = defaultAggregatorURL
+	}
+
+	authHeader := os.Getenv("AUTH_HEADER")
+
 	fmt.Printf("Starting aggregator performance test...\n")
 	fmt.Printf("Target: %s\n", aggregatorURL)
+	if authHeader != "" {
+		fmt.Printf("Authorization: [configured]\n")
+	}
 	fmt.Printf("Duration: %v\n", testDuration)
 	fmt.Printf("Workers: %d\n", workerCount)
 	fmt.Printf("Target RPS: %d\n", requestsPerSec)
@@ -317,7 +342,7 @@ func main() {
 	defer cancel()
 
 	// Create JSON-RPC client
-	client := NewJSONRPCClient(aggregatorURL)
+	client := NewJSONRPCClient(aggregatorURL, authHeader)
 
 	// Test connectivity and get starting block number
 	fmt.Printf("Testing connectivity to %s...\n", aggregatorURL)
@@ -392,7 +417,7 @@ func main() {
 	fmt.Printf("Starting from block %d\n", startingBlockNumber+1)
 
 	// First, get the latest block number to know the range
-	waitClient := NewJSONRPCClient(aggregatorURL)
+	waitClient := NewJSONRPCClient(aggregatorURL, authHeader)
 	var latestBlockNumber int64
 	blockHeightResp, blockHeightErr := waitClient.call("get_block_height", nil)
 	if blockHeightErr == nil && blockHeightResp.Error == nil {
