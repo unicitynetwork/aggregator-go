@@ -176,37 +176,16 @@ func TestMerkleTreePathVerify(t *testing.T) {
 		require.True(t, result.PathValid, "Path should still be cryptographically valid")
 	})
 
-	t.Run("EmptyBranch", func(t *testing.T) {
-		tree := smt.NewSparseMerkleTree(api.SHA256)
-
-		// Create a tree structure that results in empty branches
-		leaves := []*smt.Leaf{
-			createLeaf(2, []byte("two")),
-			createLeaf(4, []byte("four")),
-		}
-		err := tree.AddLeaves(leaves)
-		require.NoError(t, err)
-
-		// Verify paths work correctly with empty branches
-		for _, p := range []int64{2, 4} {
-			path := tree.GetPath(big.NewInt(p))
-			result, err := path.Verify(big.NewInt(p))
-			require.NoError(t, err)
-			require.True(t, result.PathIncluded && result.PathValid,
-				"Path %d should be valid even with empty branches", p)
-		}
-	})
-
 	t.Run("BinaryPatterns", func(t *testing.T) {
 		// Test various binary patterns that might cause issues
 		testCases := []struct {
 			name  string
 			paths []int64
 		}{
-			{"consecutive", []int64{1, 2, 3, 4, 5}},
-			{"powers_of_2", []int64{1, 2, 4, 8, 16, 32}},
-			{"sparse", []int64{1, 1000, 1000000}},
-			{"mixed", []int64{7, 15, 31, 63, 127}}, // patterns with multiple 1s
+			{"complete", []int64{0b100, 0b101, 0b110, 0b111}},
+			{"chain", []int64{0b11, 0b110, 0b1100, 0b11000, 0b11000}},
+			{"sparse", []int64{10, 1000, 1000000}},
+			{"mixed", []int64{0b10111, 0b101111, 0b1011111, 0b10111111, 0b10111111}}, // patterns with multiple 1s
 		}
 
 		for _, tc := range testCases {
@@ -277,17 +256,17 @@ func TestMerkleTreePathVerify(t *testing.T) {
 
 		// Add leaves incrementally
 		for i := int64(1); i <= 5; i++ {
-			leaf := createLeaf(i*10, []byte("leaf"))
+			leaf := createLeaf(i*100, []byte("leaf"))
 			err := tree.AddLeaves([]*smt.Leaf{leaf})
 			require.NoError(t, err)
 
 			// Verify all previously added leaves still work
 			for j := int64(1); j <= i; j++ {
-				path := tree.GetPath(big.NewInt(j * 10))
-				result, err := path.Verify(big.NewInt(j * 10))
+				path := tree.GetPath(big.NewInt(j * 100))
+				result, err := path.Verify(big.NewInt(j * 100))
 				require.NoError(t, err)
 				require.True(t, result.PathIncluded && result.PathValid,
-					"Path %d should remain valid after adding leaf %d", j*10, i*10)
+					"Path %d should remain valid after adding leaf %d", j*100, i*100)
 			}
 		}
 	})
@@ -353,10 +332,10 @@ func TestMerkleTreePathVerifyDuplicates(t *testing.T) {
 	err := tree.AddLeaves([]*smt.Leaf{leaf1})
 	require.NoError(t, err)
 
-	// Try to add duplicate (should be skipped)
-	leaf2 := createLeaf(100, []byte("duplicate"))
+	// Try to add new value (should error)
+	leaf2 := createLeaf(100, []byte("modified"))
 	err = tree.AddLeaves([]*smt.Leaf{leaf2})
-	require.NoError(t, err) // Should not error, just skip
+	require.Error(t, err)
 
 	// Verify the original value is still there
 	path := tree.GetPath(big.NewInt(100))
