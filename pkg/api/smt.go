@@ -1,10 +1,10 @@
 package api
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"strconv"
 )
 
 type (
@@ -21,40 +21,6 @@ type (
 		Steps []MerkleTreeStep `json:"steps"`
 	}
 )
-
-// HashAlgorithm represents the hashing algorithm to use
-type HashAlgorithm int
-
-const (
-	SHA256 HashAlgorithm = iota
-)
-
-// DataHash represents a hash with algorithm imprint (matches TypeScript DataHash)
-type DataHash struct {
-	Algorithm HashAlgorithm
-	Data      []byte
-	Imprint   []byte
-}
-
-// NewDataHash creates a api.DataHash with algorithm imprint
-func NewDataHash(algorithm HashAlgorithm, data []byte) *DataHash {
-	imprint := make([]byte, len(data)+2)
-	// Set algorithm bytes (SHA256 = 0, so 0x0000)
-	imprint[0] = byte((int(algorithm) & 0xff00) >> 8)
-	imprint[1] = byte(int(algorithm) & 0xff)
-	copy(imprint[2:], data)
-
-	return &DataHash{
-		Algorithm: algorithm,
-		Data:      append([]byte(nil), data...),
-		Imprint:   imprint,
-	}
-}
-
-// ToHex returns hex string of imprint (for compatibility)
-func (h *DataHash) ToHex() string {
-	return fmt.Sprintf("%x", h.Imprint)
-}
 
 //  public async verify(requestId: bigint): Promise<PathVerificationResult> {
 //    let currentPath = 1n;
@@ -95,6 +61,19 @@ type PathVerificationResult struct {
 }
 
 func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, error) {
+	// Extract the algorithm identifier from the root hash imprint
+	if len(m.Root) < 4 {
+		return nil, fmt.Errorf("invalid root hash format")
+	}
+	algorithm, err := strconv.ParseUint(m.Root[:4], 16, 16)
+	if err != nil {
+		return nil, err
+	}
+	hasher := NewDataHasher(HashAlgorithm(algorithm))
+	if hasher == nil {
+		return nil, fmt.Errorf("unknown algorithm identifier %s in root hash", m.Root[:4])
+	}
+
 	currentPath := big.NewInt(1)
 	var currentHash []byte
 
@@ -131,7 +110,7 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 
 			// Always calculate hash for non-null branches
 			pathBytes := BigintEncode(path)
-			hash = Sha256Hash(append(pathBytes, bytes...))
+			hash = hasher.Reset().AddData(pathBytes).AddData(bytes).GetHash().RawHash
 
 			// Update currentPath for all non-null branches (even empty ones)
 			// TypeScript: const length = BigInt(step.path.toString(2).length - 1);
@@ -161,13 +140,13 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 		isRight := path.Bit(0) == 1
 
 		if isRight {
-			currentHash = Sha256Hash(append(siblingHash, hash...))
+			currentHash = hasher.Reset().AddData(siblingHash).AddData(hash).GetHash().RawHash
 		} else {
-			currentHash = Sha256Hash(append(hash, siblingHash...))
+			currentHash = hasher.Reset().AddData(hash).AddData(siblingHash).GetHash().RawHash
 		}
 	}
 
-	pathValid := currentHash != nil && m.Root == NewDataHash(SHA256, currentHash).ToHex()
+	pathValid := currentHash != nil && m.Root == NewDataHash(hasher.GetAlgorithm(), currentHash).ToHex()
 	pathIncluded := requestId.Cmp(currentPath) == 0
 
 	return &PathVerificationResult{
@@ -176,10 +155,4 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 		Result:       pathValid && pathIncluded,
 	}, nil
 
-}
-
-// sha256Hash performs SHA256 hashing
-func Sha256Hash(data []byte) []byte {
-	hash := sha256.Sum256(data)
-	return hash[:]
 }

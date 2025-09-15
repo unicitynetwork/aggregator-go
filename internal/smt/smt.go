@@ -18,7 +18,7 @@ var (
 type (
 	// SparseMerkleTree implements a sparse merkle tree compatible with Unicity SDK
 	SparseMerkleTree struct {
-		algorithm  api.HashAlgorithm
+		hasher     *api.DataHasher
 		root       *RootNode
 		isSnapshot bool              // true if this is a snapshot, false if original tree
 		original   *SparseMerkleTree // reference to original tree (nil for original)
@@ -33,7 +33,7 @@ type (
 // NewSparseMerkleTree creates a new sparse merkle tree
 func NewSparseMerkleTree(algorithm api.HashAlgorithm) *SparseMerkleTree {
 	return &SparseMerkleTree{
-		algorithm:  algorithm,
+		hasher:     api.NewDataHasher(algorithm),
 		root:       newRootNode(nil, nil),
 		isSnapshot: false,
 		original:   nil,
@@ -44,7 +44,7 @@ func NewSparseMerkleTree(algorithm api.HashAlgorithm) *SparseMerkleTree {
 // The snapshot shares nodes with the original tree (copy-on-write)
 func (smt *SparseMerkleTree) CreateSnapshot() *SmtSnapshot {
 	snapshot := &SparseMerkleTree{
-		algorithm:  smt.algorithm,
+		hasher:     api.NewDataHasher(smt.hasher.GetAlgorithm()),
 		root:       smt.root, // Share the root initially
 		isSnapshot: true,
 		original:   smt,
@@ -121,7 +121,7 @@ type RootNode struct {
 
 // Branch interface for tree nodes (matches TypeScript Branch interface)
 type branch interface {
-	calculateHash(algo api.HashAlgorithm) *api.DataHash
+	calculateHash(hasher *api.DataHasher) *api.DataHash
 	getPath() *big.Int
 	isLeaf() bool
 }
@@ -152,26 +152,23 @@ func newRootNode(left, right branch) *RootNode {
 }
 
 // CalculateHash calculates root hash (matches TypeScript logic)
-func (r *RootNode) calculateHash(algo api.HashAlgorithm) *api.DataHash {
+func (r *RootNode) calculateHash(hasher *api.DataHasher) *api.DataHash {
 	var leftHash, rightHash []byte
 
 	if r.Left != nil {
-		leftHash = r.Left.calculateHash(algo).Data
+		leftHash = r.Left.calculateHash(hasher).RawHash
 	} else {
 		leftHash = []byte{0} // TypeScript: new Uint8Array(1)
 	}
 
 	if r.Right != nil {
-		rightHash = r.Right.calculateHash(algo).Data
+		rightHash = r.Right.calculateHash(hasher).RawHash
 	} else {
 		rightHash = []byte{0} // TypeScript: new Uint8Array(1)
 	}
 
 	// Combine and hash: leftHash + rightHash
-	combined := append(leftHash, rightHash...)
-	hashData := api.Sha256Hash(combined)
-
-	return api.NewDataHash(algo, hashData)
+	return hasher.Reset().AddData(leftHash).AddData(rightHash).GetHash()
 }
 
 // NewLeafBranch creates a leaf branch
@@ -183,16 +180,13 @@ func newLeafBranch(path *big.Int, value []byte) *LeafBranch {
 	}
 }
 
-func (l *LeafBranch) calculateHash(algo api.HashAlgorithm) *api.DataHash {
+func (l *LeafBranch) calculateHash(hasher *api.DataHasher) *api.DataHash {
 	if l.hash != nil {
 		return l.hash
 	}
 
 	pathBytes := api.BigintEncode(l.Path)
-	data := append(pathBytes, l.Value...)
-	hashData := api.Sha256Hash(data)
-
-	l.hash = api.NewDataHash(algo, hashData)
+	l.hash = hasher.Reset().AddData(pathBytes).AddData(l.Value).GetHash()
 	return l.hash
 }
 
@@ -214,24 +208,21 @@ func newNodeBranch(path *big.Int, left, right branch) *NodeBranch {
 	}
 }
 
-func (n *NodeBranch) childrenHashData(algo api.HashAlgorithm) []byte {
-	return api.Sha256Hash(append(n.Left.calculateHash(algo).Data, n.Right.calculateHash(algo).Data...))
+func (n *NodeBranch) childrenHashData(hasher *api.DataHasher) *api.DataHash {
+	leftHash := n.Left.calculateHash(hasher)
+	rightHash := n.Right.calculateHash(hasher)
+	return hasher.Reset().AddData(leftHash.RawHash).AddData(rightHash.RawHash).GetHash()
 }
 
-func (n *NodeBranch) calculateHash(algo api.HashAlgorithm) *api.DataHash {
+func (n *NodeBranch) calculateHash(hasher *api.DataHasher) *api.DataHash {
 	if n.hash != nil {
 		return n.hash
 	}
 
 	// Recalculate if needed
-	childrenHashData := n.childrenHashData(algo)
-	n.childrenHash = api.NewDataHash(algo, childrenHashData)
-
+	n.childrenHash = n.childrenHashData(hasher)
 	pathBytes := api.BigintEncode(n.Path)
-	data := append(pathBytes, childrenHashData...)
-	hashData := api.Sha256Hash(data)
-	n.hash = api.NewDataHash(algo, hashData)
-
+	n.hash = hasher.Reset().AddData(pathBytes).AddData(n.childrenHash.RawHash).GetHash()
 	return n.hash
 }
 
@@ -319,12 +310,12 @@ func (smt *SparseMerkleTree) AddLeaves(leaves []*Leaf) error {
 
 // GetRootHash returns the root hash as imprint
 func (smt *SparseMerkleTree) GetRootHash() []byte {
-	return smt.root.calculateHash(smt.algorithm).Imprint
+	return smt.root.calculateHash(smt.hasher).GetImprint()
 }
 
 // GetRootHashHex returns the root hash as hex string
 func (smt *SparseMerkleTree) GetRootHashHex() string {
-	return smt.root.calculateHash(smt.algorithm).ToHex()
+	return smt.root.calculateHash(smt.hasher).ToHex()
 }
 
 // GetLeaf retrieves a leaf by path (for compatibility)
@@ -460,7 +451,7 @@ func (smt *SparseMerkleTree) buildTree(branch branch, remainingPath *big.Int, va
 }
 
 func (smt *SparseMerkleTree) GetPath(path *big.Int) *api.MerkleTreePath {
-	rootHash := smt.root.calculateHash(smt.algorithm)
+	rootHash := smt.root.calculateHash(smt.hasher)
 	steps := smt.generatePath(path, smt.root.Left, smt.root.Right)
 
 	return &api.MerkleTreePath{
@@ -490,8 +481,8 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right br
 			Branch: nil, // nil indicates no branch exists
 		}
 		if siblingBranch != nil {
-			siblingHash := siblingBranch.calculateHash(smt.algorithm)
-			siblingHex := fmt.Sprintf("%x", siblingHash.Data) // Use only hash data without algorithm prefix
+			siblingHash := siblingBranch.calculateHash(smt.hasher)
+			siblingHex := fmt.Sprintf("%x", siblingHash.RawHash) // Use only hash data without algorithm prefix
 			step.Sibling = []string{siblingHex}
 		}
 		// If siblingBranch is nil, leave Sibling as nil (omitempty will exclude it from JSON)
@@ -551,7 +542,7 @@ func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, sibling
 			step.Branch = []string{hex.EncodeToString(leafBranch.Value)}
 		} else {
 			// Otherwise use branch children hash data
-			step.Branch = []string{hex.EncodeToString(branch.(*NodeBranch).childrenHashData(smt.algorithm))}
+			step.Branch = []string{hex.EncodeToString(branch.(*NodeBranch).childrenHashData(smt.hasher).RawHash)}
 		}
 	} else {
 		// No branch, but we need to distinguish between:
@@ -563,8 +554,8 @@ func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, sibling
 
 	// Add sibling hash if sibling exists
 	if siblingBranch != nil {
-		siblingHash := siblingBranch.calculateHash(smt.algorithm)
-		siblingHex := fmt.Sprintf("%x", siblingHash.Data) // Use only hash data without algorithm prefix
+		siblingHash := siblingBranch.calculateHash(smt.hasher)
+		siblingHex := fmt.Sprintf("%x", siblingHash.RawHash) // Use only hash data without algorithm prefix
 		step.Sibling = []string{siblingHex}
 	}
 	// If siblingBranch is nil, leave Sibling as nil (omitempty will exclude it from JSON)
