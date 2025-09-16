@@ -71,8 +71,8 @@ type GetBlockHeightResponse struct {
 // Test configuration
 const (
 	defaultAggregatorURL = "http://localhost:3000"
-	testDuration         = 10 * time.Second
-	workerCount          = 20   // Number of concurrent workers
+	testDuration         = 30 * time.Second
+	workerCount          = 30   // Number of concurrent workers
 	requestsPerSec       = 1000 // Target requests per second
 )
 
@@ -143,8 +143,19 @@ type JSONRPCClient struct {
 }
 
 func NewJSONRPCClient(url string, authHeader string) *JSONRPCClient {
+	// Configure transport with higher connection limits
+	transport := &http.Transport{
+		MaxIdleConns:        1000,
+		MaxIdleConnsPerHost: 1000,
+		MaxConnsPerHost:     1000,
+		IdleConnTimeout:     90 * time.Second,
+	}
+
 	return &JSONRPCClient{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: transport,
+		},
 		url:        url,
 		authHeader: authHeader,
 	}
@@ -263,52 +274,54 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Generate and submit commitment
-			req := generateCommitmentRequest()
+			// Generate and submit commitment asynchronously
+			go func() {
+				req := generateCommitmentRequest()
 
-			atomic.AddInt64(&metrics.totalRequests, 1)
+				atomic.AddInt64(&metrics.totalRequests, 1)
 
-			resp, err := client.call("submit_commitment", req)
-			if err != nil {
-				atomic.AddInt64(&metrics.failedRequests, 1)
-				// Don't print network errors - too noisy
-				continue
-			}
+				resp, err := client.call("submit_commitment", req)
+				if err != nil {
+					atomic.AddInt64(&metrics.failedRequests, 1)
+					// Don't print network errors - too noisy
+					return
+				}
 
-			if resp.Error != nil {
-				atomic.AddInt64(&metrics.failedRequests, 1)
-				if resp.Error.Message == "REQUEST_ID_EXISTS" {
-					atomic.AddInt64(&metrics.requestIdExistsErr, 1)
-					// Track this ID - it exists so it will be in blocks!
+				if resp.Error != nil {
+					atomic.AddInt64(&metrics.failedRequests, 1)
+					if resp.Error.Message == "REQUEST_ID_EXISTS" {
+						atomic.AddInt64(&metrics.requestIdExistsErr, 1)
+						// Track this ID - it exists so it will be in blocks!
+						metrics.submittedRequestIDs.Store(string(req.RequestID), true)
+					}
+					return
+				}
+
+				// Parse response
+				var submitResp api.SubmitCommitmentResponse
+				respBytes, _ := json.Marshal(resp.Result)
+				if err := json.Unmarshal(respBytes, &submitResp); err != nil {
+					atomic.AddInt64(&metrics.failedRequests, 1)
+					return
+				}
+
+				if submitResp.Status == "SUCCESS" {
+					atomic.AddInt64(&metrics.successfulRequests, 1)
+					// Track this request ID as submitted by us
 					metrics.submittedRequestIDs.Store(string(req.RequestID), true)
+				} else if submitResp.Status == "REQUEST_ID_EXISTS" {
+					atomic.AddInt64(&metrics.requestIdExistsErr, 1)
+					atomic.AddInt64(&metrics.successfulRequests, 1) // Count as successful - it will be in blocks!
+					// Also track this ID - it exists so it will be in blocks!
+					metrics.submittedRequestIDs.Store(string(req.RequestID), true)
+				} else {
+					atomic.AddInt64(&metrics.failedRequests, 1)
+					// Log unexpected status
+					if submitResp.Status != "" {
+						fmt.Printf("Unexpected status '%s' for request %s\n", submitResp.Status, req.RequestID)
+					}
 				}
-				continue
-			}
-
-			// Parse response
-			var submitResp api.SubmitCommitmentResponse
-			respBytes, _ := json.Marshal(resp.Result)
-			if err := json.Unmarshal(respBytes, &submitResp); err != nil {
-				atomic.AddInt64(&metrics.failedRequests, 1)
-				continue
-			}
-
-			if submitResp.Status == "SUCCESS" {
-				atomic.AddInt64(&metrics.successfulRequests, 1)
-				// Track this request ID as submitted by us
-				metrics.submittedRequestIDs.Store(string(req.RequestID), true)
-			} else if submitResp.Status == "REQUEST_ID_EXISTS" {
-				atomic.AddInt64(&metrics.requestIdExistsErr, 1)
-				atomic.AddInt64(&metrics.successfulRequests, 1) // Count as successful - it will be in blocks!
-				// Also track this ID - it exists so it will be in blocks!
-				metrics.submittedRequestIDs.Store(string(req.RequestID), true)
-			} else {
-				atomic.AddInt64(&metrics.failedRequests, 1)
-				// Log unexpected status
-				if submitResp.Status != "" {
-					fmt.Printf("Unexpected status '%s' for request %s\n", submitResp.Status, req.RequestID)
-				}
-			}
+			}()
 		}
 	}
 }
