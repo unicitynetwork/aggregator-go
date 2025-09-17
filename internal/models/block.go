@@ -139,16 +139,14 @@ func NewBlockRecords(blockNumber *api.BigInt, requestIDs []api.RequestID) *Block
 type SmtNode struct {
 	Key       api.HexBytes   `json:"key" bson:"key"`
 	Value     api.HexBytes   `json:"value" bson:"value"`
-	Hash      api.HexBytes   `json:"hash" bson:"hash"`
 	CreatedAt *api.Timestamp `json:"createdAt" bson:"createdAt"`
 }
 
 // NewSmtNode creates a new SMT node
-func NewSmtNode(key, value, hash api.HexBytes) *SmtNode {
+func NewSmtNode(key, value api.HexBytes) *SmtNode {
 	return &SmtNode{
 		Key:       key,
 		Value:     value,
-		Hash:      hash,
 		CreatedAt: api.Now(),
 	}
 }

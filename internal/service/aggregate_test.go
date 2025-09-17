@@ -13,7 +13,7 @@ func TestAggregateRequestCount(t *testing.T) {
 	t.Run("SubmitCommitment with different aggregate counts", func(t *testing.T) {
 		// This test verifies that AggregateRequestCount is properly stored
 		// The actual integration test would require setting up storage
-		
+
 		// Test creating commitments with different aggregate counts
 		commitment1 := models.NewCommitment(
 			"0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
@@ -35,7 +35,7 @@ func TestAggregateRequestCount(t *testing.T) {
 func TestGetBlockTotalCommitments(t *testing.T) {
 	t.Run("GetBlockResponse includes correct TotalCommitments", func(t *testing.T) {
 		// Test the calculation logic for TotalCommitments
-		
+
 		// Create test aggregator records with different counts
 		records := []*models.AggregatorRecord{
 			{AggregateRequestCount: 1},
@@ -44,7 +44,7 @@ func TestGetBlockTotalCommitments(t *testing.T) {
 			{AggregateRequestCount: 100},
 			{AggregateRequestCount: 50},
 		}
-		
+
 		// Calculate expected total
 		var expectedTotal uint64
 		for _, record := range records {
@@ -61,11 +61,11 @@ func TestGetBlockTotalCommitments(t *testing.T) {
 			models.Authenticator{},
 			500,
 		)
-		
+
 		blockNumber := api.NewBigInt(big.NewInt(1))
 		leafIndex := api.NewBigInt(big.NewInt(0))
-		
-		record := models.NewAggregatorRecord(commitment, blockNumber, leafIndex)
+
+		record := models.NewAggregatorRecord(commitment, blockNumber, leafIndex, nil)
 		require.Equal(t, uint64(500), record.AggregateRequestCount)
 	})
 
@@ -81,7 +81,7 @@ func TestGetBlockTotalCommitments(t *testing.T) {
 			CreatedAt:             api.Now(),
 			FinalizedAt:           api.Now(),
 		}
-		
+
 		apiRecord := modelToAPIAggregatorRecord(modelRecord)
 		require.Equal(t, uint64(1000), apiRecord.AggregateRequestCount)
 	})

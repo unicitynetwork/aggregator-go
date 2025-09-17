@@ -352,11 +352,9 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 
 	// Process commitments in batch
 	var rootHash string
-	var records []*models.AggregatorRecord
-
 	if len(rm.currentRound.Commitments) > 0 {
 		// Process batch and add to SMT, but DO NOT mark as processed yet
-		rootHash, records, err = rm.processBatch(ctx, rm.currentRound.Commitments, roundNumber)
+		rootHash, err = rm.processBatch(ctx, rm.currentRound.Commitments, roundNumber)
 		if err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to process batch", "error", err.Error())
 			return fmt.Errorf("failed to process batch: %w", err)
@@ -364,7 +362,6 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 
 		// Store pending data in the round for later finalization
 		rm.roundMutex.Lock()
-		rm.currentRound.PendingRecords = records
 		rm.currentRound.PendingRootHash = rootHash
 		rm.roundMutex.Unlock()
 
@@ -375,16 +372,14 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	} else {
 		// Empty round - use previous root hash or empty hash
 		rootHash = rm.smt.GetRootHash()
-		records = make([]*models.AggregatorRecord, 0)
 	}
 
 	// Create and propose block
 	rm.logger.WithContext(ctx).Info("Proposing block",
 		"roundNumber", roundNumber.String(),
-		"rootHash", rootHash,
-		"recordCount", len(records))
+		"rootHash", rootHash)
 
-	if err := rm.proposeBlock(ctx, roundNumber, rootHash, records); err != nil {
+	if err := rm.proposeBlock(ctx, roundNumber, rootHash); err != nil {
 		rm.logger.WithContext(ctx).Error("Failed to propose block",
 			"roundNumber", roundNumber.String(),
 			"error", err.Error())
@@ -504,11 +499,6 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) error {
 		rm.logger.Info("No latest block found, skipping SMT verification")
 	} else {
 		expectedRootHash := latestBlock.RootHash.String()
-		rm.logger.Info("SMT verification starting",
-			"restoredRootHash", finalRootHash,
-			"expectedRootHash", expectedRootHash,
-			"latestBlockNumber", latestBlock.Index.String())
-
 		if finalRootHash != expectedRootHash {
 			rm.logger.Error("SMT restoration verification failed - root hash mismatch",
 				"restoredRootHash", finalRootHash,

@@ -56,12 +56,13 @@ type AggregatorRecord struct {
 	AggregateRequestCount uint64              `json:"aggregateRequestCount" bson:"aggregateRequestCount"`
 	BlockNumber           *api.BigInt         `json:"blockNumber" bson:"blockNumber"`
 	LeafIndex             *api.BigInt         `json:"leafIndex" bson:"leafIndex"`
+	MerkleTreePath        *api.MerkleTreePath `json:"merkleTreePath" bson:"merkleTreePath"`
 	CreatedAt             *api.Timestamp      `json:"createdAt" bson:"createdAt"`
 	FinalizedAt           *api.Timestamp      `json:"finalizedAt" bson:"finalizedAt"`
 }
 
 // NewAggregatorRecord creates a new aggregator record from a commitment
-func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *api.BigInt) *AggregatorRecord {
+func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *api.BigInt, merkleTreePath *api.MerkleTreePath) *AggregatorRecord {
 	return &AggregatorRecord{
 		RequestID:             commitment.RequestID,
 		TransactionHash:       commitment.TransactionHash,
@@ -69,6 +70,7 @@ func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *api.Big
 		AggregateRequestCount: commitment.AggregateRequestCount,
 		BlockNumber:           blockNumber,
 		LeafIndex:             leafIndex,
+		MerkleTreePath:        merkleTreePath,
 		CreatedAt:             commitment.CreatedAt,
 		FinalizedAt:           api.Now(),
 	}
@@ -76,14 +78,15 @@ func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *api.Big
 
 // AggregatorRecordBSON represents the BSON version of AggregatorRecord for MongoDB storage
 type AggregatorRecordBSON struct {
-	RequestID             string            `bson:"requestId"`
-	TransactionHash       string            `bson:"transactionHash"`
-	Authenticator         AuthenticatorBSON `bson:"authenticator"`
-	AggregateRequestCount uint64            `bson:"aggregateRequestCount"`
-	BlockNumber           string            `bson:"blockNumber"`
-	LeafIndex             string            `bson:"leafIndex"`
-	CreatedAt             string            `bson:"createdAt"`
-	FinalizedAt           string            `bson:"finalizedAt"`
+	RequestID             string              `bson:"requestId"`
+	TransactionHash       string              `bson:"transactionHash"`
+	Authenticator         AuthenticatorBSON   `bson:"authenticator"`
+	AggregateRequestCount uint64              `bson:"aggregateRequestCount"`
+	BlockNumber           string              `bson:"blockNumber"`
+	LeafIndex             string              `bson:"leafIndex"`
+	MerkleTreePath        *api.MerkleTreePath `bson:"merkleTreePath,omitempty"`
+	CreatedAt             string              `bson:"createdAt"`
+	FinalizedAt           string              `bson:"finalizedAt"`
 }
 
 // AuthenticatorBSON represents the BSON version of Authenticator
@@ -108,6 +111,7 @@ func (ar *AggregatorRecord) ToBSON() *AggregatorRecordBSON {
 		AggregateRequestCount: ar.AggregateRequestCount,
 		BlockNumber:           ar.BlockNumber.String(),
 		LeafIndex:             ar.LeafIndex.String(),
+		MerkleTreePath:        ar.MerkleTreePath,
 		CreatedAt:             strconv.FormatInt(ar.CreatedAt.UnixMilli(), 10),
 		FinalizedAt:           strconv.FormatInt(ar.FinalizedAt.UnixMilli(), 10),
 	}
@@ -169,8 +173,8 @@ func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
 	}
 
 	return &AggregatorRecord{
-		RequestID:             api.RequestID(arb.RequestID),
-		TransactionHash:       api.TransactionHash(arb.TransactionHash),
+		RequestID:       api.RequestID(arb.RequestID),
+		TransactionHash: api.TransactionHash(arb.TransactionHash),
 		Authenticator: Authenticator{
 			Algorithm: arb.Authenticator.Algorithm,
 			PublicKey: publicKey,
@@ -180,6 +184,7 @@ func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
 		AggregateRequestCount: aggregateRequestCount,
 		BlockNumber:           blockNumber,
 		LeafIndex:             leafIndex,
+		MerkleTreePath:        arb.MerkleTreePath,
 		CreatedAt:             createdAt,
 		FinalizedAt:           finalizedAt,
 	}, nil

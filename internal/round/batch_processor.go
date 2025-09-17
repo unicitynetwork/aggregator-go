@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math/big"
+	"sync"
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -13,26 +14,25 @@ import (
 )
 
 // processBatch processes a batch of commitments and adds them to the SMT
-func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.Commitment, blockNumber *api.BigInt) (string, []*models.AggregatorRecord, error) {
+func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.Commitment, blockNumber *api.BigInt) (string, error) {
 	rm.logger.WithContext(ctx).Info("Processing commitment batch",
 		"commitmentCount", len(commitments),
 		"blockNumber", blockNumber.String())
 
 	// Convert commitments to SMT leaves
 	leaves := make([]*smt.Leaf, len(commitments))
-	records := make([]*models.AggregatorRecord, len(commitments))
 
 	for i, commitment := range commitments {
 		// Generate leaf path from requestID
 		path, err := commitment.RequestID.GetPath()
 		if err != nil {
-			return "", nil, fmt.Errorf("failed to get path for requestID %s: %w", commitment.RequestID, err)
+			return "", fmt.Errorf("failed to get path for requestID %s: %w", commitment.RequestID, err)
 		}
 
 		// Create leaf value (hash of commitment data)
 		leafValue, err := rm.createLeafValue(commitment)
 		if err != nil {
-			return "", nil, fmt.Errorf("failed to create leaf value for commitment %s: %w", commitment.RequestID, err)
+			return "", fmt.Errorf("failed to create leaf value for commitment %s: %w", commitment.RequestID, err)
 		}
 
 		leaves[i] = &smt.Leaf{
@@ -40,22 +40,10 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 			Value: leafValue,
 		}
 
-		// Create aggregator record with the current block number
-		leafIndex := api.NewBigInt(big.NewInt(int64(i)))
-		records[i] = models.NewAggregatorRecord(commitment, blockNumber, leafIndex)
-
 		rm.logger.WithContext(ctx).Debug("Created SMT leaf for commitment",
 			"requestId", commitment.RequestID.String(),
 			"path", path,
 			"leafIndex", i)
-	}
-
-	// Store aggregator records BEFORE adding leaves to SMT snapshot
-	rm.logger.WithContext(ctx).Debug("Storing aggregator records before SMT snapshot update",
-		"recordCount", len(records))
-
-	if err := rm.storeAggregatorRecords(ctx, records); err != nil {
-		return "", nil, fmt.Errorf("failed to store aggregator records: %w", err)
 	}
 
 	// Get the current round's snapshot
@@ -64,29 +52,43 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 	rm.roundMutex.RUnlock()
 
 	if snapshot == nil {
-		return "", nil, fmt.Errorf("no snapshot available for current round")
+		return "", fmt.Errorf("no snapshot available for current round")
 	}
 
-	// Persist SMT nodes to storage before adding to snapshot
-	if err := rm.persistSmtNodes(ctx, leaves); err != nil {
-		return "", nil, fmt.Errorf("failed to persist SMT nodes: %w", err)
-	}
-
-	// Add all leaves to the round's SMT snapshot (not the main SMT yet)
 	rootHash, err := snapshot.AddLeaves(leaves)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to add batch to SMT snapshot: %w", err)
+		return "", fmt.Errorf("failed to add batch to SMT snapshot: %w", err)
+	}
+
+	var wg sync.WaitGroup
+	var smtPersistErr, aggregatorRecordErr error
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		smtPersistErr = rm.persistSmtNodes(ctx, leaves)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		aggregatorRecordErr = rm.persistAggregatorRecords(ctx, commitments, blockNumber)
+	}()
+
+	wg.Wait()
+
+	if smtPersistErr != nil {
+		return "", fmt.Errorf("failed to persist SMT nodes: %w", smtPersistErr)
+	}
+	if aggregatorRecordErr != nil {
+		return "", fmt.Errorf("failed to store aggregator records: %w", aggregatorRecordErr)
 	}
 
 	rm.logger.WithContext(ctx).Info("Successfully processed commitment batch to snapshot",
 		"rootHash", rootHash,
 		"commitmentCount", len(commitments))
 
-	// Records have been stored during processing
-	rm.logger.WithContext(ctx).Debug("Aggregator records stored successfully during batch processing",
-		"recordCount", len(records))
-
-	return rootHash, records, nil
+	return rootHash, nil
 }
 
 // createLeafValue creates the value to store in the SMT leaf for a commitment
@@ -140,11 +142,10 @@ func (rm *RoundManager) createLeafValue(commitment *models.Commitment) ([]byte, 
 }
 
 // ProposeBlock creates and proposes a new block with the given data
-func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigInt, rootHash string, records []*models.AggregatorRecord) error {
+func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigInt, rootHash string) error {
 	rm.logger.WithContext(ctx).Info("proposeBlock called",
 		"blockNumber", blockNumber.String(),
-		"rootHash", rootHash,
-		"recordCount", len(records))
+		"rootHash", rootHash)
 
 	rm.roundMutex.Lock()
 	if rm.currentRound != nil {
@@ -157,8 +158,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 
 	rm.logger.WithContext(ctx).Info("Creating block proposal",
 		"blockNumber", blockNumber.String(),
-		"rootHash", rootHash,
-		"recordCount", len(records))
+		"rootHash", rootHash)
 
 	// Get parent block hash
 	var parentHash api.HexBytes
@@ -210,7 +210,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 	return nil
 }
 
-// finalizeBlock creates and persists a new block with the given data
+// FinalizeBlock creates and persists a new block with the given data
 func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) error {
 	rm.logger.WithContext(ctx).Info("FinalizeBlock called",
 		"blockNumber", block.Index.String(),
@@ -316,39 +316,6 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	return nil
 }
 
-func (rm *RoundManager) storeAggregatorRecords(ctx context.Context, records []*models.AggregatorRecord) error {
-	for _, record := range records {
-		// Check if record already exists to prevent duplicate key errors
-		existing, err := rm.storage.AggregatorRecordStorage().GetByRequestID(ctx, record.RequestID)
-		if err != nil {
-			return fmt.Errorf("failed to check existing aggregator record for %s: %w", record.RequestID, err)
-		}
-
-		if existing != nil {
-			rm.logger.WithContext(ctx).Debug("Aggregator record already exists, skipping",
-				"requestId", record.RequestID.String())
-			continue
-		}
-
-		if err := rm.storage.AggregatorRecordStorage().Store(ctx, record); err != nil {
-			return fmt.Errorf("failed to store aggregator record for %s: %w", record.RequestID, err)
-		}
-		existing, err = rm.storage.AggregatorRecordStorage().GetByRequestID(ctx, record.RequestID)
-		if err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to check existing aggregator record",
-				"requestId", record.RequestID.String(),
-				"error", err.Error())
-		}
-		if existing == nil {
-			rm.logger.WithContext(ctx).Error("Stored aggregator record not found after storage",
-				"requestId", record.RequestID.String())
-		}
-	}
-	rm.logger.WithContext(ctx).Info("Successfully stored aggregator records",
-		"recordCount", len(records))
-	return nil
-}
-
 // persistSmtNodes persists SMT leaves to storage for permanent retention
 func (rm *RoundManager) persistSmtNodes(ctx context.Context, leaves []*smt.Leaf) error {
 	if len(leaves) == 0 {
@@ -365,11 +332,7 @@ func (rm *RoundManager) persistSmtNodes(ctx context.Context, leaves []*smt.Leaf)
 		// Create the value
 		value := api.NewHexBytes(leaf.Value)
 
-		// Calculate hash of the leaf value for indexing and verification
-		hash := sha256.Sum256(leaf.Value)
-		leafHash := api.NewHexBytes(hash[:])
-
-		smtNodes[i] = models.NewSmtNode(key, value, leafHash)
+		smtNodes[i] = models.NewSmtNode(key, value)
 	}
 
 	// Store batch to database
@@ -377,5 +340,50 @@ func (rm *RoundManager) persistSmtNodes(ctx context.Context, leaves []*smt.Leaf)
 		return fmt.Errorf("failed to store SMT nodes batch: %w", err)
 	}
 
+	return nil
+}
+
+// persistAggregatorRecords generates aggregator records and stores them to database
+func (rm *RoundManager) persistAggregatorRecords(ctx context.Context, commitments []*models.Commitment, blockIndex *api.BigInt) error {
+	if len(commitments) == 0 {
+		return nil
+	}
+
+	records := make([]*models.AggregatorRecord, len(commitments))
+	var wg sync.WaitGroup
+
+	for i, commitment := range commitments {
+		wg.Add(1)
+		go func(index int, c *models.Commitment) {
+			defer wg.Done()
+
+			path, err := c.RequestID.GetPath()
+			if err != nil {
+				rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
+					"requestID", c.RequestID.String(),
+					"error", err.Error())
+				return
+			}
+
+			merkleTreePath := rm.smt.GetPath(path)
+			if merkleTreePath == nil {
+				rm.logger.WithContext(ctx).Error("Failed to get inclusion proof for commitment",
+					"requestID", c.RequestID.String())
+				return
+			}
+
+			leafIndex := api.NewBigInt(big.NewInt(int64(index)))
+			records[index] = models.NewAggregatorRecord(c, blockIndex, leafIndex, merkleTreePath)
+		}(i, commitment)
+	}
+
+	wg.Wait()
+
+	if err := rm.storage.AggregatorRecordStorage().StoreBatch(ctx, records); err != nil {
+		return fmt.Errorf("failed to store aggregator records batch: %w", err)
+	}
+
+	rm.logger.WithContext(ctx).Debug("Successfully stored aggregator records batch",
+		"recordCount", len(records))
 	return nil
 }
