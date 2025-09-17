@@ -72,7 +72,7 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		aggregatorRecordErr = rm.persistAggregatorRecords(ctx, commitments, blockNumber)
+		aggregatorRecordErr = rm.persistAggregatorRecords(ctx, commitments, blockNumber, snapshot)
 	}()
 
 	wg.Wait()
@@ -344,7 +344,7 @@ func (rm *RoundManager) persistSmtNodes(ctx context.Context, leaves []*smt.Leaf)
 }
 
 // persistAggregatorRecords generates aggregator records and stores them to database
-func (rm *RoundManager) persistAggregatorRecords(ctx context.Context, commitments []*models.Commitment, blockIndex *api.BigInt) error {
+func (rm *RoundManager) persistAggregatorRecords(ctx context.Context, commitments []*models.Commitment, blockIndex *api.BigInt, snapshot *ThreadSafeSmtSnapshot) error {
 	if len(commitments) == 0 {
 		return nil
 	}
@@ -365,7 +365,7 @@ func (rm *RoundManager) persistAggregatorRecords(ctx context.Context, commitment
 				return
 			}
 
-			merkleTreePath := rm.smt.GetPath(path)
+			merkleTreePath := snapshot.GetPath(path)
 			if merkleTreePath == nil {
 				rm.logger.WithContext(ctx).Error("Failed to get inclusion proof for commitment",
 					"requestID", c.RequestID.String())

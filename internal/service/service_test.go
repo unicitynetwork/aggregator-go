@@ -92,6 +92,9 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	// Set environment variables for the aggregator
 	os.Setenv("MONGODB_URI", mongoURI)
 	os.Setenv("MONGODB_DATABASE", "aggregator_test")
+	os.Setenv("MONGODB_CONNECT_TIMEOUT", "30s")
+	os.Setenv("MONGODB_SERVER_SELECTION_TIMEOUT", "30s")
+	os.Setenv("MONGODB_SOCKET_TIMEOUT", "60s")
 	os.Setenv("PORT", strconv.Itoa(port))
 	os.Setenv("HOST", "127.0.0.1")
 	os.Setenv("LOG_LEVEL", "debug")

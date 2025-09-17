@@ -249,10 +249,9 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	}
 
 	blockNumber := api.NewBigInt(big.NewInt(1))
-	rootHash, records, err := rm.processBatch(ctx, testCommitments, blockNumber)
+	rootHash, err := rm.processBatch(ctx, testCommitments, blockNumber)
 	require.NoError(t, err, "processBatch should succeed")
 	require.NotEmpty(t, rootHash, "Root hash should not be empty")
-	require.Equal(t, len(testCommitments), len(records), "Should create record for each commitment")
 
 	// Verify SMT nodes were persisted
 	count, err := storage.SmtStorage().Count(ctx)
