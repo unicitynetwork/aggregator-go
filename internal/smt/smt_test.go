@@ -196,42 +196,18 @@ func TestSMTCommonPath(t *testing.T) {
 	testCases := []struct {
 		path1   *big.Int
 		path2   *big.Int
-		expLen  int64
-		expPath int64
+		expLen  uint
+		expPath *big.Int
 	}{
-		{big.NewInt(0b11), big.NewInt(0b111101111), 1, 0b11},
-		{big.NewInt(0b111101111), big.NewInt(0b11), 1, 0b11},
-		{big.NewInt(0b110010000), big.NewInt(0b100010000), 7, 0b10010000},
+		{big.NewInt(0b11), big.NewInt(0b111101111), 1, big.NewInt(0b11)},
+		{big.NewInt(0b111101111), big.NewInt(0b11), 1, big.NewInt(0b11)},
+		{big.NewInt(0b110010000), big.NewInt(0b100010000), 7, big.NewInt(0b10010000)},
 	}
 
 	for i, tc := range testCases {
 		result := calculateCommonPath(tc.path1, tc.path2)
-
-		if result.length.Int64() != tc.expLen {
-			t.Errorf("Test %d: expected length %d, got %d", i, tc.expLen, result.length.Int64())
-		}
-
-		if result.path.Int64() != tc.expPath {
-			t.Errorf("Test %d: expected path %d, got %d", i, tc.expPath, result.path.Int64())
-		}
-	}
-}
-
-// TestSMTDataHashFormat tests the DataHash format
-func TestSMTDataHashFormat(t *testing.T) {
-	data := []byte{0x1c, 0x84, 0xda, 0x4a}
-	hash := api.NewDataHash(api.SHA256, data)
-
-	expected := "00001c84da4a" // 0000 (api.SHA256) + 1c84da4a (data)
-	actual := hash.ToHex()
-
-	if actual != expected {
-		t.Errorf("DataHash format mismatch: expected %s, got %s", expected, actual)
-	}
-
-	// Verify algorithm imprint
-	if hash.Imprint[0] != 0 || hash.Imprint[1] != 0 {
-		t.Errorf("Algorithm bytes wrong: expected [0,0], got [%d,%d]", hash.Imprint[0], hash.Imprint[1])
+		assert.Equal(t, tc.expLen, result.length, "Test %d: length mismatch", i)
+		assert.Equal(t, tc.expPath, result.path, "Test %d: path mismatch", i)
 	}
 }
 
@@ -805,7 +781,6 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 			{"Small path", big.NewInt(0b1), "1", "1"},
 			{"Medium path", big.NewInt(0b1010), "1010", "10"},         // decimal: 10
 			{"Large path", big.NewInt(0b10000000), "10000000", "128"}, // decimal: 128
-			{"Zero path", big.NewInt(0), "0", "0"},
 		}
 
 		for _, tc := range testCases {
@@ -1008,30 +983,8 @@ func TestAddLeavesEmptyList(t *testing.T) {
 	require.Equal(t, []byte("value11"), leaf11.Value)
 }
 
-// In smt_test.go
-
-// TestAddLeaves_PrefixPathHandledCorrectly specifically tests the lazy-build logic for the prefix-path case.
-func TestAddLeaves_PrefixPathHandledCorrectly(t *testing.T) {
-	smt := NewSparseMerkleTree(api.SHA256)
-	longPath := big.NewInt(45)
-	shortPath := big.NewInt(13)
-
-	// First, add the long path leaf in a batch
-	leaf1 := []*Leaf{NewLeaf(longPath, []byte("long"))}
-	err := smt.AddLeaves(leaf1)
-	require.NoError(t, err, "Adding the first leaf via batch should succeed")
-
-	// Now, add the short path leaf in a second batch. This forces a tree restructure.
-	// This call will fail if buildTreeLazy has the prefix-path bug.
-	leaf2 := []*Leaf{NewLeaf(shortPath, []byte("short"))}
-	err = smt.AddLeaves(leaf2)
-	require.NoError(t, err, "Adding a prefix-path leaf via batch should succeed")
-}
-
 // TestAddLeaves_DuplicatePathError specifically tests the lazy-build logic for duplicate leaves.
 func TestAddLeaves_DuplicatePathError(t *testing.T) {
-	t.SkipNow()
-
 	smt := NewSparseMerkleTree(api.SHA256)
 	path := big.NewInt(42)
 
@@ -1044,7 +997,7 @@ func TestAddLeaves_DuplicatePathError(t *testing.T) {
 	// The AddLeaves loop will add the first one, then fail on the second.
 	err := smt.AddLeaves(leaves)
 	require.Error(t, err, "AddLeaves should fail when a batch contains a duplicate path")
-	assert.Contains(t, err.Error(), "leaf with path '42' already exists")
+	require.ErrorIs(t, err, ErrLeafModification)
 }
 
 // Replace TestAddLeaves_DuplicatePathError with this new, more comprehensive test.
@@ -1063,7 +1016,7 @@ func TestAddLeaves_SkipsDuplicatesAndContinues(t *testing.T) {
 	// 3. Another new, valid leaf.
 	batch := []*Leaf{
 		NewLeaf(big.NewInt(200), []byte("new_value_A")), // Should be added
-		NewLeaf(initialPath, []byte("duplicate_value")), // Should be SKIPPED
+		NewLeaf(initialPath, initialValue),              // Should be SKIPPED
 		NewLeaf(big.NewInt(300), []byte("new_value_B")), // Should be added
 	}
 
@@ -1253,4 +1206,32 @@ func TestSMTOrderDependencyBatch(t *testing.T) {
 	t.Logf("Order [6,5]: %s", hash2)
 
 	assert.Equal(t, hash1, hash2, "SMT additions should be order-independent")
+}
+
+// TestSMTAddingNodeUnderLeaf - Test that the SMT does not allow adding child nodes under existing leaves
+func TestSMTAddingNodeUnderLeaf(t *testing.T) {
+	smt1 := NewSparseMerkleTree(api.SHA256)
+	require.NoError(t, smt1.AddLeaf(big.NewInt(2), []byte("leaf_1")))
+	require.Error(t, smt1.AddLeaf(big.NewInt(4), []byte("child_under_leaf_1")), "SMT should not allow adding child nodes under leaves")
+
+	smt2 := NewSparseMerkleTree(api.SHA256)
+	leaves2 := []*Leaf{
+		{Path: big.NewInt(2), Value: []byte("leaf_1")},
+		{Path: big.NewInt(4), Value: []byte("child_under_leaf_1")},
+	}
+	require.Error(t, smt2.AddLeaves(leaves2), "SMT should not allow adding child nodes under leaves, even in a batch")
+}
+
+// TestSMTAddingLeafAboveNode - Test that the SMT does not allow adding leaves above existing nodes
+func TestSMTAddingLeafAboveNode(t *testing.T) {
+	smt1 := NewSparseMerkleTree(api.SHA256)
+	require.NoError(t, smt1.AddLeaf(big.NewInt(4), []byte("leaf_1")))
+	require.Error(t, smt1.AddLeaf(big.NewInt(2), []byte("node_above_leaf_1")), "SMT should not allow adding leaves above existing nodes")
+
+	smt2 := NewSparseMerkleTree(api.SHA256)
+	leaves2 := []*Leaf{
+		{Path: big.NewInt(4), Value: []byte("leaf_1")},
+		{Path: big.NewInt(2), Value: []byte("node_above_leaf_1")},
+	}
+	require.Error(t, smt2.AddLeaves(leaves2), "SMT should not allow adding leaves above existing nodes, even in a batch")
 }

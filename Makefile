@@ -39,6 +39,18 @@ performance-test:
 	@echo "Starting performance test (make sure aggregator is running on localhost:3000)..."
 	@./$(BUILD_DIR)/performance-test
 
+# Run performance test with custom URL and auth header
+performance-test-auth:
+	@echo "Building performance test..."
+	@mkdir -p $(BUILD_DIR)
+	@go build -o $(BUILD_DIR)/performance-test ./cmd/performance-test
+	@if [ -z "$(URL)" ]; then \
+		echo "Error: URL parameter required. Usage: make performance-test-auth URL=http://localhost:8080 AUTH='Bearer token'"; \
+		exit 1; \
+	fi
+	@echo "Starting performance test against $(URL)..."
+	@AGGREGATOR_URL="$(URL)" AUTH_HEADER="$(AUTH)" ./$(BUILD_DIR)/performance-test
+
 # Format code
 fmt:
 	@echo "Formatting code..."

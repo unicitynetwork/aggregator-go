@@ -505,6 +505,9 @@ The service includes a built-in performance testing tool that generates cryptogr
 ```bash
 # Run performance test (requires aggregator running on localhost:3000)
 make performance-test
+
+# Run performance test against a remote endpoint with authentication
+make performance-test-auth URL=http://localhost:8080 AUTH='Bearer supersecret'
 ```
 
 **Performance Test Features:**

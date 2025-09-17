@@ -2,9 +2,10 @@ package smt
 
 import (
 	"fmt"
-	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"math/big"
 	"testing"
+
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // BenchmarkSMTBatchAdd benchmarks adding 1000 leaves at once (batch approach)
@@ -19,7 +20,7 @@ func BenchmarkSMTBatchAdd(b *testing.B) {
 		leaves := make([]*Leaf, 1000)
 		for j := 0; j < 1000; j++ {
 			// Use large spacing to avoid path conflicts: j * 100000
-			path := big.NewInt(int64(j * 100000))
+			path := big.NewInt(int64((j + 1) * 100000))
 			value := []byte("batch_value_" + path.String())
 			leaves[j] = NewLeaf(path, value)
 		}
@@ -50,7 +51,7 @@ func BenchmarkSMTIndividualAdd(b *testing.B) {
 		// Add 1000 leaves one by one (tree reconstruction each time)
 		for j := 0; j < 1000; j++ {
 			// Use large spacing to avoid path conflicts: j * 100000
-			path := big.NewInt(int64(j * 100000))
+			path := big.NewInt(int64((j + 1) * 100000))
 			value := []byte("individual_value_" + path.String())
 
 			err := smt.AddLeaf(path, value)
@@ -76,7 +77,7 @@ func BenchmarkSMTLargeBatch(b *testing.B) {
 		leaves := make([]*Leaf, 2000)
 		for j := 0; j < 2000; j++ {
 			// Use massive spacing to avoid path conflicts: j * 1000000
-			path := big.NewInt(int64(j * 1000000))
+			path := big.NewInt(int64((j + 1) * 1000000))
 			value := []byte("large_batch_" + path.String())
 			leaves[j] = NewLeaf(path, value)
 		}
@@ -106,7 +107,7 @@ func BenchmarkSMTLargeIndividual(b *testing.B) {
 
 		// Add 2000 leaves one by one - many hash calculations
 		for j := 0; j < 2000; j++ {
-			path := big.NewInt(int64(j * 1000000))
+			path := big.NewInt(int64((j + 1) * 1000000))
 			value := []byte("large_individual_" + path.String())
 
 			err := smt.AddLeaf(path, value)
@@ -178,7 +179,7 @@ func BenchmarkSMTRootHashCalculation(b *testing.B) {
 	// Pre-populate tree
 	smt := NewSparseMerkleTree(api.SHA256)
 	for j := 0; j < 100; j++ {
-		path := big.NewInt(int64(j * 1000))
+		path := big.NewInt(int64((j + 1) * 1000))
 		value := []byte("hash_bench_value_" + path.String())
 		smt.AddLeaf(path, value)
 	}
@@ -237,7 +238,7 @@ func BenchmarkSMTMemoryUsage(b *testing.B) {
 				smt := NewSparseMerkleTree(api.SHA256)
 
 				for j := 0; j < size; j++ {
-					path := big.NewInt(int64(j * 10000))
+					path := big.NewInt(int64((j + 1) * 10000))
 					value := []byte("memory_test_value_" + path.String())
 					smt.AddLeaf(path, value)
 				}
@@ -540,7 +541,7 @@ func BenchmarkSMTPerformanceComparison(b *testing.B) {
 				path  int64
 				value string
 			}{
-				path:  int64(i * 1000000), // Large spacing to avoid conflicts
+				path:  int64((i + 1) * 1000000), // Large spacing to avoid conflicts
 				value: "perf_test_" + string(rune(i+48)),
 			}
 		}
