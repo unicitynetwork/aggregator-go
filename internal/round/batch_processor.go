@@ -60,29 +60,12 @@ func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.
 		return "", fmt.Errorf("failed to add batch to SMT snapshot: %w", err)
 	}
 
-	var wg sync.WaitGroup
-	var smtPersistErr, aggregatorRecordErr error
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		smtPersistErr = rm.persistSmtNodes(ctx, leaves)
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		aggregatorRecordErr = rm.persistAggregatorRecords(ctx, commitments, blockNumber, snapshot)
-	}()
-
-	wg.Wait()
-
-	if smtPersistErr != nil {
-		return "", fmt.Errorf("failed to persist SMT nodes: %w", smtPersistErr)
+	// Store leaves and commitments in round state for later persistence in FinalizeBlock
+	rm.roundMutex.Lock()
+	if rm.currentRound != nil {
+		rm.currentRound.PendingLeaves = leaves
 	}
-	if aggregatorRecordErr != nil {
-		return "", fmt.Errorf("failed to store aggregator records: %w", aggregatorRecordErr)
-	}
+	rm.roundMutex.Unlock()
 
 	rm.logger.WithContext(ctx).Info("Successfully processed commitment batch to snapshot",
 		"rootHash", rootHash,
@@ -281,11 +264,50 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		return fmt.Errorf("failed to store block record: %w", err)
 	}
 
+	// Now that block is stored with unicity certificate, persist SMT nodes and aggregator records
+	rm.roundMutex.Lock()
+	var pendingLeaves []*smt.Leaf
+	var commitments []*models.Commitment
+	snapshot := rm.currentRound.Snapshot
+	if rm.currentRound != nil {
+		pendingLeaves = rm.currentRound.PendingLeaves
+		commitments = rm.currentRound.Commitments
+	}
+	rm.roundMutex.Unlock()
+
+	if len(pendingLeaves) > 0 && len(commitments) > 0 && snapshot != nil {
+		var wg sync.WaitGroup
+		var smtPersistErr, aggregatorRecordErr error
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			smtPersistErr = rm.persistSmtNodes(ctx, pendingLeaves)
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			aggregatorRecordErr = rm.persistAggregatorRecords(ctx, commitments, block.Index, snapshot)
+		}()
+
+		wg.Wait()
+
+		if smtPersistErr != nil {
+			return fmt.Errorf("failed to persist SMT nodes: %w", smtPersistErr)
+		}
+		if aggregatorRecordErr != nil {
+			return fmt.Errorf("failed to store aggregator records: %w", aggregatorRecordErr)
+		}
+
+		rm.logger.WithContext(ctx).Info("Successfully persisted SMT nodes and aggregator records",
+			"blockNumber", block.Index.String(),
+			"leafCount", len(pendingLeaves),
+			"recordCount", len(commitments))
+	}
+
 	// CRITICAL: Commit the snapshot to the main SMT AFTER storing the block successfully
 	// This ensures the SMT state only reflects successfully persisted blocks
-	rm.roundMutex.Lock()
-	snapshot := rm.currentRound.Snapshot
-	rm.roundMutex.Unlock()
 
 	if snapshot != nil {
 		rm.logger.WithContext(ctx).Info("Committing snapshot to main SMT after successful block storage",
@@ -304,6 +326,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		// Clear pending data as it's now finalized
 		rm.currentRound.PendingRecords = nil
 		rm.currentRound.PendingRootHash = ""
+		rm.currentRound.PendingLeaves = nil
 		// Clear the snapshot as it has been committed to the main SMT
 		rm.currentRound.Snapshot = nil
 	}
@@ -349,35 +372,27 @@ func (rm *RoundManager) persistAggregatorRecords(ctx context.Context, commitment
 		return nil
 	}
 
-	records := make([]*models.AggregatorRecord, len(commitments))
-	var wg sync.WaitGroup
+	records := make([]*models.AggregatorRecord, 0, len(commitments))
 
 	for i, commitment := range commitments {
-		wg.Add(1)
-		go func(index int, c *models.Commitment) {
-			defer wg.Done()
+		path, err := commitment.RequestID.GetPath()
+		if err != nil {
+			rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
+				"requestID", commitment.RequestID.String(),
+				"error", err.Error())
+			continue
+		}
 
-			path, err := c.RequestID.GetPath()
-			if err != nil {
-				rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
-					"requestID", c.RequestID.String(),
-					"error", err.Error())
-				return
-			}
+		merkleTreePath := snapshot.GetPath(path)
+		if merkleTreePath == nil {
+			rm.logger.WithContext(ctx).Error("Failed to get inclusion proof for commitment",
+				"requestID", commitment.RequestID.String())
+			continue
+		}
 
-			merkleTreePath := snapshot.GetPath(path)
-			if merkleTreePath == nil {
-				rm.logger.WithContext(ctx).Error("Failed to get inclusion proof for commitment",
-					"requestID", c.RequestID.String())
-				return
-			}
-
-			leafIndex := api.NewBigInt(big.NewInt(int64(index)))
-			records[index] = models.NewAggregatorRecord(c, blockIndex, leafIndex, merkleTreePath)
-		}(i, commitment)
+		leafIndex := api.NewBigInt(big.NewInt(int64(i)))
+		records = append(records, models.NewAggregatorRecord(commitment, blockIndex, leafIndex, merkleTreePath))
 	}
-
-	wg.Wait()
 
 	if err := rm.storage.AggregatorRecordStorage().StoreBatch(ctx, records); err != nil {
 		return fmt.Errorf("failed to store aggregator records batch: %w", err)

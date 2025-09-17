@@ -50,6 +50,8 @@ type Round struct {
 	PendingRootHash string
 	// SMT snapshot for this round - allows accumulating changes before committing
 	Snapshot *ThreadSafeSmtSnapshot
+	// Store data for persistence during FinalizeBlock
+	PendingLeaves []*smt.Leaf
 }
 
 // RoundManager handles the creation of blocks and processing of commitments
