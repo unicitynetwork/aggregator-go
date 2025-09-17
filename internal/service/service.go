@@ -234,7 +234,7 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		}, nil
 	}
 
-	merkleTreePath, authenticator, transactionHash, err := as.getInclusionProof(ctx, req.RequestID)
+	merkleTreePath, authenticator, transactionHash, err := as.getInclusionProofFromRecord(record)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get inclusion proof: %w", err)
 	}
@@ -254,14 +254,9 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 	}, nil
 }
 
-func (as *AggregatorService) getInclusionProof(ctx context.Context, requestID api.RequestID) (*api.MerkleTreePath, *api.Authenticator, *api.TransactionHash, error) {
-	aggregatorRecord, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, requestID)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to get aggregator record: %w", err)
-	}
-
+func (as *AggregatorService) getInclusionProofFromRecord(aggregatorRecord *models.AggregatorRecord) (*api.MerkleTreePath, *api.Authenticator, *api.TransactionHash, error) {
 	if aggregatorRecord.MerkleTreePath == nil {
-		return nil, nil, nil, fmt.Errorf("aggregator record does not contain inclusion proof for request ID %s", requestID)
+		return nil, nil, nil, fmt.Errorf("aggregator record does not contain inclusion proof for request ID %s", aggregatorRecord.RequestID)
 	}
 
 	authenticator := &api.Authenticator{
