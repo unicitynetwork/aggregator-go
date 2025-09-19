@@ -375,23 +375,8 @@ func (rm *RoundManager) persistAggregatorRecords(ctx context.Context, commitment
 	records := make([]*models.AggregatorRecord, 0, len(commitments))
 
 	for i, commitment := range commitments {
-		path, err := commitment.RequestID.GetPath()
-		if err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
-				"requestID", commitment.RequestID.String(),
-				"error", err.Error())
-			continue
-		}
-
-		merkleTreePath := snapshot.GetPath(path)
-		if merkleTreePath == nil {
-			rm.logger.WithContext(ctx).Error("Failed to get inclusion proof for commitment",
-				"requestID", commitment.RequestID.String())
-			continue
-		}
-
 		leafIndex := api.NewBigInt(big.NewInt(int64(i)))
-		records = append(records, models.NewAggregatorRecord(commitment, blockIndex, leafIndex, merkleTreePath))
+		records = append(records, models.NewAggregatorRecord(commitment, blockIndex, leafIndex))
 	}
 
 	if err := rm.storage.AggregatorRecordStorage().StoreBatch(ctx, records); err != nil {

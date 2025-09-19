@@ -234,9 +234,13 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		}, nil
 	}
 
-	merkleTreePath, authenticator, transactionHash, err := as.getInclusionProofFromRecord(record)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get inclusion proof: %w", err)
+	merkleTreePath := as.roundManager.GetSMT().GetPath(path)
+
+	authenticator := &api.Authenticator{
+		Algorithm: record.Authenticator.Algorithm,
+		PublicKey: record.Authenticator.PublicKey,
+		Signature: record.Authenticator.Signature,
+		StateHash: record.Authenticator.StateHash,
 	}
 
 	block, err := as.storage.BlockStorage().GetByNumber(ctx, record.BlockNumber)
@@ -248,27 +252,10 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		InclusionProof: &api.InclusionProof{
 			Authenticator:      authenticator,
 			MerkleTreePath:     merkleTreePath,
-			TransactionHash:    transactionHash,
+			TransactionHash:    &record.TransactionHash,
 			UnicityCertificate: block.UnicityCertificate,
 		},
 	}, nil
-}
-
-func (as *AggregatorService) getInclusionProofFromRecord(aggregatorRecord *models.AggregatorRecord) (*api.MerkleTreePath, *api.Authenticator, *api.TransactionHash, error) {
-	if aggregatorRecord.MerkleTreePath == nil {
-		return nil, nil, nil, fmt.Errorf("aggregator record does not contain inclusion proof for request ID %s", aggregatorRecord.RequestID)
-	}
-
-	authenticator := &api.Authenticator{
-		Algorithm: aggregatorRecord.Authenticator.Algorithm,
-		PublicKey: aggregatorRecord.Authenticator.PublicKey,
-		Signature: aggregatorRecord.Authenticator.Signature,
-		StateHash: aggregatorRecord.Authenticator.StateHash,
-	}
-
-	apiTransactionHash := aggregatorRecord.TransactionHash
-
-	return aggregatorRecord.MerkleTreePath, authenticator, &apiTransactionHash, nil
 }
 
 // GetNoDeletionProof retrieves the global no-deletion proof

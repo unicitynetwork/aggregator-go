@@ -80,12 +80,7 @@ func createTestAggregatorRecord(requestID string, blockNumber int64, leafIndex i
 	blockIndex := api.NewBigInt(big.NewInt(blockNumber))
 	leafIdx := api.NewBigInt(big.NewInt(leafIndex))
 
-	merkleTreePath := &api.MerkleTreePath{
-		Root:  "test_root",
-		Steps: []api.MerkleTreeStep{},
-	}
-
-	return models.NewAggregatorRecord(commitment, blockIndex, leafIdx, merkleTreePath)
+	return models.NewAggregatorRecord(commitment, blockIndex, leafIdx)
 }
 
 func TestAggregatorRecordStorage_StoreBatch_DuplicateHandling(t *testing.T) {

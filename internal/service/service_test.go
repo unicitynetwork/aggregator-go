@@ -325,7 +325,7 @@ func (suite *AggregatorTestSuite) TestInclusionProof() {
 	// Wait for new block processing
 	time.Sleep(3 * time.Second)
 
-	// 4) Verify original commitments still reference original root hash
+	// 4) Verify original commitments now reference current root hash
 	for _, requestID := range submittedRequestIDs {
 		proofRequest := &api.GetInclusionProofRequest{RequestID: api.RequestID(requestID)}
 		proofResponse := makeJSONRPCRequest[api.GetInclusionProofResponse](
@@ -336,9 +336,13 @@ func (suite *AggregatorTestSuite) TestInclusionProof() {
 		originalRootHash, exists := firstBatchRootHashes[requestID]
 
 		suite.True(exists, "Should have stored original root hash for %s", requestID)
-		suite.Equal(originalRootHash, currentRootHash,
-			"Root hash in inclusion proof should remain same for RequestID %s. Original: %s, Current: %s",
+		// With on-demand proof generation, the root hash should now be different (current SMT state)
+		suite.NotEqual(originalRootHash, currentRootHash,
+			"Root hash in inclusion proof should be current (not original) for RequestID %s. Original: %s, Current: %s",
 			requestID, originalRootHash, currentRootHash)
+
+		// Validate that the proof is still valid for the commitment
+		validateInclusionProof(suite.T(), proofResponse.InclusionProof, api.RequestID(requestID))
 	}
 }
 

@@ -65,7 +65,7 @@ func TestGetBlockTotalCommitments(t *testing.T) {
 		blockNumber := api.NewBigInt(big.NewInt(1))
 		leafIndex := api.NewBigInt(big.NewInt(0))
 
-		record := models.NewAggregatorRecord(commitment, blockNumber, leafIndex, nil)
+		record := models.NewAggregatorRecord(commitment, blockNumber, leafIndex)
 		require.Equal(t, uint64(500), record.AggregateRequestCount)
 	})
 
