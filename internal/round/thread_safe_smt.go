@@ -175,6 +175,13 @@ func (tss *ThreadSafeSmtSnapshot) GetRootHash() string {
 	return tss.snapshot.GetRootHashHex()
 }
 
+func (tss *ThreadSafeSmtSnapshot) GetPath(path *big.Int) *api.MerkleTreePath {
+	tss.rwMux.RLock()
+	defer tss.rwMux.RUnlock()
+
+	return tss.snapshot.GetPath(path)
+}
+
 // GetStats returns statistics about the snapshot
 // This is a read operation that can be performed concurrently
 func (tss *ThreadSafeSmtSnapshot) GetStats() map[string]interface{} {

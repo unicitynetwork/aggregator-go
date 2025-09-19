@@ -66,6 +66,9 @@ type BlockStorage interface {
 	// GetLatestNumber retrieves the latest block number
 	GetLatestNumber(ctx context.Context) (*api.BigInt, error)
 
+	// GetLatestByRootHash retrieves the latest block with the given root hash
+	GetLatestByRootHash(ctx context.Context, rootHash api.HexBytes) (*models.Block, error)
+
 	// Count returns the total number of blocks
 	Count(ctx context.Context) (int64, error)
 

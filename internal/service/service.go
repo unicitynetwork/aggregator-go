@@ -41,8 +41,8 @@ func apiToModelBigInt(apiBigInt *api.BigInt) *api.BigInt {
 
 func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.AggregatorRecord {
 	return &api.AggregatorRecord{
-		RequestID:             modelRecord.RequestID,
-		TransactionHash:       modelRecord.TransactionHash,
+		RequestID:       modelRecord.RequestID,
+		TransactionHash: modelRecord.TransactionHash,
 		Authenticator: api.Authenticator{
 			Algorithm: modelRecord.Authenticator.Algorithm,
 			PublicKey: modelRecord.Authenticator.PublicKey,
@@ -131,10 +131,10 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 	if aggregateCount == 0 {
 		aggregateCount = 1 // Default to 1 if not specified
 	}
-	
+
 	commitment := models.NewCommitmentWithAggregate(
-		req.RequestID, 
-		req.TransactionHash, 
+		req.RequestID,
+		req.TransactionHash,
 		models.Authenticator{
 			Algorithm: req.Authenticator.Algorithm,
 			PublicKey: req.Authenticator.PublicKey,
@@ -221,21 +221,49 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 	if err != nil {
 		return nil, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
 	}
-	merkleTreePath := as.roundManager.GetSMT().GetPath(path)
 
 	if record == nil {
-		return &api.GetInclusionProofResponse{Authenticator: nil, MerkleTreePath: merkleTreePath, TransactionHash: nil}, nil
+		merkleTreePath := as.roundManager.GetSMT().GetPath(path)
+		return &api.GetInclusionProofResponse{
+			InclusionProof: &api.InclusionProof{
+				Authenticator:      nil,
+				MerkleTreePath:     merkleTreePath,
+				TransactionHash:    nil,
+				UnicityCertificate: nil,
+			},
+		}, nil
 	}
 
-	// Convert model authenticator to API authenticator
-	apiAuthenticator := &api.Authenticator{
+	merkleTreePath := as.roundManager.GetSMT().GetPath(path)
+
+	// Find the latest block that matches the current SMT root hash
+	rootHash, err := api.NewHexBytesFromString(merkleTreePath.Root)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse root hash: %w", err)
+	}
+	block, err := as.storage.BlockStorage().GetLatestByRootHash(ctx, rootHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get latest block by root hash: %w", err)
+	}
+	if block == nil {
+		return nil, fmt.Errorf("no block found with root hash %s", rootHash)
+	}
+
+	authenticator := &api.Authenticator{
 		Algorithm: record.Authenticator.Algorithm,
 		PublicKey: record.Authenticator.PublicKey,
 		Signature: record.Authenticator.Signature,
-		StateHash: api.StateHash(record.Authenticator.StateHash.String()),
+		StateHash: record.Authenticator.StateHash,
 	}
 
-	return &api.GetInclusionProofResponse{Authenticator: apiAuthenticator, MerkleTreePath: merkleTreePath, TransactionHash: &record.TransactionHash}, nil
+	return &api.GetInclusionProofResponse{
+		InclusionProof: &api.InclusionProof{
+			Authenticator:      authenticator,
+			MerkleTreePath:     merkleTreePath,
+			TransactionHash:    &record.TransactionHash,
+			UnicityCertificate: block.UnicityCertificate,
+		},
+	}, nil
 }
 
 // GetNoDeletionProof retrieves the global no-deletion proof

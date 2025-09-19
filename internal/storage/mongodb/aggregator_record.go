@@ -43,13 +43,17 @@ func (ars *AggregatorRecordStorage) StoreBatch(ctx context.Context, records []*m
 		return nil
 	}
 
-	docs := make([]interface{}, len(records))
+	documents := make([]interface{}, len(records))
 	for i, record := range records {
-		docs[i] = record.ToBSON()
+		documents[i] = record.ToBSON()
 	}
 
-	_, err := ars.collection.InsertMany(ctx, docs)
+	opts := options.InsertMany().SetOrdered(false)
+	_, err := ars.collection.InsertMany(ctx, documents, opts)
 	if err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return nil
+		}
 		return fmt.Errorf("failed to store aggregator records batch: %w", err)
 	}
 	return nil

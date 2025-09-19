@@ -249,12 +249,28 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	}
 
 	blockNumber := api.NewBigInt(big.NewInt(1))
-	rootHash, records, err := rm.processBatch(ctx, testCommitments, blockNumber)
+	rootHash, err := rm.processBatch(ctx, testCommitments, blockNumber)
 	require.NoError(t, err, "processBatch should succeed")
 	require.NotEmpty(t, rootHash, "Root hash should not be empty")
-	require.Equal(t, len(testCommitments), len(records), "Should create record for each commitment")
 
-	// Verify SMT nodes were persisted
+	// After processBatch, SMT nodes are not yet persisted - they're stored in round state
+	// We need to finalize a block to trigger persistence
+	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
+	require.NoError(t, err, "Should parse root hash")
+
+	block := models.NewBlock(
+		blockNumber,
+		"unicity",
+		"1.0",
+		"mainnet",
+		rootHashBytes,
+		api.HexBytes{},
+	)
+
+	err = rm.FinalizeBlock(ctx, block)
+	require.NoError(t, err, "FinalizeBlock should succeed")
+
+	// Now verify SMT nodes were persisted
 	count, err := storage.SmtStorage().Count(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, int64(len(testCommitments)), count, "Should have persisted SMT nodes for all commitments")

@@ -79,11 +79,10 @@ func setupSmtTestDB(t *testing.T) (*mongo.Database, func()) {
 }
 
 // createTestSmtNode creates a test SMT node
-func createTestSmtNode(key api.HexBytes, value []byte, hash api.HexBytes) *models.SmtNode {
+func createTestSmtNode(key api.HexBytes, value []byte) *models.SmtNode {
 	return &models.SmtNode{
 		Key:       key,
 		Value:     value,
-		Hash:      hash,
 		CreatedAt: api.Now(),
 	}
 }
@@ -95,7 +94,6 @@ func createTestSmtNodes(count int) []*models.SmtNode {
 		// Create unique keys and values using all bytes to avoid collisions
 		key := make([]byte, 32)
 		value := make([]byte, 32)
-		hash := make([]byte, 32)
 
 		// Use multiple bytes to ensure uniqueness for large counts
 		key[28] = byte(i >> 24)
@@ -108,12 +106,7 @@ func createTestSmtNodes(count int) []*models.SmtNode {
 		value[30] = byte((i + 100) >> 8)
 		value[31] = byte(i + 100)
 
-		hash[28] = byte((i + 200) >> 24)
-		hash[29] = byte((i + 200) >> 16)
-		hash[30] = byte((i + 200) >> 8)
-		hash[31] = byte(i + 200)
-
-		nodes[i] = createTestSmtNode(api.HexBytes(key), value, api.HexBytes(hash))
+		nodes[i] = createTestSmtNode(api.HexBytes(key), value)
 	}
 	return nodes
 }
@@ -133,9 +126,8 @@ func TestSmtStorage_Store(t *testing.T) {
 		// Create test data
 		key := api.HexBytes([]byte("test_key_1234567890abcdef1234567890ab"))
 		value := []byte("test_value_1234567890abcdef")
-		hash := api.HexBytes([]byte("test_hash_1234567890abcdef1234567890ab"))
 
-		node := createTestSmtNode(key, value, hash)
+		node := createTestSmtNode(key, value)
 
 		// Store the node
 		err := storage.Store(ctx, node)
@@ -149,7 +141,6 @@ func TestSmtStorage_Store(t *testing.T) {
 		// Verify the stored data matches
 		assert.Equal(t, key, storedNode.Key)
 		assert.Equal(t, api.HexBytes(value), storedNode.Value)
-		assert.Equal(t, hash, storedNode.Hash)
 		assert.NotNil(t, storedNode.CreatedAt)
 	})
 
@@ -158,11 +149,9 @@ func TestSmtStorage_Store(t *testing.T) {
 		key := api.HexBytes([]byte("duplicate_key_1234567890abcdef12345678"))
 		value1 := []byte("first_value_123456789")
 		value2 := []byte("second_value_987654321")
-		hash1 := api.HexBytes([]byte("first_hash_1234567890abcdef123456789"))
-		hash2 := api.HexBytes([]byte("second_hash_9876543210fedcba987654321"))
 
-		node1 := createTestSmtNode(key, value1, hash1)
-		node2 := createTestSmtNode(key, value2, hash2)
+		node1 := createTestSmtNode(key, value1)
+		node2 := createTestSmtNode(key, value2)
 
 		// Store the first node
 		err := storage.Store(ctx, node1)
@@ -180,7 +169,6 @@ func TestSmtStorage_Store(t *testing.T) {
 		// Should have the first node's data (not overwritten)
 		assert.Equal(t, key, storedNode.Key)
 		assert.Equal(t, api.HexBytes(value1), storedNode.Value)
-		assert.Equal(t, hash1, storedNode.Hash)
 	})
 
 	t.Run("should store multiple different nodes", func(t *testing.T) {
@@ -201,7 +189,6 @@ func TestSmtStorage_Store(t *testing.T) {
 
 			assert.Equal(t, []byte(node.Key), []byte(storedNode.Key))
 			assert.Equal(t, node.Value, storedNode.Value)
-			assert.Equal(t, []byte(node.Hash), []byte(storedNode.Hash))
 		}
 	})
 }
@@ -233,7 +220,6 @@ func TestSmtStorage_StoreBatch(t *testing.T) {
 
 			assert.Equal(t, []byte(node.Key), []byte(storedNode.Key))
 			assert.Equal(t, node.Value, storedNode.Value)
-			assert.Equal(t, []byte(node.Hash), []byte(storedNode.Hash))
 		}
 	})
 
@@ -249,22 +235,20 @@ func TestSmtStorage_StoreBatch(t *testing.T) {
 		batch2 := make([]*models.SmtNode, 5)
 
 		// First 2 nodes have duplicate keys from batch1
-		batch2[0] = createTestSmtNode(batch1[0].Key, []byte("new_value_1"), api.HexBytes([]byte("new_hash_123456789012345678901234567890ab")))
-		batch2[1] = createTestSmtNode(batch1[1].Key, []byte("new_value_2"), api.HexBytes([]byte("new_hash_234567890123456789012345678901bc")))
+		batch2[0] = createTestSmtNode(batch1[0].Key, []byte("new_value_1"))
+		batch2[1] = createTestSmtNode(batch1[1].Key, []byte("new_value_2"))
 
 		// Last 3 nodes have new unique keys
 		for i := 2; i < 5; i++ {
 			key := make([]byte, 32)
 			value := make([]byte, 32)
-			hash := make([]byte, 32)
 
 			// Create unique keys different from batch1
 			key[30] = byte(i + 100)
 			key[31] = byte(i + 200)
 			value[31] = byte(i + 50)
-			hash[31] = byte(i + 150)
 
-			batch2[i] = createTestSmtNode(api.HexBytes(key), value, api.HexBytes(hash))
+			batch2[i] = createTestSmtNode(api.HexBytes(key), value)
 		}
 
 		// Store second batch - should succeed despite duplicates
@@ -280,7 +264,7 @@ func TestSmtStorage_StoreBatch(t *testing.T) {
 			// Should have original values, not the new ones
 			assert.Equal(t, batch1[i].Key, storedNode.Key)
 			assert.Equal(t, batch1[i].Value, storedNode.Value)
-			assert.Equal(t, batch1[i].Hash, storedNode.Hash)
+			assert.Equal(t, batch1[i].Value, storedNode.Value)
 		}
 
 		// Verify new unique nodes were stored
@@ -291,7 +275,7 @@ func TestSmtStorage_StoreBatch(t *testing.T) {
 
 			assert.Equal(t, batch2[i].Key, storedNode.Key)
 			assert.Equal(t, batch2[i].Value, storedNode.Value)
-			assert.Equal(t, batch2[i].Hash, storedNode.Hash)
+			assert.Equal(t, batch2[i].Value, storedNode.Value)
 		}
 	})
 
@@ -305,10 +289,8 @@ func TestSmtStorage_StoreBatch(t *testing.T) {
 		duplicateBatch := make([]*models.SmtNode, 3)
 		for i := 0; i < 3; i++ {
 			newValue := []byte(fmt.Sprintf("duplicate_value_%d", i))
-			newHash := make([]byte, 32)
-			newHash[31] = byte(i + 50)
 
-			duplicateBatch[i] = createTestSmtNode(originalBatch[i].Key, newValue, api.HexBytes(newHash))
+			duplicateBatch[i] = createTestSmtNode(originalBatch[i].Key, newValue)
 		}
 
 		// Store duplicate batch - should succeed and ignore all duplicates
@@ -324,7 +306,7 @@ func TestSmtStorage_StoreBatch(t *testing.T) {
 			// Should have original values, not the duplicate values
 			assert.Equal(t, originalBatch[i].Key, storedNode.Key)
 			assert.Equal(t, originalBatch[i].Value, storedNode.Value)
-			assert.Equal(t, originalBatch[i].Hash, storedNode.Hash)
+			assert.Equal(t, originalBatch[i].Value, storedNode.Value)
 		}
 	})
 
@@ -352,26 +334,22 @@ func TestSmtStorage_StoreBatch(t *testing.T) {
 		// First 50 are duplicates
 		for i := 0; i < 50; i++ {
 			newValue := []byte(fmt.Sprintf("duplicate_large_value_%d", i))
-			newHash := make([]byte, 32)
-			newHash[31] = byte(i % 256)
 
-			mixedBatch[i] = createTestSmtNode(largeBatch[i].Key, newValue, api.HexBytes(newHash))
+			mixedBatch[i] = createTestSmtNode(largeBatch[i].Key, newValue)
 		}
 
 		// Last 50 are new
 		for i := 50; i < 100; i++ {
 			key := make([]byte, 32)
 			value := make([]byte, 32)
-			hash := make([]byte, 32)
 
 			// Create unique keys
 			key[29] = byte(i)
 			key[30] = byte(i + 100)
 			key[31] = byte(i + 200)
 			value[31] = byte(i % 256)
-			hash[31] = byte((i + 128) % 256)
 
-			mixedBatch[i] = createTestSmtNode(api.HexBytes(key), value, api.HexBytes(hash))
+			mixedBatch[i] = createTestSmtNode(api.HexBytes(key), value)
 		}
 
 		// Store mixed batch - should succeed
@@ -385,7 +363,7 @@ func TestSmtStorage_StoreBatch(t *testing.T) {
 
 			// Should have original values
 			assert.Equal(t, largeBatch[i].Value, storedNode.Value)
-			assert.Equal(t, largeBatch[i].Hash, storedNode.Hash)
+			assert.Equal(t, largeBatch[i].Value, storedNode.Value)
 		}
 
 		// Verify new data is stored
@@ -395,7 +373,7 @@ func TestSmtStorage_StoreBatch(t *testing.T) {
 
 			// Should have new values
 			assert.Equal(t, mixedBatch[i].Value, storedNode.Value)
-			assert.Equal(t, mixedBatch[i].Hash, storedNode.Hash)
+			assert.Equal(t, mixedBatch[i].Value, storedNode.Value)
 		}
 	})
 }
@@ -406,6 +384,9 @@ func TestSmtStorage_Count(t *testing.T) {
 
 	storage := NewSmtStorage(db)
 	ctx := context.Background()
+
+	err := storage.CreateIndexes(ctx)
+	require.NoError(t, err, "CreateIndexes should not return an error")
 
 	t.Run("should count stored nodes correctly", func(t *testing.T) {
 		// Initially should be 0
@@ -441,6 +422,9 @@ func TestSmtStorage_GetChunked(t *testing.T) {
 	storage := NewSmtStorage(db)
 	ctx := context.Background()
 
+	err := storage.CreateIndexes(ctx)
+	require.NoError(t, err, "CreateIndexes should not return an error")
+
 	t.Run("should retrieve chunked nodes after duplicate handling", func(t *testing.T) {
 		// Store initial batch
 		nodes := createTestSmtNodes(10)
@@ -475,4 +459,43 @@ func TestSmtStorage_GetChunked(t *testing.T) {
 
 		assert.Len(t, allChunkedKeys, 10, "Should have exactly 10 unique keys")
 	})
+}
+
+func TestSmtStorage_StoreBatch_DuplicateHandling(t *testing.T) {
+	db, cleanup := setupSmtTestDB(t)
+	defer cleanup()
+
+	storage := NewSmtStorage(db)
+	ctx := context.Background()
+
+	// Create indexes first
+	err := storage.CreateIndexes(ctx)
+	require.NoError(t, err, "CreateIndexes should not return an error")
+
+	// Create test nodes with some duplicates
+	nodes1 := createTestSmtNodes(3)
+	nodes2 := []*models.SmtNode{
+		nodes1[0], // Duplicate of first node
+		nodes1[1], // Duplicate of second node
+		createTestSmtNode(api.HexBytes("newkey"), []byte("newvalue")), // New node
+	}
+
+	// Store first batch
+	err = storage.StoreBatch(ctx, nodes1)
+	require.NoError(t, err, "First StoreBatch should not return an error")
+
+	// Store second batch with duplicates - should not error
+	err = storage.StoreBatch(ctx, nodes2)
+	assert.NoError(t, err, "StoreBatch with duplicates should not return an error")
+
+	// Verify that we only have 4 unique nodes (3 from first batch + 1 new from second)
+	count, err := storage.Count(ctx)
+	require.NoError(t, err, "Count should not return an error")
+	assert.Equal(t, int64(4), count, "Should have exactly 4 nodes (duplicates ignored)")
+
+	// Verify the new node was stored
+	newNode, err := storage.GetByKey(ctx, api.HexBytes("newkey"))
+	require.NoError(t, err, "GetByKey should not return an error")
+	assert.NotNil(t, newNode, "New node should be found")
+	assert.Equal(t, []byte("newvalue"), []byte(newNode.Value), "New node should have correct value")
 }
