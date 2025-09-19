@@ -236,16 +236,24 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 
 	merkleTreePath := as.roundManager.GetSMT().GetPath(path)
 
+	// Find the latest block that matches the current SMT root hash
+	rootHash, err := api.NewHexBytesFromString(merkleTreePath.Root)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse root hash: %w", err)
+	}
+	block, err := as.storage.BlockStorage().GetLatestByRootHash(ctx, rootHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get latest block by root hash: %w", err)
+	}
+	if block == nil {
+		return nil, fmt.Errorf("no block found with root hash %s", rootHash)
+	}
+
 	authenticator := &api.Authenticator{
 		Algorithm: record.Authenticator.Algorithm,
 		PublicKey: record.Authenticator.PublicKey,
 		Signature: record.Authenticator.Signature,
 		StateHash: record.Authenticator.StateHash,
-	}
-
-	block, err := as.storage.BlockStorage().GetByNumber(ctx, record.BlockNumber)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get block: %w", err)
 	}
 
 	return &api.GetInclusionProofResponse{
