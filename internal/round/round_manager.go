@@ -72,9 +72,30 @@ type RoundManager struct {
 	// Round duration (configurable, default 1 second)
 	roundDuration time.Duration
 
+	// Streaming support
+	commitmentStream chan *models.Commitment
+	streamMutex      sync.RWMutex
+
+	// Adaptive throughput tracking
+	avgProcessingRate float64 // commitments per millisecond
+	lastRoundMetrics  RoundMetrics
+
+	// Adaptive timing
+	avgFinalizationTime time.Duration // Running average of finalization time
+	avgSMTUpdateTime    time.Duration // Running average of SMT update time per batch
+	processingRatio     float64       // Ratio of round duration for processing (starts at 0.9)
+
 	// Metrics
 	totalRounds      int64
 	totalCommitments int64
+}
+
+// RoundMetrics tracks performance metrics for a round
+type RoundMetrics struct {
+	CommitmentsProcessed int
+	ProcessingTime       time.Duration
+	RoundNumber          *api.BigInt
+	Timestamp            time.Time
 }
 
 // NewRoundManager creates a new round manager
@@ -84,12 +105,17 @@ func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfac
 	threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 	rm := &RoundManager{
-		config:        cfg,
-		logger:        logger,
-		storage:       storage,
-		smt:           threadSafeSMT,
-		stopChan:      make(chan struct{}),
-		roundDuration: cfg.Processing.RoundDuration, // Configurable round duration (default 1s)
+		config:              cfg,
+		logger:              logger,
+		storage:             storage,
+		smt:                 threadSafeSMT,
+		stopChan:            make(chan struct{}),
+		roundDuration:       cfg.Processing.RoundDuration,        // Configurable round duration (default 1s)
+		commitmentStream:    make(chan *models.Commitment, 2000), // Buffered channel for streaming
+		avgProcessingRate:   1.0,                                 // Initial estimate: 1 commitment per ms
+		processingRatio:     0.9,                                 // Start with 90% of round for processing
+		avgFinalizationTime: 100 * time.Millisecond,              // Initial estimate
+		avgSMTUpdateTime:    5 * time.Millisecond,                // Initial estimate per batch
 	}
 
 	if cfg.BFT.Enabled {
@@ -115,6 +141,10 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 	if err := rm.restoreSmtFromStorage(ctx); err != nil {
 		return fmt.Errorf("failed to restore SMT from storage: %w", err)
 	}
+
+	// Start the commitment stream prefetcher
+	rm.wg.Add(1)
+	go rm.commitmentPrefetcher(ctx)
 
 	// Ensure any previous timers are stopped
 	rm.roundMutex.Lock()
@@ -215,6 +245,37 @@ func (rm *RoundManager) GetCurrentRound() *Round {
 	}
 }
 
+// GetStreamingMetrics returns metrics about the streaming performance
+func (rm *RoundManager) GetStreamingMetrics() map[string]interface{} {
+	rm.streamMutex.RLock()
+	defer rm.streamMutex.RUnlock()
+
+	channelUtilization := float64(len(rm.commitmentStream)) / float64(cap(rm.commitmentStream)) * 100
+	processingMs := time.Duration(float64(rm.roundDuration) * rm.processingRatio).Milliseconds()
+	finalizationMs := time.Duration(float64(rm.roundDuration) * (1 - rm.processingRatio)).Milliseconds()
+
+	return map[string]interface{}{
+		"avgProcessingRate":       rm.avgProcessingRate,
+		"targetCommitmentsPerSec": int(rm.avgProcessingRate * 1000),
+		"channelSize":             len(rm.commitmentStream),
+		"channelCapacity":         cap(rm.commitmentStream),
+		"channelUtilization":      fmt.Sprintf("%.2f%%", channelUtilization),
+		"adaptiveTiming": map[string]interface{}{
+			"processingRatio":     fmt.Sprintf("%.2f", rm.processingRatio),
+			"processingWindow":    fmt.Sprintf("%dms", processingMs),
+			"finalizationWindow":  fmt.Sprintf("%dms", finalizationMs),
+			"avgFinalizationTime": rm.avgFinalizationTime.String(),
+			"avgSMTUpdateTime":    rm.avgSMTUpdateTime.String(),
+		},
+		"lastRound": map[string]interface{}{
+			"number":               rm.lastRoundMetrics.RoundNumber,
+			"commitmentsProcessed": rm.lastRoundMetrics.CommitmentsProcessed,
+			"processingTime":       rm.lastRoundMetrics.ProcessingTime.String(),
+			"timestamp":            rm.lastRoundMetrics.Timestamp,
+		},
+	}
+}
+
 // GetSMT returns the thread-safe SMT instance for inclusion proof generation
 func (rm *RoundManager) GetSMT() *ThreadSafeSMT {
 	return rm.smt
@@ -304,9 +365,9 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 	return nil
 }
 
-// processCurrentRound processes the current round and creates a block
+// processCurrentRound processes the current round using streaming approach with time bounds
 func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
-	rm.logger.WithContext(ctx).Info("processCurrentRound called")
+	rm.logger.WithContext(ctx).Info("processCurrentRound called (streaming mode)")
 
 	rm.roundMutex.Lock()
 	if rm.currentRound == nil {
@@ -336,45 +397,123 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	rm.logger.WithContext(ctx).Info("Changed round state to processing",
 		"roundNumber", roundNumber.String())
 
-	// Get any unprocessed commitments from storage
-	var err error
-	rm.currentRound.Commitments, err = rm.storage.CommitmentStorage().GetUnprocessedBatch(ctx, rm.config.Processing.BatchLimit)
-	if err != nil {
-		rm.logger.WithContext(ctx).Error("Failed to get unprocessed commitments",
-			"roundNumber", roundNumber.String(),
-			"error", err.Error())
-		rm.currentRound.Commitments = []*models.Commitment{}
-	}
+	// Clear any existing commitments
+	rm.currentRound.Commitments = make([]*models.Commitment, 0, 2000)
 
-	rm.logger.WithContext(ctx).Info("Processing round",
-		"roundNumber", roundNumber.String(),
-		"commitmentCount", len(rm.currentRound.Commitments),
-		"batchLimit", rm.config.Processing.BatchLimit)
+	// Calculate adaptive processing deadline based on historical data
+	processingDuration := time.Duration(float64(rm.roundDuration) * rm.processingRatio)
+	rm.logger.WithContext(ctx).Debug("Using adaptive processing deadline",
+		"roundDuration", rm.roundDuration,
+		"processingRatio", rm.processingRatio,
+		"processingDuration", processingDuration,
+		"expectedFinalizationTime", rm.avgFinalizationTime)
+
 	rm.roundMutex.Unlock()
 
-	// Process commitments in batch
+	// Process commitments with streaming until adaptive deadline
+	processingDeadline := time.Now().Add(processingDuration)
+	commitmentsProcessed := 0
+	processingStart := time.Now()
+	smtUpdateTime := time.Duration(0)
+
+	// Stream and process commitments until deadline
+	for time.Now().Before(processingDeadline) {
+		select {
+		case commitment := <-rm.commitmentStream:
+			// Add commitment to current round
+			rm.roundMutex.Lock()
+			rm.currentRound.Commitments = append(rm.currentRound.Commitments, commitment)
+			commitmentsProcessed++
+
+			// Process in mini-batches for SMT efficiency
+			if len(rm.currentRound.Commitments)%100 == 0 {
+				// Process this mini-batch into SMT
+				batchStart := time.Now()
+				rm.processMiniBatch(ctx, rm.currentRound.Commitments[len(rm.currentRound.Commitments)-100:])
+				smtUpdateTime += time.Since(batchStart)
+			}
+			rm.roundMutex.Unlock()
+
+		case <-time.After(10 * time.Millisecond):
+			// No commitments available, check if we should continue waiting
+			remainingTime := time.Until(processingDeadline)
+			if remainingTime < 50*time.Millisecond {
+				// Not enough time to wait for more
+				break
+			}
+			// Continue waiting for more commitments
+
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	// Process any remaining commitments not in a full mini-batch
+	rm.roundMutex.Lock()
+	lastBatchStart := (commitmentsProcessed / 100) * 100
+	if lastBatchStart < len(rm.currentRound.Commitments) {
+		batchStart := time.Now()
+		rm.processMiniBatch(ctx, rm.currentRound.Commitments[lastBatchStart:])
+		smtUpdateTime += time.Since(batchStart)
+	}
+
+	// Calculate and track metrics
+	processingTime := time.Since(processingStart)
+	if processingTime.Milliseconds() > 0 {
+		rm.avgProcessingRate = float64(commitmentsProcessed) / float64(processingTime.Milliseconds())
+	}
+
+	// Update average SMT update time (exponential moving average)
+	if commitmentsProcessed > 0 {
+		avgBatchTime := smtUpdateTime / time.Duration((commitmentsProcessed+99)/100) // Number of batches
+		rm.avgSMTUpdateTime = (rm.avgSMTUpdateTime*4 + avgBatchTime) / 5             // Weight towards recent: 80/20
+	}
+
+	rm.lastRoundMetrics = RoundMetrics{
+		CommitmentsProcessed: commitmentsProcessed,
+		ProcessingTime:       processingTime,
+		RoundNumber:          roundNumber,
+		Timestamp:            time.Now(),
+	}
+
+	rm.logger.WithContext(ctx).Info("Streaming round processing complete",
+		"roundNumber", roundNumber.String(),
+		"commitmentsProcessed", commitmentsProcessed,
+		"processingTime", processingTime,
+		"smtUpdateTime", smtUpdateTime,
+		"rate", fmt.Sprintf("%.2f commitments/ms", rm.avgProcessingRate),
+		"targetRPS", int(rm.avgProcessingRate*1000))
+	rm.roundMutex.Unlock()
+
+	// Finalize SMT processing and get root hash
 	var rootHash string
 	if len(rm.currentRound.Commitments) > 0 {
-		// Process batch and add to SMT, but DO NOT mark as processed yet
-		rootHash, err = rm.processBatch(ctx, rm.currentRound.Commitments, roundNumber)
-		if err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to process batch", "error", err.Error())
-			return fmt.Errorf("failed to process batch: %w", err)
+		// Get the root hash from the snapshot (already processed via streaming)
+		rm.roundMutex.RLock()
+		if rm.currentRound.Snapshot != nil {
+			rootHash = rm.currentRound.Snapshot.GetRootHash()
 		}
+		rm.roundMutex.RUnlock()
 
 		// Store pending data in the round for later finalization
 		rm.roundMutex.Lock()
 		rm.currentRound.PendingRootHash = rootHash
 		rm.roundMutex.Unlock()
 
-		rm.logger.WithContext(ctx).Info("Batch processed and added to SMT, awaiting finalization",
+		rm.logger.WithContext(ctx).Info("Round streaming complete, awaiting finalization",
 			"roundNumber", roundNumber.String(),
 			"commitmentCount", len(rm.currentRound.Commitments),
 			"rootHash", rootHash)
 	} else {
 		// Empty round - use previous root hash or empty hash
 		rootHash = rm.smt.GetRootHash()
+		rm.logger.WithContext(ctx).Info("Empty round, using existing root hash",
+			"roundNumber", roundNumber.String(),
+			"rootHash", rootHash)
 	}
+
+	// Track finalization start time
+	finalizationStart := time.Now()
 
 	// Create and propose block
 	rm.logger.WithContext(ctx).Info("Proposing block",
@@ -387,6 +526,13 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 			"error", err.Error())
 		return fmt.Errorf("failed to propose block: %w", err)
 	}
+
+	// Track finalization time
+	finalizationTime := time.Since(finalizationStart)
+	rm.avgFinalizationTime = (rm.avgFinalizationTime*4 + finalizationTime) / 5 // EMA with 80/20 weight
+
+	// Adjust processing ratio based on actual performance
+	rm.adjustProcessingRatio(ctx, processingTime, finalizationTime)
 
 	// Update stats
 	rm.totalRounds++
@@ -416,6 +562,138 @@ func (rm *RoundManager) roundProcessor(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// commitmentPrefetcher continuously fetches commitments from storage and feeds them into the stream
+func (rm *RoundManager) commitmentPrefetcher(ctx context.Context) {
+	defer rm.wg.Done()
+
+	rm.logger.WithContext(ctx).Info("Commitment prefetcher started")
+
+	ticker := time.NewTicker(50 * time.Millisecond) // Check for new commitments every 50ms
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-rm.stopChan:
+			rm.logger.WithContext(ctx).Info("Commitment prefetcher stopping")
+			return
+		case <-ctx.Done():
+			rm.logger.WithContext(ctx).Info("Commitment prefetcher context cancelled")
+			return
+		case <-ticker.C:
+			// Only fetch if channel has space
+			channelSpace := cap(rm.commitmentStream) - len(rm.commitmentStream)
+			if channelSpace > 100 { // Only fetch if we have reasonable space
+				// Fetch a batch of unprocessed commitments
+				commitments, err := rm.storage.CommitmentStorage().GetUnprocessedBatch(ctx, min(channelSpace, 500))
+				if err != nil {
+					rm.logger.WithContext(ctx).Error("Failed to fetch commitments", "error", err.Error())
+					continue
+				}
+
+				// Feed commitments into the stream
+				for _, commitment := range commitments {
+					select {
+					case rm.commitmentStream <- commitment:
+						// Successfully added to stream
+					case <-ctx.Done():
+						return
+					default:
+						// Channel is full, stop feeding for now
+						rm.logger.WithContext(ctx).Debug("Commitment stream full, pausing prefetch")
+						break
+					}
+				}
+
+				if len(commitments) > 0 {
+					rm.logger.WithContext(ctx).Debug("Prefetched commitments",
+						"count", len(commitments),
+						"channelSize", len(rm.commitmentStream))
+				}
+			}
+		}
+	}
+}
+
+// adjustProcessingRatio dynamically adjusts the processing ratio based on actual performance
+func (rm *RoundManager) adjustProcessingRatio(ctx context.Context, processingTime, finalizationTime time.Duration) {
+	totalTime := processingTime + finalizationTime
+
+	// Only adjust if we have meaningful data (round took at least 100ms)
+	if totalTime < 100*time.Millisecond {
+		return
+	}
+
+	// Calculate what ratio we actually used
+	actualRatio := float64(processingTime) / float64(rm.roundDuration)
+
+	// Calculate ideal ratio based on actual finalization time
+	// Leave a buffer of 50ms for safety
+	safeFinalizationTime := rm.avgFinalizationTime + 50*time.Millisecond
+	idealRatio := 1.0 - (float64(safeFinalizationTime) / float64(rm.roundDuration))
+
+	// Clamp ideal ratio to reasonable bounds
+	if idealRatio < 0.5 {
+		idealRatio = 0.5 // At least 50% for processing
+	} else if idealRatio > 0.95 {
+		idealRatio = 0.95 // At most 95% for processing
+	}
+
+	// Adjust current ratio towards ideal (gradual adjustment)
+	rm.processingRatio = (rm.processingRatio*4 + idealRatio) / 5
+
+	rm.logger.WithContext(ctx).Debug("Adjusted processing ratio",
+		"actualRatio", fmt.Sprintf("%.2f", actualRatio),
+		"idealRatio", fmt.Sprintf("%.2f", idealRatio),
+		"newRatio", fmt.Sprintf("%.2f", rm.processingRatio),
+		"avgFinalizationTime", rm.avgFinalizationTime,
+		"lastFinalizationTime", finalizationTime,
+		"processingTime", processingTime)
+}
+
+// processMiniBatch processes a small batch of commitments into the SMT for efficiency
+func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.Commitment) error {
+	if len(commitments) == 0 {
+		return nil
+	}
+
+	// Convert commitments to SMT leaves
+	leaves := make([]*smt.Leaf, len(commitments))
+	for i, commitment := range commitments {
+		// Generate leaf path from requestID
+		path, err := commitment.RequestID.GetPath()
+		if err != nil {
+			rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
+				"requestID", commitment.RequestID.String(),
+				"error", err.Error())
+			continue
+		}
+
+		// Create leaf value (hash of commitment data)
+		leafValue, err := rm.createLeafValue(commitment)
+		if err != nil {
+			rm.logger.WithContext(ctx).Error("Failed to create leaf value",
+				"requestID", commitment.RequestID.String(),
+				"error", err.Error())
+			continue
+		}
+
+		leaves[i] = &smt.Leaf{
+			Path:  path,
+			Value: leafValue,
+		}
+	}
+
+	// Add leaves to the current round's SMT snapshot
+	if rm.currentRound.Snapshot != nil {
+		_, err := rm.currentRound.Snapshot.AddLeaves(leaves)
+		if err != nil {
+			return fmt.Errorf("failed to add leaves to SMT snapshot: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // restoreSmtFromStorage restores the SMT tree from persisted nodes in storage
