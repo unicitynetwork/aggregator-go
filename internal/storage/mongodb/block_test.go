@@ -100,6 +100,28 @@ func createTestBlock(index *api.BigInt) *models.Block {
 	return block
 }
 
+// createTestBlockWithRootHash creates a test block with specified index, chainID, and root hash
+func createTestBlockWithRootHash(index int64, chainID string, rootHash api.HexBytes) *models.Block {
+	indexBigInt := api.NewBigInt(big.NewInt(index))
+	previousBlockHash, _ := api.NewHexBytesFromString("0xfedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321")
+	unicityCertificate, _ := api.NewHexBytesFromString("0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
+	noDeletionProofHash, _ := api.NewHexBytesFromString("0x9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba")
+
+	block := &models.Block{
+		Index:               indexBigInt,
+		ChainID:             chainID,
+		Version:             "1.0.0",
+		ForkID:              "test-fork",
+		RootHash:            rootHash,
+		PreviousBlockHash:   previousBlockHash,
+		NoDeletionProofHash: noDeletionProofHash,
+		CreatedAt:           api.Now(),
+		UnicityCertificate:  unicityCertificate,
+	}
+
+	return block
+}
+
 // createTestBlocksRange creates a range of test blocks from start to end (inclusive)
 func createTestBlocksRange(start, count int64) []*models.Block {
 	blocks := make([]*models.Block, count)
@@ -344,6 +366,63 @@ func TestBlockStorage_GetLatest(t *testing.T) {
 
 		assert.Equal(t, 0, expectedLatestIndex.Cmp(latestBlock.Index.Int), "Should get latest block")
 		assert.Equal(t, "large-num-test-2000000000000000000000", latestBlock.ChainID)
+	})
+}
+
+func TestBlockStorage_GetLatestByRootHash(t *testing.T) {
+	db, cleanup := setupBlockTestDB(t)
+	defer cleanup()
+
+	storage := NewBlockStorage(db)
+	ctx := context.Background()
+
+	err := storage.CreateIndexes(ctx)
+	require.NoError(t, err)
+
+	t.Run("GetLatestByRootHash_NonExistentRootHash", func(t *testing.T) {
+		rootHash := api.HexBytes("nonexistent")
+		block, err := storage.GetLatestByRootHash(ctx, rootHash)
+		require.NoError(t, err, "GetLatestByRootHash should not return an error for non-existent root hash")
+		assert.Nil(t, block, "Should return nil for non-existent root hash")
+	})
+
+	t.Run("GetLatestByRootHash_WithBlocks", func(t *testing.T) {
+		// Create test blocks with different root hashes
+		rootHash1 := api.HexBytes("0000111122223333444455556666777788889999aaaabbbbccccddddeeeeffff")
+		rootHash2 := api.HexBytes("1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff")
+
+		blocks := []*models.Block{
+			createTestBlockWithRootHash(1, "test-chain", rootHash1),
+			createTestBlockWithRootHash(2, "test-chain", rootHash2),
+			createTestBlockWithRootHash(3, "test-chain", rootHash1), // Same root hash as block 1
+			createTestBlockWithRootHash(4, "test-chain", rootHash2), // Same root hash as block 2
+		}
+
+		// Store all blocks
+		for _, block := range blocks {
+			err := storage.Store(ctx, block)
+			require.NoError(t, err, "Should store block successfully")
+		}
+
+		// Test getting latest block with rootHash1 (should return block 3)
+		latestBlock1, err := storage.GetLatestByRootHash(ctx, rootHash1)
+		require.NoError(t, err, "GetLatestByRootHash should not return an error")
+		require.NotNil(t, latestBlock1, "Should find block with rootHash1")
+		assert.Equal(t, big.NewInt(3), latestBlock1.Index.Int, "Should return the latest block (block 3) with rootHash1")
+		assert.Equal(t, rootHash1.String(), latestBlock1.RootHash.String(), "Root hash should match")
+
+		// Test getting latest block with rootHash2 (should return block 4)
+		latestBlock2, err := storage.GetLatestByRootHash(ctx, rootHash2)
+		require.NoError(t, err, "GetLatestByRootHash should not return an error")
+		require.NotNil(t, latestBlock2, "Should find block with rootHash2")
+		assert.Equal(t, big.NewInt(4), latestBlock2.Index.Int, "Should return the latest block (block 4) with rootHash2")
+		assert.Equal(t, rootHash2.String(), latestBlock2.RootHash.String(), "Root hash should match")
+
+		// Test with non-existent root hash
+		nonExistentHash := api.HexBytes("9999888877776666555544443333222211110000aaaabbbbccccddddeeeeffff")
+		nonExistentBlock, err := storage.GetLatestByRootHash(ctx, nonExistentHash)
+		require.NoError(t, err, "GetLatestByRootHash should not return an error for non-existent hash")
+		assert.Nil(t, nonExistentBlock, "Should return nil for non-existent root hash")
 	})
 }
 

@@ -169,8 +169,8 @@ func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
 	}
 
 	return &AggregatorRecord{
-		RequestID:             api.RequestID(arb.RequestID),
-		TransactionHash:       api.TransactionHash(arb.TransactionHash),
+		RequestID:       api.RequestID(arb.RequestID),
+		TransactionHash: api.TransactionHash(arb.TransactionHash),
 		Authenticator: Authenticator{
 			Algorithm: arb.Authenticator.Algorithm,
 			PublicKey: publicKey,

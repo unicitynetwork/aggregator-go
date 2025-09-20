@@ -63,12 +63,12 @@ type HAConfig struct {
 
 // LoggingConfig holds logging configuration
 type LoggingConfig struct {
-	Level            string `mapstructure:"level"`
-	Format           string `mapstructure:"format"`
-	Output           string `mapstructure:"output"`
-	EnableJSON       bool   `mapstructure:"enable_json"`
-	EnableAsync      bool   `mapstructure:"enable_async"`
-	AsyncBufferSize  int    `mapstructure:"async_buffer_size"`
+	Level           string `mapstructure:"level"`
+	Format          string `mapstructure:"format"`
+	Output          string `mapstructure:"output"`
+	EnableJSON      bool   `mapstructure:"enable_json"`
+	EnableAsync     bool   `mapstructure:"enable_async"`
+	AsyncBufferSize int    `mapstructure:"async_buffer_size"`
 }
 
 // ProcessingConfig holds batch processing configuration

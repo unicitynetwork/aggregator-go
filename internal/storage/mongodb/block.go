@@ -115,6 +115,27 @@ func (bs *BlockStorage) GetLatestNumber(ctx context.Context) (*api.BigInt, error
 	return blockNumber, nil
 }
 
+// GetLatestByRootHash retrieves the latest block with the given root hash
+func (bs *BlockStorage) GetLatestByRootHash(ctx context.Context, rootHash api.HexBytes) (*models.Block, error) {
+	filter := bson.M{"rootHash": rootHash.String()}
+	opts := options.FindOne().SetSort(bson.M{"index": -1})
+
+	var blockBSON models.BlockBSON
+	err := bs.collection.FindOne(ctx, filter, opts).Decode(&blockBSON)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get latest block by root hash: %w", err)
+	}
+
+	block, err := blockBSON.FromBSON()
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+	}
+	return block, nil
+}
+
 // Count returns the total number of blocks
 func (bs *BlockStorage) Count(ctx context.Context) (int64, error) {
 	count, err := bs.collection.CountDocuments(ctx, bson.M{})
