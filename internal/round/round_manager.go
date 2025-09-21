@@ -652,50 +652,6 @@ func (rm *RoundManager) adjustProcessingRatio(ctx context.Context, processingTim
 		"processingTime", processingTime)
 }
 
-// processMiniBatch processes a small batch of commitments into the SMT for efficiency
-func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.Commitment) error {
-	if len(commitments) == 0 {
-		return nil
-	}
-
-	// Convert commitments to SMT leaves
-	leaves := make([]*smt.Leaf, len(commitments))
-	for i, commitment := range commitments {
-		// Generate leaf path from requestID
-		path, err := commitment.RequestID.GetPath()
-		if err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
-				"requestID", commitment.RequestID.String(),
-				"error", err.Error())
-			continue
-		}
-
-		// Create leaf value (hash of commitment data)
-		leafValue, err := rm.createLeafValue(commitment)
-		if err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to create leaf value",
-				"requestID", commitment.RequestID.String(),
-				"error", err.Error())
-			continue
-		}
-
-		leaves[i] = &smt.Leaf{
-			Path:  path,
-			Value: leafValue,
-		}
-	}
-
-	// Add leaves to the current round's SMT snapshot
-	if rm.currentRound.Snapshot != nil {
-		_, err := rm.currentRound.Snapshot.AddLeaves(leaves)
-		if err != nil {
-			return fmt.Errorf("failed to add leaves to SMT snapshot: %w", err)
-		}
-	}
-
-	return nil
-}
-
 // restoreSmtFromStorage restores the SMT tree from persisted nodes in storage
 func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) error {
 	rm.logger.Info("Starting SMT restoration from storage")

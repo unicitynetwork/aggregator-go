@@ -13,65 +13,51 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-// processBatch processes a batch of commitments and adds them to the SMT
-func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.Commitment, blockNumber *api.BigInt) (string, error) {
-	rm.logger.WithContext(ctx).Info("Processing commitment batch",
-		"commitmentCount", len(commitments),
-		"blockNumber", blockNumber.String())
+// processMiniBatch processes a small batch of commitments into the SMT for efficiency
+// NOTE: The caller is expected to hold rm.roundMutex when calling this function
+func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.Commitment) error {
+	if len(commitments) == 0 {
+		return nil
+	}
 
 	// Convert commitments to SMT leaves
 	leaves := make([]*smt.Leaf, len(commitments))
-
 	for i, commitment := range commitments {
 		// Generate leaf path from requestID
 		path, err := commitment.RequestID.GetPath()
 		if err != nil {
-			return "", fmt.Errorf("failed to get path for requestID %s: %w", commitment.RequestID, err)
+			rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
+				"requestID", commitment.RequestID.String(),
+				"error", err.Error())
+			continue
 		}
 
 		// Create leaf value (hash of commitment data)
 		leafValue, err := rm.createLeafValue(commitment)
 		if err != nil {
-			return "", fmt.Errorf("failed to create leaf value for commitment %s: %w", commitment.RequestID, err)
+			rm.logger.WithContext(ctx).Error("Failed to create leaf value",
+				"requestID", commitment.RequestID.String(),
+				"error", err.Error())
+			continue
 		}
 
 		leaves[i] = &smt.Leaf{
 			Path:  path,
 			Value: leafValue,
 		}
-
-		rm.logger.WithContext(ctx).Debug("Created SMT leaf for commitment",
-			"requestId", commitment.RequestID.String(),
-			"path", path,
-			"leafIndex", i)
 	}
 
-	// Get the current round's snapshot
-	rm.roundMutex.RLock()
-	snapshot := rm.currentRound.Snapshot
-	rm.roundMutex.RUnlock()
+	// Add leaves to the current round's SMT snapshot
+	if rm.currentRound != nil && rm.currentRound.Snapshot != nil {
+		_, err := rm.currentRound.Snapshot.AddLeaves(leaves)
+		if err != nil {
+			return fmt.Errorf("failed to add leaves to SMT snapshot: %w", err)
+		}
 
-	if snapshot == nil {
-		return "", fmt.Errorf("no snapshot available for current round")
+		rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, leaves...)
 	}
 
-	rootHash, err := snapshot.AddLeaves(leaves)
-	if err != nil {
-		return "", fmt.Errorf("failed to add batch to SMT snapshot: %w", err)
-	}
-
-	// Store leaves and commitments in round state for later persistence in FinalizeBlock
-	rm.roundMutex.Lock()
-	if rm.currentRound != nil {
-		rm.currentRound.PendingLeaves = leaves
-	}
-	rm.roundMutex.Unlock()
-
-	rm.logger.WithContext(ctx).Info("Successfully processed commitment batch to snapshot",
-		"rootHash", rootHash,
-		"commitmentCount", len(commitments))
-
-	return rootHash, nil
+	return nil
 }
 
 // createLeafValue creates the value to store in the SMT leaf for a commitment

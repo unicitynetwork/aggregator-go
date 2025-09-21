@@ -249,8 +249,18 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	}
 
 	blockNumber := api.NewBigInt(big.NewInt(1))
-	rootHash, err := rm.processBatch(ctx, testCommitments, blockNumber)
-	require.NoError(t, err, "processBatch should succeed")
+
+	// Set the commitments in the round and process them
+	rm.currentRound.Commitments = testCommitments
+
+	// Process the commitments (processMiniBatch assumes caller holds mutex)
+	rm.roundMutex.Lock()
+	err := rm.processMiniBatch(ctx, testCommitments)
+	rm.roundMutex.Unlock()
+	require.NoError(t, err, "processMiniBatch should succeed")
+
+	// Get the root hash from the snapshot
+	rootHash := rm.currentRound.Snapshot.GetRootHash()
 	require.NotEmpty(t, rootHash, "Root hash should not be empty")
 
 	// After processBatch, SMT nodes are not yet persisted - they're stored in round state
