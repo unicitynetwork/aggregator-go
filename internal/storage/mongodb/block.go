@@ -198,6 +198,9 @@ func (bs *BlockStorage) CreateIndexes(ctx context.Context) error {
 		{
 			Keys: bson.D{{Key: "chainId", Value: 1}},
 		},
+		{
+			Keys: bson.D{{Key: "rootHash", Value: 1}, {Key: "index", Value: -1}},
+		},
 	}
 
 	_, err := bs.collection.Indexes().CreateMany(ctx, indexes)

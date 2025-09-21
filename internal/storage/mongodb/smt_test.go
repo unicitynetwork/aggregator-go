@@ -264,7 +264,6 @@ func TestSmtStorage_StoreBatch(t *testing.T) {
 			// Should have original values, not the new ones
 			assert.Equal(t, batch1[i].Key, storedNode.Key)
 			assert.Equal(t, batch1[i].Value, storedNode.Value)
-			assert.Equal(t, batch1[i].Value, storedNode.Value)
 		}
 
 		// Verify new unique nodes were stored
@@ -274,7 +273,6 @@ func TestSmtStorage_StoreBatch(t *testing.T) {
 			require.NotNil(t, storedNode, "Retrieved new node %d should not be nil", i)
 
 			assert.Equal(t, batch2[i].Key, storedNode.Key)
-			assert.Equal(t, batch2[i].Value, storedNode.Value)
 			assert.Equal(t, batch2[i].Value, storedNode.Value)
 		}
 	})
@@ -305,7 +303,6 @@ func TestSmtStorage_StoreBatch(t *testing.T) {
 
 			// Should have original values, not the duplicate values
 			assert.Equal(t, originalBatch[i].Key, storedNode.Key)
-			assert.Equal(t, originalBatch[i].Value, storedNode.Value)
 			assert.Equal(t, originalBatch[i].Value, storedNode.Value)
 		}
 	})
@@ -363,7 +360,6 @@ func TestSmtStorage_StoreBatch(t *testing.T) {
 
 			// Should have original values
 			assert.Equal(t, largeBatch[i].Value, storedNode.Value)
-			assert.Equal(t, largeBatch[i].Value, storedNode.Value)
 		}
 
 		// Verify new data is stored
@@ -372,7 +368,6 @@ func TestSmtStorage_StoreBatch(t *testing.T) {
 			require.NoError(t, err, "Should be able to retrieve new node %d", i)
 
 			// Should have new values
-			assert.Equal(t, mixedBatch[i].Value, storedNode.Value)
 			assert.Equal(t, mixedBatch[i].Value, storedNode.Value)
 		}
 	})
