@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"sync"
+	"time"
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -186,6 +187,19 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		"rootHash", block.RootHash.String(),
 		"hasUnicityCertificate", block.UnicityCertificate != nil)
 
+	// Track the actual finalization time
+	finalizationStartTime := time.Now()
+	var proposalTime time.Time
+	var processingTime time.Duration
+
+	// Get timing metrics from the round if available
+	rm.roundMutex.Lock()
+	if rm.currentRound != nil && rm.currentRound.Number.String() == block.Index.String() {
+		proposalTime = rm.currentRound.ProposalTime
+		processingTime = rm.currentRound.ProcessingTime
+	}
+	rm.roundMutex.Unlock()
+
 	// CRITICAL: Store all commitment data BEFORE storing the block to prevent race conditions
 	// where API returns partial block data
 
@@ -317,6 +331,28 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		rm.currentRound.Snapshot = nil
 	}
 	rm.roundMutex.Unlock()
+
+	// Calculate actual finalization metrics
+	actualFinalizationTime := time.Since(finalizationStartTime)
+	var totalRoundTime time.Duration
+	if !proposalTime.IsZero() {
+		// Calculate time from proposal to actual finalization
+		timeFromProposalToFinalization := finalizationStartTime.Sub(proposalTime)
+
+		// Update the average finalization time with the actual measurement
+		rm.avgFinalizationTime = (rm.avgFinalizationTime*4 + actualFinalizationTime + timeFromProposalToFinalization) / 5
+
+		// Calculate total round time (processing + waiting for UC + finalization)
+		totalRoundTime = processingTime + timeFromProposalToFinalization + actualFinalizationTime
+
+		rm.logger.WithContext(ctx).Debug("Finalization timing metrics",
+			"blockNumber", block.Index.String(),
+			"processingTime", processingTime,
+			"proposalToUCTime", timeFromProposalToFinalization,
+			"finalizationTime", actualFinalizationTime,
+			"totalRoundTime", totalRoundTime,
+			"avgFinalizationTime", rm.avgFinalizationTime)
+	}
 
 	rm.logger.WithContext(ctx).Info("Block finalized and stored successfully",
 		"blockNumber", block.Index.String(),

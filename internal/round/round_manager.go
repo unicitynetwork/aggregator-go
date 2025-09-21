@@ -52,6 +52,10 @@ type Round struct {
 	Snapshot *ThreadSafeSmtSnapshot
 	// Store data for persistence during FinalizeBlock
 	PendingLeaves []*smt.Leaf
+	// Timing metrics for this round
+	ProcessingTime      time.Duration
+	ProposalTime        time.Time // When block was proposed to BFT
+	FinalizationTime    time.Time // When block was actually finalized
 }
 
 // RoundManager handles the creation of blocks and processing of commitments
@@ -517,8 +521,13 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 			"rootHash", rootHash)
 	}
 
-	// Track finalization start time
-	finalizationStart := time.Now()
+	// Store processing time and proposal time for this round
+	rm.roundMutex.Lock()
+	if rm.currentRound != nil {
+		rm.currentRound.ProcessingTime = processingTime
+		rm.currentRound.ProposalTime = time.Now()
+	}
+	rm.roundMutex.Unlock()
 
 	// Create and propose block
 	rm.logger.WithContext(ctx).Info("Proposing block",
@@ -532,12 +541,9 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 		return fmt.Errorf("failed to propose block: %w", err)
 	}
 
-	// Track finalization time
-	finalizationTime := time.Since(finalizationStart)
-	rm.avgFinalizationTime = (rm.avgFinalizationTime*4 + finalizationTime) / 5 // EMA with 80/20 weight
-
-	// Adjust processing ratio based on actual performance
-	rm.adjustProcessingRatio(ctx, processingTime, finalizationTime)
+	// Note: Actual finalization time will be tracked in FinalizeBlock when UC arrives
+	// For now, we use the average finalization time for adaptive calculations
+	rm.adjustProcessingRatio(ctx, processingTime, rm.avgFinalizationTime)
 
 	// Update stats
 	rm.totalRounds++
@@ -633,11 +639,9 @@ func (rm *RoundManager) commitmentPrefetcher(ctx context.Context) {
 }
 
 // adjustProcessingRatio dynamically adjusts the processing ratio based on actual performance
-func (rm *RoundManager) adjustProcessingRatio(ctx context.Context, processingTime, finalizationTime time.Duration) {
-	totalTime := processingTime + finalizationTime
-
-	// Only adjust if we have meaningful data (round took at least 100ms)
-	if totalTime < 100*time.Millisecond {
+func (rm *RoundManager) adjustProcessingRatio(ctx context.Context, processingTime, expectedFinalizationTime time.Duration) {
+	// Only adjust if we have meaningful data (processing took at least 100ms)
+	if processingTime < 100*time.Millisecond {
 		return
 	}
 
@@ -645,27 +649,44 @@ func (rm *RoundManager) adjustProcessingRatio(ctx context.Context, processingTim
 	actualRatio := float64(processingTime) / float64(rm.roundDuration)
 
 	// Calculate ideal ratio based on actual finalization time
-	// Leave a buffer of 50ms for safety
-	safeFinalizationTime := rm.avgFinalizationTime + 50*time.Millisecond
+	// We want: processingTime + finalizationTime <= roundDuration
+	// So: processingTime <= roundDuration - finalizationTime
+	// Therefore: idealRatio = (roundDuration - expectedFinalizationTime) / roundDuration
+
+	// Add a safety buffer based on the variability we've seen
+	safetyBuffer := 100 * time.Millisecond
+	if expectedFinalizationTime > 100*time.Millisecond {
+		// For longer finalization times, use a proportional buffer
+		safetyBuffer = expectedFinalizationTime / 5 // 20% buffer
+	}
+
+	safeFinalizationTime := expectedFinalizationTime + safetyBuffer
 	idealRatio := 1.0 - (float64(safeFinalizationTime) / float64(rm.roundDuration))
 
 	// Clamp ideal ratio to reasonable bounds
-	if idealRatio < 0.5 {
-		idealRatio = 0.5 // At least 50% for processing
+	if idealRatio < 0.3 {
+		idealRatio = 0.3 // At least 30% for processing (handle very slow finalization)
 	} else if idealRatio > 0.95 {
-		idealRatio = 0.95 // At most 95% for processing
+		idealRatio = 0.95 // At most 95% for processing (always leave some time for finalization)
 	}
 
-	// Adjust current ratio towards ideal (gradual adjustment)
-	rm.processingRatio = (rm.processingRatio*4 + idealRatio) / 5
+	// Adjust current ratio towards ideal with momentum
+	// If we're consistently missing deadlines, adjust faster
+	adjustmentWeight := 0.2 // Default: 20% weight on new measurement
+	if actualRatio > rm.processingRatio && processingTime > time.Duration(float64(rm.roundDuration)*0.9) {
+		// We're using more time than allocated and getting close to the limit
+		adjustmentWeight = 0.4 // Adjust faster
+	}
+
+	rm.processingRatio = rm.processingRatio*(1-adjustmentWeight) + idealRatio*adjustmentWeight
 
 	rm.logger.WithContext(ctx).Debug("Adjusted processing ratio",
 		"actualRatio", fmt.Sprintf("%.2f", actualRatio),
 		"idealRatio", fmt.Sprintf("%.2f", idealRatio),
 		"newRatio", fmt.Sprintf("%.2f", rm.processingRatio),
 		"avgFinalizationTime", rm.avgFinalizationTime,
-		"lastFinalizationTime", finalizationTime,
-		"processingTime", processingTime)
+		"processingTime", processingTime,
+		"roundDuration", rm.roundDuration)
 }
 
 // restoreSmtFromStorage restores the SMT tree from persisted nodes in storage
