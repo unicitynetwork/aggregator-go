@@ -75,6 +75,7 @@ type RoundManager struct {
 	// Streaming support
 	commitmentStream chan *models.Commitment
 	streamMutex      sync.RWMutex
+	lastFetchedID    string // Cursor for pagination
 
 	// Adaptive throughput tracking
 	avgProcessingRate float64 // commitments per millisecond
@@ -111,7 +112,7 @@ func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfac
 		smt:                 threadSafeSMT,
 		stopChan:            make(chan struct{}),
 		roundDuration:       cfg.Processing.RoundDuration,        // Configurable round duration (default 1s)
-		commitmentStream:    make(chan *models.Commitment, 2000), // Buffered channel for streaming
+		commitmentStream:    make(chan *models.Commitment, 10000), // Increased buffer for high throughput
 		avgProcessingRate:   1.0,                                 // Initial estimate: 1 commitment per ms
 		processingRatio:     0.9,                                 // Start with 90% of round for processing
 		avgFinalizationTime: 100 * time.Millisecond,              // Initial estimate
@@ -141,6 +142,10 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 	if err := rm.restoreSmtFromStorage(ctx); err != nil {
 		return fmt.Errorf("failed to restore SMT from storage: %w", err)
 	}
+
+	// Reset cursor to ensure we process any leftover unprocessed commitments
+	rm.lastFetchedID = ""
+	rm.logger.WithContext(ctx).Info("Reset commitment cursor to process any leftover unprocessed commitments")
 
 	// Start the commitment stream prefetcher
 	rm.wg.Add(1)
@@ -398,7 +403,7 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 		"roundNumber", roundNumber.String())
 
 	// Clear any existing commitments
-	rm.currentRound.Commitments = make([]*models.Commitment, 0, 2000)
+	rm.currentRound.Commitments = make([]*models.Commitment, 0, 10000) // Larger pre-allocation for high throughput
 
 	// Calculate adaptive processing deadline based on historical data
 	processingDuration := time.Duration(float64(rm.roundDuration) * rm.processingRatio)
@@ -570,7 +575,7 @@ func (rm *RoundManager) commitmentPrefetcher(ctx context.Context) {
 
 	rm.logger.WithContext(ctx).Info("Commitment prefetcher started")
 
-	ticker := time.NewTicker(50 * time.Millisecond) // Check for new commitments every 50ms
+	ticker := time.NewTicker(10 * time.Millisecond) // Check more frequently for high throughput
 	defer ticker.Stop()
 
 	for {
@@ -585,31 +590,42 @@ func (rm *RoundManager) commitmentPrefetcher(ctx context.Context) {
 			// Only fetch if channel has space
 			channelSpace := cap(rm.commitmentStream) - len(rm.commitmentStream)
 			if channelSpace > 100 { // Only fetch if we have reasonable space
-				// Fetch a batch of unprocessed commitments
-				commitments, err := rm.storage.CommitmentStorage().GetUnprocessedBatch(ctx, min(channelSpace, 500))
+				// Fetch a batch of unprocessed commitments using cursor for pagination
+				commitments, newCursor, err := rm.storage.CommitmentStorage().GetUnprocessedBatchWithCursor(ctx, rm.lastFetchedID, min(channelSpace, 2000))
 				if err != nil {
 					rm.logger.WithContext(ctx).Error("Failed to fetch commitments", "error", err.Error())
 					continue
 				}
 
+				// Update cursor if we got new commitments
+				if newCursor != "" {
+					rm.lastFetchedID = newCursor
+				}
+
 				// Feed commitments into the stream
+				addedCount := 0
 				for _, commitment := range commitments {
 					select {
 					case rm.commitmentStream <- commitment:
 						// Successfully added to stream
+						addedCount++
 					case <-ctx.Done():
 						return
 					default:
 						// Channel is full, stop feeding for now
-						rm.logger.WithContext(ctx).Debug("Commitment stream full, pausing prefetch")
+						rm.logger.WithContext(ctx).Debug("Commitment stream full, pausing prefetch",
+							"channelLen", len(rm.commitmentStream),
+							"channelCap", cap(rm.commitmentStream))
 						break
 					}
 				}
 
 				if len(commitments) > 0 {
 					rm.logger.WithContext(ctx).Debug("Prefetched commitments",
-						"count", len(commitments),
-						"channelSize", len(rm.commitmentStream))
+						"fetched", len(commitments),
+						"added", addedCount,
+						"channelSize", len(rm.commitmentStream),
+						"cursor", rm.lastFetchedID)
 				}
 			}
 		}

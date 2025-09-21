@@ -18,6 +18,9 @@ type CommitmentStorage interface {
 	// GetUnprocessedBatch retrieves a batch of unprocessed commitments
 	GetUnprocessedBatch(ctx context.Context, limit int) ([]*models.Commitment, error)
 
+	// GetUnprocessedBatchWithCursor retrieves a batch with cursor-based pagination
+	GetUnprocessedBatchWithCursor(ctx context.Context, lastID string, limit int) ([]*models.Commitment, string, error)
+
 	// MarkProcessed marks commitments as processed
 	MarkProcessed(ctx context.Context, requestIDs []api.RequestID) error
 
