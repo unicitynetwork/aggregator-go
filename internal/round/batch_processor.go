@@ -275,16 +275,21 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	}
 	rm.roundMutex.Unlock()
 
-	if len(pendingLeaves) > 0 && len(commitments) > 0 && snapshot != nil {
+	// Store SMT nodes and aggregator records if we have commitments
+	if len(commitments) > 0 {
 		var wg sync.WaitGroup
 		var smtPersistErr, aggregatorRecordErr error
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			smtPersistErr = rm.persistSmtNodes(ctx, pendingLeaves)
-		}()
+		// Only persist SMT nodes if we have pending leaves
+		if len(pendingLeaves) > 0 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				smtPersistErr = rm.persistSmtNodes(ctx, pendingLeaves)
+			}()
+		}
 
+		// Always persist aggregator records if we have commitments
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -300,7 +305,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 			return fmt.Errorf("failed to store aggregator records: %w", aggregatorRecordErr)
 		}
 
-		rm.logger.WithContext(ctx).Info("Successfully persisted SMT nodes and aggregator records",
+		rm.logger.WithContext(ctx).Info("Successfully persisted data",
 			"blockNumber", block.Index.String(),
 			"leafCount", len(pendingLeaves),
 			"recordCount", len(commitments))

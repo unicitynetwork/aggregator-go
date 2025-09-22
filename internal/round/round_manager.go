@@ -116,10 +116,10 @@ func NewRoundManager(cfg *config.Config, logger *logger.Logger, storage interfac
 		smt:                 threadSafeSMT,
 		stopChan:            make(chan struct{}),
 		roundDuration:       cfg.Processing.RoundDuration,        // Configurable round duration (default 1s)
-		commitmentStream:    make(chan *models.Commitment, 10000), // Increased buffer for high throughput
+		commitmentStream:    make(chan *models.Commitment, 3000), // Reasonable buffer for streaming
 		avgProcessingRate:   1.0,                                 // Initial estimate: 1 commitment per ms
-		processingRatio:     0.9,                                 // Start with 90% of round for processing
-		avgFinalizationTime: 100 * time.Millisecond,              // Initial estimate
+		processingRatio:     0.7,                                 // Start with 70% of round for processing (conservative but good throughput)
+		avgFinalizationTime: 200 * time.Millisecond,              // Initial estimate (conservative)
 		avgSMTUpdateTime:    5 * time.Millisecond,                // Initial estimate per batch
 	}
 
@@ -147,9 +147,9 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to restore SMT from storage: %w", err)
 	}
 
-	// Reset cursor to ensure we process any leftover unprocessed commitments
+	// Reset cursor on startup
 	rm.lastFetchedID = ""
-	rm.logger.WithContext(ctx).Info("Reset commitment cursor to process any leftover unprocessed commitments")
+	rm.logger.WithContext(ctx).Info("Reset commitment cursor")
 
 	// Start the commitment stream prefetcher
 	rm.wg.Add(1)
@@ -406,7 +406,8 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	rm.logger.WithContext(ctx).Info("Changed round state to processing",
 		"roundNumber", roundNumber.String())
 
-	// Clear any existing commitments
+	// Initialize commitments slice for this round
+	// Note: Any commitments consumed from the channel MUST be processed in this round
 	rm.currentRound.Commitments = make([]*models.Commitment, 0, 10000) // Larger pre-allocation for high throughput
 
 	// Calculate adaptive processing deadline based on historical data
@@ -426,6 +427,7 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	smtUpdateTime := time.Duration(0)
 
 	// Stream and process commitments until deadline
+ProcessLoop:
 	for time.Now().Before(processingDeadline) {
 		select {
 		case commitment := <-rm.commitmentStream:
@@ -438,22 +440,27 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 			if len(rm.currentRound.Commitments)%100 == 0 {
 				// Process this mini-batch into SMT
 				batchStart := time.Now()
-				rm.processMiniBatch(ctx, rm.currentRound.Commitments[len(rm.currentRound.Commitments)-100:])
+				if err := rm.processMiniBatch(ctx, rm.currentRound.Commitments[len(rm.currentRound.Commitments)-100:]); err != nil {
+					rm.logger.WithContext(ctx).Error("Failed to process mini-batch",
+						"error", err.Error(),
+						"roundNumber", roundNumber.String())
+				}
 				smtUpdateTime += time.Since(batchStart)
 			}
 			rm.roundMutex.Unlock()
 
-		case <-time.After(10 * time.Millisecond):
-			// No commitments available, check if we should continue waiting
+		case <-ctx.Done():
+			return ctx.Err()
+
+		default:
+			// No commitment immediately available
 			remainingTime := time.Until(processingDeadline)
 			if remainingTime < 50*time.Millisecond {
 				// Not enough time to wait for more
-				break
+				break ProcessLoop
 			}
-			// Continue waiting for more commitments
-
-		case <-ctx.Done():
-			return ctx.Err()
+			// Wait a bit for more commitments
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 
@@ -462,7 +469,11 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	lastBatchStart := (commitmentsProcessed / 100) * 100
 	if lastBatchStart < len(rm.currentRound.Commitments) {
 		batchStart := time.Now()
-		rm.processMiniBatch(ctx, rm.currentRound.Commitments[lastBatchStart:])
+		if err := rm.processMiniBatch(ctx, rm.currentRound.Commitments[lastBatchStart:]); err != nil {
+			rm.logger.WithContext(ctx).Error("Failed to process final mini-batch",
+				"error", err.Error(),
+				"roundNumber", roundNumber.String())
+		}
 		smtUpdateTime += time.Since(batchStart)
 	}
 
@@ -593,45 +604,77 @@ func (rm *RoundManager) commitmentPrefetcher(ctx context.Context) {
 			rm.logger.WithContext(ctx).Info("Commitment prefetcher context cancelled")
 			return
 		case <-ticker.C:
-			// Only fetch if channel has space
+			// Check channel space - be conservative to avoid race conditions
 			channelSpace := cap(rm.commitmentStream) - len(rm.commitmentStream)
+
 			if channelSpace > 100 { // Only fetch if we have reasonable space
-				// Fetch a batch of unprocessed commitments using cursor for pagination
-				commitments, newCursor, err := rm.storage.CommitmentStorage().GetUnprocessedBatchWithCursor(ctx, rm.lastFetchedID, min(channelSpace, 2000))
+				// Get current cursor
+				rm.streamMutex.RLock()
+				cursor := rm.lastFetchedID
+				rm.streamMutex.RUnlock()
+
+				// Fetch only what we can fit, with some buffer for concurrent consumption
+				// Fetch smaller batches to avoid overwhelming the channel
+				fetchSize := min(channelSpace-50, 500) // Smaller batches, leave buffer
+				if fetchSize <= 0 {
+					continue
+				}
+
+				// Fetch batch using cursor
+				commitments, _, err := rm.storage.CommitmentStorage().GetUnprocessedBatchWithCursor(ctx, cursor, fetchSize)
 				if err != nil {
 					rm.logger.WithContext(ctx).Error("Failed to fetch commitments", "error", err.Error())
 					continue
 				}
 
-				// Update cursor if we got new commitments
-				if newCursor != "" {
-					rm.lastFetchedID = newCursor
+				// If we got no commitments and have a cursor, reset it to check for new ones
+				if len(commitments) == 0 && cursor != "" {
+					// Check if there are actually unprocessed commitments
+					unprocessedCount, _ := rm.storage.CommitmentStorage().CountUnprocessed(ctx)
+					if unprocessedCount > 0 {
+						rm.logger.WithContext(ctx).Info("Resetting cursor to fetch new commitments",
+							"unprocessedCount", unprocessedCount,
+							"oldCursor", cursor)
+						rm.streamMutex.Lock()
+						rm.lastFetchedID = ""
+						rm.streamMutex.Unlock()
+						continue // Try again with reset cursor
+					}
 				}
 
-				// Feed commitments into the stream
+				// Push to channel
 				addedCount := 0
-				for _, commitment := range commitments {
+				lastAddedIdx := -1
+				for i, commitment := range commitments {
 					select {
 					case rm.commitmentStream <- commitment:
-						// Successfully added to stream
 						addedCount++
+						lastAddedIdx = i
 					case <-ctx.Done():
 						return
 					default:
-						// Channel is full, stop feeding for now
-						rm.logger.WithContext(ctx).Debug("Commitment stream full, pausing prefetch",
-							"channelLen", len(rm.commitmentStream),
-							"channelCap", cap(rm.commitmentStream))
-						break
+						// Channel full, stop trying to add more
+						goto DonePushing
 					}
 				}
+				DonePushing:
+
+				// Update cursor based on what we actually added
+				if lastAddedIdx >= 0 {
+					// Update cursor to the last successfully added commitment
+					rm.streamMutex.Lock()
+					rm.lastFetchedID = commitments[lastAddedIdx].ID.Hex()
+					rm.streamMutex.Unlock()
+				}
+				// If we couldn't add ANY commitments (lastAddedIdx = -1),
+				// we keep the cursor unchanged so we'll retry these same commitments
 
 				if len(commitments) > 0 {
 					rm.logger.WithContext(ctx).Debug("Prefetched commitments",
 						"fetched", len(commitments),
 						"added", addedCount,
-						"channelSize", len(rm.commitmentStream),
-						"cursor", rm.lastFetchedID)
+						"skipped", len(commitments)-addedCount,
+						"channelSize", len(rm.commitmentStream))
 				}
 			}
 		}
@@ -664,10 +707,11 @@ func (rm *RoundManager) adjustProcessingRatio(ctx context.Context, processingTim
 	idealRatio := 1.0 - (float64(safeFinalizationTime) / float64(rm.roundDuration))
 
 	// Clamp ideal ratio to reasonable bounds
-	if idealRatio < 0.3 {
-		idealRatio = 0.3 // At least 30% for processing (handle very slow finalization)
-	} else if idealRatio > 0.95 {
-		idealRatio = 0.95 // At most 95% for processing (always leave some time for finalization)
+	// We want at least 50-70% for processing to maintain good throughput
+	if idealRatio < 0.5 {
+		idealRatio = 0.5 // At least 50% for processing (500ms in 1s round)
+	} else if idealRatio > 0.85 {
+		idealRatio = 0.85 // At most 85% for processing (leave 150ms for finalization)
 	}
 
 	// Adjust current ratio towards ideal with momentum
