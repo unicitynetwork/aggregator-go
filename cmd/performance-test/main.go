@@ -74,7 +74,7 @@ const (
 	defaultAggregatorURL = "http://localhost:3000"
 	testDuration         = 30 * time.Second
 	workerCount          = 30   // Number of concurrent workers
-	requestsPerSec       = 1000 // Target requests per second
+	requestsPerSec       = 5000 // Target requests per second
 )
 
 // BlockCommitmentInfo stores block number and commitment count
@@ -542,10 +542,10 @@ func main() {
 
 		// Track blocks that had commitments but none were ours (might need retry due to race condition)
 		type blockRetryInfo struct {
-			blockNumber int64
+			blockNumber      int64
 			totalCommitments int
-			lastChecked time.Time
-			retryCount int
+			lastChecked      time.Time
+			retryCount       int
 		}
 		blocksToRetry := make(map[int64]*blockRetryInfo)
 
@@ -603,10 +603,10 @@ func main() {
 				// Track for retry in case aggregator records are still being written
 				if _, exists := blocksToRetry[blockNum]; !exists {
 					blocksToRetry[blockNum] = &blockRetryInfo{
-						blockNumber: blockNum,
+						blockNumber:      blockNum,
 						totalCommitments: len(commitsResp.Commitments),
-						lastChecked: time.Now(),
-						retryCount: 0,
+						lastChecked:      time.Now(),
+						retryCount:       0,
 					}
 					fmt.Printf("Block %d: 0 our commitments yet (will retry, total: %d)\n",
 						blockNum, len(commitsResp.Commitments))
@@ -688,7 +688,7 @@ func main() {
 
 								// Don't give up - keep retrying until timeout
 								// Only log every 10 retries to reduce noise
-								if info.retryCount % 10 == 0 {
+								if info.retryCount%10 == 0 {
 									fmt.Printf("Block %d: retry #%d, still waiting for aggregator records (block has %d total commitments)\n",
 										blockNum, info.retryCount, info.totalCommitments)
 								}

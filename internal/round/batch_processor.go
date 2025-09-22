@@ -22,8 +22,8 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 	}
 
 	// Convert commitments to SMT leaves
-	leaves := make([]*smt.Leaf, len(commitments))
-	for i, commitment := range commitments {
+	leaves := make([]*smt.Leaf, 0, len(commitments))
+	for _, commitment := range commitments {
 		// Generate leaf path from requestID
 		path, err := commitment.RequestID.GetPath()
 		if err != nil {
@@ -42,10 +42,10 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 			continue
 		}
 
-		leaves[i] = &smt.Leaf{
+		leaves = append(leaves, &smt.Leaf{
 			Path:  path,
 			Value: leafValue,
-		}
+		})
 	}
 
 	// Add leaves to the current round's SMT snapshot
