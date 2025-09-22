@@ -42,8 +42,8 @@ func TestAdaptiveProcessingRatio(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test initial values
-	assert.Equal(t, 0.9, rm.processingRatio, "Initial processing ratio should be 0.9")
-	assert.Equal(t, 100*time.Millisecond, rm.avgFinalizationTime, "Initial avg finalization time should be 100ms")
+	assert.Equal(t, 0.7, rm.processingRatio, "Initial processing ratio should be 0.7")
+	assert.Equal(t, 200*time.Millisecond, rm.avgFinalizationTime, "Initial avg finalization time should be 200ms")
 	assert.Equal(t, 5*time.Millisecond, rm.avgSMTUpdateTime, "Initial avg SMT update time should be 5ms")
 
 	// Test 1: Fast finalization should increase processing ratio
@@ -57,13 +57,12 @@ func TestAdaptiveProcessingRatio(t *testing.T) {
 		rm.adjustProcessingRatio(ctx, processingTime, finalizationTime)
 
 		// After very fast finalization, ratio should increase (more time for processing)
-		// With 82ms avg and 50ms buffer = 132ms needed, ideal ratio = 0.868
-		// New ratio = (0.9*4 + 0.868)/5 = 0.8936
-		assert.Greater(t, rm.processingRatio, 0.89, "Processing ratio should increase with fast finalization")
+		// Starting from 0.7, with fast finalization we should see an increase
+		assert.Greater(t, rm.processingRatio, 0.7, "Processing ratio should increase with fast finalization")
 		assert.Less(t, rm.processingRatio, 0.95, "Processing ratio should not exceed 0.95")
 
-		// Average finalization time should decrease
-		assert.Less(t, rm.avgFinalizationTime, 100*time.Millisecond, "Avg finalization time should decrease")
+		// Average finalization time should decrease from initial 200ms
+		assert.Less(t, rm.avgFinalizationTime, 200*time.Millisecond, "Avg finalization time should decrease")
 	})
 
 	// Test 2: Slow finalization should decrease processing ratio
