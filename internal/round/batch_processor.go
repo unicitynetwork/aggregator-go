@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"sync"
+	"time"
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -13,65 +14,51 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-// processBatch processes a batch of commitments and adds them to the SMT
-func (rm *RoundManager) processBatch(ctx context.Context, commitments []*models.Commitment, blockNumber *api.BigInt) (string, error) {
-	rm.logger.WithContext(ctx).Info("Processing commitment batch",
-		"commitmentCount", len(commitments),
-		"blockNumber", blockNumber.String())
+// processMiniBatch processes a small batch of commitments into the SMT for efficiency
+// NOTE: The caller is expected to hold rm.roundMutex when calling this function
+func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.Commitment) error {
+	if len(commitments) == 0 {
+		return nil
+	}
 
 	// Convert commitments to SMT leaves
-	leaves := make([]*smt.Leaf, len(commitments))
-
-	for i, commitment := range commitments {
+	leaves := make([]*smt.Leaf, 0, len(commitments))
+	for _, commitment := range commitments {
 		// Generate leaf path from requestID
 		path, err := commitment.RequestID.GetPath()
 		if err != nil {
-			return "", fmt.Errorf("failed to get path for requestID %s: %w", commitment.RequestID, err)
+			rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
+				"requestID", commitment.RequestID.String(),
+				"error", err.Error())
+			continue
 		}
 
 		// Create leaf value (hash of commitment data)
 		leafValue, err := rm.createLeafValue(commitment)
 		if err != nil {
-			return "", fmt.Errorf("failed to create leaf value for commitment %s: %w", commitment.RequestID, err)
+			rm.logger.WithContext(ctx).Error("Failed to create leaf value",
+				"requestID", commitment.RequestID.String(),
+				"error", err.Error())
+			continue
 		}
 
-		leaves[i] = &smt.Leaf{
+		leaves = append(leaves, &smt.Leaf{
 			Path:  path,
 			Value: leafValue,
+		})
+	}
+
+	// Add leaves to the current round's SMT snapshot
+	if rm.currentRound != nil && rm.currentRound.Snapshot != nil {
+		_, err := rm.currentRound.Snapshot.AddLeaves(leaves)
+		if err != nil {
+			return fmt.Errorf("failed to add leaves to SMT snapshot: %w", err)
 		}
 
-		rm.logger.WithContext(ctx).Debug("Created SMT leaf for commitment",
-			"requestId", commitment.RequestID.String(),
-			"path", path,
-			"leafIndex", i)
+		rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, leaves...)
 	}
 
-	// Get the current round's snapshot
-	rm.roundMutex.RLock()
-	snapshot := rm.currentRound.Snapshot
-	rm.roundMutex.RUnlock()
-
-	if snapshot == nil {
-		return "", fmt.Errorf("no snapshot available for current round")
-	}
-
-	rootHash, err := snapshot.AddLeaves(leaves)
-	if err != nil {
-		return "", fmt.Errorf("failed to add batch to SMT snapshot: %w", err)
-	}
-
-	// Store leaves and commitments in round state for later persistence in FinalizeBlock
-	rm.roundMutex.Lock()
-	if rm.currentRound != nil {
-		rm.currentRound.PendingLeaves = leaves
-	}
-	rm.roundMutex.Unlock()
-
-	rm.logger.WithContext(ctx).Info("Successfully processed commitment batch to snapshot",
-		"rootHash", rootHash,
-		"commitmentCount", len(commitments))
-
-	return rootHash, nil
+	return nil
 }
 
 // createLeafValue creates the value to store in the SMT leaf for a commitment
@@ -200,6 +187,19 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		"rootHash", block.RootHash.String(),
 		"hasUnicityCertificate", block.UnicityCertificate != nil)
 
+	// Track the actual finalization time
+	finalizationStartTime := time.Now()
+	var proposalTime time.Time
+	var processingTime time.Duration
+
+	// Get timing metrics from the round if available
+	rm.roundMutex.Lock()
+	if rm.currentRound != nil && rm.currentRound.Number.String() == block.Index.String() {
+		proposalTime = rm.currentRound.ProposalTime
+		processingTime = rm.currentRound.ProcessingTime
+	}
+	rm.roundMutex.Unlock()
+
 	// CRITICAL: Store all commitment data BEFORE storing the block to prevent race conditions
 	// where API returns partial block data
 
@@ -275,16 +275,21 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	}
 	rm.roundMutex.Unlock()
 
-	if len(pendingLeaves) > 0 && len(commitments) > 0 && snapshot != nil {
+	// Store SMT nodes and aggregator records if we have commitments
+	if len(commitments) > 0 {
 		var wg sync.WaitGroup
 		var smtPersistErr, aggregatorRecordErr error
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			smtPersistErr = rm.persistSmtNodes(ctx, pendingLeaves)
-		}()
+		// Only persist SMT nodes if we have pending leaves
+		if len(pendingLeaves) > 0 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				smtPersistErr = rm.persistSmtNodes(ctx, pendingLeaves)
+			}()
+		}
 
+		// Always persist aggregator records if we have commitments
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -300,7 +305,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 			return fmt.Errorf("failed to store aggregator records: %w", aggregatorRecordErr)
 		}
 
-		rm.logger.WithContext(ctx).Info("Successfully persisted SMT nodes and aggregator records",
+		rm.logger.WithContext(ctx).Info("Successfully persisted data",
 			"blockNumber", block.Index.String(),
 			"leafCount", len(pendingLeaves),
 			"recordCount", len(commitments))
@@ -331,6 +336,28 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		rm.currentRound.Snapshot = nil
 	}
 	rm.roundMutex.Unlock()
+
+	// Calculate actual finalization metrics
+	actualFinalizationTime := time.Since(finalizationStartTime)
+	var totalRoundTime time.Duration
+	if !proposalTime.IsZero() {
+		// Calculate time from proposal to actual finalization
+		timeFromProposalToFinalization := finalizationStartTime.Sub(proposalTime)
+
+		// Update the average finalization time with the actual measurement
+		rm.avgFinalizationTime = (rm.avgFinalizationTime*4 + actualFinalizationTime + timeFromProposalToFinalization) / 5
+
+		// Calculate total round time (processing + waiting for UC + finalization)
+		totalRoundTime = processingTime + timeFromProposalToFinalization + actualFinalizationTime
+
+		rm.logger.WithContext(ctx).Debug("Finalization timing metrics",
+			"blockNumber", block.Index.String(),
+			"processingTime", processingTime,
+			"proposalToUCTime", timeFromProposalToFinalization,
+			"finalizationTime", actualFinalizationTime,
+			"totalRoundTime", totalRoundTime,
+			"avgFinalizationTime", rm.avgFinalizationTime)
+	}
 
 	rm.logger.WithContext(ctx).Info("Block finalized and stored successfully",
 		"blockNumber", block.Index.String(),

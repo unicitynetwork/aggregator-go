@@ -392,12 +392,26 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 		status.AddDetail("database", "connected")
 	}
 
-	// Add commitment queue status
+	// Add commitment queue status and warning if too high
 	unprocessedCount, err := as.storage.CommitmentStorage().CountUnprocessed(ctx)
 	if err != nil {
 		status.AddDetail("commitment_queue", "unknown")
+		status.AddDetail("commitment_queue_status", "error")
 	} else {
 		status.AddDetail("commitment_queue", strconv.FormatInt(unprocessedCount, 10))
+
+		// Add warning if unprocessed count is concerning
+		if unprocessedCount > 10000 {
+			status.AddDetail("commitment_queue_status", "critical")
+			as.logger.WithContext(ctx).Error("Critical: High unprocessed commitment count",
+				"count", unprocessedCount)
+		} else if unprocessedCount > 5000 {
+			status.AddDetail("commitment_queue_status", "warning")
+			as.logger.WithContext(ctx).Warn("Warning: Elevated unprocessed commitment count",
+				"count", unprocessedCount)
+		} else {
+			status.AddDetail("commitment_queue_status", "healthy")
+		}
 	}
 
 	return modelToAPIHealthStatus(status), nil

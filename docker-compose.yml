@@ -139,7 +139,7 @@ services:
       LEADER_ELECTION_POLLING_INTERVAL: "5s"
 
       # Logging Configuration
-      LOG_LEVEL: "info"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
       LOG_FORMAT: "json"
       LOG_ENABLE_JSON: "true"
 

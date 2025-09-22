@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,7 +74,7 @@ const (
 	defaultAggregatorURL = "http://localhost:3000"
 	testDuration         = 30 * time.Second
 	workerCount          = 30   // Number of concurrent workers
-	requestsPerSec       = 1000 // Target requests per second
+	requestsPerSec       = 5000 // Target requests per second
 )
 
 // BlockCommitmentInfo stores block number and commitment count
@@ -307,13 +308,13 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 
 				if submitResp.Status == "SUCCESS" {
 					atomic.AddInt64(&metrics.successfulRequests, 1)
-					// Track this request ID as submitted by us
-					metrics.submittedRequestIDs.Store(string(req.RequestID), true)
+					// Track this request ID as submitted by us (normalized to lowercase)
+					metrics.submittedRequestIDs.Store(strings.ToLower(string(req.RequestID)), true)
 				} else if submitResp.Status == "REQUEST_ID_EXISTS" {
 					atomic.AddInt64(&metrics.requestIdExistsErr, 1)
 					atomic.AddInt64(&metrics.successfulRequests, 1) // Count as successful - it will be in blocks!
-					// Also track this ID - it exists so it will be in blocks!
-					metrics.submittedRequestIDs.Store(string(req.RequestID), true)
+					// Also track this ID - it exists so it will be in blocks! (normalized to lowercase)
+					metrics.submittedRequestIDs.Store(strings.ToLower(string(req.RequestID)), true)
 				} else {
 					atomic.AddInt64(&metrics.failedRequests, 1)
 					// Log unexpected status
@@ -443,14 +444,22 @@ func main() {
 
 	fmt.Printf("Latest block: %d\n", latestBlockNumber)
 
-	// Check all blocks from start to latest
+	// Check all blocks from start to latest-1 (since latest might not be fully persisted)
 	processedCount := int64(0)
 	currentCheckBlock := startingBlockNumber + 1
 	blocksWithOurCommitments := 0
 
-	fmt.Printf("\nChecking blocks %d to %d...\n", currentCheckBlock, latestBlockNumber)
+	// Only check blocks that are guaranteed to be fully persisted (N-1)
+	safeBlockNumber := latestBlockNumber - 1
+	if safeBlockNumber < currentCheckBlock {
+		fmt.Printf("\nWaiting for more blocks to be created...\n")
+		safeBlockNumber = currentCheckBlock
+	}
 
-	for currentCheckBlock <= latestBlockNumber && processedCount < successful {
+	fmt.Printf("\nChecking blocks %d to %d (block %d exists, ensuring previous blocks are fully persisted)...\n",
+		currentCheckBlock, safeBlockNumber, latestBlockNumber)
+
+	for currentCheckBlock <= safeBlockNumber && processedCount < successful {
 		// Try to get commitments for this block
 		commitReq := GetBlockCommitmentsRequest{
 			BlockNumber: fmt.Sprintf("%d", currentCheckBlock),
@@ -485,10 +494,12 @@ func main() {
 		ourCommitmentCount := 0
 		notOurs := 0
 		for _, commitment := range commitsResp.Commitments {
-			if _, exists := metrics.submittedRequestIDs.Load(commitment.RequestID); exists {
+			// Normalize the request ID to ensure consistent format
+			requestIDStr := strings.ToLower(commitment.RequestID)
+			if _, exists := metrics.submittedRequestIDs.Load(requestIDStr); exists {
 				ourCommitmentCount++
 				// Mark this ID as found
-				metrics.submittedRequestIDs.Store(commitment.RequestID, "found")
+				metrics.submittedRequestIDs.Store(requestIDStr, "found")
 			} else {
 				notOurs++
 			}
@@ -521,84 +532,257 @@ func main() {
 	// If we haven't found all commitments yet, keep checking for a bit more
 	if processedCount < successful {
 		fmt.Printf("\nContinuing to check for remaining %d commitments...\n", successful-processedCount)
+		fmt.Printf("Will check for up to 3 minutes for new blocks...\n")
 
-		// Continue checking for up to 90 more seconds or until we find all commitments
-		timeoutTime := time.Now().Add(90 * time.Second)
+		// Continue checking for up to 3 minutes or until we find all commitments
+		timeoutTime := time.Now().Add(3 * time.Minute)
 		lastProgressTime := time.Now()
+		lastReportTime := time.Now()
+		blocksCheckedInWait := 0
+
+		// Track blocks that had commitments but none were ours (might need retry due to race condition)
+		type blockRetryInfo struct {
+			blockNumber      int64
+			totalCommitments int
+			lastChecked      time.Time
+			retryCount       int
+		}
+		blocksToRetry := make(map[int64]*blockRetryInfo)
+
+		// Helper function to check a block and handle retry logic
+		checkBlock := func(blockNum int64) bool {
+			commitReq := GetBlockCommitmentsRequest{
+				BlockNumber: fmt.Sprintf("%d", blockNum),
+			}
+
+			commitResp, err := waitClient.call("get_block_commitments", commitReq)
+			if err != nil {
+				fmt.Printf("Block %d: network error: %v\n", blockNum, err)
+				return false
+			}
+
+			if commitResp.Error != nil {
+				// Only log real errors, not "block doesn't exist yet"
+				if commitResp.Error.Code != -32602 {
+					fmt.Printf("Block %d: error %d: %s\n", blockNum, commitResp.Error.Code, commitResp.Error.Message)
+				}
+				return false
+			}
+
+			// Parse the response
+			var commitsResp GetBlockCommitmentsResponse
+			commitRespBytes, _ := json.Marshal(commitResp.Result)
+			if err := json.Unmarshal(commitRespBytes, &commitsResp); err != nil {
+				fmt.Printf("Block %d: failed to parse response: %v\n", blockNum, err)
+				return false
+			}
+
+			// Count only commitments that we submitted and haven't counted yet
+			ourCommitmentCount := 0
+			for _, commitment := range commitsResp.Commitments {
+				// Normalize the request ID to ensure consistent format
+				requestIDStr := strings.ToLower(commitment.RequestID)
+				if val, exists := metrics.submittedRequestIDs.Load(requestIDStr); exists && val != "found" {
+					ourCommitmentCount++
+					// Mark this ID as found
+					metrics.submittedRequestIDs.Store(requestIDStr, "found")
+				}
+			}
+
+			if ourCommitmentCount > 0 {
+				metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount)
+				processedCount += int64(ourCommitmentCount)
+				fmt.Printf("Block %d: %d our commitments (total in block: %d, running total: %d/%d)\n",
+					blockNum, ourCommitmentCount, len(commitsResp.Commitments), processedCount, successful)
+				lastProgressTime = time.Now()
+				// Remove from retry list if it was there
+				delete(blocksToRetry, blockNum)
+				return true
+			} else if len(commitsResp.Commitments) > 0 {
+				// Block has commitments but none are ours - might be race condition
+				// Track for retry in case aggregator records are still being written
+				if _, exists := blocksToRetry[blockNum]; !exists {
+					blocksToRetry[blockNum] = &blockRetryInfo{
+						blockNumber:      blockNum,
+						totalCommitments: len(commitsResp.Commitments),
+						lastChecked:      time.Now(),
+						retryCount:       0,
+					}
+					fmt.Printf("Block %d: 0 our commitments yet (will retry, total: %d)\n",
+						blockNum, len(commitsResp.Commitments))
+				}
+			} else {
+				// Block exists but has 0 commitments total
+				// Don't print anything for empty blocks to reduce noise
+			}
+			return false
+		}
 
 		for processedCount < successful && time.Now().Before(timeoutTime) {
 			// Get current block height
 			heightResp, err := waitClient.call("get_block_height", nil)
 			if err != nil {
-				time.Sleep(1 * time.Second)
+				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 
 			var heightResult GetBlockHeightResponse
 			heightRespBytes, _ := json.Marshal(heightResp.Result)
 			if err := json.Unmarshal(heightRespBytes, &heightResult); err != nil {
-				time.Sleep(1 * time.Second)
+				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 
 			var latestBlock int64
 			if _, err := fmt.Sscanf(heightResult.BlockNumber, "%d", &latestBlock); err != nil {
-				time.Sleep(1 * time.Second)
+				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 
-			// Check any new blocks
-			for currentCheckBlock <= latestBlock && processedCount < successful {
-				commitReq := GetBlockCommitmentsRequest{
-					BlockNumber: fmt.Sprintf("%d", currentCheckBlock),
+			// Check any new blocks that we haven't checked yet
+			// Only check blocks up to latestBlock-1 to ensure they're fully persisted
+			safeLatestBlock := latestBlock - 1
+			for currentCheckBlock <= safeLatestBlock && processedCount < successful {
+				if checkBlock(currentCheckBlock) {
+					blocksCheckedInWait++
 				}
+				currentCheckBlock++
+			}
 
-				commitResp, err := waitClient.call("get_block_commitments", commitReq)
-				if err != nil {
-					currentCheckBlock++
-					continue
-				}
+			// Retry blocks that had commitments but we didn't recognize them (race condition with aggregator record writes)
+			// Be more aggressive with retries to ensure we find all commitments
+			for blockNum, info := range blocksToRetry {
+				// Retry more frequently (every 500ms) and don't give up until we timeout
+				if time.Since(info.lastChecked) > 500*time.Millisecond {
+					// Retry this block
+					commitReq := GetBlockCommitmentsRequest{
+						BlockNumber: fmt.Sprintf("%d", blockNum),
+					}
 
-				if commitResp.Error == nil {
-					// Parse the response
-					var commitsResp GetBlockCommitmentsResponse
-					commitRespBytes, _ := json.Marshal(commitResp.Result)
-					if err := json.Unmarshal(commitRespBytes, &commitsResp); err == nil {
-						// Count only commitments that we submitted
-						ourCommitmentCount := 0
-						for _, commitment := range commitsResp.Commitments {
-							if _, exists := metrics.submittedRequestIDs.Load(commitment.RequestID); exists {
-								ourCommitmentCount++
-								// Mark this ID as found
-								metrics.submittedRequestIDs.Store(commitment.RequestID, "found")
+					if commitResp, err := waitClient.call("get_block_commitments", commitReq); err == nil && commitResp.Error == nil {
+						var commitsResp GetBlockCommitmentsResponse
+						commitRespBytes, _ := json.Marshal(commitResp.Result)
+						if err := json.Unmarshal(commitRespBytes, &commitsResp); err == nil {
+							ourCommitmentCount := 0
+							for _, commitment := range commitsResp.Commitments {
+								// Normalize the request ID to ensure consistent format
+								requestIDStr := strings.ToLower(commitment.RequestID)
+								if val, exists := metrics.submittedRequestIDs.Load(requestIDStr); exists && val != "found" {
+									ourCommitmentCount++
+									metrics.submittedRequestIDs.Store(requestIDStr, "found")
+								}
+							}
+
+							if ourCommitmentCount > 0 {
+								// Found some! Remove from retry list
+								metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount)
+								processedCount += int64(ourCommitmentCount)
+								fmt.Printf("Block %d (retry #%d): FOUND %d our commitments! (running total: %d/%d)\n",
+									blockNum, info.retryCount+1, ourCommitmentCount, processedCount, successful)
+								delete(blocksToRetry, blockNum)
+								lastProgressTime = time.Now()
+							} else {
+								// Still none, update retry info
+								info.retryCount++
+								info.lastChecked = time.Now()
+
+								// Don't give up - keep retrying until timeout
+								// Only log every 10 retries to reduce noise
+								if info.retryCount%10 == 0 {
+									fmt.Printf("Block %d: retry #%d, still waiting for aggregator records (block has %d total commitments)\n",
+										blockNum, info.retryCount, info.totalCommitments)
+								}
 							}
 						}
+					}
+				}
+			}
 
-						if ourCommitmentCount > 0 {
-							metrics.addBlockCommitmentCount(currentCheckBlock, ourCommitmentCount)
-							processedCount += int64(ourCommitmentCount)
-							fmt.Printf("Block %d: %d our commitments (total in block: %d, running total: %d/%d)\n",
-								currentCheckBlock, ourCommitmentCount, len(commitsResp.Commitments), processedCount, successful)
-							lastProgressTime = time.Now()
-						} else if len(commitsResp.Commitments) > 0 {
-							// Block has commitments but none are ours - don't count as "no progress"
-							fmt.Printf("Block %d: 0 our commitments (total in block: %d)\n",
-								currentCheckBlock, len(commitsResp.Commitments))
+			// Update progress if we found any
+			if processedCount > 0 {
+				lastProgressTime = time.Now()
+			}
+
+			// Report status periodically
+			if time.Since(lastReportTime) > 5*time.Second {
+				retryCount := len(blocksToRetry)
+				if retryCount > 0 {
+					fmt.Printf("Still checking... waiting for block %d (latest: %d), found %d/%d commitments, %d blocks pending retry...\n",
+						currentCheckBlock, latestBlock, processedCount, successful, retryCount)
+				} else {
+					fmt.Printf("Still checking... waiting for block %d (latest: %d), found %d/%d commitments...\n",
+						currentCheckBlock, latestBlock, processedCount, successful)
+				}
+				lastReportTime = time.Now()
+			}
+
+			// If no progress for 90 seconds AND we have no blocks to retry, stop
+			if time.Since(lastProgressTime) > 90*time.Second && len(blocksToRetry) == 0 {
+				fmt.Printf("\nNo new commitments found for 90 seconds and no blocks pending retry (checked %d additional blocks), stopping...\n", blocksCheckedInWait)
+				break
+			}
+
+			// Keep trying if we still have blocks to retry (eventual consistency)
+			if len(blocksToRetry) > 0 && time.Since(lastProgressTime) > 120*time.Second {
+				fmt.Printf("\nNo progress for 120 seconds despite %d blocks still pending retry, stopping...\n", len(blocksToRetry))
+				break
+			}
+
+			// Brief pause before checking again for new blocks
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		// Final aggressive retry pass for any remaining blocks
+		if len(blocksToRetry) > 0 && processedCount < successful {
+			fmt.Printf("\nPerforming final retry pass on %d blocks...\n", len(blocksToRetry))
+			finalRetryCount := 0
+			maxFinalRetries := 10
+
+			for finalRetryCount < maxFinalRetries && len(blocksToRetry) > 0 && processedCount < successful {
+				finalRetryCount++
+				foundInRound := 0
+
+				for blockNum := range blocksToRetry {
+					commitReq := GetBlockCommitmentsRequest{
+						BlockNumber: fmt.Sprintf("%d", blockNum),
+					}
+
+					if commitResp, err := waitClient.call("get_block_commitments", commitReq); err == nil && commitResp.Error == nil {
+						var commitsResp GetBlockCommitmentsResponse
+						commitRespBytes, _ := json.Marshal(commitResp.Result)
+						if err := json.Unmarshal(commitRespBytes, &commitsResp); err == nil {
+							ourCommitmentCount := 0
+							for _, commitment := range commitsResp.Commitments {
+								requestIDStr := strings.ToLower(commitment.RequestID)
+								if val, exists := metrics.submittedRequestIDs.Load(requestIDStr); exists && val != "found" {
+									ourCommitmentCount++
+									metrics.submittedRequestIDs.Store(requestIDStr, "found")
+								}
+							}
+
+							if ourCommitmentCount > 0 {
+								metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount)
+								processedCount += int64(ourCommitmentCount)
+								foundInRound += ourCommitmentCount
+								fmt.Printf("  Block %d (final retry): FOUND %d commitments! (running total: %d/%d)\n",
+									blockNum, ourCommitmentCount, processedCount, successful)
+								delete(blocksToRetry, blockNum)
+							}
 						}
 					}
 				}
 
-				currentCheckBlock++
+				if foundInRound > 0 {
+					fmt.Printf("Final retry round %d: found %d commitments\n", finalRetryCount, foundInRound)
+				}
+
+				// Brief pause before next retry
+				time.Sleep(1 * time.Second)
 			}
 
-			// If no progress for 30 seconds, stop
-			if time.Since(lastProgressTime) > 30*time.Second {
-				fmt.Printf("\nNo new commitments found for 30 seconds, stopping...\n")
-				break
+			if len(blocksToRetry) > 0 {
+				fmt.Printf("Final retry pass complete, %d blocks still pending\n", len(blocksToRetry))
 			}
-
-			// Brief pause before checking again
-			time.Sleep(100 * time.Millisecond)
 		}
 	}
 
