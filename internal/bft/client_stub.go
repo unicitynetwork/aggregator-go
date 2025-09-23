@@ -28,10 +28,12 @@ func NewBFTClientStub(logger *logger.Logger, roundManager RoundManager, nextRoun
 }
 
 func (n *BFTClientStub) Start(ctx context.Context) error {
+	n.logger.Info("Starting BFT Client Stub")
 	return n.roundManager.StartNewRound(ctx, n.nextRoundNumber)
 }
 
 func (n *BFTClientStub) Stop() {
+	n.logger.Info("Stopping BFT Client Stub")
 }
 
 func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.Block) error {
@@ -39,8 +41,7 @@ func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.
 		return fmt.Errorf("failed to finalize block: %w", err)
 	}
 	nextRoundNumber := api.NewBigInt(nil)
-	nextRoundNumber.Set(block.Index.Int)
-	nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
+	nextRoundNumber.Add(block.Index.Int, big.NewInt(1))
 	n.nextRoundNumber = nextRoundNumber
 	return n.roundManager.StartNewRound(ctx, nextRoundNumber)
 }

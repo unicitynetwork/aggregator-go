@@ -53,9 +53,9 @@ type Round struct {
 	// Store data for persistence during FinalizeBlock
 	PendingLeaves []*smt.Leaf
 	// Timing metrics for this round
-	ProcessingTime      time.Duration
-	ProposalTime        time.Time // When block was proposed to BFT
-	FinalizationTime    time.Time // When block was actually finalized
+	ProcessingTime   time.Duration
+	ProposalTime     time.Time // When block was proposed to BFT
+	FinalizationTime time.Time // When block was actually finalized
 }
 
 // RoundManager handles the creation of blocks and processing of commitments
@@ -70,6 +70,8 @@ type RoundManager struct {
 	currentRound *Round
 	roundMutex   sync.RWMutex
 	roundTimer   *time.Timer
+	stopChan     chan struct{}
+	wg           sync.WaitGroup
 
 	lastSyncedRoundNumber      *big.Int
 	lastSyncedRoundNumberMutex sync.Mutex // mutex to protect the lastSyncedRoundNumber
@@ -123,6 +125,7 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 		logger:              logger,
 		storage:             storage,
 		smt:                 threadSafeSMT,
+		stopChan:            make(chan struct{}),
 		leaderSelector:      leaderSelector,
 		roundDuration:       cfg.Processing.RoundDuration,        // Configurable round duration (default 1s)
 		commitmentStream:    make(chan *models.Commitment, 3000), // Reasonable buffer for streaming
@@ -140,15 +143,19 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 		}
 	} else {
 		nextBlockNumber := api.NewBigInt(nil)
-		lastBlockNumber, err := rm.storage.BlockStorage().GetLatestNumber(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch latest block number: %w", err)
-		}
-		if lastBlockNumber == nil {
-			lastBlockNumber = api.NewBigInt(big.NewInt(0))
+		lastBlockNumber := api.NewBigInt(big.NewInt(0))
+		if rm.storage != nil && rm.storage.BlockStorage() != nil {
+			var err error
+			lastBlockNumber, err = rm.storage.BlockStorage().GetLatestNumber(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch latest block number: %w", err)
+			}
+			if lastBlockNumber == nil {
+				lastBlockNumber = api.NewBigInt(big.NewInt(0))
+			}
 		}
 		nextBlockNumber.Add(lastBlockNumber.Int, big.NewInt(1))
-		rm.bftClient = bft.NewBFTClientStub(logger, rm, lastBlockNumber)
+		rm.bftClient = bft.NewBFTClientStub(logger, rm, nextBlockNumber)
 	}
 	return rm, nil
 }
@@ -175,6 +182,10 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 			}
 			rm.logger.WithContext(blockSyncCtx).Info("block sync goroutine finished")
 		}()
+	} else {
+		if err := rm.bftClient.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start BFT client: %w", err)
+		}
 	}
 
 	// Reset cursor on startup
@@ -184,14 +195,6 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 	// Start the commitment stream prefetcher
 	rm.wg.Add(1)
 	go rm.commitmentPrefetcher(ctx)
-
-	// Ensure any previous timers are stopped
-	rm.roundMutex.Lock()
-	if rm.roundTimer != nil {
-		rm.roundTimer.Stop()
-		rm.roundTimer = nil
-	}
-	rm.roundMutex.Unlock()
 
 	return nil
 }
@@ -210,6 +213,12 @@ func (rm *RoundManager) Stop(ctx context.Context) error {
 	if rm.blockSyncCancelFn != nil {
 		rm.blockSyncCancelFn()
 	}
+
+	// Signal stop
+	close(rm.stopChan)
+
+	// Wait for goroutines to finish
+	rm.wg.Wait()
 
 	rm.logger.WithContext(ctx).Info("Round Manager stopped")
 	return nil
@@ -546,6 +555,153 @@ ProcessLoop:
 	return nil
 }
 
+// commitmentPrefetcher continuously fetches commitments from storage and feeds them into the stream
+func (rm *RoundManager) commitmentPrefetcher(ctx context.Context) {
+	defer rm.wg.Done()
+
+	rm.logger.WithContext(ctx).Info("Commitment prefetcher started")
+
+	ticker := time.NewTicker(10 * time.Millisecond) // Check more frequently for high throughput
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-rm.stopChan:
+			rm.logger.WithContext(ctx).Info("Commitment prefetcher stopping")
+			return
+		case <-ctx.Done():
+			rm.logger.WithContext(ctx).Info("Commitment prefetcher context cancelled")
+			return
+		case <-ticker.C:
+			// Check channel space - be conservative to avoid race conditions
+			channelSpace := cap(rm.commitmentStream) - len(rm.commitmentStream)
+
+			if channelSpace > 100 { // Only fetch if we have reasonable space
+				// Get current cursor
+				rm.streamMutex.RLock()
+				cursor := rm.lastFetchedID
+				rm.streamMutex.RUnlock()
+
+				// Fetch only what we can fit, with some buffer for concurrent consumption
+				// Fetch smaller batches to avoid overwhelming the channel
+				fetchSize := min(channelSpace-50, 500) // Smaller batches, leave buffer
+				if fetchSize <= 0 {
+					continue
+				}
+
+				// Fetch batch using cursor
+				commitments, _, err := rm.storage.CommitmentStorage().GetUnprocessedBatchWithCursor(ctx, cursor, fetchSize)
+				if err != nil {
+					rm.logger.WithContext(ctx).Error("Failed to fetch commitments", "error", err.Error())
+					continue
+				}
+
+				// If we got no commitments and have a cursor, reset it to check for new ones
+				if len(commitments) == 0 && cursor != "" {
+					// Check if there are actually unprocessed commitments
+					unprocessedCount, _ := rm.storage.CommitmentStorage().CountUnprocessed(ctx)
+					if unprocessedCount > 0 {
+						rm.logger.WithContext(ctx).Info("Resetting cursor to fetch new commitments",
+							"unprocessedCount", unprocessedCount,
+							"oldCursor", cursor)
+						rm.streamMutex.Lock()
+						rm.lastFetchedID = ""
+						rm.streamMutex.Unlock()
+						continue // Try again with reset cursor
+					}
+				}
+
+				// Push to channel
+				addedCount := 0
+				lastAddedIdx := -1
+				for i, commitment := range commitments {
+					select {
+					case rm.commitmentStream <- commitment:
+						addedCount++
+						lastAddedIdx = i
+					case <-ctx.Done():
+						return
+					default:
+						// Channel full, stop trying to add more
+						goto DonePushing
+					}
+				}
+			DonePushing:
+
+				// Update cursor based on what we actually added
+				if lastAddedIdx >= 0 {
+					// Update cursor to the last successfully added commitment
+					rm.streamMutex.Lock()
+					rm.lastFetchedID = commitments[lastAddedIdx].ID.Hex()
+					rm.streamMutex.Unlock()
+				}
+				// If we couldn't add ANY commitments (lastAddedIdx = -1),
+				// we keep the cursor unchanged so we'll retry these same commitments
+
+				if len(commitments) > 0 {
+					rm.logger.WithContext(ctx).Debug("Prefetched commitments",
+						"fetched", len(commitments),
+						"added", addedCount,
+						"skipped", len(commitments)-addedCount,
+						"channelSize", len(rm.commitmentStream))
+				}
+			}
+		}
+	}
+}
+
+// adjustProcessingRatio dynamically adjusts the processing ratio based on actual performance
+func (rm *RoundManager) adjustProcessingRatio(ctx context.Context, processingTime, expectedFinalizationTime time.Duration) {
+	// Only adjust if we have meaningful data (processing took at least 100ms)
+	if processingTime < 100*time.Millisecond {
+		return
+	}
+
+	// Calculate what ratio we actually used
+	actualRatio := float64(processingTime) / float64(rm.roundDuration)
+
+	// Calculate ideal ratio based on actual finalization time
+	// We want: processingTime + finalizationTime <= roundDuration
+	// So: processingTime <= roundDuration - finalizationTime
+	// Therefore: idealRatio = (roundDuration - expectedFinalizationTime) / roundDuration
+
+	// Add a safety buffer based on the variability we've seen
+	safetyBuffer := 100 * time.Millisecond
+	if expectedFinalizationTime > 100*time.Millisecond {
+		// For longer finalization times, use a proportional buffer
+		safetyBuffer = expectedFinalizationTime / 5 // 20% buffer
+	}
+
+	safeFinalizationTime := expectedFinalizationTime + safetyBuffer
+	idealRatio := 1.0 - (float64(safeFinalizationTime) / float64(rm.roundDuration))
+
+	// Clamp ideal ratio to reasonable bounds
+	// We want at least 50-70% for processing to maintain good throughput
+	if idealRatio < 0.5 {
+		idealRatio = 0.5 // At least 50% for processing (500ms in 1s round)
+	} else if idealRatio > 0.85 {
+		idealRatio = 0.85 // At most 85% for processing (leave 150ms for finalization)
+	}
+
+	// Adjust current ratio towards ideal with momentum
+	// If we're consistently missing deadlines, adjust faster
+	adjustmentWeight := 0.2 // Default: 20% weight on new measurement
+	if actualRatio > rm.processingRatio && processingTime > time.Duration(float64(rm.roundDuration)*0.9) {
+		// We're using more time than allocated and getting close to the limit
+		adjustmentWeight = 0.4 // Adjust faster
+	}
+
+	rm.processingRatio = rm.processingRatio*(1-adjustmentWeight) + idealRatio*adjustmentWeight
+
+	rm.logger.WithContext(ctx).Debug("Adjusted processing ratio",
+		"actualRatio", fmt.Sprintf("%.2f", actualRatio),
+		"idealRatio", fmt.Sprintf("%.2f", idealRatio),
+		"newRatio", fmt.Sprintf("%.2f", rm.processingRatio),
+		"avgFinalizationTime", rm.avgFinalizationTime,
+		"processingTime", processingTime,
+		"roundDuration", rm.roundDuration)
+}
+
 // restoreSmtFromStorage restores the SMT tree from persisted nodes in storage
 func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt, error) {
 	rm.logger.Info("Starting SMT restoration from storage")
@@ -659,7 +815,6 @@ func (rm *RoundManager) blockSync(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			// start/stop BFT client based on leadership status
 			isLeader, err := rm.leaderSelector.IsLeader(ctx)
 			if err != nil {
 				return fmt.Errorf("error on leader selection: %w", err)

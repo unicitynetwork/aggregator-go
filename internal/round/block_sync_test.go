@@ -2,7 +2,6 @@ package round
 
 import (
 	"context"
-	"crypto/sha256"
 	"math/big"
 	"testing"
 	"time"
@@ -102,8 +101,7 @@ func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage, rm
 	for i, leaf := range leaves {
 		key := api.NewHexBytes(leaf.Path.Bytes())
 		value := api.NewHexBytes(leaf.Value)
-		hash := sha256.Sum256(leaf.Value)
-		smtNodes[i] = models.NewSmtNode(key, value, api.NewHexBytes(hash[:]))
+		smtNodes[i] = models.NewSmtNode(key, value)
 	}
 	err := storage.SmtStorage().StoreBatch(ctx, smtNodes)
 	require.NoError(t, err)
