@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -18,6 +19,7 @@ type Authenticator struct {
 
 // Commitment represents a state transition request
 type Commitment struct {
+	ID                    primitive.ObjectID  `json:"-" bson:"_id,omitempty"`
 	RequestID             api.RequestID       `json:"requestId" bson:"requestId"`
 	TransactionHash       api.TransactionHash `json:"transactionHash" bson:"transactionHash"`
 	Authenticator         Authenticator       `json:"authenticator" bson:"authenticator"`
@@ -169,8 +171,8 @@ func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
 	}
 
 	return &AggregatorRecord{
-		RequestID:             api.RequestID(arb.RequestID),
-		TransactionHash:       api.TransactionHash(arb.TransactionHash),
+		RequestID:       api.RequestID(arb.RequestID),
+		TransactionHash: api.TransactionHash(arb.TransactionHash),
 		Authenticator: Authenticator{
 			Algorithm: arb.Authenticator.Algorithm,
 			PublicKey: publicKey,

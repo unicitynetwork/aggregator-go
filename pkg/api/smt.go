@@ -12,7 +12,7 @@ type (
 	MerkleTreeStep struct {
 		Branch  []string `json:"branch"`
 		Path    string   `json:"path"`
-		Sibling []string `json:"sibling,omitempty"`
+		Sibling []string `json:"sibling"`
 	}
 
 	// MerkleTreePath represents the path to verify inclusion in a Merkle tree

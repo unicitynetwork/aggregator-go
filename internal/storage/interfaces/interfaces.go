@@ -18,6 +18,9 @@ type CommitmentStorage interface {
 	// GetUnprocessedBatch retrieves a batch of unprocessed commitments
 	GetUnprocessedBatch(ctx context.Context, limit int) ([]*models.Commitment, error)
 
+	// GetUnprocessedBatchWithCursor retrieves a batch with cursor-based pagination
+	GetUnprocessedBatchWithCursor(ctx context.Context, lastID string, limit int) ([]*models.Commitment, string, error)
+
 	// MarkProcessed marks commitments as processed
 	MarkProcessed(ctx context.Context, requestIDs []api.RequestID) error
 
@@ -65,6 +68,9 @@ type BlockStorage interface {
 
 	// GetLatestNumber retrieves the latest block number
 	GetLatestNumber(ctx context.Context) (*api.BigInt, error)
+
+	// GetLatestByRootHash retrieves the latest block with the given root hash
+	GetLatestByRootHash(ctx context.Context, rootHash api.HexBytes) (*models.Block, error)
 
 	// Count returns the total number of blocks
 	Count(ctx context.Context) (int64, error)

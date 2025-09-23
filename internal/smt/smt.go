@@ -485,7 +485,7 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right br
 			siblingHex := fmt.Sprintf("%x", siblingHash.RawHash) // Use only hash data without algorithm prefix
 			step.Sibling = []string{siblingHex}
 		}
-		// If siblingBranch is nil, leave Sibling as nil (omitempty will exclude it from JSON)
+		// If siblingBranch is nil, leave Sibling as nil
 		return []api.MerkleTreeStep{step}
 	}
 
@@ -558,7 +558,7 @@ func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, sibling
 		siblingHex := fmt.Sprintf("%x", siblingHash.RawHash) // Use only hash data without algorithm prefix
 		step.Sibling = []string{siblingHex}
 	}
-	// If siblingBranch is nil, leave Sibling as nil (omitempty will exclude it from JSON)
+	// If siblingBranch is nil, leave Sibling as nil
 
 	return step
 }
