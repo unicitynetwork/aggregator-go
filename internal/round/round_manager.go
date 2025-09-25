@@ -849,7 +849,7 @@ func (rm *RoundManager) blockSync(ctx context.Context) error {
 func (rm *RoundManager) syncSmtToLatestBlock(ctx context.Context) error {
 	// fetch last synced smt block number and last stored block number
 	currBlock := rm.getLastSyncedRoundNumber()
-	endBlock, err := rm.getLastStoredBlockNumber(ctx)
+	endBlock, err := rm.getLastStoredBlockRecordNumber(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to fetch last stored block number: %w", err)
 	}
@@ -858,6 +858,9 @@ func (rm *RoundManager) syncSmtToLatestBlock(ctx context.Context) error {
 		b, err := rm.storage.BlockRecordsStorage().GetNextBlock(ctx, api.NewBigInt(currBlock))
 		if err != nil {
 			return fmt.Errorf("failed to fetch next block: %w", err)
+		}
+		if b == nil {
+			return fmt.Errorf("block record not found for block: %s", currBlock.String())
 		}
 		currBlock = b.BlockNumber.Int
 
@@ -944,8 +947,8 @@ func (rm *RoundManager) getLastSyncedRoundNumber() *big.Int {
 	return rm.lastSyncedRoundNumber
 }
 
-func (rm *RoundManager) getLastStoredBlockNumber(ctx context.Context) (*big.Int, error) {
-	num, err := rm.storage.BlockStorage().GetLatestNumber(ctx)
+func (rm *RoundManager) getLastStoredBlockRecordNumber(ctx context.Context) (*big.Int, error) {
+	num, err := rm.storage.BlockRecordsStorage().GetLatestNumber(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch latest block number: %w", err)
 	}

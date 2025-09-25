@@ -126,6 +126,9 @@ type BlockRecordsStorage interface {
 	// GetNextBlock retrieves the first block after the given block number.
 	// If blockNumber is nil then returns the very first block.
 	GetNextBlock(ctx context.Context, blockNumber *api.BigInt) (*models.BlockRecords, error)
+
+	// GetLatestNumber retrieves the latest block number
+	GetLatestNumber(ctx context.Context) (*api.BigInt, error)
 }
 
 // LeadershipStorage handles high availability leadership state

@@ -98,6 +98,22 @@ func (brs *BlockRecordsStorage) GetNextBlock(ctx context.Context, blockNumber *a
 	return &records, nil
 }
 
+// GetLatestNumber retrieves the latest block number
+func (brs *BlockRecordsStorage) GetLatestNumber(ctx context.Context) (*api.BigInt, error) {
+	opts := options.FindOne().SetSort(bson.D{{Key: "blockNumber", Value: -1}})
+
+	var result models.BlockRecords
+	err := brs.collection.FindOne(ctx, bson.M{}, opts).Decode(&result)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get latest block number: %w", err)
+	}
+
+	return result.BlockNumber, nil
+}
+
 // CreateIndexes creates necessary indexes for the block records collection
 func (brs *BlockRecordsStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
