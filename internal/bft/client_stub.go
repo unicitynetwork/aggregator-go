@@ -30,6 +30,10 @@ func (n *BFTClientStub) Start(ctx context.Context, nextRoundNumber *api.BigInt) 
 }
 
 func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.Block) error {
+	if len(block.UnicityCertificate) == 0 {
+		block.UnicityCertificate = api.HexBytes("mock_unicity_certificate_for_testing_" + block.Index.String())
+	}
+
 	if err := n.roundManager.FinalizeBlock(ctx, block); err != nil {
 		return fmt.Errorf("failed to finalize block: %w", err)
 	}
