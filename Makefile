@@ -92,3 +92,18 @@ docker-restart-aggregator:
 	@docker compose build aggregator
 	@LOG_LEVEL=debug docker compose up -d --force-recreate --no-deps aggregator
 	@echo "Aggregator service restarted"
+
+docker-run-ha-clean:
+	@echo "Rebuilding services with clean state and HA enabled as current user..."
+	@docker compose -f ha-compose.yml down
+	@rm -rf ./data
+	@mkdir -p ./data/genesis ./data/genesis-root ./data/mongodb_data && chmod -R 777 ./data
+	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose -f ha-compose.yml up --force-recreate -d --build
+	@echo "Services rebuilt with user UID=$$(id -u):$$(id -g)"
+
+docker-restart-ha:
+	@echo "Rebuilding and restarting HA aggregator services..."
+	@docker compose -f ha-compose.yml stop aggregator-1 aggregator-2
+	@docker compose -f ha-compose.yml build aggregator-1 aggregator-2
+	@LOG_LEVEL=debug docker compose -f ha-compose.yml up -d --force-recreate --no-deps aggregator-1 aggregator-2
+	@echo "HA Aggregator services restarted"
