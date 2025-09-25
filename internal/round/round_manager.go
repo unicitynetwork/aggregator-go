@@ -70,7 +70,6 @@ type RoundManager struct {
 	currentRound *Round
 	roundMutex   sync.RWMutex
 	roundTimer   *time.Timer
-	stopChan     chan struct{}
 	wg           sync.WaitGroup
 
 	lastSyncedRoundNumber      *big.Int
@@ -86,7 +85,8 @@ type RoundManager struct {
 	// Streaming support
 	commitmentStream chan *models.Commitment
 	streamMutex      sync.RWMutex
-	lastFetchedID    string // Cursor for pagination
+	lastFetchedID    string             // Cursor for pagination
+	prefetchCancel   context.CancelFunc // Cancel function for running prefetcher, used as isRunning flag
 
 	// Adaptive throughput tracking
 	avgProcessingRate float64 // commitments per millisecond
@@ -125,7 +125,6 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 		logger:              logger,
 		storage:             storage,
 		smt:                 threadSafeSMT,
-		stopChan:            make(chan struct{}),
 		leaderSelector:      leaderSelector,
 		roundDuration:       cfg.Processing.RoundDuration,        // Configurable round duration (default 1s)
 		commitmentStream:    make(chan *models.Commitment, 3000), // Reasonable buffer for streaming
@@ -186,16 +185,8 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 		if err := rm.bftClient.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start BFT client: %w", err)
 		}
+		rm.startCommitmentPrefetcher(ctx)
 	}
-
-	// Reset cursor on startup
-	rm.lastFetchedID = ""
-	rm.logger.WithContext(ctx).Info("Reset commitment cursor")
-
-	// Start the commitment stream prefetcher
-	rm.wg.Add(1)
-	go rm.commitmentPrefetcher(ctx)
-
 	return nil
 }
 
@@ -210,12 +201,15 @@ func (rm *RoundManager) Stop(ctx context.Context) error {
 	}
 	rm.roundMutex.Unlock()
 
+	rm.streamMutex.Lock()
+	if rm.prefetchCancel != nil {
+		rm.prefetchCancel()
+	}
+	rm.streamMutex.Unlock()
+
 	if rm.blockSyncCancelFn != nil {
 		rm.blockSyncCancelFn()
 	}
-
-	// Signal stop
-	close(rm.stopChan)
 
 	// Wait for goroutines to finish
 	rm.wg.Wait()
@@ -566,9 +560,6 @@ func (rm *RoundManager) commitmentPrefetcher(ctx context.Context) {
 
 	for {
 		select {
-		case <-rm.stopChan:
-			rm.logger.WithContext(ctx).Info("Commitment prefetcher stopping")
-			return
 		case <-ctx.Done():
 			rm.logger.WithContext(ctx).Info("Commitment prefetcher context cancelled")
 			return
@@ -804,6 +795,19 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 	return latestBlock.Index, nil
 }
 
+func (rm *RoundManager) onBecomeLeader(ctx context.Context) error {
+	if err := rm.bftClient.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start BFT client: %w", err)
+	}
+	rm.startCommitmentPrefetcher(ctx)
+	return nil
+}
+
+func (rm *RoundManager) onBecomeFollower() {
+	rm.bftClient.Stop()
+	rm.stopCommitmentPrefetcher()
+}
+
 func (rm *RoundManager) blockSync(ctx context.Context) error {
 	ticker := time.NewTicker(rm.roundDuration)
 	defer ticker.Stop()
@@ -829,13 +833,13 @@ func (rm *RoundManager) blockSync(ctx context.Context) error {
 			}
 			// if we became leader => start BFTClient
 			if !wasLeader && isLeader {
-				if err := rm.bftClient.Start(ctx); err != nil {
-					return fmt.Errorf("failed to start BFT client: %w", err)
+				if err := rm.onBecomeLeader(ctx); err != nil {
+					return err
 				}
 			}
 			// if we became follower => stop BFTClient
 			if wasLeader && !isLeader {
-				rm.bftClient.Stop()
+				rm.onBecomeFollower()
 			}
 			wasLeader = isLeader
 		}
@@ -949,4 +953,34 @@ func (rm *RoundManager) getLastStoredBlockNumber(ctx context.Context) (*big.Int,
 		return big.NewInt(0), nil
 	}
 	return num.Int, nil
+}
+
+func (rm *RoundManager) startCommitmentPrefetcher(ctx context.Context) {
+	rm.streamMutex.Lock()
+	defer rm.streamMutex.Unlock()
+
+	if rm.prefetchCancel != nil {
+		rm.logger.WithContext(ctx).Warn("Commitment prefetcher already running, ignoring start")
+		return
+	}
+	rm.logger.WithContext(ctx).Info("Starting commitment prefetcher")
+	rm.lastFetchedID = ""
+
+	prefetcherCtx, cancel := context.WithCancel(ctx)
+	rm.prefetchCancel = cancel
+
+	rm.wg.Add(1)
+	go rm.commitmentPrefetcher(prefetcherCtx)
+}
+
+func (rm *RoundManager) stopCommitmentPrefetcher() {
+	rm.streamMutex.Lock()
+	defer rm.streamMutex.Unlock()
+
+	if rm.prefetchCancel == nil {
+		rm.logger.Warn("stopCommitmentPrefetcher called but no prefetcher running")
+		return
+	}
+	rm.prefetchCancel()
+	rm.prefetchCancel = nil
 }
