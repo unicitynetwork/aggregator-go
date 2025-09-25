@@ -2,6 +2,7 @@ package round
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"sync"
@@ -808,6 +809,8 @@ func (rm *RoundManager) onBecomeFollower() {
 	rm.stopCommitmentPrefetcher()
 }
 
+var errInvalidSmtNodeCount = errors.New("invalid smt node count")
+
 func (rm *RoundManager) blockSync(ctx context.Context) error {
 	ticker := time.NewTicker(rm.roundDuration)
 	defer ticker.Stop()
@@ -829,6 +832,9 @@ func (rm *RoundManager) blockSync(ctx context.Context) error {
 			// sync smt to latest block regardless of leadership status
 			// (freshly promoted leader could still be behind etc.)
 			if err := rm.syncSmtToLatestBlock(ctx); err != nil {
+				if errors.Is(err, errInvalidSmtNodeCount) {
+					continue
+				}
 				return fmt.Errorf("failed to sync smt to latest block: %w", err)
 			}
 			// if we became leader => start BFTClient
@@ -855,34 +861,36 @@ func (rm *RoundManager) syncSmtToLatestBlock(ctx context.Context) error {
 	}
 	for currBlock.Cmp(endBlock) < 0 {
 		// 1. fetch the next block record
-		b, err := rm.storage.BlockRecordsStorage().GetNextBlock(ctx, api.NewBigInt(currBlock))
+		nextBlock, err := rm.storage.BlockRecordsStorage().GetNextBlock(ctx, api.NewBigInt(currBlock))
 		if err != nil {
 			return fmt.Errorf("failed to fetch next block: %w", err)
 		}
-		if b == nil {
+		if nextBlock == nil {
 			return fmt.Errorf("block record not found for block: %s", currBlock.String())
 		}
-		currBlock = b.BlockNumber.Int
 
 		// skip empty blocks
-		if len(b.RequestIDs) == 0 {
+		if len(nextBlock.RequestIDs) == 0 {
+			currBlock = nextBlock.BlockNumber.Int
+			rm.setLastSyncedRoundNumber(currBlock)
 			continue
 		}
 
 		// 2. apply changes from block record to SMT
-		smtRootHash, err := rm.updateSMTForBlock(ctx, b)
+		smtRootHash, err := rm.updateSMTForBlock(ctx, nextBlock)
 		if err != nil {
 			return fmt.Errorf("failed to update SMT: %w", err)
 		}
 
 		// 3. verify SMT root hash matches block store root hash
-		if err := rm.verifySMTForBlock(ctx, smtRootHash, b.BlockNumber); err != nil {
+		if err := rm.verifySMTForBlock(ctx, smtRootHash, nextBlock.BlockNumber); err != nil {
 			return fmt.Errorf("failed to verify SMT: %w", err)
 		}
 		rm.logger.Info("SMT updated for round", "roundNumber", currBlock.String())
+
+		currBlock = nextBlock.BlockNumber.Int
+		rm.setLastSyncedRoundNumber(currBlock)
 	}
-	// update last synced block round number
-	rm.setLastSyncedRoundNumber(currBlock)
 	return nil
 }
 
@@ -919,6 +927,10 @@ func (rm *RoundManager) updateSMTForBlock(ctx context.Context, blockRecord *mode
 	smtNodes, err := rm.storage.SmtStorage().GetByKeys(ctx, leafIDs)
 	if err != nil {
 		return "", fmt.Errorf("failed to load smt nodes by keys: %w", err)
+	}
+	if len(smtNodes) != len(leafIDs) {
+		rm.logger.WithContext(ctx).Info("block record request id and smt node count mismatch", "requestIds", len(blockRecord.RequestIDs), "smtNodes", len(smtNodes))
+		return "", errInvalidSmtNodeCount
 	}
 	// convert smt nodes to leaves
 	for i, smtNode := range smtNodes {
