@@ -151,6 +151,29 @@ services:
         "try { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongo1:27017'}, {_id: 1, host: 'mongo2:27017'}, {_id: 2, host: 'mongo3:27017'}]}) } catch(e) { print('Replica set already initialized or error:', e.message) }",
       ]
 
+  # HAProxy load balancer for aggregators
+  haproxy:
+    image: haproxy:2.8-alpine
+    container_name: haproxy
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+      - "8404:8404"  # HAProxy stats page
+    networks:
+      - default
+    volumes:
+      - ./scripts/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      aggregator-1:
+        condition: service_healthy
+      aggregator-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nc", "-zv", "localhost", "3000"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
   aggregator-1: &aggregator-base
     build:
       context: .
@@ -158,13 +181,13 @@ services:
     container_name: aggregator-1
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3001:3001"
     networks:
       - default
     volumes:
       - ./data/genesis:/app/bft-config
     environment: &environment-base # Server Configuration
-      PORT: "3000"
+      PORT: "3001"
       HOST: "0.0.0.0"
       CONCURRENCY_LIMIT: "1000"
       ENABLE_DOCS: "true"
@@ -224,7 +247,7 @@ services:
       mongo-setup:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "nc", "-zv", "aggregator-1", "3000"]
+      test: ["CMD", "nc", "-zv", "aggregator-1", "3001"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -232,12 +255,12 @@ services:
     <<: *aggregator-base
     container_name: aggregator-2
     ports:
-      - "3001:3001"
+      - "3002:3002"
     environment:
       <<: *environment-base
-      PORT: "3001"
+      PORT: "3002"
     healthcheck:
-      test: ["CMD", "nc", "-zv", "aggregator-2", "3001"]
+      test: ["CMD", "nc", "-zv", "aggregator-2", "3002"]
       interval: 30s
       timeout: 10s
       retries: 3
