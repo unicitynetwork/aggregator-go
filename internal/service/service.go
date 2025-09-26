@@ -223,17 +223,6 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 	}
 	merkleTreePath := as.roundManager.GetSMT().GetPath(path)
 
-	if record == nil {
-		return &api.GetInclusionProofResponse{
-			InclusionProof: &api.InclusionProof{
-				Authenticator:      nil,
-				MerkleTreePath:     merkleTreePath,
-				TransactionHash:    nil,
-				UnicityCertificate: nil,
-			},
-		}, nil
-	}
-
 	// Find the latest block that matches the current SMT root hash
 	rootHash, err := api.NewHexBytesFromString(merkleTreePath.Root)
 	if err != nil {
@@ -245,6 +234,18 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 	}
 	if block == nil {
 		return nil, fmt.Errorf("no block found with root hash %s", rootHash)
+	}
+
+	if record == nil {
+		// Non-inclusion proof
+		return &api.GetInclusionProofResponse{
+			InclusionProof: &api.InclusionProof{
+				Authenticator:      nil,
+				MerkleTreePath:     merkleTreePath,
+				TransactionHash:    nil,
+				UnicityCertificate: block.UnicityCertificate,
+			},
+		}, nil
 	}
 
 	authenticator := &api.Authenticator{

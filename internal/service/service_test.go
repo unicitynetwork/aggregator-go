@@ -270,13 +270,28 @@ func validateInclusionProof(t *testing.T, proof *api.InclusionProof, requestID a
 
 // TestInclusionProofMissingRecord tests getting inclusion proof for non-existent record
 func (suite *AggregatorTestSuite) TestInclusionProofMissingRecord() {
+	// First, submit some commitments and wait for block processing to ensure we have blocks
+	testCommitments := createTestCommitments(suite.T(), 1)
+	submitResponse := makeJSONRPCRequest[api.SubmitCommitmentResponse](
+		suite.T(), suite.serverAddr, "submit_commitment", "submit-setup", testCommitments[0])
+	suite.Equal("SUCCESS", submitResponse.Status)
+
+	// Wait for block processing
+	time.Sleep(3 * time.Second)
+
+	// Now test non-inclusion proof for a different request ID
 	inclusionProof := makeJSONRPCRequest[api.GetInclusionProofResponse](
 		suite.T(), suite.serverAddr, "get_inclusion_proof", "test-request-id",
 		&api.GetInclusionProofRequest{RequestID: "00000000"})
 
+	// Validate non-inclusion proof structure
 	suite.Nil(inclusionProof.InclusionProof.TransactionHash)
 	suite.Nil(inclusionProof.InclusionProof.Authenticator)
 	suite.NotNil(inclusionProof.InclusionProof.MerkleTreePath)
+
+	// Verify that UnicityCertificate is included in non-inclusion proof
+	suite.NotNil(inclusionProof.InclusionProof.UnicityCertificate, "Non-inclusion proof should include UnicityCertificate")
+	suite.NotEmpty(inclusionProof.InclusionProof.UnicityCertificate, "UnicityCertificate should not be empty")
 }
 
 // TestInclusionProof tests the complete inclusion proof workflow
