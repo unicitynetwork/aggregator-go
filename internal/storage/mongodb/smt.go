@@ -85,6 +85,25 @@ func (ss *SmtStorage) GetByKey(ctx context.Context, key api.HexBytes) (*models.S
 	return &node, nil
 }
 
+// GetByKeys retrieves multiple SMT nodes by their keys
+func (ss *SmtStorage) GetByKeys(ctx context.Context, keys []api.HexBytes) ([]*models.SmtNode, error) {
+	if len(keys) == 0 {
+		return []*models.SmtNode{}, nil
+	}
+	filter := bson.M{"key": bson.M{"$in": keys}}
+	cursor, err := ss.collection.Find(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query SMT nodes by keys: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var nodes []*models.SmtNode
+	if err := cursor.All(ctx, &nodes); err != nil {
+		return nil, fmt.Errorf("failed to decode SMT nodes: %w", err)
+	}
+	return nodes, nil
+}
+
 // Delete removes an SMT node
 func (ss *SmtStorage) Delete(ctx context.Context, key api.HexBytes) error {
 	_, err := ss.collection.DeleteOne(ctx, bson.M{"key": key})

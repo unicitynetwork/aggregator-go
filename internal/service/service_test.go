@@ -21,9 +21,11 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/mongodb"
 	"github.com/testcontainers/testcontainers-go/wait"
+
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	mongodbStorage "github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -110,12 +112,15 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	require.NoError(t, err)
 
 	// Initialize storage
-	mongoStorage, err := mongodbStorage.NewStorage(&cfg.Database)
+	mongoStorage, err := mongodbStorage.NewStorage(*cfg)
+	require.NoError(t, err)
+
+	// Initialize round manager
+	roundManager, err := round.NewRoundManager(ctx, cfg, log, mongoStorage, nil)
 	require.NoError(t, err)
 
 	// Initialize service
-	aggregatorService, err := NewAggregatorService(cfg, log, mongoStorage)
-	require.NoError(t, err)
+	aggregatorService := NewAggregatorService(cfg, log, roundManager, mongoStorage, nil)
 
 	// Start the aggregator service
 	err = aggregatorService.Start(ctx)
