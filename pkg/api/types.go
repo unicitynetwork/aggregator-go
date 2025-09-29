@@ -286,6 +286,54 @@ type GetBlockCommitmentsResponse struct {
 	Commitments []*AggregatorRecord `json:"commitments"`
 }
 
+// Status constants for SubmitShardRootResponse
+const (
+	ShardRootStatusSuccess         = "SUCCESS"
+	ShardRootStatusInvalidShardID  = "INVALID_SHARD_ID"
+	ShardRootStatusInvalidRootHash = "INVALID_ROOT_HASH"
+	ShardRootStatusInternalError   = "INTERNAL_ERROR"
+)
+
+// SubmitShardRootRequest represents the submit_shard_root JSON-RPC request
+type SubmitShardRootRequest struct {
+	ShardID  int      `json:"shardId"`  // Shard identifier (e.g., 4)
+	RootHash HexBytes `json:"rootHash"` // Root hash from child SMT
+}
+
+// SubmitShardRootResponse represents the submit_shard_root JSON-RPC response
+type SubmitShardRootResponse struct {
+	Status string `json:"status"` // "SUCCESS", "INVALID_SHARD_ID", "INVALID_ROOT_HASH", etc.
+}
+
+// GetShardProofRequest represents the get_shard_proof JSON-RPC request
+type GetShardProofRequest struct {
+	ShardID int `json:"shardId"` // Shard identifier (e.g., 4)
+}
+
+// GetShardProofResponse represents the get_shard_proof JSON-RPC response
+type GetShardProofResponse struct {
+	MerkleTreePath *MerkleTreePath `json:"merkleTreePath"` // Proof path for the shard
+}
+
+// Validate validates the SubmitShardRootRequest
+func (req *SubmitShardRootRequest) Validate() error {
+	if req.ShardID < 0 {
+		return fmt.Errorf("shardId cannot be negative")
+	}
+	if len(req.RootHash) == 0 {
+		return fmt.Errorf("rootHash cannot be empty")
+	}
+	return nil
+}
+
+// Validate validates the GetShardProofRequest
+func (req *GetShardProofRequest) Validate() error {
+	if req.ShardID < 0 {
+		return fmt.Errorf("shardId cannot be negative")
+	}
+	return nil
+}
+
 // HealthStatus represents the health status of the service
 type HealthStatus struct {
 	Status   string            `json:"status"`

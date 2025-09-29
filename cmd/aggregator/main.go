@@ -95,14 +95,12 @@ func main() {
 		log.WithComponent("main").Info("High availability mode is disabled")
 	}
 
-	roundManager, err := round.NewRoundManager(ctx, cfg, log, storage, leaderElection)
+	// Initialize service (uses factory to create appropriate service based on sharding mode)
+	aggregatorService, err := service.NewService(ctx, cfg, log, storage, leaderElection)
 	if err != nil {
-		log.WithComponent("main").Error("Failed to create round manager", "error", err.Error())
+		log.WithComponent("main").Error("Failed to create aggregator service", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
 	}
-
-	// Initialize service
-	aggregatorService := service.NewAggregatorService(cfg, log, roundManager, storage, leaderElection)
 
 	// Start the aggregator service
 	if err := aggregatorService.Start(ctx); err != nil {

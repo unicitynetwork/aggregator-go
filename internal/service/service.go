@@ -14,6 +14,41 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
+// Service defines the common interface that all service implementations must satisfy
+type Service interface {
+	Start(ctx context.Context) error
+	Stop(ctx context.Context) error
+
+	// JSON-RPC methods
+	SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error)
+	GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error)
+	GetNoDeletionProof(ctx context.Context) (*api.GetNoDeletionProofResponse, error)
+	GetBlockHeight(ctx context.Context) (*api.GetBlockHeightResponse, error)
+	GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error)
+	GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error)
+	GetHealthStatus(ctx context.Context) (*api.HealthStatus, error)
+
+	// Parent mode specific methods
+	SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) (*api.SubmitShardRootResponse, error)
+	GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.GetShardProofResponse, error)
+}
+
+// NewService creates the appropriate service implementation based on configuration mode
+func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, storage interfaces.Storage, leaderSelector LeaderSelector) (Service, error) {
+	switch cfg.Sharding.Mode {
+	case config.ShardingModeStandalone:
+		roundManager, err := round.NewRoundManager(ctx, cfg, logger, storage, leaderSelector)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create round manager: %w", err)
+		}
+		return NewAggregatorService(cfg, logger, roundManager, storage, leaderSelector), nil
+	case config.ShardingModeParent:
+		return NewParentAggregatorService(cfg, logger, storage)
+	default:
+		return nil, fmt.Errorf("unsupported sharding mode: %s", cfg.Sharding.Mode)
+	}
+}
+
 // AggregatorService implements the business logic for the aggregator
 type AggregatorService struct {
 	config              *config.Config
@@ -412,4 +447,14 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 	}
 
 	return modelToAPIHealthStatus(status), nil
+}
+
+// SubmitShardRoot - not supported in standalone mode
+func (as *AggregatorService) SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) (*api.SubmitShardRootResponse, error) {
+	return nil, fmt.Errorf("submit_shard_root is not supported in standalone mode")
+}
+
+// GetShardProof - not supported in standalone mode
+func (as *AggregatorService) GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.GetShardProofResponse, error) {
+	return nil, fmt.Errorf("get_shard_proof is not supported in standalone mode")
 }

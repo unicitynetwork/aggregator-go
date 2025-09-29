@@ -119,3 +119,49 @@ func (s *Server) handleGetBlockCommitments(ctx context.Context, params json.RawM
 
 	return response, nil
 }
+
+// Parent mode handlers
+
+// handleSubmitShardRoot handles the submit_shard_root method
+func (s *Server) handleSubmitShardRoot(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
+	var req api.SubmitShardRootRequest
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
+	}
+
+	// Validate using the request's validation method
+	if err := req.Validate(); err != nil {
+		return nil, jsonrpc.NewValidationError(err.Error())
+	}
+
+	// Call service
+	response, err := s.service.SubmitShardRoot(ctx, &req)
+	if err != nil {
+		s.logger.WithContext(ctx).Error("Failed to submit shard root", "error", err.Error())
+		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to submit shard root", err.Error())
+	}
+
+	return response, nil
+}
+
+// handleGetShardProof handles the get_shard_proof method
+func (s *Server) handleGetShardProof(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
+	var req api.GetShardProofRequest
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
+	}
+
+	// Validate using the request's validation method
+	if err := req.Validate(); err != nil {
+		return nil, jsonrpc.NewValidationError(err.Error())
+	}
+
+	// Call service
+	response, err := s.service.GetShardProof(ctx, &req)
+	if err != nil {
+		s.logger.WithContext(ctx).Error("Failed to get shard proof", "error", err.Error())
+		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to get shard proof", err.Error())
+	}
+
+	return response, nil
+}

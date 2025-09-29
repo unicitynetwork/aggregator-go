@@ -23,6 +23,7 @@ type Config struct {
 	Logging    LoggingConfig    `mapstructure:"logging"`
 	BFT        BFTConfig        `mapstructure:"bft"`
 	Processing ProcessingConfig `mapstructure:"processing"`
+	Sharding   ShardingConfig   `mapstructure:"sharding"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -76,6 +77,51 @@ type LoggingConfig struct {
 type ProcessingConfig struct {
 	BatchLimit    int           `mapstructure:"batch_limit"`
 	RoundDuration time.Duration `mapstructure:"round_duration"`
+}
+
+// ShardingMode represents the aggregator operating mode
+type ShardingMode string
+
+const (
+	ShardingModeStandalone ShardingMode = "standalone"
+	ShardingModeParent     ShardingMode = "parent"
+	ShardingModeChild      ShardingMode = "child"
+)
+
+// String returns the string representation of the sharding mode
+func (sm ShardingMode) String() string {
+	return string(sm)
+}
+
+// IsValid returns true if the sharding mode is valid
+func (sm ShardingMode) IsValid() bool {
+	switch sm {
+	case ShardingModeStandalone, ShardingModeParent, ShardingModeChild:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsStandalone returns true if this is standalone mode
+func (sm ShardingMode) IsStandalone() bool {
+	return sm == ShardingModeStandalone
+}
+
+// IsParent returns true if this is parent mode
+func (sm ShardingMode) IsParent() bool {
+	return sm == ShardingModeParent
+}
+
+// IsChild returns true if this is child mode
+func (sm ShardingMode) IsChild() bool {
+	return sm == ShardingModeChild
+}
+
+// ShardingConfig holds sharding configuration
+type ShardingConfig struct {
+	Mode          ShardingMode `mapstructure:"mode"`            // Operating mode: standalone, parent, or child
+	ShardIDLength int          `mapstructure:"shard_id_length"` // Bit length for shard IDs (e.g., 4 bits = 16 shards)
 }
 
 type BFTConfig struct {
@@ -136,6 +182,10 @@ func Load() (*Config, error) {
 		Processing: ProcessingConfig{
 			BatchLimit:    getEnvIntOrDefault("BATCH_LIMIT", 1000),
 			RoundDuration: getEnvDurationOrDefault("ROUND_DURATION", "1s"),
+		},
+		Sharding: ShardingConfig{
+			Mode:          ShardingMode(getEnvOrDefault("SHARDING_MODE", "standalone")),
+			ShardIDLength: getEnvIntOrDefault("SHARD_ID_LENGTH", 4),
 		},
 	}
 	config.BFT = BFTConfig{
@@ -200,6 +250,15 @@ func (c *Config) Validate() error {
 	validLevels := []string{"debug", "info", "warn", "error", "fatal", "panic"}
 	if !contains(validLevels, strings.ToLower(c.Logging.Level)) {
 		return fmt.Errorf("invalid log level: %s", c.Logging.Level)
+	}
+
+	// Validate sharding configuration
+	if !c.Sharding.Mode.IsValid() {
+		return fmt.Errorf("invalid sharding mode: %s, must be one of: standalone, parent, child", c.Sharding.Mode)
+	}
+
+	if c.Sharding.ShardIDLength < 1 || c.Sharding.ShardIDLength > 16 {
+		return fmt.Errorf("shard ID length must be between 1 and 16 bits, got: %d", c.Sharding.ShardIDLength)
 	}
 
 	return nil
