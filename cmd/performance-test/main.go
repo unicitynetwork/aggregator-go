@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -135,12 +136,107 @@ func (m *Metrics) getAverageCommitments() float64 {
 	return float64(total) / float64(count)
 }
 
-// HTTP client for JSON-RPC calls
+// APIClient interface for submitting commitments
+type APIClient interface {
+	SubmitCommitment(req *api.SubmitCommitmentRequest) error
+	GetBlockHeight() (*GetBlockHeightResponse, error)
+	GetBlock(blockNumber string) (*GetBlockResponse, error)
+	GetBlockCommitments(blockNumber string) (*GetBlockCommitmentsResponse, error)
+}
+
+// JSONRPCClient implements APIClient for JSON-RPC
 type JSONRPCClient struct {
 	httpClient *http.Client
 	url        string
 	authHeader string
 	requestID  int64
+}
+
+// RESTClient implements APIClient for REST API
+type RESTClient struct {
+	httpClient *http.Client
+	baseURL    string
+	authHeader string
+	jsonRPCClient *JSONRPCClient // Cache for non-submission endpoints
+}
+
+// NewRESTClient creates a new REST API client
+func NewRESTClient(url string, authHeader string) *RESTClient {
+	// Configure transport with higher connection limits
+	transport := &http.Transport{
+		MaxIdleConns:        1000,
+		MaxIdleConnsPerHost: 1000,
+		MaxConnsPerHost:     1000,
+		IdleConnTimeout:     90 * time.Second,
+	}
+
+	return &RESTClient{
+		httpClient: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: transport,
+		},
+		baseURL:    url,
+		authHeader: authHeader,
+		jsonRPCClient: NewJSONRPCClient(url, authHeader), // Create once and reuse
+	}
+}
+
+// SubmitCommitment submits a commitment via REST API
+func (c *RESTClient) SubmitCommitment(req *api.SubmitCommitmentRequest) error {
+	url := fmt.Sprintf("%s/commitments/%s", c.baseURL, req.RequestID)
+
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("POST", url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	if c.authHeader != "" {
+		httpReq.Header.Set("Authorization", c.authHeader)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusConflict {
+		return fmt.Errorf("REQUEST_ID_EXISTS")
+	}
+	if resp.StatusCode != http.StatusOK {
+		var errResp map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		if msg, ok := errResp["error"].(string); ok {
+			return fmt.Errorf("REST API error: %s", msg)
+		}
+		return fmt.Errorf("request failed with status %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// GetBlockHeight gets the current block height via REST API (uses JSON-RPC endpoint)
+func (c *RESTClient) GetBlockHeight() (*GetBlockHeightResponse, error) {
+	// For non-submission endpoints, we still use JSON-RPC
+	return c.jsonRPCClient.GetBlockHeight()
+}
+
+// GetBlock gets a block by number via REST API (uses JSON-RPC endpoint)
+func (c *RESTClient) GetBlock(blockNumber string) (*GetBlockResponse, error) {
+	// For non-submission endpoints, we still use JSON-RPC
+	return c.jsonRPCClient.GetBlock(blockNumber)
+}
+
+// GetBlockCommitments gets commitments in a block via REST API (uses JSON-RPC endpoint)
+func (c *RESTClient) GetBlockCommitments(blockNumber string) (*GetBlockCommitmentsResponse, error) {
+	// For non-submission endpoints, we still use JSON-RPC
+	return c.jsonRPCClient.GetBlockCommitments(blockNumber)
 }
 
 func NewJSONRPCClient(url string, authHeader string) *JSONRPCClient {
@@ -160,6 +256,74 @@ func NewJSONRPCClient(url string, authHeader string) *JSONRPCClient {
 		url:        url,
 		authHeader: authHeader,
 	}
+}
+
+// SubmitCommitment submits a commitment via JSON-RPC
+func (c *JSONRPCClient) SubmitCommitment(req *api.SubmitCommitmentRequest) error {
+	resp, err := c.call("submit_commitment", req)
+	if err != nil {
+		return err
+	}
+	if resp.Error != nil {
+		return fmt.Errorf("JSON-RPC error %d: %s", resp.Error.Code, resp.Error.Message)
+	}
+	return nil
+}
+
+// GetBlockHeight gets the current block height via JSON-RPC
+func (c *JSONRPCClient) GetBlockHeight() (*GetBlockHeightResponse, error) {
+	resp, err := c.call("get_block_height", nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, fmt.Errorf("JSON-RPC error %d: %s", resp.Error.Code, resp.Error.Message)
+	}
+
+	var result GetBlockHeightResponse
+	respBytes, _ := json.Marshal(resp.Result)
+	if err := json.Unmarshal(respBytes, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// GetBlock gets a block by number via JSON-RPC
+func (c *JSONRPCClient) GetBlock(blockNumber string) (*GetBlockResponse, error) {
+	params := map[string]interface{}{"blockNumber": blockNumber}
+	resp, err := c.call("get_block", params)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, fmt.Errorf("JSON-RPC error %d: %s", resp.Error.Code, resp.Error.Message)
+	}
+
+	var result GetBlockResponse
+	respBytes, _ := json.Marshal(resp.Result)
+	if err := json.Unmarshal(respBytes, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// GetBlockCommitments gets commitments in a block via JSON-RPC
+func (c *JSONRPCClient) GetBlockCommitments(blockNumber string) (*GetBlockCommitmentsResponse, error) {
+	params := GetBlockCommitmentsRequest{BlockNumber: blockNumber}
+	resp, err := c.call("get_block_commitments", params)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, fmt.Errorf("JSON-RPC error %d: %s", resp.Error.Code, resp.Error.Message)
+	}
+
+	var result GetBlockCommitmentsResponse
+	respBytes, _ := json.Marshal(resp.Result)
+	if err := json.Unmarshal(respBytes, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 func (c *JSONRPCClient) call(method string, params interface{}) (*JSONRPCResponse, error) {
@@ -264,7 +428,7 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 }
 
 // Worker function that continuously submits commitments
-func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metrics, wg *sync.WaitGroup) {
+func commitmentWorker(ctx context.Context, client APIClient, metrics *Metrics, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	ticker := time.NewTicker(time.Second / time.Duration(requestsPerSec/workerCount))
@@ -281,16 +445,10 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 
 				atomic.AddInt64(&metrics.totalRequests, 1)
 
-				resp, err := client.call("submit_commitment", req)
+				err := client.SubmitCommitment(req)
 				if err != nil {
 					atomic.AddInt64(&metrics.failedRequests, 1)
-					// Don't print network errors - too noisy
-					return
-				}
-
-				if resp.Error != nil {
-					atomic.AddInt64(&metrics.failedRequests, 1)
-					if resp.Error.Message == "REQUEST_ID_EXISTS" {
+					if strings.Contains(err.Error(), "REQUEST_ID_EXISTS") {
 						atomic.AddInt64(&metrics.requestIdExistsErr, 1)
 						// Track this ID - it exists so it will be in blocks!
 						metrics.submittedRequestIDs.Store(string(req.RequestID), true)
@@ -298,36 +456,21 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 					return
 				}
 
-				// Parse response
-				var submitResp api.SubmitCommitmentResponse
-				respBytes, _ := json.Marshal(resp.Result)
-				if err := json.Unmarshal(respBytes, &submitResp); err != nil {
-					atomic.AddInt64(&metrics.failedRequests, 1)
-					return
-				}
-
-				if submitResp.Status == "SUCCESS" {
-					atomic.AddInt64(&metrics.successfulRequests, 1)
-					// Track this request ID as submitted by us (normalized to lowercase)
-					metrics.submittedRequestIDs.Store(strings.ToLower(string(req.RequestID)), true)
-				} else if submitResp.Status == "REQUEST_ID_EXISTS" {
-					atomic.AddInt64(&metrics.requestIdExistsErr, 1)
-					atomic.AddInt64(&metrics.successfulRequests, 1) // Count as successful - it will be in blocks!
-					// Also track this ID - it exists so it will be in blocks! (normalized to lowercase)
-					metrics.submittedRequestIDs.Store(strings.ToLower(string(req.RequestID)), true)
-				} else {
-					atomic.AddInt64(&metrics.failedRequests, 1)
-					// Log unexpected status
-					if submitResp.Status != "" {
-						fmt.Printf("Unexpected status '%s' for request %s\n", submitResp.Status, req.RequestID)
-					}
-				}
+				// Success
+				atomic.AddInt64(&metrics.successfulRequests, 1)
+				// Track this request ID as submitted by us (normalized to lowercase)
+				metrics.submittedRequestIDs.Store(strings.ToLower(string(req.RequestID)), true)
 			}()
 		}
 	}
 }
 
 func main() {
+	// Parse command-line flags
+	var useREST bool
+	flag.BoolVar(&useREST, "rest", false, "Use REST API instead of JSON-RPC for submitting commitments")
+	flag.Parse()
+
 	// Get URL and auth header from environment variables
 	aggregatorURL := os.Getenv("AGGREGATOR_URL")
 	if aggregatorURL == "" {
@@ -338,6 +481,12 @@ func main() {
 
 	fmt.Printf("Starting aggregator performance test...\n")
 	fmt.Printf("Target: %s\n", aggregatorURL)
+	fmt.Printf("API Mode: %s\n", func() string {
+		if useREST {
+			return "REST"
+		}
+		return "JSON-RPC"
+	}())
 	if authHeader != "" {
 		fmt.Printf("Authorization: [configured]\n")
 	}
@@ -355,24 +504,19 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), testDuration)
 	defer cancel()
 
-	// Create JSON-RPC client
-	client := NewJSONRPCClient(aggregatorURL, authHeader)
+	// Create API client based on flag
+	var client APIClient
+	if useREST {
+		client = NewRESTClient(aggregatorURL, authHeader)
+	} else {
+		client = NewJSONRPCClient(aggregatorURL, authHeader)
+	}
 
 	// Test connectivity and get starting block number
 	fmt.Printf("Testing connectivity to %s...\n", aggregatorURL)
-	resp, err := client.call("get_block_height", nil)
+	heightResp, err := client.GetBlockHeight()
 	if err != nil {
 		log.Fatalf("Failed to connect to aggregator: %v", err)
-	}
-
-	if resp.Error != nil {
-		log.Fatalf("Error getting block height: %v", resp.Error.Message)
-	}
-
-	var heightResp GetBlockHeightResponse
-	respBytes, _ := json.Marshal(resp.Result)
-	if err := json.Unmarshal(respBytes, &heightResp); err != nil {
-		log.Fatalf("Failed to parse block height: %v", err)
 	}
 
 	// Parse starting block number
@@ -431,15 +575,18 @@ func main() {
 	fmt.Printf("Starting from block %d\n", startingBlockNumber+1)
 
 	// First, get the latest block number to know the range
-	waitClient := NewJSONRPCClient(aggregatorURL, authHeader)
+	// Create a separate client for waiting/monitoring (always use same type as main client)
+	var waitClient APIClient
+	if useREST {
+		waitClient = NewRESTClient(aggregatorURL, authHeader)
+	} else {
+		waitClient = NewJSONRPCClient(aggregatorURL, authHeader)
+	}
+
 	var latestBlockNumber int64
-	blockHeightResp, blockHeightErr := waitClient.call("get_block_height", nil)
-	if blockHeightErr == nil && blockHeightResp.Error == nil {
-		var heightResult GetBlockHeightResponse
-		respBytes, _ := json.Marshal(blockHeightResp.Result)
-		if err := json.Unmarshal(respBytes, &heightResult); err == nil {
-			fmt.Sscanf(heightResult.BlockNumber, "%d", &latestBlockNumber)
-		}
+	heightResp, err = waitClient.GetBlockHeight()
+	if err == nil {
+		fmt.Sscanf(heightResp.BlockNumber, "%d", &latestBlockNumber)
 	}
 
 	fmt.Printf("Latest block: %d\n", latestBlockNumber)
@@ -461,31 +608,9 @@ func main() {
 
 	for currentCheckBlock <= safeBlockNumber && processedCount < successful {
 		// Try to get commitments for this block
-		commitReq := GetBlockCommitmentsRequest{
-			BlockNumber: fmt.Sprintf("%d", currentCheckBlock),
-		}
-
-		commitResp, err := waitClient.call("get_block_commitments", commitReq)
+		commitsResp, err := waitClient.GetBlockCommitments(fmt.Sprintf("%d", currentCheckBlock))
 		if err != nil {
-			// Network error, skip this block
-			currentCheckBlock++
-			continue
-		}
-
-		if commitResp.Error != nil {
-			// Block doesn't exist (could be skipped round due to repeat UC)
-			currentCheckBlock++
-			continue
-		}
-
-		// Parse the response
-		var commitsResp GetBlockCommitmentsResponse
-		commitRespBytes, err := json.Marshal(commitResp.Result)
-		if err != nil {
-			currentCheckBlock++
-			continue
-		}
-		if err := json.Unmarshal(commitRespBytes, &commitsResp); err != nil {
+			// Network or API error, skip this block
 			currentCheckBlock++
 			continue
 		}
@@ -551,29 +676,12 @@ func main() {
 
 		// Helper function to check a block and handle retry logic
 		checkBlock := func(blockNum int64) bool {
-			commitReq := GetBlockCommitmentsRequest{
-				BlockNumber: fmt.Sprintf("%d", blockNum),
-			}
-
-			commitResp, err := waitClient.call("get_block_commitments", commitReq)
+			commitsResp, err := waitClient.GetBlockCommitments(fmt.Sprintf("%d", blockNum))
 			if err != nil {
-				fmt.Printf("Block %d: network error: %v\n", blockNum, err)
-				return false
-			}
-
-			if commitResp.Error != nil {
 				// Only log real errors, not "block doesn't exist yet"
-				if commitResp.Error.Code != -32602 {
-					fmt.Printf("Block %d: error %d: %s\n", blockNum, commitResp.Error.Code, commitResp.Error.Message)
+				if !strings.Contains(err.Error(), "does not exist") {
+					fmt.Printf("Block %d: error: %v\n", blockNum, err)
 				}
-				return false
-			}
-
-			// Parse the response
-			var commitsResp GetBlockCommitmentsResponse
-			commitRespBytes, _ := json.Marshal(commitResp.Result)
-			if err := json.Unmarshal(commitRespBytes, &commitsResp); err != nil {
-				fmt.Printf("Block %d: failed to parse response: %v\n", blockNum, err)
 				return false
 			}
 
@@ -620,15 +728,8 @@ func main() {
 
 		for processedCount < successful && time.Now().Before(timeoutTime) {
 			// Get current block height
-			heightResp, err := waitClient.call("get_block_height", nil)
+			heightResult, err := waitClient.GetBlockHeight()
 			if err != nil {
-				time.Sleep(500 * time.Millisecond)
-				continue
-			}
-
-			var heightResult GetBlockHeightResponse
-			heightRespBytes, _ := json.Marshal(heightResp.Result)
-			if err := json.Unmarshal(heightRespBytes, &heightResult); err != nil {
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}
@@ -655,43 +756,35 @@ func main() {
 				// Retry more frequently (every 500ms) and don't give up until we timeout
 				if time.Since(info.lastChecked) > 500*time.Millisecond {
 					// Retry this block
-					commitReq := GetBlockCommitmentsRequest{
-						BlockNumber: fmt.Sprintf("%d", blockNum),
-					}
-
-					if commitResp, err := waitClient.call("get_block_commitments", commitReq); err == nil && commitResp.Error == nil {
-						var commitsResp GetBlockCommitmentsResponse
-						commitRespBytes, _ := json.Marshal(commitResp.Result)
-						if err := json.Unmarshal(commitRespBytes, &commitsResp); err == nil {
-							ourCommitmentCount := 0
-							for _, commitment := range commitsResp.Commitments {
-								// Normalize the request ID to ensure consistent format
-								requestIDStr := strings.ToLower(commitment.RequestID)
-								if val, exists := metrics.submittedRequestIDs.Load(requestIDStr); exists && val != "found" {
-									ourCommitmentCount++
-									metrics.submittedRequestIDs.Store(requestIDStr, "found")
-								}
+					if commitsResp, err := waitClient.GetBlockCommitments(fmt.Sprintf("%d", blockNum)); err == nil {
+						ourCommitmentCount := 0
+						for _, commitment := range commitsResp.Commitments {
+							// Normalize the request ID to ensure consistent format
+							requestIDStr := strings.ToLower(commitment.RequestID)
+							if val, exists := metrics.submittedRequestIDs.Load(requestIDStr); exists && val != "found" {
+								ourCommitmentCount++
+								metrics.submittedRequestIDs.Store(requestIDStr, "found")
 							}
+						}
 
-							if ourCommitmentCount > 0 {
-								// Found some! Remove from retry list
-								metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount)
-								processedCount += int64(ourCommitmentCount)
-								fmt.Printf("Block %d (retry #%d): FOUND %d our commitments! (running total: %d/%d)\n",
-									blockNum, info.retryCount+1, ourCommitmentCount, processedCount, successful)
-								delete(blocksToRetry, blockNum)
-								lastProgressTime = time.Now()
-							} else {
-								// Still none, update retry info
-								info.retryCount++
-								info.lastChecked = time.Now()
+						if ourCommitmentCount > 0 {
+							// Found some! Remove from retry list
+							metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount)
+							processedCount += int64(ourCommitmentCount)
+							fmt.Printf("Block %d (retry #%d): FOUND %d our commitments! (running total: %d/%d)\n",
+								blockNum, info.retryCount+1, ourCommitmentCount, processedCount, successful)
+							delete(blocksToRetry, blockNum)
+							lastProgressTime = time.Now()
+						} else {
+							// Still none, update retry info
+							info.retryCount++
+							info.lastChecked = time.Now()
 
-								// Don't give up - keep retrying until timeout
-								// Only log every 10 retries to reduce noise
-								if info.retryCount%10 == 0 {
-									fmt.Printf("Block %d: retry #%d, still waiting for aggregator records (block has %d total commitments)\n",
-										blockNum, info.retryCount, info.totalCommitments)
-								}
+							// Don't give up - keep retrying until timeout
+							// Only log every 10 retries to reduce noise
+							if info.retryCount%10 == 0 {
+								fmt.Printf("Block %d: retry #%d, still waiting for aggregator records (block has %d total commitments)\n",
+									blockNum, info.retryCount, info.totalCommitments)
 							}
 						}
 					}
@@ -743,31 +836,23 @@ func main() {
 				foundInRound := 0
 
 				for blockNum := range blocksToRetry {
-					commitReq := GetBlockCommitmentsRequest{
-						BlockNumber: fmt.Sprintf("%d", blockNum),
-					}
-
-					if commitResp, err := waitClient.call("get_block_commitments", commitReq); err == nil && commitResp.Error == nil {
-						var commitsResp GetBlockCommitmentsResponse
-						commitRespBytes, _ := json.Marshal(commitResp.Result)
-						if err := json.Unmarshal(commitRespBytes, &commitsResp); err == nil {
-							ourCommitmentCount := 0
-							for _, commitment := range commitsResp.Commitments {
-								requestIDStr := strings.ToLower(commitment.RequestID)
-								if val, exists := metrics.submittedRequestIDs.Load(requestIDStr); exists && val != "found" {
-									ourCommitmentCount++
-									metrics.submittedRequestIDs.Store(requestIDStr, "found")
-								}
+					if commitsResp, err := waitClient.GetBlockCommitments(fmt.Sprintf("%d", blockNum)); err == nil {
+						ourCommitmentCount := 0
+						for _, commitment := range commitsResp.Commitments {
+							requestIDStr := strings.ToLower(commitment.RequestID)
+							if val, exists := metrics.submittedRequestIDs.Load(requestIDStr); exists && val != "found" {
+								ourCommitmentCount++
+								metrics.submittedRequestIDs.Store(requestIDStr, "found")
 							}
+						}
 
-							if ourCommitmentCount > 0 {
-								metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount)
-								processedCount += int64(ourCommitmentCount)
-								foundInRound += ourCommitmentCount
-								fmt.Printf("  Block %d (final retry): FOUND %d commitments! (running total: %d/%d)\n",
-									blockNum, ourCommitmentCount, processedCount, successful)
-								delete(blocksToRetry, blockNum)
-							}
+						if ourCommitmentCount > 0 {
+							metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount)
+							processedCount += int64(ourCommitmentCount)
+							foundInRound += ourCommitmentCount
+							fmt.Printf("  Block %d (final retry): FOUND %d commitments! (running total: %d/%d)\n",
+								blockNum, ourCommitmentCount, processedCount, successful)
+							delete(blocksToRetry, blockNum)
 						}
 					}
 				}

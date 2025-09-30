@@ -39,6 +39,13 @@ performance-test:
 	@echo "Starting performance test (make sure aggregator is running on localhost:3000)..."
 	@./$(BUILD_DIR)/performance-test
 
+performance-test-rest:
+	@echo "Building performance test..."
+	@mkdir -p $(BUILD_DIR)
+	@go build -o $(BUILD_DIR)/performance-test ./cmd/performance-test
+	@echo "Starting performance test (make sure aggregator is running on localhost:3000)..."
+	@./$(BUILD_DIR)/performance-test -rest
+
 # Run performance test with custom URL and auth header
 performance-test-auth:
 	@echo "Building performance test..."

@@ -331,9 +331,155 @@ func GenerateDocsHTML() string {
                 </div>
             </div>
         </div>
+
+        <!-- REST Endpoints Section -->
+        <h2 style="margin-top: 40px; color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 5px;">REST Endpoints</h2>
+
+        <!-- POST /commitments/:request_id -->
+        <div class="method-section">
+            <div class="method-header" style="background: #28a745;">POST /commitments/:request_id</div>
+            <div class="method-content">
+                <p><strong>Description:</strong> Submit a commitment via REST API. The request ID in the URL path allows load balancers to route requests to specific aggregator shards without parsing the request body.</p>
+                <p><strong>Path Parameter:</strong> <code>request_id</code> - The request ID (must match the requestId in the body)</p>
+
+                <div class="params-container">
+                    <div class="params-section">
+                        <h3>Request Body</h3>
+                        <textarea id="rest_submit_params">{
+  "requestId": "0000a5c3b2d1e0f1234567890abcdef1234567890abcdef1234567890abcdef12345",
+  "transactionHash": "000012345678901234567890123456789012345678901234567890123456789012345",
+  "authenticator": {
+    "algorithm": "secp256k1",
+    "publicKey": "02a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
+    "signature": "3045022100abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890022012345678901234567890123456789012345678901234567890123456789012345601",
+    "stateHash": "0000fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+  }
+}</textarea>
+                        <div class="button-group">
+                            <button onclick="sendRestRequest()">🚀 Send Request</button>
+                            <button onclick="clearRestResponse()">🗑️ Clear</button>
+                            <button onclick="copyRestAsCurl()">📋 Copy cURL</button>
+                        </div>
+                    </div>
+
+                    <div class="response-section">
+                        <h3>Response <span id="rest_submit_status" class="status"></span></h3>
+                        <div id="rest_submit_response" class="response-box">Click "Send Request" to see the response here...</div>
+                    </div>
+                </div>
+
+                <div style="background: #fff3cd; padding: 10px; border-radius: 5px; margin-top: 15px;">
+                    <strong>Note:</strong> The request ID in the URL path must exactly match the <code>requestId</code> field in the request body. This redundancy enables efficient routing at the load balancer level.
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
+        // REST endpoint functions
+        async function sendRestRequest() {
+            const paramsField = document.getElementById('rest_submit_params');
+            const responseField = document.getElementById('rest_submit_response');
+            const statusField = document.getElementById('rest_submit_status');
+
+            // Show loading status
+            statusField.className = 'status status-loading';
+            statusField.textContent = 'Sending...';
+            responseField.textContent = 'Sending request...';
+
+            let body = {};
+            try {
+                body = JSON.parse(paramsField.value);
+            } catch (e) {
+                statusField.className = 'status status-error';
+                statusField.textContent = 'Parse Error';
+                responseField.textContent = 'Error parsing JSON body: ' + e.message;
+                return;
+            }
+
+            // Extract request ID from body for URL
+            const requestId = body.requestId;
+            if (!requestId) {
+                statusField.className = 'status status-error';
+                statusField.textContent = 'Missing requestId';
+                responseField.textContent = 'Error: requestId is required in the request body';
+                return;
+            }
+
+            try {
+                const startTime = Date.now();
+                const response = await fetch('/commitments/' + requestId, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(body)
+                });
+
+                const duration = Date.now() - startTime;
+                const text = await response.text();
+
+                let formatted;
+                try {
+                    const json = JSON.parse(text);
+                    formatted = JSON.stringify(json, null, 2);
+                } catch (e) {
+                    formatted = text;
+                }
+
+                responseField.textContent = formatted;
+
+                if (response.ok) {
+                    statusField.className = 'status status-success';
+                    statusField.textContent = 'Success (' + duration + 'ms)';
+                } else {
+                    statusField.className = 'status status-error';
+                    statusField.textContent = 'Error ' + response.status + ' (' + duration + 'ms)';
+                }
+
+            } catch (error) {
+                statusField.className = 'status status-error';
+                statusField.textContent = 'Network Error';
+                responseField.textContent = 'Network error: ' + error.message;
+            }
+        }
+
+        function clearRestResponse() {
+            const responseField = document.getElementById('rest_submit_response');
+            const statusField = document.getElementById('rest_submit_status');
+
+            responseField.textContent = 'Click "Send Request" to see the response here...';
+            statusField.className = 'status';
+            statusField.textContent = '';
+        }
+
+        function copyRestAsCurl() {
+            const paramsField = document.getElementById('rest_submit_params');
+
+            let body = {};
+            try {
+                body = JSON.parse(paramsField.value);
+            } catch (e) {
+                alert('Error parsing JSON: ' + e.message);
+                return;
+            }
+
+            const requestId = body.requestId;
+            if (!requestId) {
+                alert('Error: requestId is required in the request body');
+                return;
+            }
+
+            const curl = 'curl -X POST \'' + window.location.origin + '/commitments/' + requestId + '\' \\' +
+                '\n  -H \'Content-Type: application/json\' \\' +
+                '\n  -d \'' + JSON.stringify(body, null, 2) + '\'';
+
+            navigator.clipboard.writeText(curl).then(function() {
+                alert('cURL command copied to clipboard!');
+            }, function(err) {
+                alert('Failed to copy to clipboard');
+            });
+        }
         async function sendRequest(method) {
             const paramsField = document.getElementById(method + '_params');
             const responseField = document.getElementById(method + '_response');

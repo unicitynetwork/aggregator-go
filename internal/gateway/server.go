@@ -91,6 +91,10 @@ func (s *Server) setupRoutes() {
 	// JSON-RPC endpoint
 	s.router.POST("/", gin.WrapH(s.rpcServer))
 
+	// REST endpoint for commitment submission with request ID in path
+	// This allows load balancers to route by request ID without parsing body
+	s.router.POST("/commitments/:request_id", s.handleSubmitCommitmentREST)
+
 	// API documentation endpoint
 	if s.config.Server.EnableDocs {
 		s.router.GET("/docs", s.handleDocs)
@@ -165,4 +169,66 @@ func (s *Server) handleDocs(c *gin.Context) {
 	html := GenerateDocsHTML()
 	c.Header("Content-Type", "text/html")
 	c.String(http.StatusOK, html)
+}
+
+// handleSubmitCommitmentREST handles REST commitment submission
+// Path parameter allows load balancer to route by request ID without parsing body
+func (s *Server) handleSubmitCommitmentREST(c *gin.Context) {
+	ctx := c.Request.Context()
+	requestIDParam := c.Param("request_id")
+
+	// Convert path parameter to RequestID type
+	pathRequestID, err := api.NewImprintHexString(requestIDParam)
+	if err != nil {
+		s.logger.WithContext(ctx).Error("Invalid request ID in path", "error", err.Error())
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request ID format in path: " + err.Error()})
+		return
+	}
+
+	// Parse request body
+	var req api.SubmitCommitmentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		s.logger.WithContext(ctx).Error("Invalid request body", "error", err.Error())
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body: " + err.Error()})
+		return
+	}
+
+	// Validate that path parameter matches body
+	if string(req.RequestID) != string(pathRequestID) {
+		s.logger.WithContext(ctx).Error("Request ID mismatch",
+			"path", pathRequestID,
+			"body", req.RequestID)
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Request ID in path does not match body",
+			"path_request_id": string(pathRequestID),
+			"body_request_id": string(req.RequestID),
+		})
+		return
+	}
+
+	// Validate required fields
+	if req.TransactionHash == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "transactionHash is required"})
+		return
+	}
+
+	// Call service
+	response, err := s.service.SubmitCommitment(ctx, &req)
+	if err != nil {
+		s.logger.WithContext(ctx).Error("Failed to submit commitment", "error", err.Error())
+
+		// Check for specific error types to return appropriate status codes
+		if err.Error() == "REQUEST_ID_EXISTS" {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "REQUEST_ID_EXISTS",
+				"message": "Commitment with this request ID already exists",
+			})
+			return
+		}
+
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit commitment"})
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
 }

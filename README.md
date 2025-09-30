@@ -417,10 +417,45 @@ The documentation includes:
 - **🚀 Live API testing** - Execute requests directly from the browser
 - **📋 cURL export** - Copy commands for terminal use
 - **⌨️ Keyboard shortcuts** - Ctrl+Enter to send requests
-- **🎯 Status indicators** - Response times and success/error status
-- **↻ Reset functionality** - Restore original examples
-- **📱 Responsive design** - Works on desktop and mobile
-- **💾 Real-time responses** - JSON formatted with syntax highlighting
+
+### REST Endpoints
+
+#### `POST /commitments/:request_id`
+Submit a commitment via REST API. The request ID in the URL path allows load balancers to route requests to specific aggregator shards without parsing the request body.
+
+**Path Parameter:**
+- `request_id` - The request ID (must match the `requestId` in the body)
+
+**Request:**
+```json
+{
+  "requestId": "0000a5c3b2d1e0f1234567890abcdef1234567890abcdef1234567890abcdef12345",
+  "transactionHash": "000012345678901234567890123456789012345678901234567890123456789012345",
+  "authenticator": {
+    "algorithm": "secp256k1",
+    "publicKey": "02a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
+    "signature": "3045022100abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890022012345678901234567890123456789012345678901234567890123456789012345601",
+    "stateHash": "0000fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "status": "SUCCESS"
+}
+```
+
+**Error Response (409 Conflict):**
+```json
+{
+  "error": "REQUEST_ID_EXISTS",
+  "message": "Commitment with this request ID already exists"
+}
+```
+
+**Note:** The request ID in the URL path must exactly match the `requestId` field in the request body. This redundancy enables efficient routing at the load balancer level for sharding scenarios.
 
 ## Development
 
