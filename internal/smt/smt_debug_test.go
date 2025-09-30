@@ -19,7 +19,7 @@ func TestAddLeaves_DebugInvalidPath(t *testing.T) {
 		commitment := &models.Commitment{}
 		require.NoError(t, json.Unmarshal(commJsonBytes, commitment))
 
-		path, err := commitment.RequestID.GetPath()
+		path, err := commitment.RequestID.GetPath(0)
 		require.NoError(t, err)
 
 		// Create leaf value (hash of commitment data)
@@ -82,7 +82,7 @@ func TestAddLeaves_DebugInvalidPath(t *testing.T) {
 	{
 		req, err := api.NewImprintHexString("00006df936060e07cad29086335623b2a05afef0b05f77dcc27f6e5065abce6f061d")
 		require.NoError(t, err, "Failed to create request ID")
-		path, err := req.GetPath()
+		path, err := req.GetPath(0)
 		require.NoError(t, err)
 		merkleTreePath := _smt.GetPath(path)
 		require.NotNil(t, merkleTreePath, "Expected non-nil Merkle tree path for valid request ID")

@@ -2,6 +2,7 @@ package round
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"math/big"
 	"sync"
@@ -21,14 +22,14 @@ type ParentRound struct {
 	Number       *api.BigInt
 	StartTime    time.Time
 	State        RoundState
-	ShardUpdates map[string]*models.ShardRootUpdate // Latest update per shard path (key is hex string)
+	ShardUpdates map[int]*models.ShardRootUpdate // Latest update per shard path (key is hex string)
 	Block        *models.Block
 
 	// SMT snapshot for this round - allows accumulating shard changes before committing
 	Snapshot *smt.ThreadSafeSmtSnapshot
 
 	// Store processed data for persistence during FinalizeBlock
-	ProcessedShardUpdates map[string]*models.ShardRootUpdate // Shard updates that were actually processed into the parent SMT
+	ProcessedShardUpdates map[int]*models.ShardRootUpdate // Shard updates that were actually processed into the parent SMT
 
 	// Timing metrics for this round
 	ProcessingTime   time.Duration
@@ -139,13 +140,13 @@ func (prm *ParentRoundManager) SubmitShardRoot(ctx context.Context, update *mode
 		return fmt.Errorf("no active round to accept shard root update")
 	}
 
-	shardKey := update.ShardID.String()
+	shardKey := update.ShardID
 	prm.currentRound.ShardUpdates[shardKey] = update
 	prm.totalShardUpdates++
 
 	prm.logger.WithContext(ctx).Debug("Shard root update accepted",
 		"roundNumber", prm.currentRound.Number.String(),
-		"shardID", update.ShardID.String(),
+		"shardID", update.ShardID,
 		"rootHash", update.RootHash.String(),
 		"totalShards", len(prm.currentRound.ShardUpdates))
 
@@ -170,11 +171,11 @@ func (prm *ParentRoundManager) startNewRound(ctx context.Context, roundNumber *a
 		prm.roundTimer.Stop()
 	}
 
-	var shardUpdates map[string]*models.ShardRootUpdate
+	var shardUpdates map[int]*models.ShardRootUpdate
 	if prm.currentRound != nil {
 		shardUpdates = prm.currentRound.ShardUpdates
 	} else {
-		shardUpdates = make(map[string]*models.ShardRootUpdate)
+		shardUpdates = make(map[int]*models.ShardRootUpdate)
 	}
 
 	// Create new round
@@ -218,7 +219,7 @@ func (prm *ParentRoundManager) processCurrentRound(ctx context.Context) error {
 	round := prm.currentRound
 	round.State = RoundStateProcessing
 
-	round.ProcessedShardUpdates = make(map[string]*models.ShardRootUpdate, len(round.ShardUpdates))
+	round.ProcessedShardUpdates = make(map[int]*models.ShardRootUpdate, len(round.ShardUpdates))
 	for shardKey, update := range round.ShardUpdates {
 		round.ProcessedShardUpdates[shardKey] = update
 	}
@@ -293,10 +294,13 @@ func (prm *ParentRoundManager) processRound(ctx context.Context, round *ParentRo
 	block := models.NewBlock(
 		round.Number,
 		"unicity",
+		0,
 		"1.0",
 		"mainnet",
 		parentRootHash,
 		previousBlockHash,
+		nil,
+		nil,
 	)
 
 	round.Block = block
@@ -399,10 +403,10 @@ func (prm *ParentRoundManager) FinalizeBlock(ctx context.Context, block *models.
 		"blockNumber", block.Index.String())
 
 	prm.roundMutex.RLock()
-	var processedShardUpdates map[string]*models.ShardRootUpdate
+	var processedShardUpdates map[int]*models.ShardRootUpdate
 	var snapshot *smt.ThreadSafeSmtSnapshot
 	if prm.currentRound != nil && prm.currentRound.ProcessedShardUpdates != nil {
-		processedShardUpdates = make(map[string]*models.ShardRootUpdate)
+		processedShardUpdates = make(map[int]*models.ShardRootUpdate)
 		for shardKey, update := range prm.currentRound.ProcessedShardUpdates {
 			processedShardUpdates[shardKey] = update
 		}
@@ -413,7 +417,9 @@ func (prm *ParentRoundManager) FinalizeBlock(ctx context.Context, block *models.
 	if len(processedShardUpdates) > 0 {
 		smtNodes := make([]*models.SmtNode, 0, len(processedShardUpdates))
 		for _, update := range processedShardUpdates {
-			smtNode := models.NewSmtNode(update.ShardID, update.RootHash)
+			bytes := make([]byte, 4)
+			binary.BigEndian.PutUint32(bytes, uint32(update.ShardID))
+			smtNode := models.NewSmtNode(api.NewHexBytes(bytes), update.RootHash)
 			smtNodes = append(smtNodes, smtNode)
 		}
 
@@ -486,8 +492,8 @@ func (prm *ParentRoundManager) reconstructParentSMT(ctx context.Context) error {
 	return nil
 }
 
-func getShardIDs(shardUpdates map[string]*models.ShardRootUpdate) []string {
-	shardIDs := make([]string, 0, len(shardUpdates))
+func getShardIDs(shardUpdates map[int]*models.ShardRootUpdate) []int {
+	shardIDs := make([]int, 0, len(shardUpdates))
 	for shardKey := range shardUpdates {
 		shardIDs = append(shardIDs, shardKey)
 	}

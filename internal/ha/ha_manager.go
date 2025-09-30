@@ -48,13 +48,14 @@ func NewHAManager(logger *logger.Logger,
 	leaderSelector LeaderSelector,
 	storage interfaces.Storage,
 	smt *smt.ThreadSafeSMT,
+	shardID int,
 	stateTracker *state.Tracker,
 	syncInterval time.Duration,
 ) *HAManager {
 	return &HAManager{
 		logger:         logger,
 		leaderSelector: leaderSelector,
-		blockSyncer:    newBlockSyncer(logger, storage, smt, stateTracker),
+		blockSyncer:    newBlockSyncer(logger, storage, smt, shardID, stateTracker),
 		activatable:    activatable,
 		syncInterval:   syncInterval,
 	}

@@ -79,6 +79,7 @@ type RoundManager struct {
 	commitmentQueue interfaces.CommitmentQueue
 	storage         interfaces.Storage
 	smt             *smt.ThreadSafeSMT
+	rootClient      RootAggregatorClient
 	bftClient       bft.BFTClient
 	stateTracker    *state.Tracker
 
@@ -111,6 +112,11 @@ type RoundManager struct {
 	totalCommitments int64
 }
 
+type RootAggregatorClient interface {
+	SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) error
+	GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.RootShardInclusionProof, error)
+}
+
 // RoundMetrics tracks performance metrics for a round
 type RoundMetrics struct {
 	CommitmentsProcessed int
@@ -120,7 +126,7 @@ type RoundMetrics struct {
 }
 
 // NewRoundManager creates a new round manager
-func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, stateTracker *state.Tracker) (*RoundManager, error) {
+func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, rootAggregatorClient RootAggregatorClient, stateTracker *state.Tracker) (*RoundManager, error) {
 	// Initialize SMT with empty tree - will be replaced with restored tree in Start()
 	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
 	threadSafeSMT := smt.NewThreadSafeSMT(smtInstance)
@@ -131,6 +137,7 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 		commitmentQueue:     commitmentQueue,
 		storage:             storage,
 		smt:                 threadSafeSMT,
+		rootClient:          rootAggregatorClient,
 		stateTracker:        stateTracker,
 		roundDuration:       cfg.Processing.RoundDuration,         // Configurable round duration (default 1s)
 		commitmentStream:    make(chan *models.Commitment, 10000), // Reasonable buffer for streaming
@@ -140,27 +147,30 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 		avgSMTUpdateTime:    5 * time.Millisecond,                 // Initial estimate per batch
 	}
 
-	if cfg.BFT.Enabled {
-		var err error
-		rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, logger)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create BFT client: %w", err)
-		}
-	} else {
-		nextBlockNumber := api.NewBigInt(nil)
-		lastBlockNumber := api.NewBigInt(big.NewInt(0))
-		if rm.storage != nil && rm.storage.BlockStorage() != nil {
+	// create BFT client for standalone mode
+	if cfg.Sharding.Mode == config.ShardingModeStandalone {
+		if cfg.BFT.Enabled {
 			var err error
-			lastBlockNumber, err = rm.storage.BlockStorage().GetLatestNumber(ctx)
+			rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, logger)
 			if err != nil {
-				return nil, fmt.Errorf("failed to fetch latest block number: %w", err)
+				return nil, fmt.Errorf("failed to create BFT client: %w", err)
 			}
-			if lastBlockNumber == nil {
-				lastBlockNumber = api.NewBigInt(big.NewInt(0))
+		} else {
+			nextBlockNumber := api.NewBigInt(nil)
+			lastBlockNumber := api.NewBigInt(big.NewInt(0))
+			if rm.storage != nil && rm.storage.BlockStorage() != nil {
+				var err error
+				lastBlockNumber, err = rm.storage.BlockStorage().GetLatestNumber(ctx)
+				if err != nil {
+					return nil, fmt.Errorf("failed to fetch latest block number: %w", err)
+				}
+				if lastBlockNumber == nil {
+					lastBlockNumber = api.NewBigInt(big.NewInt(0))
+				}
 			}
+			nextBlockNumber.Add(lastBlockNumber.Int, big.NewInt(1))
+			rm.bftClient = bft.NewBFTClientStub(logger, rm, nextBlockNumber)
 		}
-		nextBlockNumber.Add(lastBlockNumber.Int, big.NewInt(1))
-		rm.bftClient = bft.NewBFTClientStub(logger, rm, nextBlockNumber)
 	}
 	return rm, nil
 }
@@ -329,6 +339,18 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 			rm.logger.WithContext(ctx).Error("Failed to process round",
 				"roundNumber", roundNumber.String(),
 				"error", err.Error())
+
+			if rm.config.Sharding.Mode.IsChild() {
+				nextRoundNumber := big.NewInt(0).Add(roundNumber.Int, big.NewInt(1))
+				rm.logger.WithContext(ctx).Info("Attempting to start new round after processing failure.",
+					"failedRound", roundNumber.String(),
+					"nextRound", nextRoundNumber.String())
+				if startErr := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); startErr != nil {
+					rm.logger.WithContext(ctx).Error("Failed to start new round after processing error",
+						"nextRound", nextRoundNumber.String(),
+						"error", startErr)
+				}
+			}
 		}
 	})
 
@@ -803,16 +825,38 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 }
 
 func (rm *RoundManager) Activate(ctx context.Context) error {
-	if err := rm.bftClient.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start BFT client: %w", err)
+	switch rm.config.Sharding.Mode {
+	case config.ShardingModeStandalone:
+		if err := rm.bftClient.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start BFT client: %w", err)
+		}
+	case config.ShardingModeChild:
+		roundNumber := rm.stateTracker.GetLastSyncedBlock()
+		roundNumber.Add(roundNumber, big.NewInt(1))
+		if err := rm.StartNewRound(ctx, api.NewBigInt(roundNumber)); err != nil {
+			return fmt.Errorf("failed to start new round: %w", err)
+		}
+	default:
+		return fmt.Errorf("invalid shard mode: %s", rm.config.Sharding.Mode)
 	}
+
 	rm.startCommitmentPrefetcher(ctx)
 	return nil
 }
 
 func (rm *RoundManager) Deactivate(ctx context.Context) error {
-	rm.bftClient.Stop()
 	rm.stopCommitmentPrefetcher()
+	if rm.bftClient != nil {
+		rm.bftClient.Stop()
+	}
+
+	// stop creating blocks if we become follower
+	rm.roundMutex.Lock()
+	if rm.roundTimer != nil {
+		rm.roundTimer.Stop()
+	}
+	rm.roundMutex.Unlock()
+
 	return nil
 }
 

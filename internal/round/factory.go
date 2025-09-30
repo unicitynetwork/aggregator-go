@@ -24,11 +24,9 @@ type Manager interface {
 func NewManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, stateTracker *state.Tracker) (Manager, error) {
 	switch cfg.Sharding.Mode {
 	case config.ShardingModeStandalone:
-		return NewRoundManager(ctx, cfg, logger, commitmentQueue, storage, stateTracker)
-
+		return NewRoundManager(ctx, cfg, logger, commitmentQueue, storage, nil, stateTracker)
 	case config.ShardingModeParent:
 		return NewParentRoundManager(ctx, cfg, logger, storage)
-
 	default:
 		return nil, fmt.Errorf("unsupported sharding mode: %s", cfg.Sharding.Mode)
 	}

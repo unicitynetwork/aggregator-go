@@ -61,7 +61,7 @@ func (pas *ParentAggregatorService) Stop(ctx context.Context) error {
 // SubmitShardRoot handles shard root submission from child aggregators
 func (pas *ParentAggregatorService) SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) (*api.SubmitShardRootResponse, error) {
 	if err := pas.validateShardID(req.ShardID); err != nil {
-		pas.logger.WithContext(ctx).Warn("Invalid shard ID", "shardId", req.ShardID.String(), "error", err.Error())
+		pas.logger.WithContext(ctx).Warn("Invalid shard ID", "shardId", req.ShardID, "error", err.Error())
 		return &api.SubmitShardRootResponse{
 			Status: api.ShardRootStatusInvalidShardID,
 		}, nil
@@ -78,7 +78,7 @@ func (pas *ParentAggregatorService) SubmitShardRoot(ctx context.Context, req *ap
 	}
 
 	pas.logger.WithContext(ctx).Info("Shard root update accepted",
-		"shardId", req.ShardID.String(),
+		"shardId", req.ShardID,
 		"rootHash", req.RootHash.String())
 
 	return &api.SubmitShardRootResponse{
@@ -89,25 +89,25 @@ func (pas *ParentAggregatorService) SubmitShardRoot(ctx context.Context, req *ap
 // GetShardProof handles shard proof requests
 func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.GetShardProofResponse, error) {
 	if err := pas.validateShardID(req.ShardID); err != nil {
-		pas.logger.WithContext(ctx).Warn("Invalid shard ID", "shardId", req.ShardID.String(), "error", err.Error())
+		pas.logger.WithContext(ctx).Warn("Invalid shard ID", "shardId", req.ShardID, "error", err.Error())
 		return nil, fmt.Errorf("invalid shard ID: %w", err)
 	}
 
-	pas.logger.WithContext(ctx).Info("Shard proof requested", "shardId", req.ShardID.String())
+	pas.logger.WithContext(ctx).Info("Shard proof requested", "shardId", req.ShardID)
 
-	shardPath := new(big.Int).SetBytes(req.ShardID)
+	shardPath := new(big.Int).SetInt64(int64(req.ShardID))
 	merkleTreePath := pas.parentRoundManager.GetSMT().GetPath(shardPath)
 
 	var proofPath *api.MerkleTreePath
 	if len(merkleTreePath.Steps) > 0 && merkleTreePath.Steps[0].Branch != nil {
 		proofPath = merkleTreePath
 		pas.logger.WithContext(ctx).Info("Generated shard proof from current state",
-			"shardId", req.ShardID.String(),
+			"shardId", req.ShardID,
 			"rootHash", merkleTreePath.Root)
 	} else {
 		proofPath = nil
 		pas.logger.WithContext(ctx).Info("Shard has not submitted root yet, returning nil proof",
-			"shardId", req.ShardID.String())
+			"shardId", req.ShardID)
 	}
 
 	latestBlock, err := pas.storage.BlockStorage().GetLatest(ctx)
@@ -126,17 +126,17 @@ func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.
 	}, nil
 }
 
-func (pas *ParentAggregatorService) validateShardID(shardID api.HexBytes) error {
-	if len(shardID) < 2 {
-		return fmt.Errorf("shard ID too short, must have at least 2 bytes")
+func (pas *ParentAggregatorService) validateShardID(shardID int) error {
+	if shardID == 0 {
+		return fmt.Errorf("shard it cannot be zero")
 	}
-
-	if shardID[0] != 0x01 {
-		return fmt.Errorf("shard ID must have 0x01 prefix, got: %s", shardID.String())
-	}
-
-	shardValueBytes := shardID[1:]
-	shardValue := new(big.Int).SetBytes(shardValueBytes)
+	//
+	//if shardID[0] != 0x01 {
+	//	return fmt.Errorf("shard ID must have 0x01 prefix, got: %s", shardID.String())
+	//}
+	//
+	//shardValueBytes := shardID[1:]
+	shardValue := new(big.Int).SetInt64(int64(shardID))
 
 	maxShardID := int64((1 << pas.config.Sharding.ShardIDLength) - 1)
 	maxShardIDBig := big.NewInt(maxShardID)

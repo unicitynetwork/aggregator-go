@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -148,6 +149,48 @@ func (sm ShardingMode) IsChild() bool {
 type ShardingConfig struct {
 	Mode          ShardingMode `mapstructure:"mode"`            // Operating mode: standalone, parent, or child
 	ShardIDLength int          `mapstructure:"shard_id_length"` // Bit length for shard IDs (e.g., 4 bits = 16 shards)
+	Child         ChildConfig  `mapstructure:"child"`           // child aggregator config
+}
+
+type ChildConfig struct {
+	ParentRpcAddr      string        `mapstructure:"parent_rpc_addr"`
+	ShardID            int           `mapstructure:"shard_id"`
+	RoundDuration      time.Duration `mapstructure:"round_duration"`
+	ParentPollTimeout  time.Duration `mapstructure:"parent_poll_timeout"`
+	ParentPollInterval time.Duration `mapstructure:"parent_poll_interval"`
+}
+
+func (c ShardingConfig) Validate() error {
+	if c.Mode == ShardingModeChild {
+		if err := c.Child.Validate(); err != nil {
+			return fmt.Errorf("invalid child mode configuration: %w", err)
+		}
+	}
+	if c.Mode == ShardingModeStandalone {
+		if c.Child.ShardID != 0 {
+			return errors.New("shard_id must be undefined in standalone mode")
+		}
+	}
+	return nil
+}
+
+func (c ChildConfig) Validate() error {
+	if c.ParentRpcAddr == "" {
+		return errors.New("parent rpc addr is required")
+	}
+	if c.ShardID == 0 {
+		return errors.New("shard id is required")
+	}
+	if c.RoundDuration == 0 {
+		return errors.New("round duration is required")
+	}
+	if c.ParentPollTimeout == 0 {
+		return errors.New("parent poll timeout is required")
+	}
+	if c.ParentPollInterval == 0 {
+		return errors.New("parent poll interval is required")
+	}
+	return nil
 }
 
 type BFTConfig struct {
@@ -305,6 +348,10 @@ func (c *Config) Validate() error {
 
 	if c.Sharding.ShardIDLength < 1 || c.Sharding.ShardIDLength > 16 {
 		return fmt.Errorf("shard ID length must be between 1 and 16 bits, got: %d", c.Sharding.ShardIDLength)
+	}
+
+	if err := c.Sharding.Validate(); err != nil {
+		return fmt.Errorf("invalid sharding configuration: %w", err)
 	}
 
 	return nil

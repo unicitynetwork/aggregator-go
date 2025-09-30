@@ -51,7 +51,7 @@ func (suite *ParentServiceTestSuite) SetupSuite() {
 		},
 	}
 
-	suite.storage, suite.cleanup = testutil.SetupTestStorage(suite.T(), *suite.cfg)
+	suite.storage = testutil.SetupTestStorage(suite.T(), *suite.cfg)
 }
 
 // TearDownSuite runs once after all tests
@@ -100,10 +100,6 @@ func (suite *ParentServiceTestSuite) TearDownTest() {
 }
 
 // Test helpers
-func makeShardID(shardNum byte) api.HexBytes {
-	return api.HexBytes{0x01, shardNum}
-}
-
 func makeTestHash(value byte) []byte {
 	hash := make([]byte, 32)
 	hash[0] = value
@@ -111,7 +107,7 @@ func makeTestHash(value byte) []byte {
 }
 
 // waitForShardToExist polls until the shard proof is available or times out
-func (suite *ParentServiceTestSuite) waitForShardToExist(ctx context.Context, shardID api.HexBytes) {
+func (suite *ParentServiceTestSuite) waitForShardToExist(ctx context.Context, shardID int) {
 	timeout := time.After(5 * time.Second)
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
@@ -119,7 +115,7 @@ func (suite *ParentServiceTestSuite) waitForShardToExist(ctx context.Context, sh
 	for {
 		select {
 		case <-timeout:
-			suite.T().Fatalf("Timeout waiting for shard %s to be processed", shardID.String())
+			suite.T().Fatalf("Timeout waiting for shard %d to be processed", shardID)
 		case <-ticker.C:
 			response, err := suite.service.GetShardProof(ctx, &api.GetShardProofRequest{ShardID: shardID})
 			if err == nil && response.MerkleTreePath != nil {
@@ -135,7 +131,7 @@ func (suite *ParentServiceTestSuite) TestSubmitShardRoot_ValidSubmission() {
 	ctx := context.Background()
 
 	request := &api.SubmitShardRootRequest{
-		ShardID:  makeShardID(0),
+		ShardID:  1,
 		RootHash: makeTestHash(0xAA),
 	}
 
@@ -152,7 +148,7 @@ func (suite *ParentServiceTestSuite) TestSubmitShardRoot_EmptyShardID() {
 	ctx := context.Background()
 
 	request := &api.SubmitShardRootRequest{
-		ShardID:  api.HexBytes{}, // Empty
+		ShardID:  0, // Empty
 		RootHash: makeTestHash(0xAA),
 	}
 
@@ -164,47 +160,11 @@ func (suite *ParentServiceTestSuite) TestSubmitShardRoot_EmptyShardID() {
 	suite.T().Log("✓ Empty shard ID rejected correctly")
 }
 
-// Test 3: SubmitShardRoot - Invalid ShardID (missing 0x01 prefix)
-func (suite *ParentServiceTestSuite) TestSubmitShardRoot_MissingPrefix() {
-	ctx := context.Background()
-
-	request := &api.SubmitShardRootRequest{
-		ShardID:  api.HexBytes{0x05}, // Missing 0x01 prefix
-		RootHash: makeTestHash(0xAA),
-	}
-
-	response, err := suite.service.SubmitShardRoot(ctx, request)
-	suite.Require().NoError(err, "Should not return Go error")
-	suite.Require().NotNil(response, "Response should not be nil")
-	suite.Assert().Equal(api.ShardRootStatusInvalidShardID, response.Status, "Should return INVALID_SHARD_ID status")
-
-	suite.T().Log("✓ Missing 0x01 prefix rejected correctly")
-}
-
-// Test 4: SubmitShardRoot - Invalid ShardID (out of range)
-func (suite *ParentServiceTestSuite) TestSubmitShardRoot_OutOfRange() {
-	ctx := context.Background()
-
-	// For 4-bit shard IDs, max value is 15 (0x0F)
-	// Send shard ID 16 (0x10) which is out of range
-	request := &api.SubmitShardRootRequest{
-		ShardID:  api.HexBytes{0x01, 0x10}, // 0x01 prefix + 0x10 (16 decimal)
-		RootHash: makeTestHash(0xAA),
-	}
-
-	response, err := suite.service.SubmitShardRoot(ctx, request)
-	suite.Require().NoError(err, "Should not return Go error")
-	suite.Require().NotNil(response, "Response should not be nil")
-	suite.Assert().Equal(api.ShardRootStatusInvalidShardID, response.Status, "Should return INVALID_SHARD_ID status")
-
-	suite.T().Log("✓ Out of range shard ID rejected correctly")
-}
-
 // Test 5: SubmitShardRoot - Verify Update is Queued
 func (suite *ParentServiceTestSuite) TestSubmitShardRoot_UpdateQueued() {
 	ctx := context.Background()
 
-	shard0ID := makeShardID(0)
+	shard0ID := 0
 	shard0Root := makeTestHash(0xAA)
 
 	request := &api.SubmitShardRootRequest{
@@ -230,7 +190,7 @@ func (suite *ParentServiceTestSuite) TestSubmitShardRoot_UpdateQueued() {
 func (suite *ParentServiceTestSuite) TestGetShardProof_Success() {
 	ctx := context.Background()
 
-	shard0ID := makeShardID(0)
+	shard0ID := 1
 
 	// TODO(SMT): Child would extract root hash from their SMT and send to parent
 	childRootRaw := makeTestHash(0xAA)
@@ -259,7 +219,7 @@ func (suite *ParentServiceTestSuite) TestGetShardProof_Success() {
 
 	// Verify that the proof can be validated
 	// Convert shard ID to big.Int for verification (the path in the parent SMT)
-	shardPath := new(big.Int).SetBytes(shard0ID)
+	shardPath := new(big.Int).SetInt64(int64(shard0ID))
 	result, err := response.MerkleTreePath.Verify(shardPath)
 	suite.Require().NoError(err, "Proof verification should not error")
 
@@ -275,7 +235,7 @@ func (suite *ParentServiceTestSuite) TestGetShardProof_NonExistentShard() {
 	ctx := context.Background()
 
 	// Submit one shard
-	shard0ID := makeShardID(0)
+	shard0ID := 0b11
 	submitReq := &api.SubmitShardRootRequest{
 		ShardID:  shard0ID,
 		RootHash: makeTestHash(0xAA),
@@ -287,7 +247,7 @@ func (suite *ParentServiceTestSuite) TestGetShardProof_NonExistentShard() {
 	suite.waitForShardToExist(ctx, shard0ID)
 
 	// Request proof for a shard that was never submitted
-	shard5ID := makeShardID(5)
+	shard5ID := 0b10
 	proofReq := &api.GetShardProofRequest{
 		ShardID: shard5ID,
 	}
@@ -305,7 +265,7 @@ func (suite *ParentServiceTestSuite) TestGetShardProof_EmptyTree() {
 	ctx := context.Background()
 
 	// Request proof before any shards have been submitted
-	shard0ID := makeShardID(0)
+	shard0ID := 1
 	proofReq := &api.GetShardProofRequest{
 		ShardID: shard0ID,
 	}
@@ -318,44 +278,14 @@ func (suite *ParentServiceTestSuite) TestGetShardProof_EmptyTree() {
 	suite.T().Log("✓ GetShardProof returns nil MerkleTreePath for empty tree")
 }
 
-// Test 9: GetShardProof - Invalid ShardID (empty)
-func (suite *ParentServiceTestSuite) TestGetShardProof_EmptyShardID() {
-	ctx := context.Background()
-
-	proofReq := &api.GetShardProofRequest{
-		ShardID: api.HexBytes{}, // Empty
-	}
-
-	_, err := suite.service.GetShardProof(ctx, proofReq)
-	suite.Require().Error(err, "Should return error for empty shard ID")
-	suite.Assert().Contains(err.Error(), "invalid shard ID", "Error should indicate invalid shard ID")
-
-	suite.T().Log("✓ GetShardProof rejects empty shard ID")
-}
-
-// Test 10: GetShardProof - Invalid ShardID (missing prefix)
-func (suite *ParentServiceTestSuite) TestGetShardProof_MissingPrefix() {
-	ctx := context.Background()
-
-	proofReq := &api.GetShardProofRequest{
-		ShardID: api.HexBytes{0x05}, // Missing 0x01 prefix
-	}
-
-	_, err := suite.service.GetShardProof(ctx, proofReq)
-	suite.Require().Error(err, "Should return error for missing prefix")
-	suite.Assert().Contains(err.Error(), "invalid shard ID", "Error should indicate invalid shard ID")
-
-	suite.T().Log("✓ GetShardProof rejects shard ID without 0x01 prefix")
-}
-
 // Test 11: GetShardProof - Multiple Shards (verify each has correct proof)
 func (suite *ParentServiceTestSuite) TestGetShardProof_MultipleShards() {
 	ctx := context.Background()
 
 	// Submit 3 different shards
-	shard0ID := makeShardID(0)
-	shard1ID := makeShardID(1)
-	shard2ID := makeShardID(2)
+	shard2ID := 0b100
+	shard0ID := 0b101
+	shard1ID := 0b111
 
 	_, err := suite.service.SubmitShardRoot(ctx, &api.SubmitShardRootRequest{
 		ShardID:  shard0ID,

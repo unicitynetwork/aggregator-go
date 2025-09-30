@@ -2,8 +2,11 @@ package signing
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"math/big"
 
+	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -20,6 +23,7 @@ const (
 	ValidationStatusInvalidStateHashFormat
 	ValidationStatusInvalidTransactionHashFormat
 	ValidationStatusUnsupportedAlgorithm
+	ValidationStatusShardMismatch
 )
 
 func (s ValidationStatus) String() string {
@@ -54,12 +58,14 @@ type ValidationResult struct {
 // CommitmentValidator validates commitment signatures and request IDs
 type CommitmentValidator struct {
 	signingService *SigningService
+	shardConfig    config.ShardingConfig
 }
 
 // NewCommitmentValidator creates a new commitment validator
-func NewCommitmentValidator() *CommitmentValidator {
+func NewCommitmentValidator(shardConfig config.ShardingConfig) *CommitmentValidator {
 	return &CommitmentValidator{
 		signingService: NewSigningService(),
+		shardConfig:    shardConfig,
 	}
 }
 
@@ -71,6 +77,14 @@ func (v *CommitmentValidator) ValidateCommitment(commitment *models.Commitment) 
 		return ValidationResult{
 			Status: ValidationStatusUnsupportedAlgorithm,
 			Error:  fmt.Errorf("unsupported algorithm: %s", commitment.Authenticator.Algorithm),
+		}
+	}
+
+	// 1.1 Verify correct shard
+	if err := v.ValidateShardID(commitment.RequestID); err != nil {
+		return ValidationResult{
+			Status: ValidationStatusShardMismatch,
+			Error:  fmt.Errorf("invalid shard: %w", err),
 		}
 	}
 
@@ -200,4 +214,50 @@ func (v *CommitmentValidator) ValidateCommitment(commitment *models.Commitment) 
 		Status: ValidationStatusSuccess,
 		Error:  nil,
 	}
+}
+
+// ValidateShardID verifies if the request id belongs to the configured shard
+func (v *CommitmentValidator) ValidateShardID(requestID api.RequestID) error {
+	if !v.shardConfig.Mode.IsChild() {
+		return nil
+	}
+	ok, err := verifyShardID(requestID.String(), v.shardConfig.Child.ShardID)
+	if err != nil {
+		return fmt.Errorf("error verifying shard id: %w", err)
+	}
+	if !ok {
+		return errors.New("request ID shard part does not match the current shard identifier")
+	}
+	return nil
+}
+
+// verifyShardID Checks if commitmentID's least significant bits match the shard bitmask.
+func verifyShardID(commitmentID string, shardBitmask int) (bool, error) {
+	// convert to big.Ints
+	bytes, err := hex.DecodeString(commitmentID)
+	if err != nil {
+		return false, fmt.Errorf("failed to decode commitment ID: %w", err)
+	}
+	commitmentIdBigInt := new(big.Int).SetBytes(bytes)
+	shardBitmaskBigInt := new(big.Int).SetInt64(int64(shardBitmask))
+
+	// find position of MSB e.g.
+	// 0b111 -> BitLen=3 -> 3-1=2
+	msbPos := shardBitmaskBigInt.BitLen() - 1
+
+	// build a mask covering bits below MSB e.g.
+	// 1<<2=0b100; 0b100-1=0b11; compareMask=0b11
+	compareMask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), uint(msbPos)), big.NewInt(1))
+
+	// remove MSB from shardBitmask to get expected value e.g.
+	// 0b111 & 0b11 = 0b11
+	expected := new(big.Int).And(shardBitmaskBigInt, compareMask)
+
+	// extract low bits from commitment e.g.
+	// commitment=0b11111111 & 0b11 = 0b11
+	commitmentLowBits := new(big.Int).And(commitmentIdBigInt, compareMask)
+
+	// return true if the commitment low bits match bitmask bits e.g.
+	// 0b11 == 0b11
+	return commitmentLowBits.Cmp(expected) == 0, nil
 }

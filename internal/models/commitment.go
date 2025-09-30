@@ -100,3 +100,12 @@ func (c *Commitment) CreateLeafValue() ([]byte, error) {
 
 	return imprint, nil
 }
+
+func (a *Authenticator) ToAPI() *api.Authenticator {
+	return &api.Authenticator{
+		Algorithm: a.Algorithm,
+		PublicKey: a.PublicKey,
+		Signature: a.Signature,
+		StateHash: a.StateHash,
+	}
+}
