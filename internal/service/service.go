@@ -20,7 +20,12 @@ type AggregatorService struct {
 	logger              *logger.Logger
 	storage             interfaces.Storage
 	roundManager        *round.RoundManager
+	leaderSelector      LeaderSelector
 	commitmentValidator *signing.CommitmentValidator
+}
+
+type LeaderSelector interface {
+	IsLeader(ctx context.Context) (bool, error)
 }
 
 // Conversion functions between API and internal model types
@@ -81,20 +86,15 @@ func modelToAPIHealthStatus(modelHealth *models.HealthStatus) *api.HealthStatus 
 }
 
 // NewAggregatorService creates a new aggregator service
-func NewAggregatorService(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*AggregatorService, error) {
-	roundManager, err := round.NewRoundManager(cfg, logger, storage)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create round manager: %w", err)
-	}
-	commitmentValidator := signing.NewCommitmentValidator()
-
+func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManager *round.RoundManager, storage interfaces.Storage, leaderSelector LeaderSelector) *AggregatorService {
 	return &AggregatorService{
 		config:              cfg,
 		logger:              logger,
 		storage:             storage,
 		roundManager:        roundManager,
-		commitmentValidator: commitmentValidator,
-	}, nil
+		leaderSelector:      leaderSelector,
+		commitmentValidator: signing.NewCommitmentValidator(),
+	}
 }
 
 // Start starts the aggregator service and round manager
@@ -362,11 +362,8 @@ func (as *AggregatorService) GetBlockCommitments(ctx context.Context, req *api.G
 func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthStatus, error) {
 	// Check if HA is enabled and determine role
 	var role string
-	var isLeader bool
-
-	if as.config.HA.Enabled {
-		var err error
-		isLeader, err = as.storage.LeadershipStorage().IsLeader(ctx, as.config.HA.ServerID)
+	if as.leaderSelector != nil {
+		isLeader, err := as.leaderSelector.IsLeader(ctx)
 		if err != nil {
 			as.logger.WithContext(ctx).Warn("Failed to check leadership status", "error", err.Error())
 			// Don't fail health check on leadership query failure
@@ -380,7 +377,6 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 		}
 	} else {
 		role = "standalone"
-		isLeader = true // In standalone mode, this server handles everything
 	}
 
 	status := models.NewHealthStatus(role, as.config.HA.ServerID)

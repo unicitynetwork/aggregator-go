@@ -40,10 +40,7 @@ func bigIntToDecimal128(bigInt *api.BigInt) primitive.Decimal128 {
 
 // Store stores a new block
 func (bs *BlockStorage) Store(ctx context.Context, block *models.Block) error {
-	// Convert to BSON format for storage
-	blockBSON := block.ToBSON()
-
-	_, err := bs.collection.InsertOne(ctx, blockBSON)
+	_, err := bs.collection.InsertOne(ctx, block.ToBSON())
 	if err != nil {
 		return fmt.Errorf("failed to store block: %w", err)
 	}

@@ -11,89 +11,31 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	mongoContainer "github.com/testcontainers/testcontainers-go/modules/mongodb"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
-	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
-	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
+	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-const (
-	testDBName  = "test_smt_persistence"
-	testTimeout = 30 * time.Second
-)
-
-// setupTestStorage creates a complete storage instance with MongoDB using testcontainers
-func setupTestStorage(t *testing.T) (interfaces.Storage, func()) {
-	ctx := context.Background()
-
-	container, err := mongoContainer.Run(ctx, "mongo:7.0")
-	if err != nil {
-		t.Skipf("Skipping MongoDB tests - cannot start MongoDB container (Docker not available?): %v", err)
-		return nil, func() {}
-	}
-
-	mongoURI, err := container.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("Failed to get MongoDB connection string: %v", err)
-	}
-
-	connectCtx, cancel := context.WithTimeout(ctx, testTimeout)
-	defer cancel()
-
-	client, err := mongo.Connect(connectCtx, options.Client().ApplyURI(mongoURI))
-	if err != nil {
-		t.Fatalf("Failed to connect to MongoDB: %v", err)
-	}
-
-	if err := client.Ping(connectCtx, nil); err != nil {
-		t.Fatalf("Failed to ping MongoDB: %v", err)
-	}
-
-	dbConfig := &config.DatabaseConfig{
-		URI:                    mongoURI,
-		Database:               testDBName,
-		ConnectTimeout:         testTimeout,
+var conf = config.Config{
+	Database: config.DatabaseConfig{
+		Database:               "test_smt_persistence",
+		ConnectTimeout:         30 * time.Second,
 		ServerSelectionTimeout: 5 * time.Second,
 		SocketTimeout:          30 * time.Second,
 		MaxPoolSize:            100,
 		MinPoolSize:            5,
 		MaxConnIdleTime:        5 * time.Minute,
-	}
-
-	storage, err := mongodb.NewStorage(dbConfig)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-
-	cleanup := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-		defer cancel()
-
-		if err := storage.Close(ctx); err != nil {
-			t.Logf("Failed to close storage: %v", err)
-		}
-		if err := client.Disconnect(ctx); err != nil {
-			t.Logf("Failed to disconnect MongoDB client: %v", err)
-		}
-		if err := container.Terminate(ctx); err != nil {
-			t.Logf("Failed to terminate MongoDB container: %v", err)
-		}
-	}
-
-	return storage, cleanup
+	},
 }
 
 // TestSmtPersistenceAndRestoration tests SMT persistence and restoration with consistent root hashes
 func TestSmtPersistenceAndRestoration(t *testing.T) {
-	storage, cleanup := setupTestStorage(t)
+	storage, cleanup := testutil.SetupTestStorage(t, conf)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -114,7 +56,7 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(cfg, testLogger, storage)
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
 	require.NoError(t, err, "Should create RoundManager")
 
 	// Test persistence
@@ -133,7 +75,7 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 	freshHash := freshSmt.GetRootHashHex()
 
 	// Create RoundManager and call Start() to trigger restoration
-	restoredRm, err := NewRoundManager(cfg, testLogger, storage)
+	restoredRm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
 	require.NoError(t, err, "Should create RoundManager")
 
 	err = restoredRm.Start(ctx)
@@ -157,7 +99,7 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 
 // TestLargeSmtRestoration tests multi-chunk restoration with large dataset
 func TestLargeSmtRestoration(t *testing.T) {
-	storage, cleanup := setupTestStorage(t)
+	storage, cleanup := testutil.SetupTestStorage(t, conf)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -169,7 +111,7 @@ func TestLargeSmtRestoration(t *testing.T) {
 			RoundDuration: time.Second,
 		},
 	}
-	rm, err := NewRoundManager(cfg, testLogger, storage)
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
 	require.NoError(t, err, "Should create RoundManager")
 
 	const testNodeCount = 2500 // Ensure multiple chunks (chunkSize = 1000 in round_manager.go)
@@ -198,7 +140,7 @@ func TestLargeSmtRestoration(t *testing.T) {
 	require.Equal(t, int64(testNodeCount), count, "Should have stored all nodes")
 
 	// Create new RoundManager and call Start() to restore from storage (uses multiple chunks)
-	newRm, err := NewRoundManager(cfg, testLogger, storage)
+	newRm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
 	require.NoError(t, err, "Should create new RoundManager")
 
 	err = newRm.Start(ctx)
@@ -217,7 +159,7 @@ func TestLargeSmtRestoration(t *testing.T) {
 
 // TestCompleteWorkflowWithRestart tests end-to-end workflow including service restart simulation
 func TestCompleteWorkflowWithRestart(t *testing.T) {
-	storage, cleanup := setupTestStorage(t)
+	storage, cleanup := testutil.SetupTestStorage(t, conf)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -238,7 +180,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(cfg, testLogger, storage)
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
 	require.NoError(t, err, "Should create RoundManager")
 
 	rm.currentRound = &Round{
@@ -286,7 +228,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	assert.Equal(t, int64(len(testCommitments)), count, "Should have persisted SMT nodes for all commitments")
 
 	// Simulate service restart with new round manager
-	newRm, err := NewRoundManager(&config.Config{Processing: config.ProcessingConfig{RoundDuration: time.Second}}, testLogger, storage)
+	newRm, err := NewRoundManager(ctx, &config.Config{Processing: config.ProcessingConfig{RoundDuration: time.Second}}, testLogger, storage, nil)
 	require.NoError(t, err, "NewRoundManager should succeed after restart")
 
 	// Call Start() to trigger SMT restoration
@@ -316,7 +258,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 
 // TestSmtRestorationWithBlockVerification tests that SMT restoration verifies against existing blocks
 func TestSmtRestorationWithBlockVerification(t *testing.T) {
-	storage, cleanup := setupTestStorage(t)
+	storage, cleanup := testutil.SetupTestStorage(t, conf)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -358,7 +300,7 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 	cfg := &config.Config{
 		Processing: config.ProcessingConfig{RoundDuration: time.Second},
 	}
-	rm, err := NewRoundManager(cfg, testLogger, storage)
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
 	require.NoError(t, err, "Should create RoundManager")
 
 	// Persist SMT nodes to storage
@@ -367,7 +309,7 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 
 	// Test 1: Successful verification (matching root hash)
 	t.Run("SuccessfulVerification", func(t *testing.T) {
-		successRm, err := NewRoundManager(cfg, testLogger, storage)
+		successRm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
 		require.NoError(t, err, "Should create RoundManager")
 
 		err = successRm.Start(ctx)
@@ -402,7 +344,7 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 		err = storage.BlockStorage().Store(ctx, wrongBlock)
 		require.NoError(t, err, "Should store wrong test block")
 
-		failRm, err := NewRoundManager(cfg, testLogger, storage)
+		failRm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
 		require.NoError(t, err, "Should create RoundManager")
 
 		// This should fail because the restored SMT root hash doesn't match the latest block

@@ -58,6 +58,7 @@ type HAConfig struct {
 	LockTTLSeconds                int           `mapstructure:"lock_ttl_seconds"`
 	LeaderHeartbeatInterval       time.Duration `mapstructure:"leader_heartbeat_interval"`
 	LeaderElectionPollingInterval time.Duration `mapstructure:"leader_election_polling_interval"`
+	LockID                        string        `mapstructure:"lock_id"`
 	ServerID                      string        `mapstructure:"server_id"`
 }
 
@@ -121,6 +122,7 @@ func Load() (*Config, error) {
 			LockTTLSeconds:                getEnvIntOrDefault("LOCK_TTL_SECONDS", 30),
 			LeaderHeartbeatInterval:       getEnvDurationOrDefault("LEADER_HEARTBEAT_INTERVAL", "10s"),
 			LeaderElectionPollingInterval: getEnvDurationOrDefault("LEADER_ELECTION_POLLING_INTERVAL", "5s"),
+			LockID:                        getEnvOrDefault("LOCK_ID", "aggregator_leader_lock"),
 			ServerID:                      getEnvOrDefault("SERVER_ID", generateServerID()),
 		},
 		Logging: LoggingConfig{

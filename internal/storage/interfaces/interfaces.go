@@ -90,6 +90,9 @@ type SmtStorage interface {
 	// GetByKey retrieves an SMT node by key
 	GetByKey(ctx context.Context, key api.HexBytes) (*models.SmtNode, error)
 
+	// GetByKeys retrieves multiple SMT nodes by their keys
+	GetByKeys(ctx context.Context, keys []api.HexBytes) ([]*models.SmtNode, error)
+
 	// Delete removes an SMT node
 	Delete(ctx context.Context, key api.HexBytes) error
 
@@ -119,24 +122,31 @@ type BlockRecordsStorage interface {
 
 	// Count returns the total number of block records
 	Count(ctx context.Context) (int64, error)
+
+	// GetNextBlock retrieves the first block after the given block number.
+	// If blockNumber is nil then returns the very first block.
+	GetNextBlock(ctx context.Context, blockNumber *api.BigInt) (*models.BlockRecords, error)
+
+	// GetLatestBlock retrieves the latest block
+	GetLatestBlock(ctx context.Context) (*models.BlockRecords, error)
 }
 
 // LeadershipStorage handles high availability leadership state
 type LeadershipStorage interface {
-	// AcquireLock attempts to acquire the leadership lock
-	AcquireLock(ctx context.Context, serverID string, ttlSeconds int) (bool, error)
+	// TryAcquireLock attempts to acquire the leadership lock,
+	// returns true if the lock was successfully acquired,
+	// returns false if the lock is already granted for this server.
+	TryAcquireLock(ctx context.Context, lockID string, serverID string) (bool, error)
 
-	// RenewLock renews the leadership lock
-	RenewLock(ctx context.Context, serverID string, ttlSeconds int) error
+	// ReleaseLock releases the leadership lock, returns true if the lock was released, false otherwise.
+	ReleaseLock(ctx context.Context, lockID string, serverID string) (bool, error)
 
-	// ReleaseLock releases the leadership lock
-	ReleaseLock(ctx context.Context, serverID string) error
+	// UpdateHeartbeat updates the heartbeat timestamp to maintain leadership,
+	// returns true if the lock document was successfully updated, false otherwise.
+	UpdateHeartbeat(ctx context.Context, lockID string, serverID string) (bool, error)
 
-	// GetCurrentLeader retrieves the current leader information
-	GetCurrentLeader(ctx context.Context) (*models.LeadershipLock, error)
-
-	// IsLeader checks if the given server is the current leader
-	IsLeader(ctx context.Context, serverID string) (bool, error)
+	// IsLeader checks if the given server is the current leader.
+	IsLeader(ctx context.Context, lockID string, serverID string) (bool, error)
 }
 
 // Storage represents the complete storage interface

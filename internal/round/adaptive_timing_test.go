@@ -38,7 +38,7 @@ func TestAdaptiveProcessingRatio(t *testing.T) {
 	mockStorage := createMockStorage(t)
 
 	// Create round manager
-	rm, err := NewRoundManager(cfg, testLogger, mockStorage)
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, mockStorage, nil)
 	require.NoError(t, err)
 
 	// Test initial values
@@ -134,7 +134,7 @@ func TestAdaptiveDeadlineCalculation(t *testing.T) {
 	require.NoError(t, err)
 	mockStorage := createMockStorage(t)
 
-	rm, err := NewRoundManager(cfg, testLogger, mockStorage)
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, mockStorage, nil)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -202,7 +202,7 @@ func TestSMTUpdateTimeTracking(t *testing.T) {
 	require.NoError(t, err)
 	mockStorage := createMockStorage(t)
 
-	rm, err := NewRoundManager(cfg, testLogger, mockStorage)
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, mockStorage, nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -266,7 +266,7 @@ func TestStreamingMetrics(t *testing.T) {
 	require.NoError(t, err)
 	mockStorage := createMockStorage(t)
 
-	rm, err := NewRoundManager(cfg, testLogger, mockStorage)
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, mockStorage, nil)
 	require.NoError(t, err)
 
 	// Set some test values
@@ -320,7 +320,7 @@ func TestAdaptiveTimingIntegration(t *testing.T) {
 	require.NoError(t, err)
 	mockStorage := createMockStorage(t)
 
-	rm, err := NewRoundManager(cfg, testLogger, mockStorage)
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, mockStorage, nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()

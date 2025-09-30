@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -362,6 +363,8 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	rm.logger.WithContext(ctx).Info("Block finalized and stored successfully",
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String())
+
+	rm.setLastSyncedRoundNumber(block.Index.Int)
 
 	return nil
 }
