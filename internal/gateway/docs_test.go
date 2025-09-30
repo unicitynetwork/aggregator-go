@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -99,10 +101,10 @@ func TestDocumentationExamplePayload(t *testing.T) {
 	err = json.Unmarshal([]byte(exampleJSON), &commitment)
 	require.NoError(t, err, "Failed to unmarshal commitment")
 
-	validator := signing.NewCommitmentValidator()
+	validator := signing.NewCommitmentValidator(config.ShardingConfig{Mode: config.ShardingModeStandalone})
 	result := validator.ValidateCommitment(&commitment)
 
-	require.Equal(t, signing.ValidationStatusSuccess, result.Status, 
+	require.Equal(t, signing.ValidationStatusSuccess, result.Status,
 		"Commitment validation failed with status: %s, error: %v", result.Status.String(), result.Error)
 
 	t.Logf("✅ Documentation example payload passes all validation checks!")

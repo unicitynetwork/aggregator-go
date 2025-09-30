@@ -11,6 +11,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
@@ -26,7 +27,7 @@ func (m MockLeaderSelector) IsLeader(ctx context.Context) (bool, error) {
 }
 
 func TestBlockSync(t *testing.T) {
-	storage, cleanup := testutil.SetupTestStorage(t, config.Config{
+	storage := testutil.SetupTestStorage(t, config.Config{
 		Database: config.DatabaseConfig{
 			Database:               "test_block_sync",
 			ConnectTimeout:         30 * time.Second,
@@ -37,7 +38,6 @@ func TestBlockSync(t *testing.T) {
 			MaxConnIdleTime:        5 * time.Minute,
 		},
 	})
-	defer cleanup()
 
 	ctx := context.Background()
 	cfg := &config.Config{
@@ -49,7 +49,8 @@ func TestBlockSync(t *testing.T) {
 	require.NoError(t, err)
 
 	mockLeader := &MockLeaderSelector{isLeader: false}
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage, mockLeader)
+	rootAggregatorClient := sharding.NewRootAggregatorClientStub()
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage, mockLeader, rootAggregatorClient)
 	require.NoError(t, err)
 
 	require.NoError(t, rm.Start(ctx))
@@ -83,7 +84,7 @@ func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage, rm
 	leaves := make([]*smt.Leaf, len(testCommitments))
 	records := make([]*models.AggregatorRecord, len(testCommitments))
 	for i, c := range testCommitments {
-		path, err := c.RequestID.GetPath()
+		path, err := c.RequestID.GetPath(0)
 		require.NoError(t, err)
 
 		val, err := rm.createLeafValue(c)
@@ -112,7 +113,7 @@ func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage, rm
 	rootHash := api.NewHexBytes(tmpSMT.GetRootHash())
 
 	// persist block
-	block := models.NewBlock(blockNumber, "unicity", "1.0", "mainnet", rootHash, nil)
+	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", rootHash, nil, nil, nil)
 	err = storage.BlockStorage().Store(ctx, block)
 	require.NoError(t, err)
 

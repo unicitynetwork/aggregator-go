@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -222,12 +223,12 @@ func TestMerkleTreePathVerify(t *testing.T) {
 
 		req1, err := api.NewImprintHexString(requestID1)
 		require.NoError(t, err)
-		path1, err := req1.GetPath()
+		path1, err := req1.GetPath(0)
 		require.NoError(t, err)
 
 		req2, err := api.NewImprintHexString(requestID2)
 		require.NoError(t, err)
-		path2, err := req2.GetPath()
+		path2, err := req2.GetPath(0)
 		require.NoError(t, err)
 
 		// Add to tree

@@ -12,7 +12,6 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
 	"github.com/unicitynetwork/aggregator-go/internal/ha"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
-	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/service"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 )

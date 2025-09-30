@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
+
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -15,6 +16,15 @@ type Authenticator struct {
 	PublicKey api.HexBytes  `json:"publicKey" bson:"publicKey"`
 	Signature api.HexBytes  `json:"signature" bson:"signature"`
 	StateHash api.StateHash `json:"stateHash" bson:"stateHash"`
+}
+
+func (a *Authenticator) ToAPI() *api.Authenticator {
+	return &api.Authenticator{
+		Algorithm: a.Algorithm,
+		PublicKey: a.PublicKey,
+		Signature: a.Signature,
+		StateHash: a.StateHash,
+	}
 }
 
 // Commitment represents a state transition request

@@ -14,13 +14,13 @@ import (
 )
 
 // SetupTestStorage creates a complete storage instance with MongoDB using testcontainers
-func SetupTestStorage(t *testing.T, conf config.Config) (*mongodb.Storage, func()) {
+func SetupTestStorage(t *testing.T, conf config.Config) *mongodb.Storage {
 	ctx := context.Background()
 
 	container, err := mongoContainer.Run(ctx, "mongo:7.0")
 	if err != nil {
 		t.Skipf("Skipping MongoDB tests - cannot start MongoDB container (Docker not available?): %v", err)
-		return nil, func() {}
+		return nil
 	}
 
 	mongoURI, err := container.ConnectionString(ctx)
@@ -28,18 +28,24 @@ func SetupTestStorage(t *testing.T, conf config.Config) (*mongodb.Storage, func(
 		t.Fatalf("Failed to get MongoDB connection string: %v", err)
 	}
 
-	connectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	conf.Database.URI = mongoURI
+	if conf.Database.ConnectTimeout == 0 {
+		conf.Database.ConnectTimeout = 5 * time.Second
+	}
+	if conf.Database.Database == "" {
+		conf.Database.Database = t.Name()
+	}
+
+	connectCtx, cancel := context.WithTimeout(ctx, conf.Database.ConnectTimeout)
 	defer cancel()
 
 	client, err := mongo.Connect(connectCtx, options.Client().ApplyURI(mongoURI))
 	if err != nil {
 		t.Fatalf("Failed to connect to MongoDB: %v", err)
 	}
-
 	if err := client.Ping(connectCtx, nil); err != nil {
 		t.Fatalf("Failed to ping MongoDB: %v", err)
 	}
-	conf.Database.URI = mongoURI
 	storage, err := mongodb.NewStorage(conf)
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
@@ -59,6 +65,7 @@ func SetupTestStorage(t *testing.T, conf config.Config) (*mongodb.Storage, func(
 			t.Logf("Failed to terminate MongoDB container: %v", err)
 		}
 	}
+	t.Cleanup(cleanup)
 
-	return storage, cleanup
+	return storage
 }
