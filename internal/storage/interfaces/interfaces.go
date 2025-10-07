@@ -159,6 +159,7 @@ type Storage interface {
 	LeadershipStorage() LeadershipStorage
 
 	// Database operations
+	Initialize(ctx context.Context) error
 	Ping(ctx context.Context) error
 	Close(ctx context.Context) error
 

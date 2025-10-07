@@ -188,10 +188,11 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		"rootHash", block.RootHash.String(),
 		"hasUnicityCertificate", block.UnicityCertificate != nil)
 
-	// Track the actual finalization time
 	finalizationStartTime := time.Now()
 	var proposalTime time.Time
 	var processingTime time.Duration
+	var markProcessedStart, storeBlockStart, persistDataStart, commitSnapshotStart time.Time
+	var markProcessedTime, storeBlockTime, persistDataTime, commitSnapshotTime time.Duration
 
 	// Get timing metrics from the round if available
 	rm.roundMutex.Lock()
@@ -234,12 +235,14 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 			"commitmentCount", len(requestIDs))
 
 		// Mark commitments as processed BEFORE storing the block
+		markProcessedStart = time.Now()
 		if err := rm.storage.CommitmentStorage().MarkProcessed(ctx, requestIDs); err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to mark commitments as processed",
 				"error", err.Error(),
 				"blockNumber", block.Index.String())
 			return fmt.Errorf("failed to mark commitments as processed: %w", err)
 		}
+		markProcessedTime = time.Since(markProcessedStart)
 
 		rm.logger.WithContext(ctx).Info("Successfully prepared commitment data",
 			"count", len(requestIDs),
@@ -253,6 +256,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	rm.logger.WithContext(ctx).Debug("Storing block in database",
 		"blockNumber", block.Index.String())
 
+	storeBlockStart = time.Now()
 	if err := rm.storage.BlockStorage().Store(ctx, block); err != nil {
 		rm.logger.WithContext(ctx).Error("Failed to store block",
 			"blockNumber", block.Index.String(),
@@ -264,6 +268,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	if err := rm.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds)); err != nil {
 		return fmt.Errorf("failed to store block record: %w", err)
 	}
+	storeBlockTime = time.Since(storeBlockStart)
 
 	// Now that block is stored with unicity certificate, persist SMT nodes and aggregator records
 	rm.roundMutex.Lock()
@@ -278,6 +283,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 
 	// Store SMT nodes and aggregator records if we have commitments
 	if len(commitments) > 0 {
+		persistDataStart = time.Now()
 		var wg sync.WaitGroup
 		var smtPersistErr, aggregatorRecordErr error
 
@@ -298,6 +304,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		}()
 
 		wg.Wait()
+		persistDataTime = time.Since(persistDataStart)
 
 		if smtPersistErr != nil {
 			return fmt.Errorf("failed to persist SMT nodes: %w", smtPersistErr)
@@ -316,10 +323,12 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	// This ensures the SMT state only reflects successfully persisted blocks
 
 	if snapshot != nil {
+		commitSnapshotStart = time.Now()
 		rm.logger.WithContext(ctx).Info("Committing snapshot to main SMT after successful block storage",
 			"blockNumber", block.Index.String())
 
 		snapshot.Commit(rm.smt)
+		commitSnapshotTime = time.Since(commitSnapshotStart)
 
 		rm.logger.WithContext(ctx).Info("Successfully committed snapshot to main SMT",
 			"blockNumber", block.Index.String())
@@ -341,24 +350,47 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	// Calculate actual finalization metrics
 	actualFinalizationTime := time.Since(finalizationStartTime)
 	var totalRoundTime time.Duration
+	var bftWaitTime time.Duration
+
 	if !proposalTime.IsZero() {
 		// Calculate time from proposal to actual finalization
-		timeFromProposalToFinalization := finalizationStartTime.Sub(proposalTime)
+		bftWaitTime = finalizationStartTime.Sub(proposalTime)
 
 		// Update the average finalization time with the actual measurement
-		rm.avgFinalizationTime = (rm.avgFinalizationTime*4 + actualFinalizationTime + timeFromProposalToFinalization) / 5
+		rm.avgFinalizationTime = (rm.avgFinalizationTime*4 + actualFinalizationTime + bftWaitTime) / 5
 
 		// Calculate total round time (processing + waiting for UC + finalization)
-		totalRoundTime = processingTime + timeFromProposalToFinalization + actualFinalizationTime
+		totalRoundTime = processingTime + bftWaitTime + actualFinalizationTime
 
 		rm.logger.WithContext(ctx).Debug("Finalization timing metrics",
 			"blockNumber", block.Index.String(),
 			"processingTime", processingTime,
-			"proposalToUCTime", timeFromProposalToFinalization,
+			"proposalToUCTime", bftWaitTime,
 			"finalizationTime", actualFinalizationTime,
 			"totalRoundTime", totalRoundTime,
 			"avgFinalizationTime", rm.avgFinalizationTime)
 	}
+
+	// Get commitment count for performance summary
+	rm.roundMutex.RLock()
+	commitmentCount := 0
+	if rm.currentRound != nil {
+		commitmentCount = len(rm.currentRound.Commitments)
+	}
+	rm.roundMutex.RUnlock()
+
+	// Log comprehensive performance summary
+	rm.logger.WithContext(ctx).Info("PERF: Round completed",
+		"blockNumber", block.Index.String(),
+		"commitments", commitmentCount,
+		"totalRoundTime", totalRoundTime.String(),
+		"processingTime", processingTime.String(),
+		"bftWaitTime", bftWaitTime.String(),
+		"finalizationTime", actualFinalizationTime.String(),
+		"markProcessedTime", markProcessedTime.String(),
+		"storeBlockTime", storeBlockTime.String(),
+		"persistDataTime", persistDataTime.String(),
+		"commitSnapshotTime", commitSnapshotTime.String())
 
 	rm.logger.WithContext(ctx).Info("Block finalized and stored successfully",
 		"blockNumber", block.Index.String(),

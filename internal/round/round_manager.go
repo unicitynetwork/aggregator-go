@@ -13,6 +13,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/redis"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -85,8 +86,8 @@ type RoundManager struct {
 	// Streaming support
 	commitmentStream chan *models.Commitment
 	streamMutex      sync.RWMutex
-	lastFetchedID    string             // Cursor for pagination
-	prefetchCancel   context.CancelFunc // Cancel function for running prefetcher, used as isRunning flag
+	lastFetchedID    string             // Cursor for MongoDB pagination
+	prefetchCancel   context.CancelFunc // Cancel function for running streamer/prefetcher
 
 	// Adaptive throughput tracking
 	avgProcessingRate float64 // commitments per millisecond
@@ -126,12 +127,12 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 		storage:             storage,
 		smt:                 threadSafeSMT,
 		leaderSelector:      leaderSelector,
-		roundDuration:       cfg.Processing.RoundDuration,        // Configurable round duration (default 1s)
-		commitmentStream:    make(chan *models.Commitment, 3000), // Reasonable buffer for streaming
-		avgProcessingRate:   1.0,                                 // Initial estimate: 1 commitment per ms
-		processingRatio:     0.7,                                 // Start with 70% of round for processing (conservative but good throughput)
-		avgFinalizationTime: 200 * time.Millisecond,              // Initial estimate (conservative)
-		avgSMTUpdateTime:    5 * time.Millisecond,                // Initial estimate per batch
+		roundDuration:       cfg.Processing.RoundDuration,         // Configurable round duration (default 1s)
+		commitmentStream:    make(chan *models.Commitment, 10000), // // Reasonable buffer for streaming
+		avgProcessingRate:   1.0,                                  // Initial estimate: 1 commitment per ms
+		processingRatio:     0.7,                                  // Start with 70% of round for processing (conservative but good throughput)
+		avgFinalizationTime: 200 * time.Millisecond,               // Initial estimate (conservative)
+		avgSMTUpdateTime:    5 * time.Millisecond,                 // Initial estimate per batch
 	}
 
 	if cfg.BFT.Enabled {
@@ -405,7 +406,7 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	processingStart := time.Now()
 	smtUpdateTime := time.Duration(0)
 
-	// Stream and process commitments until deadline
+	// Stream and process commitments until deadline or cap reached
 ProcessLoop:
 	for time.Now().Before(processingDeadline) {
 		select {
@@ -414,6 +415,16 @@ ProcessLoop:
 			rm.roundMutex.Lock()
 			rm.currentRound.Commitments = append(rm.currentRound.Commitments, commitment)
 			commitmentsProcessed++
+
+			// Check if we've reached the configured cap
+			if rm.config.Processing.MaxCommitmentsPerRound > 0 && commitmentsProcessed >= rm.config.Processing.MaxCommitmentsPerRound {
+				rm.logger.WithContext(ctx).Info("Reached max commitments per round, stopping early",
+					"roundNumber", roundNumber.String(),
+					"commitmentsProcessed", commitmentsProcessed,
+					"maxCommitments", rm.config.Processing.MaxCommitmentsPerRound)
+				rm.roundMutex.Unlock()
+				break ProcessLoop
+			}
 
 			// Process in mini-batches for SMT efficiency
 			if len(rm.currentRound.Commitments)%100 == 0 {
@@ -545,6 +556,23 @@ ProcessLoop:
 		"totalCommitments", rm.totalCommitments)
 
 	return nil
+}
+
+// redisCommitmentStreamer uses Redis StreamCommitments to continuously stream commitments
+func (rm *RoundManager) redisCommitmentStreamer(ctx context.Context) {
+	defer rm.wg.Done()
+
+	rm.logger.WithContext(ctx).Info("Redis commitment streamer started")
+
+	redisStorage := rm.storage.CommitmentStorage().(*redis.CommitmentStorage)
+	err := redisStorage.StreamCommitments(ctx, rm.commitmentStream)
+
+	if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+		rm.logger.WithContext(ctx).Error("Redis commitment streamer ended with error",
+			"error", err.Error())
+	} else {
+		rm.logger.WithContext(ctx).Info("Redis commitment streamer stopped gracefully")
+	}
 }
 
 // commitmentPrefetcher continuously fetches commitments from storage and feeds them into the stream
@@ -985,14 +1013,20 @@ func (rm *RoundManager) startCommitmentPrefetcher(ctx context.Context) {
 		rm.logger.WithContext(ctx).Warn("Commitment prefetcher already running, ignoring start")
 		return
 	}
-	rm.logger.WithContext(ctx).Info("Starting commitment prefetcher")
-	rm.lastFetchedID = ""
 
 	prefetcherCtx, cancel := context.WithCancel(ctx)
 	rm.prefetchCancel = cancel
 
-	rm.wg.Add(1)
-	go rm.commitmentPrefetcher(prefetcherCtx)
+	if rm.config.Storage.UseRedisForCommitments {
+		rm.logger.WithContext(ctx).Info("Starting Redis commitment streamer")
+		rm.wg.Add(1)
+		go rm.redisCommitmentStreamer(prefetcherCtx)
+	} else {
+		rm.logger.WithContext(ctx).Info("Starting MongoDB commitment prefetcher")
+		rm.lastFetchedID = ""
+		rm.wg.Add(1)
+		go rm.commitmentPrefetcher(prefetcherCtx)
+	}
 }
 
 func (rm *RoundManager) stopCommitmentPrefetcher() {

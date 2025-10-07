@@ -14,7 +14,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/service"
-	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
+	"github.com/unicitynetwork/aggregator-go/internal/storage"
 )
 
 // gracefulExit flushes async logger and exits with the given code
@@ -67,16 +67,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Initialize storage
-	storage, err := mongodb.NewStorage(*cfg)
+	storageInstance, err := storage.NewStorage(cfg)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to initialize storage", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
 	}
 
-	// Test database connection
+	if cfg.Storage.UseRedisForCommitments {
+		log.WithComponent("main").Info("Using hybrid storage: Redis for commitments, MongoDB for other data",
+			"redis_host", cfg.Redis.Host,
+			"redis_port", cfg.Redis.Port,
+			"flush_interval", cfg.Storage.RedisFlushInterval,
+			"max_batch_size", cfg.Storage.RedisMaxBatchSize)
+	} else {
+		log.WithComponent("main").Info("Using MongoDB for all storage")
+	}
+
 	connectionTestCtx, connectionTestCancelFn := context.WithTimeout(ctx, 10*time.Second)
-	if err := storage.Ping(connectionTestCtx); err != nil {
+	if err := storageInstance.Ping(connectionTestCtx); err != nil {
 		connectionTestCancelFn()
 		log.WithComponent("main").Error("Failed to connect to database", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
@@ -85,24 +93,29 @@ func main() {
 
 	log.WithComponent("main").Info("Database connection established")
 
+	if err := storageInstance.Initialize(ctx); err != nil {
+		log.WithComponent("main").Error("Failed to initialize storage", "error", err.Error())
+		gracefulExit(asyncLogger, 1)
+	}
+
 	// start leader election service
 	var leaderElection *ha.LeaderElection
 	if cfg.HA.Enabled {
-		leaderElection = ha.NewLeaderElection(cfg.HA, log, storage.LeadershipStorage())
+		leaderElection = ha.NewLeaderElection(cfg.HA, log, storageInstance.LeadershipStorage())
 		leaderElection.Start(ctx)
 		log.WithComponent("main").Info("High availability mode leader election started")
 	} else {
 		log.WithComponent("main").Info("High availability mode is disabled")
 	}
 
-	roundManager, err := round.NewRoundManager(ctx, cfg, log, storage, leaderElection)
+	roundManager, err := round.NewRoundManager(ctx, cfg, log, storageInstance, leaderElection)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to create round manager", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
 	}
 
 	// Initialize service
-	aggregatorService := service.NewAggregatorService(cfg, log, roundManager, storage, leaderElection)
+	aggregatorService := service.NewAggregatorService(cfg, log, roundManager, storageInstance, leaderElection)
 
 	// Start the aggregator service
 	if err := aggregatorService.Start(ctx); err != nil {
@@ -111,7 +124,7 @@ func main() {
 	}
 
 	// Initialize gateway server
-	server := gateway.NewServer(cfg, log, storage, aggregatorService)
+	server := gateway.NewServer(cfg, log, storageInstance, aggregatorService)
 
 	// Start server in a goroutine
 	go func() {
@@ -151,7 +164,7 @@ func main() {
 	}
 
 	// Close storage
-	if err := storage.Close(shutdownCtx); err != nil {
+	if err := storageInstance.Close(shutdownCtx); err != nil {
 		log.WithComponent("main").Error("Failed to close storage gracefully", "error", err.Error())
 	}
 

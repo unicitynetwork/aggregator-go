@@ -78,6 +78,10 @@ func NewStorage(config config.Config) (*Storage, error) {
 	return storage, nil
 }
 
+func (s *Storage) Initialize(ctx context.Context) error {
+	return nil
+}
+
 // CommitmentStorage returns the commitment storage implementation
 func (s *Storage) CommitmentStorage() interfaces.CommitmentStorage {
 	return s.commitmentStorage

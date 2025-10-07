@@ -84,6 +84,23 @@ services:
         curl -X PUT -H 'Content-Type: application/json' -d @/genesis/shard-conf-7_0.json http://bft-root:8002/api/v1/configurations
       "
 
+  redis:
+    image: redis:7-alpine
+    container_name: aggregator-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - default
+    volumes:
+      - ./data/redis_data:/data
+    command: redis-server --appendonly yes --appendfsync everysec
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   mongodb:
     image: mongo:7.0
     container_name: aggregator-mongodb
@@ -132,6 +149,19 @@ services:
       MONGODB_CONNECT_TIMEOUT: "10s"
       MONGODB_SERVER_SELECTION_TIMEOUT: "5s"
 
+      # Redis Configuration
+      REDIS_HOST: "redis"
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ""
+      REDIS_DB: "0"
+      REDIS_POOL_SIZE: "100"
+      REDIS_MIN_IDLE_CONNS: "10"
+
+      # Storage Configuration
+      USE_REDIS_FOR_COMMITMENTS: "true"
+      REDIS_FLUSH_INTERVAL: "50ms"
+      REDIS_MAX_BATCH_SIZE: "2000"
+
       # High Availability Configuration
       DISABLE_HIGH_AVAILABILITY: "false"
       LOCK_TTL_SECONDS: "30"
@@ -145,6 +175,7 @@ services:
 
       # Processing Configuration
       BATCH_LIMIT: "1000"
+      MAX_COMMITMENTS_PER_ROUND: "10000"  # Stop waiting once 10k commitments collected
 
       # BFT Configuration
       # Enable BFT support and specify configuration file paths
@@ -178,6 +209,8 @@ services:
     depends_on:
       bft-aggregator-genesis-gen:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
       mongodb:
         condition: service_healthy
     healthcheck:

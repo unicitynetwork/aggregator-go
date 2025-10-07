@@ -19,6 +19,8 @@ import (
 type Config struct {
 	Server     ServerConfig     `mapstructure:"server"`
 	Database   DatabaseConfig   `mapstructure:"database"`
+	Redis      RedisConfig      `mapstructure:"redis"`
+	Storage    StorageConfig    `mapstructure:"storage"`
 	HA         HAConfig         `mapstructure:"ha"`
 	Logging    LoggingConfig    `mapstructure:"logging"`
 	BFT        BFTConfig        `mapstructure:"bft"`
@@ -74,8 +76,30 @@ type LoggingConfig struct {
 
 // ProcessingConfig holds batch processing configuration
 type ProcessingConfig struct {
-	BatchLimit    int           `mapstructure:"batch_limit"`
-	RoundDuration time.Duration `mapstructure:"round_duration"`
+	BatchLimit             int           `mapstructure:"batch_limit"`
+	RoundDuration          time.Duration `mapstructure:"round_duration"`
+	MaxCommitmentsPerRound int           `mapstructure:"max_commitments_per_round"` // Stop waiting once this many commitments collected
+}
+
+// RedisConfig holds Redis connection configuration
+type RedisConfig struct {
+	Host         string        `mapstructure:"host"`
+	Port         int           `mapstructure:"port"`
+	Password     string        `mapstructure:"password"`
+	DB           int           `mapstructure:"db"`
+	PoolSize     int           `mapstructure:"pool_size"`
+	MinIdleConns int           `mapstructure:"min_idle_conns"`
+	MaxRetries   int           `mapstructure:"max_retries"`
+	DialTimeout  time.Duration `mapstructure:"dial_timeout"`
+	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout time.Duration `mapstructure:"write_timeout"`
+}
+
+// StorageConfig holds storage layer configuration
+type StorageConfig struct {
+	UseRedisForCommitments bool          `mapstructure:"use_redis_for_commitments"`
+	RedisFlushInterval     time.Duration `mapstructure:"redis_flush_interval"`
+	RedisMaxBatchSize      int           `mapstructure:"redis_max_batch_size"`
 }
 
 type BFTConfig struct {
@@ -134,8 +158,26 @@ func Load() (*Config, error) {
 			AsyncBufferSize: getEnvIntOrDefault("LOG_ASYNC_BUFFER_SIZE", 10000),
 		},
 		Processing: ProcessingConfig{
-			BatchLimit:    getEnvIntOrDefault("BATCH_LIMIT", 1000),
-			RoundDuration: getEnvDurationOrDefault("ROUND_DURATION", "1s"),
+			BatchLimit:             getEnvIntOrDefault("BATCH_LIMIT", 1000),
+			RoundDuration:          getEnvDurationOrDefault("ROUND_DURATION", "1s"),
+			MaxCommitmentsPerRound: getEnvIntOrDefault("MAX_COMMITMENTS_PER_ROUND", 10000), // Default 10k to keep rounds under 2s
+		},
+		Redis: RedisConfig{
+			Host:         getEnvOrDefault("REDIS_HOST", "localhost"),
+			Port:         getEnvIntOrDefault("REDIS_PORT", 6379),
+			Password:     getEnvOrDefault("REDIS_PASSWORD", ""),
+			DB:           getEnvIntOrDefault("REDIS_DB", 0),
+			PoolSize:     getEnvIntOrDefault("REDIS_POOL_SIZE", 10),
+			MinIdleConns: getEnvIntOrDefault("REDIS_MIN_IDLE_CONNS", 2),
+			MaxRetries:   getEnvIntOrDefault("REDIS_MAX_RETRIES", 3),
+			DialTimeout:  getEnvDurationOrDefault("REDIS_DIAL_TIMEOUT", "5s"),
+			ReadTimeout:  getEnvDurationOrDefault("REDIS_READ_TIMEOUT", "3s"),
+			WriteTimeout: getEnvDurationOrDefault("REDIS_WRITE_TIMEOUT", "3s"),
+		},
+		Storage: StorageConfig{
+			UseRedisForCommitments: getEnvBoolOrDefault("USE_REDIS_FOR_COMMITMENTS", false),
+			RedisFlushInterval:     getEnvDurationOrDefault("REDIS_FLUSH_INTERVAL", "100ms"),
+			RedisMaxBatchSize:      getEnvIntOrDefault("REDIS_MAX_BATCH_SIZE", 5000),
 		},
 	}
 	config.BFT = BFTConfig{

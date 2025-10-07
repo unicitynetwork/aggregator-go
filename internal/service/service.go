@@ -161,13 +161,13 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 		}, nil
 	}
 
-	// Check if commitment already exists
-	existing, err := as.storage.CommitmentStorage().GetByRequestID(ctx, req.RequestID)
+	// Check if commitment already processed
+	existingRecord, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, req.RequestID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check existing commitment: %w", err)
+		return nil, fmt.Errorf("failed to check existing aggregator record: %w", err)
 	}
 
-	if existing != nil {
+	if existingRecord != nil {
 		return &api.SubmitCommitmentResponse{
 			Status: "REQUEST_ID_EXISTS",
 		}, nil
