@@ -89,9 +89,10 @@ func (cs *CommitmentStorage) Initialize(ctx context.Context) error {
 }
 
 // Stop gracefully stops the storage and cleanup routines
-func (cs *CommitmentStorage) Stop() {
+func (cs *CommitmentStorage) Close(ctx context.Context) error {
 	cs.flushTicker.Stop()
 	close(cs.stopChan)
+	return nil
 }
 
 // batchProcessor runs in the background and processes pending commitments in batches

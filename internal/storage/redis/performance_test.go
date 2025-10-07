@@ -163,7 +163,7 @@ func testMongoMarkProcessedPerformance(t *testing.T, ctx context.Context, commit
 	commitments := generateTestCommitments(commitmentCount)
 
 	// Store commitments (not timed - setup)
-	commitmentStorage := mongoStorage.CommitmentStorage()
+	commitmentStorage := mongoStorage.CommitmentQueue()
 	for _, c := range commitments {
 		err := commitmentStorage.Store(ctx, c)
 		require.NoError(t, err)
@@ -362,7 +362,7 @@ func testRedisStorePerformanceWithInterval(t *testing.T, ctx context.Context, co
 
 	storage := NewCommitmentStorageWithBatchConfig(client, "perf-test-server", batchConfig)
 	storage.Initialize(ctx)
-	defer storage.Stop()
+	defer storage.Close(ctx)
 
 	// Generate test data
 	commitments := generateTestCommitments(commitmentCount)
@@ -418,7 +418,7 @@ func testMongoStorePerformance(t *testing.T, ctx context.Context, commitmentCoun
 	commitments := generateTestCommitments(commitmentCount)
 
 	// Time individual Store operations using parallel goroutines (same as Redis test)
-	commitmentStorage := mongoStorage.CommitmentStorage()
+	commitmentStorage := mongoStorage.CommitmentQueue()
 	start := time.Now()
 
 	// Use a WaitGroup to wait for all goroutines to complete
@@ -539,7 +539,7 @@ func setupTestRedisBench(b *testing.B) (*CommitmentStorage, func()) {
 	storage.Initialize(ctx)
 
 	cleanup := func() {
-		storage.Stop()
+		storage.Close(ctx)
 		client.FlushDB(ctx)
 		client.Close()
 	}

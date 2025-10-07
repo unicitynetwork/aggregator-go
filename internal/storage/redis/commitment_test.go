@@ -71,7 +71,7 @@ func setupTestRedis(t *testing.T) (*CommitmentStorage, func()) {
 	require.NoError(t, storage.Initialize(ctx))
 
 	cleanup := func() {
-		storage.Stop()
+		storage.Close(ctx)
 		client.Close()
 		redisContainer.Terminate(ctx)
 	}

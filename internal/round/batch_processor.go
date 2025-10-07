@@ -236,7 +236,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 
 		// Mark commitments as processed BEFORE storing the block
 		markProcessedStart = time.Now()
-		if err := rm.storage.CommitmentStorage().MarkProcessed(ctx, requestIDs); err != nil {
+		if err := rm.commitmentQueue.MarkProcessed(ctx, requestIDs); err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to mark commitments as processed",
 				"error", err.Error(),
 				"blockNumber", block.Index.String())

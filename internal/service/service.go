@@ -18,6 +18,7 @@ import (
 type AggregatorService struct {
 	config              *config.Config
 	logger              *logger.Logger
+	commitmentQueue     interfaces.CommitmentQueue
 	storage             interfaces.Storage
 	roundManager        *round.RoundManager
 	leaderSelector      LeaderSelector
@@ -86,10 +87,11 @@ func modelToAPIHealthStatus(modelHealth *models.HealthStatus) *api.HealthStatus 
 }
 
 // NewAggregatorService creates a new aggregator service
-func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManager *round.RoundManager, storage interfaces.Storage, leaderSelector LeaderSelector) *AggregatorService {
+func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManager *round.RoundManager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) *AggregatorService {
 	return &AggregatorService{
 		config:              cfg,
 		logger:              logger,
+		commitmentQueue:     commitmentQueue,
 		storage:             storage,
 		roundManager:        roundManager,
 		leaderSelector:      leaderSelector,
@@ -174,7 +176,7 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 	}
 
 	// Store commitment
-	if err := as.storage.CommitmentStorage().Store(ctx, commitment); err != nil {
+	if err := as.commitmentQueue.Store(ctx, commitment); err != nil {
 		return nil, fmt.Errorf("failed to store commitment: %w", err)
 	}
 
@@ -390,7 +392,7 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 	}
 
 	// Add commitment queue status and warning if too high
-	unprocessedCount, err := as.storage.CommitmentStorage().CountUnprocessed(ctx)
+	unprocessedCount, err := as.commitmentQueue.CountUnprocessed(ctx)
 	if err != nil {
 		status.AddDetail("commitment_queue", "unknown")
 		status.AddDetail("commitment_queue_status", "error")

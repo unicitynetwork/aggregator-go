@@ -67,14 +67,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	storageInstance, err := storage.NewStorage(cfg)
+	commitmentQueue, storageInstance, err := storage.NewStorage(cfg)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to initialize storage", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
 	}
 
 	if cfg.Storage.UseRedisForCommitments {
-		log.WithComponent("main").Info("Using hybrid storage: Redis for commitments, MongoDB for other data",
+		log.WithComponent("main").Info("Using Redis for commitment queue and MongoDB for persistence",
 			"redis_host", cfg.Redis.Host,
 			"redis_port", cfg.Redis.Port,
 			"flush_interval", cfg.Storage.RedisFlushInterval,
@@ -93,8 +93,8 @@ func main() {
 
 	log.WithComponent("main").Info("Database connection established")
 
-	if err := storageInstance.Initialize(ctx); err != nil {
-		log.WithComponent("main").Error("Failed to initialize storage", "error", err.Error())
+	if err := commitmentQueue.Initialize(ctx); err != nil {
+		log.WithComponent("main").Error("Failed to initialize commitment queue", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
 	}
 
@@ -108,14 +108,14 @@ func main() {
 		log.WithComponent("main").Info("High availability mode is disabled")
 	}
 
-	roundManager, err := round.NewRoundManager(ctx, cfg, log, storageInstance, leaderElection)
+	roundManager, err := round.NewRoundManager(ctx, cfg, log, commitmentQueue, storageInstance, leaderElection)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to create round manager", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
 	}
 
 	// Initialize service
-	aggregatorService := service.NewAggregatorService(cfg, log, roundManager, storageInstance, leaderElection)
+	aggregatorService := service.NewAggregatorService(cfg, log, roundManager, commitmentQueue, storageInstance, leaderElection)
 
 	// Start the aggregator service
 	if err := aggregatorService.Start(ctx); err != nil {
@@ -124,7 +124,7 @@ func main() {
 	}
 
 	// Initialize gateway server
-	server := gateway.NewServer(cfg, log, storageInstance, aggregatorService)
+	server := gateway.NewServer(cfg, log, aggregatorService)
 
 	// Start server in a goroutine
 	go func() {
@@ -163,7 +163,10 @@ func main() {
 		}
 	}
 
-	// Close storage
+	// Close storage backends
+	if err := commitmentQueue.Close(shutdownCtx); err != nil {
+		log.WithComponent("main").Error("Failed to close commitment queue gracefully", "error", err.Error())
+	}
 	if err := storageInstance.Close(shutdownCtx); err != nil {
 		log.WithComponent("main").Error("Failed to close storage gracefully", "error", err.Error())
 	}

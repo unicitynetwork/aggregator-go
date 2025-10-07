@@ -61,11 +61,12 @@ type Round struct {
 
 // RoundManager handles the creation of blocks and processing of commitments
 type RoundManager struct {
-	config    *config.Config
-	logger    *logger.Logger
-	storage   interfaces.Storage
-	smt       *ThreadSafeSMT
-	bftClient bft.BFTClient
+	config          *config.Config
+	logger          *logger.Logger
+	commitmentQueue interfaces.CommitmentQueue
+	storage         interfaces.Storage
+	smt             *ThreadSafeSMT
+	bftClient       bft.BFTClient
 
 	// Round management
 	currentRound *Round
@@ -116,7 +117,7 @@ type RoundMetrics struct {
 }
 
 // NewRoundManager creates a new round manager
-func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, storage interfaces.Storage, leaderSelector LeaderSelector) (*RoundManager, error) {
+func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) (*RoundManager, error) {
 	// Initialize SMT with empty tree - will be replaced with restored tree in Start()
 	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
 	threadSafeSMT := NewThreadSafeSMT(smtInstance)
@@ -124,6 +125,7 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 	rm := &RoundManager{
 		config:              cfg,
 		logger:              logger,
+		commitmentQueue:     commitmentQueue,
 		storage:             storage,
 		smt:                 threadSafeSMT,
 		leaderSelector:      leaderSelector,
@@ -564,7 +566,7 @@ func (rm *RoundManager) redisCommitmentStreamer(ctx context.Context) {
 
 	rm.logger.WithContext(ctx).Info("Redis commitment streamer started")
 
-	redisStorage := rm.storage.CommitmentStorage().(*redis.CommitmentStorage)
+	redisStorage := rm.commitmentQueue.(*redis.CommitmentStorage)
 	err := redisStorage.StreamCommitments(ctx, rm.commitmentStream)
 
 	if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
@@ -607,7 +609,7 @@ func (rm *RoundManager) commitmentPrefetcher(ctx context.Context) {
 				}
 
 				// Fetch batch using cursor
-				commitments, _, err := rm.storage.CommitmentStorage().GetUnprocessedBatchWithCursor(ctx, cursor, fetchSize)
+				commitments, _, err := rm.commitmentQueue.GetUnprocessedBatchWithCursor(ctx, cursor, fetchSize)
 				if err != nil {
 					rm.logger.WithContext(ctx).Error("Failed to fetch commitments", "error", err.Error())
 					continue
@@ -616,7 +618,7 @@ func (rm *RoundManager) commitmentPrefetcher(ctx context.Context) {
 				// If we got no commitments and have a cursor, reset it to check for new ones
 				if len(commitments) == 0 && cursor != "" {
 					// Check if there are actually unprocessed commitments
-					unprocessedCount, _ := rm.storage.CommitmentStorage().CountUnprocessed(ctx)
+					unprocessedCount, _ := rm.commitmentQueue.CountUnprocessed(ctx)
 					if unprocessedCount > 0 {
 						rm.logger.WithContext(ctx).Info("Resetting cursor to fetch new commitments",
 							"unprocessedCount", unprocessedCount,

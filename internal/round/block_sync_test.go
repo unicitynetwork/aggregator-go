@@ -49,7 +49,7 @@ func TestBlockSync(t *testing.T) {
 	require.NoError(t, err)
 
 	mockLeader := &MockLeaderSelector{isLeader: false}
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage, mockLeader)
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, mockLeader)
 	require.NoError(t, err)
 
 	require.NoError(t, rm.Start(ctx))
