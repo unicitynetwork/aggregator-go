@@ -42,12 +42,14 @@ func TestLeaderElection_LockContention(t *testing.T) {
 	// setup server 1
 	le1Config := conf.HA
 	le1Config.ServerID = "server-1"
-	le1 := NewLeaderElection(le1Config, log, storage.LeadershipStorage())
+	le1 := NewLeaderElection(log, le1Config, storage.LeadershipStorage())
+	defer le1.Stop(context.Background())
 
 	// setup server 2
 	le2Config := conf.HA
 	le2Config.ServerID = "server-2"
-	le2 := NewLeaderElection(le2Config, log, storage.LeadershipStorage())
+	le2 := NewLeaderElection(log, le2Config, storage.LeadershipStorage())
+	defer le2.Stop(context.Background())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -55,7 +57,7 @@ func TestLeaderElection_LockContention(t *testing.T) {
 	// start server 1 and wait for startup
 	le1.Start(ctx)
 	assert.Eventually(t, func() bool {
-		isLeader, err := le1.IsLeader(context.Background())
+		isLeader, err := le1.IsLeader(ctx)
 		require.NoError(t, err)
 		return isLeader
 	}, 2*time.Second, 50*time.Millisecond, "server 1 should become leader")
@@ -65,19 +67,14 @@ func TestLeaderElection_LockContention(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// verify server 1 is still the leader
-	isLeader1, err := le1.IsLeader(context.Background())
+	isLeader1, err := le1.IsLeader(ctx)
 	assert.NoError(t, err)
 	assert.True(t, isLeader1, "server 1 should remain the leader")
 
 	// verify server 2 is NOT the leader
-	isLeader2, err := le2.IsLeader(context.Background())
+	isLeader2, err := le2.IsLeader(ctx)
 	assert.NoError(t, err)
 	assert.False(t, isLeader2, "server 2 should not become leader while server 1 is active")
-
-	err = le1.Shutdown(context.Background())
-	assert.NoError(t, err)
-	err = le2.Shutdown(context.Background())
-	assert.NoError(t, err)
 }
 
 func TestLeaderElection_Failover(t *testing.T) {
@@ -91,12 +88,14 @@ func TestLeaderElection_Failover(t *testing.T) {
 	le1Config := conf.HA
 	le1Config.ServerID = "server-1"
 	le1Config.LeaderHeartbeatInterval = 2 * time.Second // slower heartbeat that TTL
-	le1 := NewLeaderElection(le1Config, log, storage.LeadershipStorage())
+	le1 := NewLeaderElection(log, le1Config, storage.LeadershipStorage())
+	defer le1.Stop(context.Background())
 
 	// setup server 2 with normal heartbeat
 	le2Config := conf.HA
 	le2Config.ServerID = "server-2"
-	le2 := NewLeaderElection(le2Config, log, storage.LeadershipStorage())
+	le2 := NewLeaderElection(log, le2Config, storage.LeadershipStorage())
+	defer le2.Stop(context.Background())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -104,7 +103,7 @@ func TestLeaderElection_Failover(t *testing.T) {
 	// start server 1 and wait for it to become leader
 	le1.Start(ctx)
 	assert.Eventually(t, func() bool {
-		isLeader, err := le1.IsLeader(context.Background())
+		isLeader, err := le1.IsLeader(ctx)
 		require.NoError(t, err)
 		return isLeader
 	}, 2*time.Second, 50*time.Millisecond, "server 1 should become leader")
@@ -112,25 +111,19 @@ func TestLeaderElection_Failover(t *testing.T) {
 	// start server 2 (initially cannot get the lock)
 	le2.Start(ctx)
 	time.Sleep(200 * time.Millisecond)
-	isLeader2, err := le2.IsLeader(context.Background())
+	isLeader2, err := le2.IsLeader(ctx)
 	assert.NoError(t, err)
 	assert.False(t, isLeader2, "server 2 should not become leader while server 1 is active")
 
 	// wait long enough for server 1 lock to expire and server 2 to acquire it
 	assert.Eventually(t, func() bool {
-		isLeader2, err := le2.IsLeader(context.Background())
+		isLeader2, err := le2.IsLeader(ctx)
 		require.NoError(t, err)
 		return isLeader2
 	}, 5*time.Second, 100*time.Millisecond, "server 2 should take over leadership after server 1 misses heartbeat")
 
 	// confirm server 1 is no longer leader
-	isLeader1, err := le1.IsLeader(context.Background())
+	isLeader1, err := le1.IsLeader(ctx)
 	assert.NoError(t, err)
 	assert.False(t, isLeader1, "server 1 should lose leadership after missing heartbeat")
-
-	// cleanup
-	err = le1.Shutdown(context.Background())
-	assert.NoError(t, err)
-	err = le2.Shutdown(context.Background())
-	assert.NoError(t, err)
 }

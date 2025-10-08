@@ -1,11 +1,10 @@
-package round
+package smt
 
 import (
 	"fmt"
 	"math/big"
 	"sync"
 
-	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -13,12 +12,12 @@ import (
 // It wraps an SmtSnapshot and provides thread-safety for write operations (AddLeaf, AddLeaves)
 // Read operations should be performed on the original ThreadSafeSMT after committing the snapshot
 type ThreadSafeSmtSnapshot struct {
-	snapshot *smt.SmtSnapshot
+	snapshot *SmtSnapshot
 	rwMux    sync.RWMutex // RWMutex allows multiple readers but exclusive writers
 }
 
 // NewThreadSafeSmtSnapshot creates a new thread-safe SMT snapshot wrapper
-func NewThreadSafeSmtSnapshot(snapshot *smt.SmtSnapshot) *ThreadSafeSmtSnapshot {
+func NewThreadSafeSmtSnapshot(snapshot *SmtSnapshot) *ThreadSafeSmtSnapshot {
 	return &ThreadSafeSmtSnapshot{
 		snapshot: snapshot,
 	}
@@ -26,7 +25,7 @@ func NewThreadSafeSmtSnapshot(snapshot *smt.SmtSnapshot) *ThreadSafeSmtSnapshot 
 
 // AddLeaves adds multiple leaves to the snapshot in a batch operation
 // This operation is exclusive and blocks all other operations on this snapshot
-func (tss *ThreadSafeSmtSnapshot) AddLeaves(leaves []*smt.Leaf) (string, error) {
+func (tss *ThreadSafeSmtSnapshot) AddLeaves(leaves []*Leaf) (string, error) {
 	tss.rwMux.Lock()
 	defer tss.rwMux.Unlock()
 
@@ -34,7 +33,7 @@ func (tss *ThreadSafeSmtSnapshot) AddLeaves(leaves []*smt.Leaf) (string, error) 
 }
 
 // addLeavesUnsafe adds multiple leaves without acquiring locks (internal use)
-func (tss *ThreadSafeSmtSnapshot) addLeavesUnsafe(leaves []*smt.Leaf) (string, error) {
+func (tss *ThreadSafeSmtSnapshot) addLeavesUnsafe(leaves []*Leaf) (string, error) {
 	err := tss.snapshot.AddLeaves(leaves)
 	if err != nil {
 		return "", fmt.Errorf("failed to add leaves to SMT snapshot: %w", err)
@@ -105,7 +104,7 @@ func (tss *ThreadSafeSmtSnapshot) Commit(originalSMT *ThreadSafeSMT) {
 
 // WithWriteLock executes a function while holding a write lock on the snapshot
 // The function receives the underlying snapshot for direct access to avoid deadlocks
-func (tss *ThreadSafeSmtSnapshot) WithWriteLock(fn func(*smt.SmtSnapshot) error) error {
+func (tss *ThreadSafeSmtSnapshot) WithWriteLock(fn func(*SmtSnapshot) error) error {
 	tss.rwMux.Lock()
 	defer tss.rwMux.Unlock()
 	return fn(tss.snapshot)
