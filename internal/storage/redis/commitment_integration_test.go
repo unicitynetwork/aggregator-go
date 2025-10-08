@@ -392,3 +392,242 @@ CollectLoop:
 			"Streamed commitment %s was not stored", requestID)
 	}
 }
+
+// setupTestRedisWithCleanupInterval creates a test Redis storage with custom cleanup interval
+func setupTestRedisWithCleanupInterval(t *testing.T, cleanupInterval time.Duration, maxStreamLen int64) (*CommitmentStorage, func()) {
+	storage, baseCleanup := setupTestRedis(t)
+
+	// Close the default storage (but keep the Redis client)
+	ctx := context.Background()
+	storage.flushTicker.Stop()
+	// Don't close stopChan since it's already closed in the default storage
+
+	// Get the Redis client from the storage
+	client := storage.client
+
+	// Create new storage with custom cleanup interval and max stream length
+	cfg := &BatchConfig{
+		FlushInterval:   50 * time.Millisecond,
+		MaxBatchSize:    2000,
+		CleanupInterval: cleanupInterval,
+		MaxStreamLength: maxStreamLen,
+	}
+	customStorage := NewCommitmentStorageWithBatchConfig(client, "test-server-custom", cfg)
+
+	err := customStorage.Initialize(ctx)
+	require.NoError(t, err)
+
+	cleanup := func() {
+		customStorage.Close(ctx)
+		baseCleanup()
+	}
+
+	return customStorage, cleanup
+}
+
+// Test 6: Periodic Cleanup - Verify automatic stream trimming runs periodically
+func TestCommitmentPipeline_PeriodicCleanup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping periodic cleanup test in short mode")
+	}
+
+	ctx := context.Background()
+
+	// Setup test container with custom Redis config (10K max stream length for testing)
+	testMaxStreamLen := int64(10000)
+	storage, cleanup := setupTestRedisWithCleanupInterval(t, 1*time.Second, testMaxStreamLen)
+	defer cleanup()
+
+	// Store more than the max stream length to verify trimming works
+	targetCount := 15000
+	batchSize := 5000
+	numBatches := (targetCount + batchSize - 1) / batchSize
+
+	t.Logf("Storing %d commitments (max stream length: %d)...", targetCount, testMaxStreamLen)
+
+	for i := 0; i < numBatches; i++ {
+		remaining := targetCount - (i * batchSize)
+		currentBatchSize := batchSize
+		if remaining < batchSize {
+			currentBatchSize = remaining
+		}
+
+		batch := make([]*models.Commitment, currentBatchSize)
+		for j := 0; j < currentBatchSize; j++ {
+			batch[j] = createTestCommitment()
+		}
+
+		err := storage.StoreBatch(ctx, batch)
+		require.NoError(t, err)
+	}
+
+	// Wait for async processing
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify all commitments stored
+	countBefore, err := storage.Count(ctx)
+	require.NoError(t, err)
+	t.Logf("Stream count before cleanup: %d (stored: %d)", countBefore, targetCount)
+	assert.Equal(t, int64(targetCount), countBefore,
+		"Stream should have all stored commitments")
+
+	// Wait for first periodic cleanup to trigger (cleanup interval = 1 second)
+	t.Log("Waiting for periodic cleanup to trigger...")
+	time.Sleep(1500 * time.Millisecond)
+
+	// Verify stream was automatically trimmed to maxStreamLength
+	countAfter, err := storage.Count(ctx)
+	require.NoError(t, err)
+	t.Logf("Stream count after first cleanup: %d (max: %d)", countAfter, testMaxStreamLen)
+
+	assert.LessOrEqual(t, countAfter, testMaxStreamLen,
+		"Stream should be trimmed to maxStreamLength after periodic cleanup")
+	assert.Less(t, countAfter, countBefore,
+		"Stream should have fewer messages after cleanup")
+
+	// Store more commitments to exceed limit again
+	t.Log("Storing 3K more commitments...")
+	moreBatch := make([]*models.Commitment, 3000)
+	for j := 0; j < 3000; j++ {
+		moreBatch[j] = createTestCommitment()
+	}
+	err = storage.StoreBatch(ctx, moreBatch)
+	require.NoError(t, err)
+
+	time.Sleep(200 * time.Millisecond)
+
+	countBeforeSecond, err := storage.Count(ctx)
+	require.NoError(t, err)
+	t.Logf("Stream count before second cleanup: %d", countBeforeSecond)
+
+	// Wait for second periodic cleanup cycle
+	t.Log("Waiting for second cleanup cycle...")
+	time.Sleep(1200 * time.Millisecond)
+
+	countFinal, err := storage.Count(ctx)
+	require.NoError(t, err)
+	t.Logf("Stream count after second cleanup: %d (max: %d)", countFinal, testMaxStreamLen)
+
+	// Verify still trimmed to limit
+	assert.LessOrEqual(t, countFinal, testMaxStreamLen,
+		"Stream should remain within maxStreamLength after second cleanup")
+}
+
+// Test 7: Restart Recovery - Verify pending messages are recovered after restart
+func TestCommitmentPipeline_RestartRecovery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping restart recovery test in short mode")
+	}
+
+	ctx := context.Background()
+
+	// Setup Redis
+	storage1, cleanup := setupTestRedis(t)
+	defer cleanup()
+
+	// Store commitments
+	numCommitments := 10
+	commitments := make([]*models.Commitment, numCommitments)
+	for i := 0; i < numCommitments; i++ {
+		commitments[i] = createTestCommitment()
+	}
+
+	err := storage1.StoreBatch(ctx, commitments)
+	require.NoError(t, err)
+
+	time.Sleep(100 * time.Millisecond)
+
+	t.Logf("Stored %d commitments", numCommitments)
+
+	// Use StreamCommitments (the actual production flow) to read messages
+	commitmentChan := make(chan *models.Commitment, 20)
+	streamCtx, cancelStream := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelStream()
+
+	go func() {
+		_ = storage1.StreamCommitments(streamCtx, commitmentChan)
+	}()
+
+	// Collect messages from stream
+	var received []*models.Commitment
+	timeout := time.After(500 * time.Millisecond)
+CollectLoop:
+	for {
+		select {
+		case c := <-commitmentChan:
+			received = append(received, c)
+			if len(received) == numCommitments {
+				break CollectLoop
+			}
+		case <-timeout:
+			break CollectLoop
+		}
+	}
+
+	require.Len(t, received, numCommitments, "Should stream all commitments")
+	t.Logf("First consumer streamed %d commitments (now pending)", len(received))
+
+	// Count pending for this consumer
+	pendingInfo := storage1.client.XPending(ctx, "commitments", "processors")
+	require.NoError(t, pendingInfo.Err())
+	t.Logf("Pending messages after first consumer: %d", pendingInfo.Val().Count)
+
+	// Simulate server restart: Close first storage and create new one with different consumerID
+	// DON'T call MarkProcessed - simulating a crash before ACK
+	cancelStream()
+	storage1.Close(ctx)
+	t.Log("Simulated server crash (before XACK)")
+
+	// Create new storage instance (new consumerID, simulating restart)
+	storage2 := NewCommitmentStorage(storage1.client, "server-restarted")
+	err = storage2.Initialize(ctx)
+	require.NoError(t, err)
+
+	t.Logf("New consumer started with ID: %s", storage2.consumerID)
+
+	// Try to stream again - with current implementation, new consumer won't see pending messages
+	commitmentChan2 := make(chan *models.Commitment, 20)
+	streamCtx2, cancelStream2 := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelStream2()
+
+	go func() {
+		_ = storage2.StreamCommitments(streamCtx2, commitmentChan2)
+	}()
+
+	var received2 []*models.Commitment
+	timeout2 := time.After(500 * time.Millisecond)
+CollectLoop2:
+	for {
+		select {
+		case c := <-commitmentChan2:
+			received2 = append(received2, c)
+			if len(received2) == numCommitments {
+				break CollectLoop2
+			}
+		case <-timeout2:
+			break CollectLoop2
+		}
+	}
+
+	t.Logf("After restart, new consumer streamed %d commitments", len(received2))
+
+	// Check total stream count - messages should still be in stream
+	totalCount, err := storage2.Count(ctx)
+	require.NoError(t, err)
+	t.Logf("Total messages in stream: %d", totalCount)
+
+	// Check pending count - old messages should still be pending
+	pendingInfo2 := storage2.client.XPending(ctx, "commitments", "processors")
+	require.NoError(t, pendingInfo2.Err())
+	t.Logf("Total pending messages after restart: %d", pendingInfo2.Val().Count)
+
+	// Verify pending messages were recovered after restart
+	assert.Equal(t, numCommitments, len(received2), "Should recover all pending messages after restart")
+	assert.Equal(t, int64(numCommitments), pendingInfo2.Val().Count,
+		"Messages should still be in pending state (not yet ACKed)")
+
+	t.Logf("✅ SUCCESS: All %d pending messages were recovered after restart!", numCommitments)
+
+	// Close the second storage instance
+	storage2.Close(ctx)
+}

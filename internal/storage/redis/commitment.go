@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -23,15 +24,19 @@ const (
 
 // BatchConfig configures the asynchronous batching behavior
 type BatchConfig struct {
-	FlushInterval time.Duration // How often to flush pending items
-	MaxBatchSize  int           // Max items before forcing flush
+	FlushInterval   time.Duration // How often to flush pending items
+	MaxBatchSize    int           // Max items before forcing flush
+	CleanupInterval time.Duration // How often to trim the stream
+	MaxStreamLength int64         // Maximum stream length before trimming
 }
 
 // DefaultBatchConfig returns default batching configuration
 func DefaultBatchConfig() *BatchConfig {
 	return &BatchConfig{
-		FlushInterval: defaultFlushInterval,
-		MaxBatchSize:  defaultBatchSize,
+		FlushInterval:   defaultFlushInterval,
+		MaxBatchSize:    defaultBatchSize,
+		CleanupInterval: cleanupInterval,
+		MaxStreamLength: maxStreamLength,
 	}
 }
 
@@ -47,7 +52,13 @@ type CommitmentStorage struct {
 	serverID    string
 	consumerID  string
 	stopChan    chan struct{}
+	closed      atomic.Bool
 	batchConfig *BatchConfig
+
+	// Restart recovery: on startup, exhaust all pending messages before reading new ones
+	// This ensures messages stuck in "pending" state (from crashed consumer) are recovered
+	// Once all pending are read, switch to new messages permanently
+	pendingExhausted atomic.Bool
 
 	// Batching channels
 	pendingChan chan *pendingCommitment
@@ -64,7 +75,7 @@ func NewCommitmentStorageWithBatchConfig(client *redis.Client, serverID string, 
 	cs := &CommitmentStorage{
 		client:      client,
 		serverID:    serverID,
-		consumerID:  fmt.Sprintf("processor-%s-%d", serverID, time.Now().UnixNano()),
+		consumerID:  "processor",
 		stopChan:    make(chan struct{}),
 		batchConfig: batchConfig,
 		pendingChan: make(chan *pendingCommitment, batchConfig.MaxBatchSize*2), // Buffer for 2x max batch
@@ -83,13 +94,21 @@ func (cs *CommitmentStorage) Initialize(ctx context.Context) error {
 		return fmt.Errorf("failed to create consumer group: %w", err)
 	}
 
-	go cs.periodicCleanup(ctx)
+	// Only start periodic cleanup if interval is configured
+	if cs.batchConfig.CleanupInterval > 0 {
+		go cs.periodicCleanup(ctx)
+	}
 
 	return nil
 }
 
-// Stop gracefully stops the storage and cleanup routines
+// Close gracefully stops the storage and cleanup routines
 func (cs *CommitmentStorage) Close(ctx context.Context) error {
+	// Prevent double-close
+	if !cs.closed.CompareAndSwap(false, true) {
+		return nil // Already closed
+	}
+
 	cs.flushTicker.Stop()
 	close(cs.stopChan)
 	return nil
@@ -281,96 +300,19 @@ func (cs *CommitmentStorage) StoreBatch(ctx context.Context, commitments []*mode
 	return nil
 }
 
-// GetByRequestID retrieves a commitment by request ID
+// GetByRequestID is not implemented for Redis
 func (cs *CommitmentStorage) GetByRequestID(ctx context.Context, requestID api.RequestID) (*models.Commitment, error) {
-	// Search through stream for the requestID
-	// Note: This is not the most efficient for random access, but works for the interface
-	messages := cs.client.XRange(ctx, commitmentStream, "-", "+")
-	if messages.Err() != nil {
-		return nil, fmt.Errorf("failed to search stream: %w", messages.Err())
-	}
-
-	for _, message := range messages.Val() {
-		if reqID, exists := message.Values["requestId"]; exists {
-			if reqID == string(requestID) {
-				commitment, err := cs.parseCommitment(message)
-				if err != nil {
-					return nil, fmt.Errorf("failed to parse commitment: %w", err)
-				}
-				return commitment, nil
-			}
-		}
-	}
-
-	return nil, nil // Not found
+	return nil, fmt.Errorf("GetByRequestID not implemented for Redis")
 }
 
-// GetUnprocessedBatch retrieves a batch of unprocessed commitments and moves them to pending state
+// GetUnprocessedBatch is not implemented for Redis - use StreamCommitments instead
 func (cs *CommitmentStorage) GetUnprocessedBatch(ctx context.Context, limit int) ([]*models.Commitment, error) {
-	// Use consumer group to read new messages and move to pending state
-	streams := cs.client.XReadGroup(ctx, &redis.XReadGroupArgs{
-		Group:    consumerGroup,
-		Consumer: cs.consumerID,
-		Streams:  []string{commitmentStream, ">"},
-		Count:    int64(limit),
-		Block:    time.Millisecond * 10,
-	})
-
-	if streams.Err() != nil {
-		if streams.Err() == redis.Nil {
-			return []*models.Commitment{}, nil // No new messages
-		}
-		return nil, fmt.Errorf("failed to read from stream: %w", streams.Err())
-	}
-
-	var commitments []*models.Commitment
-	for _, stream := range streams.Val() {
-		for _, message := range stream.Messages {
-			if commitment, err := cs.parseCommitment(message); err == nil && commitment != nil {
-				commitments = append(commitments, commitment)
-			}
-		}
-	}
-
-	return commitments, nil
+	return nil, fmt.Errorf("GetUnprocessedBatch not implemented for Redis - use StreamCommitments")
 }
 
-// GetUnprocessedBatchWithCursor retrieves a batch with cursor support using XREAD (read-only, doesn't change state)
+// GetUnprocessedBatchWithCursor is not implemented for Redis - use StreamCommitments instead
 func (cs *CommitmentStorage) GetUnprocessedBatchWithCursor(ctx context.Context, lastID string, limit int) ([]*models.Commitment, string, error) {
-	// Determine starting position for XREAD
-	startPos := "0" // Start from beginning if no cursor
-	if lastID != "" {
-		// Read from after the last ID
-		startPos = lastID
-	}
-
-	// Use XREAD to get messages without consuming them via consumer groups
-	streams := cs.client.XRead(ctx, &redis.XReadArgs{
-		Streams: []string{commitmentStream, startPos},
-		Count:   int64(limit),
-		Block:   time.Millisecond * 10,
-	})
-
-	if streams.Err() != nil {
-		if streams.Err() == redis.Nil {
-			return []*models.Commitment{}, lastID, nil // No new messages
-		}
-		return nil, "", fmt.Errorf("failed to read from stream: %w", streams.Err())
-	}
-
-	var commitments []*models.Commitment
-	var newCursor string = lastID // Default to input cursor
-
-	for _, stream := range streams.Val() {
-		for _, message := range stream.Messages {
-			if commitment, err := cs.parseCommitment(message); err == nil && commitment != nil {
-				commitments = append(commitments, commitment)
-				newCursor = message.ID // Update cursor to last message ID
-			}
-		}
-	}
-
-	return commitments, newCursor, nil
+	return nil, "", fmt.Errorf("GetUnprocessedBatchWithCursor not implemented for Redis - use StreamCommitments")
 }
 
 // MarkProcessed marks commitments as processed by acknowledging only the first N pending messages
@@ -481,7 +423,7 @@ func (cs *CommitmentStorage) parseCommitment(message redis.XMessage) (*models.Co
 
 // periodicCleanup runs periodic maintenance on the stream
 func (cs *CommitmentStorage) periodicCleanup(ctx context.Context) {
-	ticker := time.NewTicker(cleanupInterval)
+	ticker := time.NewTicker(cs.batchConfig.CleanupInterval)
 	defer ticker.Stop()
 
 	for {
@@ -499,8 +441,7 @@ func (cs *CommitmentStorage) periodicCleanup(ctx context.Context) {
 // trimStream keeps the stream at a reasonable size
 func (cs *CommitmentStorage) trimStream(ctx context.Context) {
 	// Trim to keep only the last N messages
-	// Errors are silently ignored - this is best-effort maintenance
-	_ = cs.client.XTrimMaxLen(ctx, commitmentStream, maxStreamLength).Err()
+	_ = cs.client.XTrimMaxLen(ctx, commitmentStream, cs.batchConfig.MaxStreamLength).Err()
 }
 
 // StreamCommitments continuously streams commitments using blocking Redis reads
@@ -513,16 +454,42 @@ func (cs *CommitmentStorage) StreamCommitments(ctx context.Context, commitmentCh
 		case <-cs.stopChan:
 			return nil
 		default:
-			// Use blocking XREADGROUP with short timeout to handle both new and pending messages
-			// Using ">" reads only NEW messages (never delivered to any consumer)
-			// This is correct - we want new messages, and MarkProcessed will ACK them when done
-			streams := cs.client.XReadGroup(ctx, &redis.XReadGroupArgs{
-				Group:    consumerGroup,
-				Consumer: cs.consumerID,
-				Streams:  []string{commitmentStream, ">"},
-				Count:    100,                    // Read up to 100 messages at once for efficiency
-				Block:    100 * time.Millisecond, // Short block to check context regularly
-			})
+			var streams *redis.XStreamSliceCmd
+
+			// On startup: exhaust all pending messages first
+			// Once exhausted, switch to reading new messages
+			if !cs.pendingExhausted.Load() {
+				// Check for pending messages
+				pendingStreams := cs.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    consumerGroup,
+					Consumer: cs.consumerID,
+					Streams:  []string{commitmentStream, "0"}, // "0" = read pending for this consumer
+					Count:    100,
+					Block:    0, // Don't block
+				})
+
+				if pendingStreams.Err() != nil && pendingStreams.Err() != redis.Nil {
+					return fmt.Errorf("failed to check pending messages: %w", pendingStreams.Err())
+				}
+
+				// If we got pending, keep reading them
+				if pendingStreams.Err() == nil && len(pendingStreams.Val()) > 0 && len(pendingStreams.Val()[0].Messages) > 0 {
+					streams = pendingStreams
+				} else {
+					// No more pending! Switch to new messages mode
+					cs.pendingExhausted.Store(true)
+					continue // Next iteration will read new messages
+				}
+			} else {
+				// Normal operation: read new messages only
+				streams = cs.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    consumerGroup,
+					Consumer: cs.consumerID,
+					Streams:  []string{commitmentStream, ">"}, // ">" = new messages only
+					Count:    100,
+					Block:    100 * time.Millisecond,
+				})
+			}
 
 			if streams.Err() != nil {
 				if streams.Err() == redis.Nil {

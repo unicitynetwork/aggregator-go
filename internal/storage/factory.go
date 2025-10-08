@@ -57,8 +57,10 @@ func createRedisCommitmentQueue(cfg *config.Config) (interfaces.CommitmentQueue,
 
 	// Create batch config
 	batchConfig := &redis.BatchConfig{
-		FlushInterval: cfg.Storage.RedisFlushInterval,
-		MaxBatchSize:  cfg.Storage.RedisMaxBatchSize,
+		FlushInterval:   cfg.Storage.RedisFlushInterval,
+		MaxBatchSize:    cfg.Storage.RedisMaxBatchSize,
+		CleanupInterval: cfg.Storage.RedisCleanupInterval,
+		MaxStreamLength: cfg.Storage.RedisMaxStreamLength,
 	}
 
 	// Get server ID

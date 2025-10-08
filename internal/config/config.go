@@ -100,6 +100,8 @@ type StorageConfig struct {
 	UseRedisForCommitments bool          `mapstructure:"use_redis_for_commitments"`
 	RedisFlushInterval     time.Duration `mapstructure:"redis_flush_interval"`
 	RedisMaxBatchSize      int           `mapstructure:"redis_max_batch_size"`
+	RedisCleanupInterval   time.Duration `mapstructure:"redis_cleanup_interval"`
+	RedisMaxStreamLength   int64         `mapstructure:"redis_max_stream_length"`
 }
 
 type BFTConfig struct {
@@ -178,6 +180,8 @@ func Load() (*Config, error) {
 			UseRedisForCommitments: getEnvBoolOrDefault("USE_REDIS_FOR_COMMITMENTS", false),
 			RedisFlushInterval:     getEnvDurationOrDefault("REDIS_FLUSH_INTERVAL", "100ms"),
 			RedisMaxBatchSize:      getEnvIntOrDefault("REDIS_MAX_BATCH_SIZE", 5000),
+			RedisCleanupInterval:   getEnvDurationOrDefault("REDIS_CLEANUP_INTERVAL", "5m"),
+			RedisMaxStreamLength:   int64(getEnvIntOrDefault("REDIS_MAX_STREAM_LENGTH", 1000000)),
 		},
 	}
 	config.BFT = BFTConfig{
