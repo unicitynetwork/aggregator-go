@@ -4,10 +4,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 )
 
-func TestAggregatorRecordBackwardCompatibility(t *testing.T) {
+func TestBackwardCompatibility(t *testing.T) {
 	t.Run("FromBSON defaults AggregateRequestCount to 1 when missing", func(t *testing.T) {
 		// Simulate an old record without AggregateRequestCount
 		bsonRecord := &models.AggregatorRecordBSON{

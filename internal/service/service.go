@@ -99,33 +99,6 @@ func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManage
 	}
 }
 
-// Start starts the aggregator service and round manager
-func (as *AggregatorService) Start(ctx context.Context) error {
-	as.logger.WithContext(ctx).Info("Starting Aggregator Service")
-
-	// Start the round manager
-	if err := as.roundManager.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start round manager: %w", err)
-	}
-
-	as.logger.WithContext(ctx).Info("Aggregator Service started successfully")
-	return nil
-}
-
-// Stop stops the aggregator service and round manager
-func (as *AggregatorService) Stop(ctx context.Context) error {
-	as.logger.WithContext(ctx).Info("Stopping Aggregator Service")
-
-	// Stop the round manager
-	if err := as.roundManager.Stop(ctx); err != nil {
-		as.logger.WithContext(ctx).Error("Failed to stop round manager", "error", err.Error())
-		return fmt.Errorf("failed to stop round manager: %w", err)
-	}
-
-	as.logger.WithContext(ctx).Info("Aggregator Service stopped successfully")
-	return nil
-}
-
 // SubmitCommitment handles commitment submission
 func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error) {
 	// Create commitment with aggregate count

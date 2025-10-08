@@ -1,4 +1,4 @@
-package round
+package ha
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
@@ -16,14 +17,6 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
-
-type MockLeaderSelector struct {
-	isLeader bool
-}
-
-func (m MockLeaderSelector) IsLeader(ctx context.Context) (bool, error) {
-	return m.isLeader, nil
-}
 
 func TestBlockSync(t *testing.T) {
 	storage, cleanup := testutil.SetupTestStorage(t, config.Config{
@@ -40,43 +33,33 @@ func TestBlockSync(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	cfg := &config.Config{
-		Processing: config.ProcessingConfig{RoundDuration: 100 * time.Millisecond},
-		HA:         config.HAConfig{Enabled: true},
-		BFT:        config.BFTConfig{Enabled: false},
-	}
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	mockLeader := &MockLeaderSelector{isLeader: false}
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, mockLeader)
-	require.NoError(t, err)
-
-	require.NoError(t, rm.Start(ctx))
-	defer func() {
-		if err := rm.Stop(ctx); err != nil {
-			t.Logf("Failed to stop RoundManager: %v", err)
-		}
-	}()
+	// create block syncer
+	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
+	threadSafeSMT := smt.NewThreadSafeSMT(smtInstance)
+	stateTracker := state.NewSyncStateTracker()
+	syncer := newBlockSyncer(testLogger, storage, threadSafeSMT, stateTracker)
 
 	// simulate leader creating a block
-	rootHash := createBlock(ctx, t, storage, rm)
+	rootHash := createBlock(ctx, t, storage)
 
-	// wait for follower's blockSync to replay storage into smt
-	require.Eventually(t, func() bool {
-		return rm.GetSMT().GetRootHash() == rootHash.String()
-	}, 5*time.Second, 100*time.Millisecond,
-		"SMT root hash should eventually match persisted block root hash after block sync")
+	// trigger the sync
+	err = syncer.syncToLatestBlock(ctx)
+	require.NoError(t, err)
 
-	require.Equal(t, big.NewInt(1), rm.getLastSyncedRoundNumber())
+	// SMT root hash should match persisted block root hash after block sync
+	require.Equal(t, rootHash.String(), threadSafeSMT.GetRootHash())
+	require.Equal(t, big.NewInt(1), stateTracker.GetLastSyncedBlock())
 }
 
-func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage, rm *RoundManager) api.HexBytes {
+func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage) api.HexBytes {
 	blockNumber := api.NewBigInt(big.NewInt(1))
 	testCommitments := []*models.Commitment{
-		createTestCommitment(t, "request_1"),
-		createTestCommitment(t, "request_2"),
-		createTestCommitment(t, "request_3"),
+		testutil.CreateTestCommitment(t, "request_1"),
+		testutil.CreateTestCommitment(t, "request_2"),
+		testutil.CreateTestCommitment(t, "request_3"),
 	}
 
 	// persist aggregator records
@@ -86,7 +69,7 @@ func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage, rm
 		path, err := c.RequestID.GetPath()
 		require.NoError(t, err)
 
-		val, err := rm.createLeafValue(c)
+		val, err := c.CreateLeafValue()
 		require.NoError(t, err)
 
 		leaves[i] = &smt.Leaf{Path: path, Value: val}
