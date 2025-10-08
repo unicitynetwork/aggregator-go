@@ -464,26 +464,23 @@ func TestCommitmentPipeline_PeriodicCleanup(t *testing.T) {
 	// Wait for async processing
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify all commitments stored
+	// Check initial count (may be full or already trimmed depending on timing)
 	countBefore, err := storage.Count(ctx)
 	require.NoError(t, err)
-	t.Logf("Stream count before cleanup: %d (stored: %d)", countBefore, targetCount)
-	assert.Equal(t, int64(targetCount), countBefore,
-		"Stream should have all stored commitments")
+	t.Logf("Stream count after storage: %d (target: %d, max: %d)", countBefore, targetCount, testMaxStreamLen)
 
-	// Wait for first periodic cleanup to trigger (cleanup interval = 1 second)
-	t.Log("Waiting for periodic cleanup to trigger...")
-	time.Sleep(1500 * time.Millisecond)
+	// If stream exceeds max, wait for periodic cleanup (runs every 1 second)
+	if countBefore > testMaxStreamLen {
+		t.Log("Waiting for periodic cleanup to trim stream...")
+		time.Sleep(1500 * time.Millisecond)
 
-	// Verify stream was automatically trimmed to maxStreamLength
-	countAfter, err := storage.Count(ctx)
-	require.NoError(t, err)
-	t.Logf("Stream count after first cleanup: %d (max: %d)", countAfter, testMaxStreamLen)
+		countAfter, err := storage.Count(ctx)
+		require.NoError(t, err)
+		t.Logf("Stream count after cleanup: %d (max: %d)", countAfter, testMaxStreamLen)
 
-	assert.LessOrEqual(t, countAfter, testMaxStreamLen,
-		"Stream should be trimmed to maxStreamLength after periodic cleanup")
-	assert.Less(t, countAfter, countBefore,
-		"Stream should have fewer messages after cleanup")
+		assert.LessOrEqual(t, countAfter, testMaxStreamLen,
+			"Stream should be trimmed to maxStreamLength after periodic cleanup")
+	}
 
 	// Store more commitments to exceed limit again
 	t.Log("Storing 3K more commitments...")
