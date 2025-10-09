@@ -13,59 +13,48 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestSMTTypeScriptCompatibility tests exact compatibility with TypeScript implementation
-func TestSMTTypeScriptCompatibility(t *testing.T) {
-	// Test case 1: Simple case (known to work)
-	t.Run("SimpleCase", func(t *testing.T) {
+// TestSMTGetRoot test basic SMT root hash computation
+func TestSMTGetRoot(t *testing.T) {
+	t.Run("EmptyTree", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256)
-
-		err := smt.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3})
-		require.NoError(t, err, "AddLeaf failed")
-
-		err = smt.AddLeaf(big.NewInt(0b101), []byte{4, 5, 6})
-		require.NoError(t, err, "AddLeaf failed")
-
-		expectedHash := "00001c84da4abb4a2af2fa49e295032a5fbce583e2b8043a20246c27f327ee38d927"
-		actualHash := smt.GetRootHashHex()
-
-		require.Equal(t, expectedHash, actualHash, "Hash mismatch")
-		t.Logf("✅ Simple case exact match: %s", actualHash)
+		expected := "00001e54402898172f2948615fb17627733abbd120a85381c624ad060d28321be672"
+		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
-	// Test case 2: Complex case from TypeScript tests
-	t.Run("ComplexCase", func(t *testing.T) {
+	t.Run("LeftLeaf", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256)
+		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
 
-		testData := []struct {
-			path  int64
-			value string
-		}{
-			{0b110010000, "value00010000"},
-			{0b100000000, "value00000000"},
-			{0b100010000, "value00010000"},
-			{0b111100101, "value11100101"},
-			{0b1100, "value100"},
-			{0b1011, "value011"},
-			{0b111101111, "value11101111"},
-			{0b10001010, "value0001010"},
-			{0b11010101, "value1010101"},
-		}
+		expected := "0000ccd73506d27518c983860a47a6a323d41038a74f9339f5302798563cb168f12f"
+		require.Equal(t, expected, smt.GetRootHashHex())
+	})
 
-		for _, data := range testData {
-			err := smt.AddLeaf(big.NewInt(data.path), []byte(data.value))
-			if err != nil {
-				t.Fatalf("AddLeaf failed for path %b: %v", data.path, err)
-			}
-		}
+	t.Run("RightLeaf", func(t *testing.T) {
+		smt := NewSparseMerkleTree(api.SHA256)
+		smt.AddLeaf(big.NewInt(0b111), []byte{0x62})
 
-		expectedHash := "00001fd5fffc41e26f249d04e435b71dbe86d079711131671ed54431a5e117291b42"
-		actualHash := smt.GetRootHashHex()
+		expected := "00005219d2dac90ad497a82a5231f10cffaf5a12dc65b762be39a6d739b4159136a3"
+		require.Equal(t, expected, smt.GetRootHashHex())
+	})
 
-		if actualHash != expectedHash {
-			t.Errorf("Hash mismatch:\nExpected: %s\nActual:   %s", expectedHash, actualHash)
-		} else {
-			t.Logf("✅ Complex case exact match: %s", actualHash)
-		}
+	t.Run("TwoLeaves", func(t *testing.T) {
+		smt := NewSparseMerkleTree(api.SHA256)
+		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
+		smt.AddLeaf(big.NewInt(0b111), []byte{0x62})
+
+		expected := "0000b5fcdedf0f5e9cdaec060d8963b5ea86fcd16b7a48fa8607a3347a213316b857"
+		require.Equal(t, expected, smt.GetRootHashHex())
+	})
+
+	t.Run("FourLeaves", func(t *testing.T) {
+		smt := NewSparseMerkleTree(api.SHA256)
+		smt.AddLeaf(big.NewInt(0b1000), []byte{0x61})
+		smt.AddLeaf(big.NewInt(0b1100), []byte{0x62})
+		smt.AddLeaf(big.NewInt(0b1011), []byte{0x63})
+		smt.AddLeaf(big.NewInt(0b1111), []byte{0x64})
+
+		expected := "000095005e568fdac5cc01a3a091c70ce89ab2da98c36b254dd2ddf29bd568c377ab"
+		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 }
 
@@ -434,7 +423,7 @@ func TestSMTGetPath(t *testing.T) {
 		require.NotNil(t, merkleTreePath, "GetPath should return a path")
 		require.NotEmpty(t, merkleTreePath.Root, "Root hash should not be empty")
 		require.NotNil(t, merkleTreePath.Steps, "Steps should not be nil")
-		require.Equal(t, "0000482ddbdcdc36ad18e203c0262ad81af809aec071cce7b45ac84d5d9b0f40f079", merkleTreePath.Root, "Root hash should match expected value")
+		require.Equal(t, smt.GetRootHashHex(), merkleTreePath.Root, "Root hash should match expected value")
 		require.Equal(t, 1, len(merkleTreePath.Steps), "There should be exactly one step in the path")
 		require.Equal(t, 1, len(merkleTreePath.Steps[0].Branch), "Step should have one branch")
 		// Branch should contain the value of the LeafBranch, not its hash

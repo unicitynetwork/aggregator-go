@@ -52,10 +52,8 @@ func (h *DataHash) ToHex() string {
 
 // DataHasher wraps a hash algorithm identifier and a corresponding hash function object
 type DataHasher struct {
-	// Identifies the hash algorithm
-	algorithm HashAlgorithm
-	// The hasher object used internally
-	hasher hash.Hash
+	algorithm HashAlgorithm // Identifies the hash algorithm
+	hasher    hash.Hash     // The hasher object used internally
 }
 
 // NewDataHasher creates a new DataHasher using the given algorithm
@@ -82,10 +80,15 @@ func (h *DataHasher) GetAlgorithm() HashAlgorithm {
 	return h.algorithm
 }
 
-// AddData adds data to the hasher
+// AddData adds data to the hasher, returns the hasher for easy call chaining
 func (h *DataHasher) AddData(data []byte) *DataHasher {
 	h.hasher.Write(data) // hash.Hash.Write promises to never return errors
 	return h
+}
+
+// AddCborBytes adds data to the hasher as CBOR byte string, returns the hasher for easy call chaining
+func (h *DataHasher) AddCborBytes(data []byte) *DataHasher {
+	return h.AddData(CborBytes(len(data))).AddData(data)
 }
 
 // GetHash finalizes the computation and returns the hash value
@@ -93,7 +96,7 @@ func (h *DataHasher) GetHash() *DataHash {
 	return NewDataHash(h.algorithm, h.hasher.Sum(nil))
 }
 
-// Reset resets the hasher to initial state
+// Reset resets the hasher to initial state, returns the hasher for easy call chaining
 func (h *DataHasher) Reset() *DataHasher {
 	h.hasher.Reset()
 	return h
