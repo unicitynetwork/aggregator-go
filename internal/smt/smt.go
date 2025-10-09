@@ -159,16 +159,16 @@ func (r *RootNode) calculateHash(hasher *api.DataHasher) *api.DataHash {
 	pathBytes := api.BigintEncode(r.Path)
 	rootHasher.AddCborBytes(pathBytes)
 
-	if r.Left != nil {
-		rootHasher.AddCborBytes(r.Left.calculateHash(hasher).RawHash)
+	if r.Left == nil {
+		rootHasher.AddCborNull()
 	} else {
-		rootHasher.AddData(api.CborNull())
+		rootHasher.AddCborBytes(r.Left.calculateHash(hasher).RawHash)
 	}
 
-	if r.Right != nil {
-		rootHasher.AddCborBytes(r.Right.calculateHash(hasher).RawHash)
+	if r.Right == nil {
+		rootHasher.AddCborNull()
 	} else {
-		rootHasher.AddData(api.CborNull())
+		rootHasher.AddCborBytes(r.Right.calculateHash(hasher).RawHash)
 	}
 
 	return rootHasher.GetHash()

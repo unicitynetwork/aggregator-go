@@ -91,6 +91,11 @@ func (h *DataHasher) AddCborBytes(data []byte) *DataHasher {
 	return h.AddData(CborBytes(len(data))).AddData(data)
 }
 
+// AddCborNull adds a CBOR null to the hasher, returns the hasher for easy call chaining
+func (h *DataHasher) AddCborNull() *DataHasher {
+	return h.AddData(CborNull())
+}
+
 // GetHash finalizes the computation and returns the hash value
 func (h *DataHasher) GetHash() *DataHash {
 	return NewDataHash(h.algorithm, h.hasher.Sum(nil))
