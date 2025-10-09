@@ -7,13 +7,14 @@ import (
 	redislib "github.com/redis/go-redis/v9"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/redis"
 )
 
 // NewStorage creates commitment queue and storage based on configuration
-func NewStorage(cfg *config.Config) (interfaces.CommitmentQueue, interfaces.Storage, error) {
+func NewStorage(cfg *config.Config, log *logger.Logger) (interfaces.CommitmentQueue, interfaces.Storage, error) {
 	// Always create MongoDB for persistence
 	mongoStorage, err := mongodb.NewStorage(*cfg)
 	if err != nil {
@@ -23,7 +24,7 @@ func NewStorage(cfg *config.Config) (interfaces.CommitmentQueue, interfaces.Stor
 	// Choose commitment queue implementation
 	var commitmentQueue interfaces.CommitmentQueue
 	if cfg.Storage.UseRedisForCommitments {
-		commitmentQueue, err = createRedisCommitmentQueue(cfg)
+		commitmentQueue, err = createRedisCommitmentQueue(cfg, log)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create Redis commitment queue: %w", err)
 		}
@@ -36,7 +37,7 @@ func NewStorage(cfg *config.Config) (interfaces.CommitmentQueue, interfaces.Stor
 }
 
 // createRedisCommitmentQueue creates a Redis-based commitment queue
-func createRedisCommitmentQueue(cfg *config.Config) (interfaces.CommitmentQueue, error) {
+func createRedisCommitmentQueue(cfg *config.Config, log *logger.Logger) (interfaces.CommitmentQueue, error) {
 	// Create Redis client
 	redisClient := redislib.NewClient(&redislib.Options{
 		Addr:         fmt.Sprintf("%s:%d", cfg.Redis.Host, cfg.Redis.Port),
@@ -70,7 +71,7 @@ func createRedisCommitmentQueue(cfg *config.Config) (interfaces.CommitmentQueue,
 	}
 
 	// Create commitment storage
-	commitmentStorage := redis.NewCommitmentStorageWithBatchConfig(redisClient, serverID, batchConfig)
+	commitmentStorage := redis.NewCommitmentStorage(redisClient, serverID, batchConfig, log)
 
 	return commitmentStorage, nil
 }

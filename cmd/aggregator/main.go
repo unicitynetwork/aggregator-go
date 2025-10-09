@@ -67,7 +67,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	commitmentQueue, storageInstance, err := storage.NewStorage(cfg)
+	commitmentQueue, storageInstance, err := storage.NewStorage(cfg, log)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to initialize storage", "error", err.Error())
 		gracefulExit(asyncLogger, 1)

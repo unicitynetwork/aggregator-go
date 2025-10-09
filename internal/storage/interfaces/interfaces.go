@@ -21,6 +21,9 @@ type CommitmentQueue interface {
 	// GetUnprocessedBatchWithCursor retrieves a batch with cursor-based pagination
 	GetUnprocessedBatchWithCursor(ctx context.Context, lastID string, limit int) ([]*models.Commitment, string, error)
 
+	// StreamCommitments continuously streams commitments to the provided channel
+	StreamCommitments(ctx context.Context, commitmentChan chan<- *models.Commitment) error
+
 	// MarkProcessed marks commitments as processed
 	MarkProcessed(ctx context.Context, requestIDs []api.RequestID) error
 

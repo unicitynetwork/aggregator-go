@@ -2,6 +2,7 @@ package round
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"sync"
@@ -13,7 +14,6 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
-	"github.com/unicitynetwork/aggregator-go/internal/storage/redis"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -130,7 +130,7 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 		smt:                 threadSafeSMT,
 		leaderSelector:      leaderSelector,
 		roundDuration:       cfg.Processing.RoundDuration,         // Configurable round duration (default 1s)
-		commitmentStream:    make(chan *models.Commitment, 10000), // // Reasonable buffer for streaming
+		commitmentStream:    make(chan *models.Commitment, 10000), // Reasonable buffer for streaming
 		avgProcessingRate:   1.0,                                  // Initial estimate: 1 commitment per ms
 		processingRatio:     0.7,                                  // Start with 70% of round for processing (conservative but good throughput)
 		avgFinalizationTime: 200 * time.Millisecond,               // Initial estimate (conservative)
@@ -560,16 +560,15 @@ ProcessLoop:
 	return nil
 }
 
-// redisCommitmentStreamer uses Redis StreamCommitments to continuously stream commitments
+// redisCommitmentStreamer uses StreamCommitments to continuously stream commitments
 func (rm *RoundManager) redisCommitmentStreamer(ctx context.Context) {
 	defer rm.wg.Done()
 
 	rm.logger.WithContext(ctx).Info("Redis commitment streamer started")
 
-	redisStorage := rm.commitmentQueue.(*redis.CommitmentStorage)
-	err := redisStorage.StreamCommitments(ctx, rm.commitmentStream)
+	err := rm.commitmentQueue.StreamCommitments(ctx, rm.commitmentStream)
 
-	if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		rm.logger.WithContext(ctx).Error("Redis commitment streamer ended with error",
 			"error", err.Error())
 	} else {

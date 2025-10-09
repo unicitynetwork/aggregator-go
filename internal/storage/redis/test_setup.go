@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/unicitynetwork/aggregator-go/internal/logger"
 )
 
 func setupTestRedis(t *testing.T) (*CommitmentStorage, func()) {
@@ -63,7 +65,8 @@ func setupTestRedis(t *testing.T) (*CommitmentStorage, func()) {
 	err = client.FlushDB(ctx).Err()
 	require.NoError(t, err)
 
-	storage := NewCommitmentStorage(client, "test-server")
+	log, _ := logger.New("info", "text", "stdout", false)
+	storage := NewCommitmentStorage(client, "test-server", DefaultBatchConfig(), log)
 	require.NoError(t, storage.Initialize(ctx))
 
 	cleanup := func() {

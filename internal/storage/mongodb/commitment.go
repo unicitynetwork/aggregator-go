@@ -164,6 +164,11 @@ func (cs *CommitmentStorage) Initialize(ctx context.Context) error {
 	return nil
 }
 
+// StreamCommitments is not supported for MongoDB - use GetUnprocessedBatchWithCursor instead
+func (cs *CommitmentStorage) StreamCommitments(ctx context.Context, commitmentChan chan<- *models.Commitment) error {
+	return fmt.Errorf("StreamCommitments not supported for MongoDB - use GetUnprocessedBatchWithCursor for polling")
+}
+
 // Close closes the commitment storage (no-op for MongoDB as connection is managed by Storage)
 func (cs *CommitmentStorage) Close(ctx context.Context) error {
 	return nil

@@ -9,6 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -18,7 +19,7 @@ const (
 	consumerGroup        = "processors"
 	cleanupInterval      = 5 * time.Minute
 	maxStreamLength      = 1000000                // Keep last 1M messages
-	defaultFlushInterval = 100 * time.Millisecond // Optimal performance based on testing
+	defaultFlushInterval = 100 * time.Millisecond // How often to flush pending items to Redis
 	defaultBatchSize     = 5000                   // Max batch size before forcing flush
 )
 
@@ -54,6 +55,7 @@ type CommitmentStorage struct {
 	stopChan    chan struct{}
 	closed      atomic.Bool
 	batchConfig *BatchConfig
+	logger      *logger.Logger
 
 	// Restart recovery: on startup, exhaust all pending messages before reading new ones
 	// This ensures messages stuck in "pending" state (from crashed consumer) are recovered
@@ -65,19 +67,15 @@ type CommitmentStorage struct {
 	flushTicker *time.Ticker
 }
 
-// NewCommitmentStorage creates a new Redis-based commitment storage instance with default batching
-func NewCommitmentStorage(client *redis.Client, serverID string) *CommitmentStorage {
-	return NewCommitmentStorageWithBatchConfig(client, serverID, DefaultBatchConfig())
-}
-
-// NewCommitmentStorageWithBatchConfig creates a new Redis-based commitment storage instance with custom batching config
-func NewCommitmentStorageWithBatchConfig(client *redis.Client, serverID string, batchConfig *BatchConfig) *CommitmentStorage {
+// NewCommitmentStorage creates a new Redis-based commitment storage instance with custom batching config
+func NewCommitmentStorage(client *redis.Client, serverID string, batchConfig *BatchConfig, log *logger.Logger) *CommitmentStorage {
 	cs := &CommitmentStorage{
 		client:      client,
 		serverID:    serverID,
 		consumerID:  "processor",
 		stopChan:    make(chan struct{}),
 		batchConfig: batchConfig,
+		logger:      log,
 		pendingChan: make(chan *pendingCommitment, batchConfig.MaxBatchSize*2), // Buffer for 2x max batch
 		flushTicker: time.NewTicker(batchConfig.FlushInterval),
 	}
@@ -403,7 +401,7 @@ func (cs *CommitmentStorage) CountUnprocessed(ctx context.Context) (int64, error
 	}
 
 	pending := pendingInfo.Val()
-	return int64(pending.Count), nil
+	return pending.Count, nil
 }
 
 // parseCommitment parses a Redis stream message into a Commitment
@@ -440,8 +438,21 @@ func (cs *CommitmentStorage) periodicCleanup(ctx context.Context) {
 
 // trimStream keeps the stream at a reasonable size
 func (cs *CommitmentStorage) trimStream(ctx context.Context) {
+	// Get current count before trimming
+	countBefore, _ := cs.Count(ctx)
+
 	// Trim to keep only the last N messages
-	_ = cs.client.XTrimMaxLen(ctx, commitmentStream, cs.batchConfig.MaxStreamLength).Err()
+	trimmed := cs.client.XTrimMaxLen(ctx, commitmentStream, cs.batchConfig.MaxStreamLength).Val()
+
+	if trimmed > 0 {
+		countAfter := countBefore - trimmed
+		cs.logger.WithContext(ctx).Info("Redis stream trimmed",
+			"stream", commitmentStream,
+			"trimmed", trimmed,
+			"before", countBefore,
+			"after", countAfter,
+			"maxLength", cs.batchConfig.MaxStreamLength)
+	}
 }
 
 // StreamCommitments continuously streams commitments using blocking Redis reads
