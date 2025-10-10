@@ -3,7 +3,10 @@ package redis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -56,6 +59,7 @@ type CommitmentStorage struct {
 	closed      atomic.Bool
 	batchConfig *BatchConfig
 	logger      *logger.Logger
+	wg          sync.WaitGroup // Tracks background goroutines for graceful shutdown
 
 	// Restart recovery: on startup, exhaust all pending messages before reading new ones
 	// This ensures messages stuck in "pending" state (from crashed consumer) are recovered
@@ -80,20 +84,24 @@ func NewCommitmentStorage(client *redis.Client, serverID string, batchConfig *Ba
 		flushTicker: time.NewTicker(batchConfig.FlushInterval),
 	}
 
-	go cs.batchProcessor()
-
 	return cs
 }
 
-// Initialize creates the consumer group and starts cleanup routine
+// Initialize creates the consumer group and starts background goroutines
 func (cs *CommitmentStorage) Initialize(ctx context.Context) error {
 	err := cs.client.XGroupCreateMkStream(ctx, commitmentStream, consumerGroup, "0").Err()
-	if err != nil && err.Error() != "BUSYGROUP Consumer Group name already exists" {
+	// Ignore "BUSYGROUP" error - it means the consumer group already exists
+	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
 		return fmt.Errorf("failed to create consumer group: %w", err)
 	}
 
-	// Only start periodic cleanup if interval is configured
+	// Start batch processor
+	cs.wg.Add(1)
+	go cs.batchProcessor()
+
+	// Start periodic cleanup if interval is configured
 	if cs.batchConfig.CleanupInterval > 0 {
+		cs.wg.Add(1)
 		go cs.periodicCleanup(ctx)
 	}
 
@@ -109,11 +117,17 @@ func (cs *CommitmentStorage) Close(ctx context.Context) error {
 
 	cs.flushTicker.Stop()
 	close(cs.stopChan)
+
+	// Wait for all background goroutines to finish
+	cs.wg.Wait()
+
 	return nil
 }
 
 // batchProcessor runs in the background and processes pending commitments in batches
 func (cs *CommitmentStorage) batchProcessor() {
+	defer cs.wg.Done()
+
 	var pendingBatch []*pendingCommitment
 	var flushTimer <-chan time.Time
 
@@ -335,11 +349,11 @@ func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, requestIDs []api
 		Count:    int64(len(requestIDs)), // Only get the exact number we need
 	})
 
-	if pending.Err() != nil {
-		if pending.Err() == redis.Nil {
+	if err := pending.Err(); err != nil {
+		if errors.Is(err, redis.Nil) {
 			return nil // No pending entries
 		}
-		return fmt.Errorf("failed to get pending entries: %w", pending.Err())
+		return fmt.Errorf("failed to get pending entries: %w", err)
 	}
 
 	pendingEntries := pending.Val()
@@ -377,14 +391,34 @@ func (cs *CommitmentStorage) Delete(ctx context.Context, requestIDs []api.Reques
 	return nil
 }
 
+// Cleanup removes all data for this storage instance (useful for testing)
+func (cs *CommitmentStorage) Cleanup(ctx context.Context) error {
+	// Delete the stream entirely
+	err := cs.client.Del(ctx, commitmentStream).Err()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return fmt.Errorf("failed to delete stream: %w", err)
+	}
+
+	// Delete the consumer group (will be recreated on next Initialize)
+	err = cs.client.XGroupDestroy(ctx, commitmentStream, consumerGroup).Err()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		// Ignore "NOGROUP" error - group doesn't exist
+		if !strings.Contains(err.Error(), "NOGROUP") {
+			return fmt.Errorf("failed to destroy consumer group: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // Count returns the total number of commitments in the stream
 func (cs *CommitmentStorage) Count(ctx context.Context) (int64, error) {
 	info := cs.client.XInfoStream(ctx, commitmentStream)
-	if info.Err() != nil {
-		if info.Err() == redis.Nil {
+	if err := info.Err(); err != nil {
+		if errors.Is(err, redis.Nil) {
 			return 0, nil
 		}
-		return 0, fmt.Errorf("failed to get stream info: %w", info.Err())
+		return 0, fmt.Errorf("failed to get stream info: %w", err)
 	}
 	return info.Val().Length, nil
 }
@@ -393,11 +427,11 @@ func (cs *CommitmentStorage) Count(ctx context.Context) (int64, error) {
 func (cs *CommitmentStorage) CountUnprocessed(ctx context.Context) (int64, error) {
 	// Get pending count for the entire consumer group - this represents unprocessed items
 	pendingInfo := cs.client.XPending(ctx, commitmentStream, consumerGroup)
-	if pendingInfo.Err() != nil {
-		if pendingInfo.Err() == redis.Nil {
+	if err := pendingInfo.Err(); err != nil {
+		if errors.Is(err, redis.Nil) {
 			return 0, nil
 		}
-		return 0, fmt.Errorf("failed to get pending count: %w", pendingInfo.Err())
+		return 0, fmt.Errorf("failed to get pending count: %w", err)
 	}
 
 	pending := pendingInfo.Val()
@@ -421,6 +455,8 @@ func (cs *CommitmentStorage) parseCommitment(message redis.XMessage) (*models.Co
 
 // periodicCleanup runs periodic maintenance on the stream
 func (cs *CommitmentStorage) periodicCleanup(ctx context.Context) {
+	defer cs.wg.Done()
+
 	ticker := time.NewTicker(cs.batchConfig.CleanupInterval)
 	defer ticker.Stop()
 
@@ -479,8 +515,8 @@ func (cs *CommitmentStorage) StreamCommitments(ctx context.Context, commitmentCh
 					Block:    0, // Don't block
 				})
 
-				if pendingStreams.Err() != nil && pendingStreams.Err() != redis.Nil {
-					return fmt.Errorf("failed to check pending messages: %w", pendingStreams.Err())
+				if err := pendingStreams.Err(); err != nil && !errors.Is(err, redis.Nil) {
+					return fmt.Errorf("failed to check pending messages: %w", err)
 				}
 
 				// If we got pending, keep reading them
@@ -502,15 +538,15 @@ func (cs *CommitmentStorage) StreamCommitments(ctx context.Context, commitmentCh
 				})
 			}
 
-			if streams.Err() != nil {
-				if streams.Err() == redis.Nil {
+			if err := streams.Err(); err != nil {
+				if errors.Is(err, redis.Nil) {
 					// No new messages, continue (shouldn't happen with block=0, but just in case)
 					continue
 				}
-				if streams.Err() == context.Canceled || streams.Err() == context.DeadlineExceeded {
-					return streams.Err() // Context cancelled, exit gracefully
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return err // Context cancelled, exit gracefully
 				}
-				return fmt.Errorf("failed to read from stream: %w", streams.Err())
+				return fmt.Errorf("failed to read from stream: %w", err)
 			}
 
 			// Process messages and stream them to the channel

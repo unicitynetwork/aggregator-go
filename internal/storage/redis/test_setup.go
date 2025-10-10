@@ -10,39 +10,44 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
-
-	"github.com/unicitynetwork/aggregator-go/internal/logger"
 )
 
-func setupTestRedis(t *testing.T) (*CommitmentStorage, func()) {
-	ctx := context.Background()
-
-	// Start Redis container
+// CreateTestRedisContainer starts a Redis container for testing
+// Returns the container and a cleanup function
+func CreateTestRedisContainer(ctx context.Context, t *testing.T) (testcontainers.Container, func()) {
 	req := testcontainers.ContainerRequest{
 		Image:        "redis:7-alpine",
 		ExposedPorts: []string{"6379/tcp"},
 		WaitingFor:   wait.ForLog("Ready to accept connections"),
 		Cmd: []string{
 			"redis-server",
-			"--save", "1", "1",
-			"--appendonly", "yes",
-			"--appendfsync", "everysec",
+			"--save", "", // Disable RDB persistence for tests
+			"--appendonly", "no", // Disable AOF persistence for tests
 		},
 	}
 
-	redisContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
 		Started:          true,
 	})
-	if err != nil {
-		t.Skipf("Could not start Redis container: %v", err)
+	require.NoError(t, err, "Failed to start Redis container")
+
+	cleanup := func() {
+		if container != nil {
+			container.Terminate(ctx)
+		}
 	}
 
+	return container, cleanup
+}
+
+// CreateRedisClient creates a Redis client connected to the given container
+func CreateRedisClient(ctx context.Context, container testcontainers.Container, t *testing.T) *redis.Client {
 	// Get container host and port
-	host, err := redisContainer.Host(ctx)
+	host, err := container.Host(ctx)
 	require.NoError(t, err)
 
-	mappedPort, err := redisContainer.MappedPort(ctx, "6379")
+	mappedPort, err := container.MappedPort(ctx, "6379")
 	require.NoError(t, err)
 
 	// Create Redis client
@@ -61,19 +66,5 @@ func setupTestRedis(t *testing.T) (*CommitmentStorage, func()) {
 	err = client.Ping(ctx).Err()
 	require.NoError(t, err, "Failed to connect to Redis container")
 
-	// Clean database
-	err = client.FlushDB(ctx).Err()
-	require.NoError(t, err)
-
-	log, _ := logger.New("info", "text", "stdout", false)
-	storage := NewCommitmentStorage(client, "test-server", DefaultBatchConfig(), log)
-	require.NoError(t, storage.Initialize(ctx))
-
-	cleanup := func() {
-		storage.Close(ctx)
-		client.Close()
-		redisContainer.Terminate(ctx)
-	}
-
-	return storage, cleanup
+	return client
 }
