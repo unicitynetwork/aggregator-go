@@ -16,7 +16,7 @@ import (
 // TestSMTGetRoot test basic SMT root hash computation
 func TestSMTGetRoot(t *testing.T) {
 	t.Run("EmptyTree", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256, 0)
+		smt := NewSparseMerkleTree(api.SHA256, 2)
 		expected := "00001e54402898172f2948615fb17627733abbd120a85381c624ad060d28321be672"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
@@ -417,19 +417,19 @@ func TestSMTGetPath(t *testing.T) {
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Test getting path for an existing leaf
-		merkleTreePath := smt.GetPath(path)
-		require.NotNil(t, merkleTreePath, "GetPath should return a path")
-		require.NotEmpty(t, merkleTreePath.Root, "Root hash should not be empty")
-		require.NotNil(t, merkleTreePath.Steps, "Steps should not be nil")
-		require.Equal(t, smt.GetRootHashHex(), merkleTreePath.Root, "Root hash should match expected value")
-		require.Equal(t, 1, len(merkleTreePath.Steps), "There should be exactly one step in the path")
-		require.Equal(t, 1, len(merkleTreePath.Steps[0].Branch), "Step should have one branch")
-		// Branch should contain the value of the LeafBranch, not its hash
-		require.Equal(t, "00000777e81da35187bc52073e96a10f89d7fe9aa826693982c8e748a96a3cc7d7b7", merkleTreePath.Steps[0].Branch[0], "Branch should contain the leaf value")
-		require.Equal(t, "7588617121771513359933852905331119149238064034818011809301695587375759386505263024", merkleTreePath.Steps[0].Path, "Step path should match leaf path")
-		require.Nil(t, merkleTreePath.Steps[0].Sibling, "Step should not have a sibling")
+		merklePath := smt.GetPath(path)
+		require.NotNil(t, merklePath, "GetPath should return a path")
+		require.Equal(t, smt.GetRootHashHex(), merklePath.Root, "Root hash should match expected value")
+		require.NotNil(t, merklePath.Steps, "Steps should not be nil")
+		require.Equal(t, 2, len(merklePath.Steps), "There should be exactly two steps in the path")
+		// First step should be the LeafNode hash step
+		require.Equal(t, "7588617121771513359933852905331119149238064034818011809301695587375759386505263024", merklePath.Steps[0].Path, "Leaf step path should match")
+		require.Equal(t, "00000777e81da35187bc52073e96a10f89d7fe9aa826693982c8e748a96a3cc7d7b7", *merklePath.Steps[0].Data, "Leaf step value should match")
+		// Second step should be the root hash step
+		require.Equal(t, "1", merklePath.Steps[1].Path, "Root step path should be empty")
+		require.Nil(t, merklePath.Steps[1].Data, "Root step value should be nil")
 
-		t.Logf("✅ Expected path test - Root: %s, Branch: %s", merkleTreePath.Root, merkleTreePath.Steps[0].Branch[0])
+		t.Logf("✅ Expected path test - Root: %s", merklePath.Root)
 	})
 
 	t.Run("BasicGetPath", func(t *testing.T) {
@@ -470,6 +470,7 @@ func TestSMTGetPath(t *testing.T) {
 
 		t.Logf("✅ GetPath for non-existent leaf - Root: %s, Steps: %d", path.Root, len(path.Steps))
 	})
+
 	t.Run("GetPathStructure", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 1)
 
@@ -487,7 +488,7 @@ func TestSMTGetPath(t *testing.T) {
 		// Verify step structure
 		for i, step := range path.Steps {
 			require.NotEmpty(t, step.Path, "Step path should not be empty")
-			t.Logf("Step %d: Path=%s, Branch=%v, Sibling=%v", i, step.Path, len(step.Branch), step.Sibling != nil)
+			t.Logf("Step %d: Path=%s, Data=%s", i, step.Path, *step.Data)
 		}
 
 		t.Logf("✅ GetPath structure verification - Root: %s, Steps: %d", path.Root, len(path.Steps))
@@ -521,15 +522,13 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		path := smt.GetPath(leafPath)
 		require.NotNil(t, path, "GetPath should return a path")
 		require.Equal(t, smt.GetRootHashHex(), path.Root, "Path root should match tree root")
-		require.Len(t, path.Steps, 1, "Single leaf should have one step")
 
 		step := path.Steps[0]
 		require.Equal(t, leafPath.String(), step.Path, "Step path should match leaf path")
-		require.Len(t, step.Branch, 1, "Step should have one branch hash")
-		require.Nil(t, step.Sibling, "Single leaf should have no sibling")
+		require.Equal(t, hex.EncodeToString(leafValue), *step.Data, "Step data should match leaf value")
 
-		t.Logf("✅ Single leaf path: Root=%s, Step path=%s, Branch=%s",
-			path.Root, step.Path, step.Branch[0])
+		t.Logf("✅ Single leaf path: Root=%s, Step path=%s, Data=%s",
+			path.Root, step.Path, *step.Data)
 	})
 
 	t.Run("GetPathWithTwoLeaves", func(t *testing.T) {
@@ -565,12 +564,12 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 
 		// Verify step details
 		for i, step := range merkPath1.Steps {
-			t.Logf("Path1 Step %d: Path=%s, Branch count=%d, Has sibling=%v",
-				i, step.Path, len(step.Branch), step.Sibling != nil)
+			t.Logf("Path1 Step %d: Path=%s, Data=%s",
+				i, step.Path, *step.Data)
 		}
 		for i, step := range merkPath2.Steps {
-			t.Logf("Path2 Step %d: Path=%s, Branch count=%d, Has sibling=%v",
-				i, step.Path, len(step.Branch), step.Sibling != nil)
+			t.Logf("Path2 Step %d: Path=%s, Data=%s",
+				i, step.Path, *step.Data)
 		}
 	})
 
@@ -597,10 +596,11 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 
 		// Verify the path structure
 		for i, step := range merkPath.Steps {
-			t.Logf("Step %d: Path=%s, Branch count=%d, Has sibling=%v",
-				i, step.Path, len(step.Branch), step.Sibling != nil)
+			t.Logf("Step %d: Path=%s, Data=%v",
+				i, step.Path, *step.Data)
 		}
 	})
+
 	t.Run("GetPathComplexTree", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 8)
 
@@ -635,11 +635,13 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 			// Verify each step has valid structure
 			for j, step := range merkPath.Steps {
 				require.NotEmpty(t, step.Path, "Step %d should have a path", j)
-				require.NotNil(t, step.Branch, "Step %d should have branch array", j)
-				// step.Sibling can be nil (that's valid)
-
-				t.Logf("  Step %d: Path=%s, Branch count=%d, Sibling=%v",
-					j, step.Path, len(step.Branch), step.Sibling != nil)
+				if j < len(merkPath.Steps)-1 {
+					require.NotNil(t, step.Data, "Step %d should have data", j)
+					t.Logf("  Step %d: Path=%s, Data=%s", j, step.Path, *step.Data)
+				} else {
+					require.Nil(t, step.Data, "Step %d should have no data", j)
+					t.Logf("  Step %d: Path=%s, Data=%v", j, step.Path, step.Data)
+				}
 			}
 		}
 
@@ -653,15 +655,18 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		path := smt.GetPath(big.NewInt(0b101))
 		require.NotNil(t, path, "GetPath should return a path even for empty tree")
 		require.NotEmpty(t, path.Root, "Root should not be empty even for empty tree")
-		require.NotNil(t, path.Steps, "Steps should not be nil") // Empty tree should have minimal steps
-		require.Len(t, path.Steps, 1, "Empty tree should have one step")
+		require.NotNil(t, path.Steps, "Steps should not be nil")
+		require.Len(t, path.Steps, 2, "Should have two steps")
 
-		step := path.Steps[0]
-		require.Equal(t, "5", step.Path, "Step path should match requested path (decimal representation)")
-		require.Empty(t, step.Branch, "Empty tree step should have no branch")
-		require.Nil(t, step.Sibling, "Empty tree step should have no sibling")
+		step0 := path.Steps[0]
+		require.Equal(t, "0", step0.Path, "Input step path")
+		require.Nil(t, step0.Data, "Empty tree step should have no data")
 
-		t.Logf("✅ Empty tree path: Root=%s, Step path=%s", path.Root, step.Path)
+		step1 := path.Steps[1]
+		require.Equal(t, "1", step1.Path, "Root step path")
+		require.Nil(t, step1.Data, "Empty tree step should have no data")
+
+		t.Logf("✅ Empty tree path: Root=%s", path.Root)
 	})
 
 	t.Run("GetPathValidation", func(t *testing.T) {
@@ -696,19 +701,9 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 			for i, step := range merkPath.Steps {
 				require.NotEmpty(t, step.Path, "Step %d must have path", i)
 
-				// Branch should either be empty (for missing nodes) or have one hash
-				require.True(t, len(step.Branch) <= 1, "Step %d should have at most one branch hash", i)
-
-				// If branch exists, it should be a valid hex hash
-				if len(step.Branch) > 0 {
-					require.Regexp(t, "^[0-9a-f]+$", step.Branch[0], "Branch hash should be valid hex")
-					require.True(t, len(step.Branch[0]) > 0, "Branch hash should not be empty")
-				}
-
-				// If sibling exists, it should be a valid hex hash
-				if len(step.Sibling) > 0 {
-					require.Regexp(t, "^[0-9a-f]+$", step.Sibling[0], "Sibling hash should be valid hex")
-					require.True(t, len(step.Sibling[0]) > 0, "Sibling hash should not be empty")
+				// If data exists, it should be valid hex
+				if step.Data != nil {
+					require.Regexp(t, "^[0-9a-f]+$", *step.Data, "Step data should be valid hex")
 				}
 			}
 
@@ -750,49 +745,52 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		for i, step1a := range merkPath1a.Steps {
 			step1b := merkPath1b.Steps[i]
 			require.Equal(t, step1a.Path, step1b.Path, "Step %d path should be consistent", i)
-			require.Equal(t, step1a.Branch, step1b.Branch, "Step %d branch should be consistent", i)
-			require.Equal(t, step1a.Sibling, step1b.Sibling, "Step %d sibling should be consistent", i)
+			require.Equal(t, step1a.Data, step1b.Data, "Step %d data should be consistent", i)
 		}
 
 		t.Logf("✅ GetPath consistency verified for multiple calls")
 	})
+
 	t.Run("GetPathBinaryRepresentation", func(t *testing.T) {
 		// Test path handling with various binary representations
 		testCases := []struct {
-			name     string
-			path     *big.Int
-			binary   string
-			expected string
+			name   string
+			binary string
 		}{
-			{"Small path", big.NewInt(0b1), "1", "1"},
-			{"Medium path", big.NewInt(0b1010), "1010", "10"},         // decimal: 10
-			{"Large path", big.NewInt(0b10000000), "10000000", "128"}, // decimal: 128
+			{"Small path left", "10"},
+			{"Small path right", "11"},
+			{"Medium path left", "10100"},
+			{"Medium path right", "10101"},
+			{"Large path left", "100000000"},
+			{"Large path right", "100000001"},
 		}
 
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
+				path, _ := new(big.Int).SetString(tc.binary, 2)
+
 				// Create a new tree for each test case to avoid conflicts
-				smt := NewSparseMerkleTree(api.SHA256, tc.path.BitLen()-1)
+				smt := NewSparseMerkleTree(api.SHA256, path.BitLen()-1)
 
 				// Add leaf
-				err := smt.AddLeaf(tc.path, []byte(fmt.Sprintf("value_%s", tc.name)))
+				err := smt.AddLeaf(path, []byte(fmt.Sprintf("value_%s", tc.name)))
 				require.NoError(t, err, "AddLeaf failed for %s", tc.name)
 
 				// Get path
-				merkPath := smt.GetPath(tc.path)
+				merkPath := smt.GetPath(path)
 				require.NotNil(t, merkPath, "GetPath should return a path for %s", tc.name)
 
 				// Verify the path representation in steps
 				found := false
 				for _, step := range merkPath.Steps {
-					if step.Path == tc.expected {
+					if step.Path == path.String() {
 						found = true
 						break
 					}
 				}
-				require.True(t, found, "Path %s should appear in steps", tc.expected)
+				require.True(t, found, "Path %s should appear in steps", tc.binary)
 
-				t.Logf("✅ Binary path %s (%s) handled correctly", tc.binary, tc.expected)
+				t.Logf("✅ Binary path %s handled correctly", tc.binary)
 			})
 		}
 	})

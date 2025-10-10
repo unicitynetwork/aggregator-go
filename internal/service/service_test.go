@@ -6,6 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"os"
+	"strconv"
+	"testing"
+	"time"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -17,11 +23,6 @@ import (
 	mongodbStorage "github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
-	"net/http"
-	"os"
-	"strconv"
-	"testing"
-	"time"
 )
 
 func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func()) {
@@ -88,7 +89,7 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	// Wait for the server to be ready
 	serverAddr := fmt.Sprintf("http://%s:%s", cfg.Server.Host, cfg.Server.Port)
 	t.Logf("Waiting for server at %s", serverAddr)
-	
+
 	require.Eventually(t, func() bool {
 		resp, err := http.Get(serverAddr + "/health")
 		if err != nil {
@@ -122,9 +123,13 @@ func TestInclusionProofMissingRecord(t *testing.T) {
 	serverAddr, cleanup := setupMongoDBAndAggregator(t, ctx)
 	defer cleanup()
 
+	requestId := ""
+	for i := 0; i < 2+32; i++ {
+		requestId = requestId + "00"
+	}
 	request, err := jsonrpc.NewRequest(
 		"get_inclusion_proof",
-		&api.GetInclusionProofRequest{RequestID: "00000000"},
+		&api.GetInclusionProofRequest{RequestID: api.RequestID(requestId)},
 		"test-request-id")
 	require.NoError(t, err)
 

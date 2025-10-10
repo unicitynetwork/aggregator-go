@@ -33,6 +33,9 @@ type (
 
 // NewSparseMerkleTree creates a new sparse merkle tree
 func NewSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int) *SparseMerkleTree {
+	if keyLength <= 0 {
+		panic("SMT key length must be positive")
+	}
 	return &SparseMerkleTree{
 		keyLength:  keyLength,
 		hasher:     api.NewDataHasher(algorithm),
@@ -430,7 +433,7 @@ func (smt *SparseMerkleTree) GetPath(path *big.Int) *api.MerkleTreePath {
 	}
 
 	rootHash := smt.root.calculateHash(smt.hasher)
-	steps := smt.generatePath(path, smt.root.Left, smt.root.Right)
+	steps := smt.generatePath(path, smt.root)
 
 	return &api.MerkleTreePath{
 		Root:  rootHash.ToHex(),
@@ -439,105 +442,88 @@ func (smt *SparseMerkleTree) GetPath(path *big.Int) *api.MerkleTreePath {
 }
 
 // generatePath recursively generates the Merkle tree path steps
-func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right branch) []api.MerkleTreeStep {
-	// Determine if we should go right (remainingPath & 1n)
-	isRight := remainingPath.Bit(0) == 1
+func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, currentNode branch) []api.MerkleTreeStep {
+	if remainingPath.BitLen() < 2 {
+		panic("Invalid remaining path, must be internal logic error")
+	}
 
-	var branch, siblingBranch branch
-	if isRight {
-		branch = right
-		siblingBranch = left
+	if currentNode.isLeaf() {
+		// We are in a leaf branch, no further navigation
+		// Create the corresponding leaf hash step
+		currentLeaf, _ := currentNode.(*LeafBranch)
+		path := currentLeaf.Path.String()
+		data := hex.EncodeToString(currentLeaf.Value)
+		return []api.MerkleTreeStep{
+			{Path: path, Data: &data},
+		}
+	}
+
+	currentBranch, ok := currentNode.(*NodeBranch)
+	if !ok {
+		panic("Unknown target branch type")
+	}
+
+	commonPath := calculateCommonPath(remainingPath, currentBranch.Path)
+	if commonPath.length < uint(currentBranch.Path.BitLen()-1) {
+		// Remaining path diverges or ends here
+		// Root node is a special case, because of its empty path
+		// Create the corresponding 2-step proof
+		// No nil children in non-root nodes
+		leftHash := hex.EncodeToString(currentBranch.Left.calculateHash(smt.hasher).RawHash)
+		rightHash := hex.EncodeToString(currentBranch.Right.calculateHash(smt.hasher).RawHash)
+		// This looks weird, but see the effect in api.MerkleTreePath.Verify()
+		return []api.MerkleTreeStep{
+			{Path: "0", Data: &rightHash},
+			{Path: currentBranch.Path.String(), Data: &leftHash},
+		}
+	}
+
+	// Trim remaining path for descending into subtree
+	remainingPath = new(big.Int).Rsh(remainingPath, commonPath.length)
+
+	var target, sibling branch
+	if remainingPath.Bit(0) == 0 {
+		// Target in the left child
+		target = currentBranch.Left
+		sibling = currentBranch.Right
 	} else {
-		branch = left
-		siblingBranch = right
+		// Target in the right child
+		target = currentBranch.Right
+		sibling = currentBranch.Left
 	}
 
-	if branch == nil {
-		// No branch exists at this position - create step without branch
-		step := api.MerkleTreeStep{
-			Path:   remainingPath.String(),
-			Branch: nil, // nil indicates no branch exists
+	if target == nil {
+		// Target branch empty
+		// This can happen only at the root node
+		// Create the 2-step exclusion proof
+		// There may be nil children here
+		var leftHash, rightHash *string
+		if currentBranch.Left != nil {
+			tmp := hex.EncodeToString(currentBranch.Left.calculateHash(smt.hasher).RawHash)
+			leftHash = &tmp
 		}
-		if siblingBranch != nil {
-			siblingHash := siblingBranch.calculateHash(smt.hasher)
-			step.Sibling = []string{hex.EncodeToString(siblingHash.RawHash)}
+		if currentBranch.Right != nil {
+			tmp := hex.EncodeToString(currentBranch.Right.calculateHash(smt.hasher).RawHash)
+			rightHash = &tmp
 		}
-		// If siblingBranch is nil, leave Sibling as nil (omitempty will exclude it from JSON)
-		return []api.MerkleTreeStep{step}
+		// This looks weird, but see the effect in api.MerkleTreePath.Verify()
+		return []api.MerkleTreeStep{
+			{Path: "0", Data: rightHash},
+			{Path: "1", Data: leftHash},
+		}
 	}
 
-	commonPath := calculateCommonPath(remainingPath, branch.getPath())
+	steps := smt.generatePath(remainingPath, target)
 
-	if branch.getPath().Cmp(commonPath.path) == 0 {
-		if branch.isLeaf() {
-			return []api.MerkleTreeStep{smt.createMerkleTreeStep(branch.getPath(), branch, siblingBranch)}
-		}
-
-		// If path has ended, return the current non-leaf branch data
-		shifted := new(big.Int).Rsh(remainingPath, commonPath.length)
-		if shifted.Cmp(big.NewInt(1)) == 0 {
-			return []api.MerkleTreeStep{smt.createMerkleTreeStep(branch.getPath(), branch, siblingBranch)}
-		}
-
-		// Continue recursively into the branch
-		nodeBranch, ok := branch.(*NodeBranch)
-		if !ok {
-			// Should not happen if IsLeaf() returned false
-			return []api.MerkleTreeStep{smt.createMerkleTreeStep(branch.getPath(), branch, siblingBranch)}
-		}
-
-		// Recursively generate path for the shifted remaining path
-		shiftedRemaining := new(big.Int).Rsh(remainingPath, commonPath.length)
-		recursiveSteps := smt.generatePath(shiftedRemaining, nodeBranch.Left, nodeBranch.Right)
-
-		// Create the current step without branch (since we went into it)
-		currentStep := smt.createMerkleTreeStep(branch.getPath(), nil, siblingBranch)
-
-		// Prepend recursive steps to current step (TypeScript: [...recursiveSteps, currentStep])
-		steps := make([]api.MerkleTreeStep, 0, len(recursiveSteps)+1)
-		steps = append(steps, recursiveSteps...)
-		steps = append(steps, currentStep)
-		return steps
-	}
-
-	return []api.MerkleTreeStep{smt.createMerkleTreeStep(branch.getPath(), branch, siblingBranch)}
-}
-
-// createMerkleTreeStep creates a api.MerkleTreeStep with proper branch and sibling handling
-func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, siblingBranch branch) api.MerkleTreeStep {
+	// Add the step for the current branch
 	step := api.MerkleTreeStep{
-		Path:    path.String(),
-		Branch:  nil, // Initialize as nil
-		Sibling: nil,
+		Path: currentBranch.Path.String(),
 	}
-
-	// Add branch data
-	if branch != nil {
-		// Branch exists, add its data
-		step.Branch = []string{}
-		if leafBranch, ok := branch.(*LeafBranch); ok {
-			step.Branch = []string{hex.EncodeToString(leafBranch.Value)}
-		} else {
-			// Otherwise use branch hash
-			branchHash := branch.calculateHash(smt.hasher)
-			step.Branch = []string{hex.EncodeToString(branchHash.RawHash)}
-		}
-	} else {
-		// No branch, but we need to distinguish between:
-		// - TypeScript's createWithoutBranch (branch = null)
-		// - TypeScript's create with null value (branch = empty)
-		// Based on the TypeScript code, when we pass null to create, it creates empty branch
-		step.Branch = []string{}
+	if sibling != nil {
+		tmp := hex.EncodeToString(sibling.calculateHash(smt.hasher).RawHash)
+		step.Data = &tmp
 	}
-
-	// Add sibling hash if sibling exists
-	if siblingBranch != nil {
-		siblingHash := siblingBranch.calculateHash(smt.hasher)
-		step.Sibling = []string{hex.EncodeToString(siblingHash.RawHash)}
-	}
-	// If siblingBranch is nil, leave Sibling as nil (omitempty will exclude it from JSON)
-
-	return step
+	return append(steps, step)
 }
 
 // calculateCommonPath computes the longest common prefix of path1 and path2
@@ -555,16 +541,15 @@ func calculateCommonPath(path1, path2 *big.Int) struct {
 		pos++
 	}
 
-	var mask, res big.Int
-	mask.SetBit(big.NewInt(0), pos, 1)
-	res.Sub(&mask, big.NewInt(1))
-	res.And(&res, path1)
-	res.Or(&res, &mask)
+	mask := new(big.Int).SetBit(big.NewInt(0), pos, 1) // mask = 2^pos
+	res := new(big.Int).Sub(mask, big.NewInt(1))       // res = mask - 1
+	res.And(res, path1)                                // res &= path
+	res.Or(res, mask)                                  // res |= mask
 
 	return struct {
 		length uint
 		path   *big.Int
-	}{uint(pos), &res}
+	}{uint(pos), res}
 }
 
 // Leaf represents a leaf to be inserted (for batch operations)
