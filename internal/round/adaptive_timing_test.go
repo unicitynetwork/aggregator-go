@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
@@ -35,7 +36,7 @@ func TestAdaptiveProcessingRatio(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create round manager
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, nil)
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, state.NewSyncStateTracker())
 	require.NoError(t, err)
 
 	// Test initial values
@@ -130,7 +131,7 @@ func TestAdaptiveDeadlineCalculation(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, nil)
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, state.NewSyncStateTracker())
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -197,7 +198,7 @@ func TestSMTUpdateTimeTracking(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, nil)
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, state.NewSyncStateTracker())
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -260,7 +261,7 @@ func TestStreamingMetrics(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, nil)
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, state.NewSyncStateTracker())
 	require.NoError(t, err)
 
 	// Set some test values
@@ -313,7 +314,7 @@ func TestAdaptiveTimingIntegration(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, nil)
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, state.NewSyncStateTracker())
 	require.NoError(t, err)
 
 	ctx := context.Background()

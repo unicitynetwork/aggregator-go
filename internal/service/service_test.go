@@ -24,6 +24,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
+	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
@@ -119,15 +120,19 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	commitmentQueue := mongoStorage.CommitmentQueue()
 
 	// Initialize round manager
-	roundManager, err := round.NewRoundManager(ctx, cfg, log, commitmentQueue, mongoStorage, nil)
+	roundManager, err := round.NewRoundManager(ctx, cfg, log, commitmentQueue, mongoStorage, state.NewSyncStateTracker())
 	require.NoError(t, err)
 
-	// Initialize service
+	// Start the round manager (restores SMT)
+	err = roundManager.Start(ctx)
+	require.NoError(t, err)
+
+	// In non-HA test mode, we are the leader, so activate the service directly
+	err = roundManager.Activate(ctx)
+	require.NoError(t, err)
+
+	// Initialize aggregator service
 	aggregatorService := NewAggregatorService(cfg, log, roundManager, commitmentQueue, mongoStorage, nil)
-
-	// Start the aggregator service
-	err = aggregatorService.Start(ctx)
-	require.NoError(t, err)
 
 	// Initialize gateway server
 	server := gateway.NewServer(cfg, log, aggregatorService)
@@ -166,10 +171,10 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 			server.Stop(shutdownCtx)
 		}
 
-		// Stop aggregator service gracefully
-		if aggregatorService != nil {
-			t.Logf("Stopping aggregator service...")
-			aggregatorService.Stop(shutdownCtx)
+		// Stop round manager gracefully
+		if roundManager != nil {
+			t.Logf("Stopping round manager...")
+			roundManager.Stop(shutdownCtx)
 		}
 
 		// Stop MongoDB container with timeout

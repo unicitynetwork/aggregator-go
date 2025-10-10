@@ -11,6 +11,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
 	"github.com/unicitynetwork/aggregator-go/internal/ha"
+	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/service"
@@ -98,30 +99,44 @@ func main() {
 		gracefulExit(asyncLogger, 1)
 	}
 
-	// start leader election service
-	var leaderElection *ha.LeaderElection
-	if cfg.HA.Enabled {
-		leaderElection = ha.NewLeaderElection(cfg.HA, log, storageInstance.LeadershipStorage())
-		leaderElection.Start(ctx)
-		log.WithComponent("main").Info("High availability mode leader election started")
-	} else {
-		log.WithComponent("main").Info("High availability mode is disabled")
-	}
+	// Create the shared state tracker for block sync height
+	stateTracker := state.NewSyncStateTracker()
 
-	roundManager, err := round.NewRoundManager(ctx, cfg, log, commitmentQueue, storageInstance, leaderElection)
+	// Create the Round Manager
+	roundManager, err := round.NewRoundManager(ctx, cfg, log, commitmentQueue, storageInstance, stateTracker)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to create round manager", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
 	}
 
-	// Initialize service
-	aggregatorService := service.NewAggregatorService(cfg, log, roundManager, commitmentQueue, storageInstance, leaderElection)
-
-	// Start the aggregator service
-	if err := aggregatorService.Start(ctx); err != nil {
-		log.WithComponent("main").Error("Failed to start aggregator service", "error", err.Error())
+	// Perform initial SMT restoration. This is required in all modes.
+	if err := roundManager.Start(ctx); err != nil {
+		log.WithComponent("main").Error("Failed to start round manager", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
 	}
+
+	// Initialize HA Manager if enabled
+	var haManager *ha.HAManager
+	var leaderSelector *ha.LeaderElection
+	if cfg.HA.Enabled {
+		log.WithComponent("main").Info("High availability mode enabled")
+		leaderSelector = ha.NewLeaderElection(log, cfg.HA, storageInstance.LeadershipStorage())
+		leaderSelector.Start(ctx)
+
+		haManager = ha.NewHAManager(log, roundManager, leaderSelector, storageInstance, roundManager.GetSMT(), stateTracker, cfg.Processing.RoundDuration)
+		haManager.Start(ctx)
+
+	} else {
+		log.WithComponent("main").Info("High availability mode is disabled, running as standalone leader")
+		// In non-HA mode, the node is always the leader, so activate it directly.
+		if err := roundManager.Activate(ctx); err != nil {
+			log.WithComponent("main").Error("Failed to activate round manager", "error", err.Error())
+			gracefulExit(asyncLogger, 1)
+		}
+	}
+
+	// Initialize service
+	aggregatorService := service.NewAggregatorService(cfg, log, roundManager, commitmentQueue, storageInstance, leaderSelector)
 
 	// Initialize gateway server
 	server := gateway.NewServer(cfg, log, aggregatorService)
@@ -151,16 +166,17 @@ func main() {
 		log.WithComponent("main").Error("Failed to stop server gracefully", "error", err.Error())
 	}
 
-	// Stop aggregator service
-	if err := aggregatorService.Stop(shutdownCtx); err != nil {
-		log.WithComponent("main").Error("Failed to stop aggregator service gracefully", "error", err.Error())
+	// Stop round manager
+	roundManager.Stop(shutdownCtx)
+
+	// Stop leader selector if it was started
+	if leaderSelector != nil {
+		leaderSelector.Stop(shutdownCtx)
 	}
 
-	// Stop leader election service
-	if leaderElection != nil {
-		if err := leaderElection.Shutdown(shutdownCtx); err != nil {
-			log.WithComponent("main").Error("Failed to stop leader election", "error", err.Error())
-		}
+	// Stop HA Manager if it was started
+	if haManager != nil {
+		haManager.Stop()
 	}
 
 	// Close storage backends
