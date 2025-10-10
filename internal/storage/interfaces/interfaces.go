@@ -7,8 +7,8 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-// CommitmentStorage handles temporary commitment storage
-type CommitmentStorage interface {
+// CommitmentQueue handles commitment queue operations
+type CommitmentQueue interface {
 	// Store stores a new commitment
 	Store(ctx context.Context, commitment *models.Commitment) error
 
@@ -21,6 +21,9 @@ type CommitmentStorage interface {
 	// GetUnprocessedBatchWithCursor retrieves a batch with cursor-based pagination
 	GetUnprocessedBatchWithCursor(ctx context.Context, lastID string, limit int) ([]*models.Commitment, string, error)
 
+	// StreamCommitments continuously streams commitments to the provided channel
+	StreamCommitments(ctx context.Context, commitmentChan chan<- *models.Commitment) error
+
 	// MarkProcessed marks commitments as processed
 	MarkProcessed(ctx context.Context, requestIDs []api.RequestID) error
 
@@ -32,6 +35,10 @@ type CommitmentStorage interface {
 
 	// CountUnprocessed returns the number of unprocessed commitments
 	CountUnprocessed(ctx context.Context) (int64, error)
+
+	// Lifecycle methods
+	Initialize(ctx context.Context) error
+	Close(ctx context.Context) error
 }
 
 // AggregatorRecordStorage handles finalized aggregator records
@@ -149,16 +156,15 @@ type LeadershipStorage interface {
 	IsLeader(ctx context.Context, lockID string, serverID string) (bool, error)
 }
 
-// Storage represents the complete storage interface
+// Storage handles persistent data storage
 type Storage interface {
-	CommitmentStorage() CommitmentStorage
 	AggregatorRecordStorage() AggregatorRecordStorage
 	BlockStorage() BlockStorage
 	SmtStorage() SmtStorage
 	BlockRecordsStorage() BlockRecordsStorage
 	LeadershipStorage() LeadershipStorage
 
-	// Database operations
+	Initialize(ctx context.Context) error
 	Ping(ctx context.Context) error
 	Close(ctx context.Context) error
 

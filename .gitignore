@@ -1,8 +1,8 @@
 .idea
 .claude
 bin
-aggregator
+/aggregator
 aggregator.log
-performance-test
+/performance-test
 bft-config
 /data/
