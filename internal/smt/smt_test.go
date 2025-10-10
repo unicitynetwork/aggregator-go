@@ -16,13 +16,13 @@ import (
 // TestSMTGetRoot test basic SMT root hash computation
 func TestSMTGetRoot(t *testing.T) {
 	t.Run("EmptyTree", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 0)
 		expected := "00001e54402898172f2948615fb17627733abbd120a85381c624ad060d28321be672"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
 	t.Run("LeftLeaf", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 2)
 		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
 
 		expected := "0000ccd73506d27518c983860a47a6a323d41038a74f9339f5302798563cb168f12f"
@@ -30,7 +30,7 @@ func TestSMTGetRoot(t *testing.T) {
 	})
 
 	t.Run("RightLeaf", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 2)
 		smt.AddLeaf(big.NewInt(0b111), []byte{0x62})
 
 		expected := "00005219d2dac90ad497a82a5231f10cffaf5a12dc65b762be39a6d739b4159136a3"
@@ -38,7 +38,7 @@ func TestSMTGetRoot(t *testing.T) {
 	})
 
 	t.Run("TwoLeaves", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 2)
 		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
 		smt.AddLeaf(big.NewInt(0b111), []byte{0x62})
 
@@ -47,7 +47,7 @@ func TestSMTGetRoot(t *testing.T) {
 	})
 
 	t.Run("FourLeaves", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 3)
 		smt.AddLeaf(big.NewInt(0b1000), []byte{0x61})
 		smt.AddLeaf(big.NewInt(0b1100), []byte{0x62})
 		smt.AddLeaf(big.NewInt(0b1011), []byte{0x63})
@@ -60,9 +60,8 @@ func TestSMTGetRoot(t *testing.T) {
 
 // TestSMTBatchOperations tests batch functionality
 func TestSMTBatchOperations(t *testing.T) {
-	// First test the exact same simple case that works in TypeScript compatibility
 	t.Run("SimpleRetrievalTest", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 1)
 
 		err := smt.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3})
 		if err != nil {
@@ -78,14 +77,14 @@ func TestSMTBatchOperations(t *testing.T) {
 		}
 
 		// Add second leaf
-		err = smt.AddLeaf(big.NewInt(0b101), []byte{4, 5, 6})
+		err = smt.AddLeaf(big.NewInt(0b11), []byte{4, 5, 6})
 		if err != nil {
 			t.Fatalf("AddLeaf failed: %v", err)
 		}
 
 		// Try to retrieve both
 		retrieved1, err1 := smt.GetLeaf(big.NewInt(0b10))
-		retrieved2, err2 := smt.GetLeaf(big.NewInt(0b101))
+		retrieved2, err2 := smt.GetLeaf(big.NewInt(0b11))
 
 		if err1 != nil {
 			t.Errorf("Failed to retrieve first leaf: %v", err1)
@@ -113,7 +112,7 @@ func TestSMTBatchOperations(t *testing.T) {
 		}
 
 		// Build tree sequentially
-		smt1 := NewSparseMerkleTree(api.SHA256)
+		smt1 := NewSparseMerkleTree(api.SHA256, 8)
 		for _, data := range testData {
 			err := smt1.AddLeaf(big.NewInt(data.path), []byte(data.value))
 			if err != nil {
@@ -123,7 +122,7 @@ func TestSMTBatchOperations(t *testing.T) {
 		sequentialHash := smt1.GetRootHashHex()
 
 		// Build tree using batch operation
-		smt2 := NewSparseMerkleTree(api.SHA256)
+		smt2 := NewSparseMerkleTree(api.SHA256, 8)
 		leaves := make([]*Leaf, len(testData))
 		for i, data := range testData {
 			leaves[i] = NewLeaf(big.NewInt(data.path), []byte(data.value))
@@ -165,7 +164,7 @@ func TestSMTBatchOperations(t *testing.T) {
 
 // TestSMTErrorHandling tests error conditions
 func TestSMTErrorHandling(t *testing.T) {
-	smt := NewSparseMerkleTree(api.SHA256)
+	smt := NewSparseMerkleTree(api.SHA256, 7)
 
 	// Add initial leaves
 	smt.AddLeaf(big.NewInt(0b110010000), []byte("value00010000"))
@@ -232,7 +231,7 @@ func TestSMTBigintEncoding(t *testing.T) {
 
 // TestSMTPerformance tests basic performance characteristics
 func TestSMTPerformance(t *testing.T) {
-	smt := NewSparseMerkleTree(api.SHA256)
+	smt := NewSparseMerkleTree(api.SHA256, 12)
 
 	// Use paths that are guaranteed not to conflict by using distinct bit patterns
 	testData := []struct {
@@ -283,7 +282,6 @@ func TestSMTPerformance(t *testing.T) {
 
 // TestSMTBatchPerformanceGains demonstrates batch operation performance improvements
 func TestSMTBatchPerformanceGains(t *testing.T) {
-	// Use the known working dataset from TypeScript compatibility tests
 	testData := []struct {
 		path  int64
 		value string
@@ -292,16 +290,16 @@ func TestSMTBatchPerformanceGains(t *testing.T) {
 		{0b100000000, "value00000000"},
 		{0b100010000, "value00010000"},
 		{0b111100101, "value11100101"},
-		{0b1100, "value100"},
-		{0b1011, "value011"},
+		{0b110000000, "value10000000"},
+		{0b101100000, "value01100000"},
 		{0b111101111, "value11101111"},
-		{0b10001010, "value0001010"},
-		{0b11010101, "value1010101"},
+		{0b100010100, "value00010100"},
+		{0b110101010, "value10101010"},
 	}
 
 	// Measure sequential addition
 	start := time.Now()
-	smt1 := NewSparseMerkleTree(api.SHA256)
+	smt1 := NewSparseMerkleTree(api.SHA256, 8)
 	for _, data := range testData {
 		err := smt1.AddLeaf(big.NewInt(data.path), []byte(data.value))
 		if err != nil {
@@ -313,7 +311,7 @@ func TestSMTBatchPerformanceGains(t *testing.T) {
 
 	// Measure batch addition
 	start = time.Now()
-	smt2 := NewSparseMerkleTree(api.SHA256)
+	smt2 := NewSparseMerkleTree(api.SHA256, 8)
 	leaves := make([]*Leaf, len(testData))
 	for i, data := range testData {
 		leaves[i] = NewLeaf(big.NewInt(data.path), []byte(data.value))
@@ -342,7 +340,7 @@ func TestSMTBatchPerformanceGains(t *testing.T) {
 	t.Logf("   Root hash: %s", hash1)
 
 	if improvement < 1.0 {
-		t.Logf("⚠️  Batch operations should be faster than sequential")
+		t.Logf("⚠️ Batch operations should be faster than sequential")
 	} else if improvement >= 1.2 {
 		t.Logf("✅ Batch operations are significantly faster!")
 	}
@@ -354,7 +352,7 @@ func TestSMTProductionTiming(t *testing.T) {
 
 	for _, size := range sizes {
 		t.Run(fmt.Sprintf("Production_%dk", size/1000), func(t *testing.T) {
-			smt := NewSparseMerkleTree(api.SHA256)
+			smt := NewSparseMerkleTree(api.SHA256, 60)
 
 			// Generate realistic production data
 			leaves := make([]*Leaf, size)
@@ -394,7 +392,7 @@ func TestSMTProductionTiming(t *testing.T) {
 			// Verify reasonable performance
 			maxTimePerLeaf := time.Microsecond * 50 // 50µs per leaf should be reasonable
 			if totalTime > time.Duration(size)*maxTimePerLeaf {
-				t.Logf("⚠️  Processing slower than expected: %v per leaf", totalTime/time.Duration(size))
+				t.Logf("⚠️ Processing slower than expected: %v per leaf", totalTime/time.Duration(size))
 			} else {
 				t.Logf("✅ Performance is excellent: %v per leaf", totalTime/time.Duration(size))
 			}
@@ -406,7 +404,7 @@ func TestSMTProductionTiming(t *testing.T) {
 func TestSMTGetPath(t *testing.T) {
 
 	t.Run("ExpectedPath", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 272)
 
 		// Add some test data
 		path := big.NewInt(0)
@@ -435,13 +433,13 @@ func TestSMTGetPath(t *testing.T) {
 	})
 
 	t.Run("BasicGetPath", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 1)
 
 		// Add some test data
 		err := smt.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3})
 		require.NoError(t, err, "AddLeaf failed")
 
-		err = smt.AddLeaf(big.NewInt(0b101), []byte{4, 5, 6})
+		err = smt.AddLeaf(big.NewInt(0b11), []byte{4, 5, 6})
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Test getting path for an existing leaf
@@ -458,7 +456,7 @@ func TestSMTGetPath(t *testing.T) {
 	})
 
 	t.Run("GetPathForNonExistentLeaf", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 1)
 
 		// Add some test data
 		err := smt.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3})
@@ -473,13 +471,13 @@ func TestSMTGetPath(t *testing.T) {
 		t.Logf("✅ GetPath for non-existent leaf - Root: %s, Steps: %d", path.Root, len(path.Steps))
 	})
 	t.Run("GetPathStructure", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 1)
 
 		// Add test data - just use the two paths that we know work
 		err := smt.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3})
 		require.NoError(t, err, "AddLeaf failed")
 
-		err = smt.AddLeaf(big.NewInt(0b101), []byte{4, 5, 6})
+		err = smt.AddLeaf(big.NewInt(0b11), []byte{4, 5, 6})
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Test path structure
@@ -496,7 +494,7 @@ func TestSMTGetPath(t *testing.T) {
 	})
 
 	t.Run("EmptyTreeGetPath", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 1)
 
 		// Test getting path from empty tree
 		path := smt.GetPath(big.NewInt(0b10))
@@ -511,7 +509,7 @@ func TestSMTGetPath(t *testing.T) {
 // TestSMTGetPathComprehensive tests the GetPath method comprehensively
 func TestSMTGetPathComprehensive(t *testing.T) {
 	t.Run("GetPathWithSingleLeaf", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 2)
 
 		// Add a single leaf
 		leafPath := big.NewInt(0b101)
@@ -535,11 +533,11 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 	})
 
 	t.Run("GetPathWithTwoLeaves", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 2)
 
 		// Add two leaves that will require a node
-		path1 := big.NewInt(0b10)  // binary: 10
-		path2 := big.NewInt(0b101) // binary: 101
+		path1 := big.NewInt(0b100)
+		path2 := big.NewInt(0b101)
 
 		err := smt.AddLeaf(path1, []byte("value1"))
 		require.NoError(t, err, "AddLeaf 1 failed")
@@ -577,17 +575,17 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 	})
 
 	t.Run("GetPathForNonExistentPath", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 2)
 
 		// Add some leaves
-		err := smt.AddLeaf(big.NewInt(0b10), []byte("value1"))
+		err := smt.AddLeaf(big.NewInt(0b100), []byte("value1"))
 		require.NoError(t, err, "AddLeaf failed")
 
 		err = smt.AddLeaf(big.NewInt(0b101), []byte("value2"))
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Try to get path for non-existent leaf
-		nonExistentPath := big.NewInt(0b11) // binary: 11
+		nonExistentPath := big.NewInt(0b111)
 		merkPath := smt.GetPath(nonExistentPath)
 
 		require.NotNil(t, merkPath, "GetPath should return a path even for non-existent paths")
@@ -604,17 +602,16 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		}
 	})
 	t.Run("GetPathComplexTree", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 8)
 
 		// Add multiple leaves to create a complex tree structure with non-conflicting paths
-		// Use paths from the successful TypeScript compatibility test
 		testPaths := []*big.Int{
-			big.NewInt(0b110010000), // 400
-			big.NewInt(0b100000000), // 256
-			big.NewInt(0b100010000), // 272
-			big.NewInt(0b1100),      // 12
-			big.NewInt(0b1011),      // 11
-			big.NewInt(0b10001010),  // 138
+			big.NewInt(0b110010000),
+			big.NewInt(0b100000000),
+			big.NewInt(0b100010000),
+			big.NewInt(0b110000000),
+			big.NewInt(0b101100000),
+			big.NewInt(0b100010100),
 		}
 
 		for i, path := range testPaths {
@@ -650,7 +647,7 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 	})
 
 	t.Run("GetPathEmptyTree", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 2)
 
 		// Get path from empty tree
 		path := smt.GetPath(big.NewInt(0b101))
@@ -669,16 +666,16 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 
 	t.Run("GetPathValidation", func(t *testing.T) {
 		// This test validates that the path structure is correct and could be used for verification
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 8)
 
 		// Add test data with non-conflicting paths from working complex test
 		testLeaves := []struct {
 			path  *big.Int
 			value []byte
 		}{
-			{big.NewInt(0b110010000), []byte("data1")}, // 400
-			{big.NewInt(0b100000000), []byte("data2")}, // 256
-			{big.NewInt(0b1100), []byte("data3")},      // 12
+			{big.NewInt(0b110010000), []byte("data1")},
+			{big.NewInt(0b100000000), []byte("data2")},
+			{big.NewInt(0b110000000), []byte("data3")},
 		}
 
 		for _, leaf := range testLeaves {
@@ -722,7 +719,7 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 
 	t.Run("GetPathConsistency", func(t *testing.T) {
 		// Test that GetPath returns consistent results
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 3)
 
 		// Add leaves
 		path1 := big.NewInt(0b1010)
@@ -775,7 +772,7 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				// Create a new tree for each test case to avoid conflicts
-				smt := NewSparseMerkleTree(api.SHA256)
+				smt := NewSparseMerkleTree(api.SHA256, tc.path.BitLen()-1)
 
 				// Add leaf
 				err := smt.AddLeaf(tc.path, []byte(fmt.Sprintf("value_%s", tc.name)))
@@ -803,12 +800,12 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 
 // TestAddLeavesToExistingTree tests that AddLeaves adds leaves to existing tree instead of replacing it
 func TestAddLeavesToExistingTree(t *testing.T) {
-	smt := NewSparseMerkleTree(api.SHA256)
+	smt := NewSparseMerkleTree(api.SHA256, 8)
 
-	// Add initial leaves to create a tree (using non-conflicting paths from TypeScript tests)
+	// Add initial leaves to create a tree using non-conflicting paths
 	initialLeaves := []*Leaf{
-		{Path: big.NewInt(0b100000000), Value: []byte("value256")}, // 256
-		{Path: big.NewInt(0b100010000), Value: []byte("value272")}, // 272
+		{Path: big.NewInt(0b100000000), Value: []byte("value256")},
+		{Path: big.NewInt(0b100010000), Value: []byte("value272")},
 	}
 
 	err := smt.AddLeaves(initialLeaves)
@@ -828,10 +825,10 @@ func TestAddLeavesToExistingTree(t *testing.T) {
 	// Store the initial root hash
 	initialRootHash := smt.GetRootHashHex()
 
-	// Add more leaves to the existing tree (using non-conflicting paths from TypeScript tests)
+	// Add more leaves to the existing tree using non-conflicting paths
 	additionalLeaves := []*Leaf{
-		{Path: big.NewInt(0b1100), Value: []byte("value12")}, // 12
-		{Path: big.NewInt(0b1011), Value: []byte("value11")}, // 11
+		{Path: big.NewInt(0b110000000), Value: []byte("value12")},
+		{Path: big.NewInt(0b101100000), Value: []byte("value11")},
 	}
 
 	err = smt.AddLeaves(additionalLeaves)
@@ -848,12 +845,12 @@ func TestAddLeavesToExistingTree(t *testing.T) {
 	require.NotNil(t, leaf272)
 	require.Equal(t, []byte("value272"), leaf272.Value)
 
-	leaf12, err := smt.GetLeaf(big.NewInt(0b1100))
+	leaf12, err := smt.GetLeaf(big.NewInt(0b110000000))
 	require.NoError(t, err)
 	require.NotNil(t, leaf12)
 	require.Equal(t, []byte("value12"), leaf12.Value)
 
-	leaf11, err := smt.GetLeaf(big.NewInt(0b1011))
+	leaf11, err := smt.GetLeaf(big.NewInt(0b101100000))
 	require.NoError(t, err)
 	require.NotNil(t, leaf11)
 	require.Equal(t, []byte("value11"), leaf11.Value)
@@ -865,20 +862,19 @@ func TestAddLeavesToExistingTree(t *testing.T) {
 
 // TestAddLeavesEquivalentToSequentialAddLeaf tests that AddLeaves produces the same result as sequential AddLeaf calls
 func TestAddLeavesEquivalentToSequentialAddLeaf(t *testing.T) {
-	// Test data (using non-conflicting paths from TypeScript tests)
 	leaves := []*Leaf{
-		{Path: big.NewInt(0b100000000), Value: []byte("value256")}, // 256
-		{Path: big.NewInt(0b100010000), Value: []byte("value272")}, // 272
-		{Path: big.NewInt(0b1100), Value: []byte("value12")},       // 12
-		{Path: big.NewInt(0b1011), Value: []byte("value11")},       // 11
+		{Path: big.NewInt(0b100000000), Value: []byte("value256")},
+		{Path: big.NewInt(0b100010000), Value: []byte("value272")},
+		{Path: big.NewInt(0b110000000), Value: []byte("value12")},
+		{Path: big.NewInt(0b101100000), Value: []byte("value11")},
 	}
 	// Create tree using AddLeaves
-	smt1 := NewSparseMerkleTree(api.SHA256)
+	smt1 := NewSparseMerkleTree(api.SHA256, 8)
 	err := smt1.AddLeaves(leaves)
 	require.NoError(t, err)
 
 	// Create tree using sequential AddLeaf
-	smt2 := NewSparseMerkleTree(api.SHA256)
+	smt2 := NewSparseMerkleTree(api.SHA256, 8)
 	for _, leaf := range leaves {
 		err := smt2.AddLeaf(leaf.Path, leaf.Value)
 		require.NoError(t, err)
@@ -904,20 +900,20 @@ func TestAddLeavesEquivalentToSequentialAddLeaf(t *testing.T) {
 
 // TestAddLeavesWithExistingAndNewToExistingTree tests adding leaves to a tree that already has some leaves
 func TestAddLeavesWithExistingAndNewToExistingTree(t *testing.T) {
-	smt := NewSparseMerkleTree(api.SHA256)
-	// Add some initial leaves (using non-conflicting paths from TypeScript tests)
-	err := smt.AddLeaf(big.NewInt(0b110010000), []byte("initial400")) // 400
+	smt := NewSparseMerkleTree(api.SHA256, 8)
+	// Add some initial leaves using non-conflicting paths
+	err := smt.AddLeaf(big.NewInt(0b110010000), []byte("initial400"))
 	require.NoError(t, err)
-	err = smt.AddLeaf(big.NewInt(0b111100101), []byte("initial485")) // 485
+	err = smt.AddLeaf(big.NewInt(0b111100101), []byte("initial485"))
 	require.NoError(t, err)
 
 	initialRootHash := smt.GetRootHashHex()
 
-	// Add more leaves using AddLeaves (non-conflicting paths from TypeScript tests)
+	// Add more leaves using AddLeaves non-conflicting paths
 	newLeaves := []*Leaf{
-		{Path: big.NewInt(0b100000000), Value: []byte("new256")}, // 256
-		{Path: big.NewInt(0b100010000), Value: []byte("new272")}, // 272
-		{Path: big.NewInt(0b1100), Value: []byte("new12")},       // 12
+		{Path: big.NewInt(0b100000000), Value: []byte("new256")},
+		{Path: big.NewInt(0b100010000), Value: []byte("new272")},
+		{Path: big.NewInt(0b110000000), Value: []byte("new12")},
 	}
 	err = smt.AddLeaves(newLeaves)
 	require.NoError(t, err)
@@ -939,7 +935,7 @@ func TestAddLeavesWithExistingAndNewToExistingTree(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("new272"), leaf272.Value)
 
-	leaf12, err := smt.GetLeaf(big.NewInt(0b1100))
+	leaf12, err := smt.GetLeaf(big.NewInt(0b11000000))
 	require.NoError(t, err)
 	require.Equal(t, []byte("new12"), leaf12.Value)
 
@@ -950,9 +946,9 @@ func TestAddLeavesWithExistingAndNewToExistingTree(t *testing.T) {
 
 // TestAddLeavesEmptyList tests that AddLeaves with empty list doesn't affect the tree
 func TestAddLeavesEmptyList(t *testing.T) {
-	smt := NewSparseMerkleTree(api.SHA256)
+	smt := NewSparseMerkleTree(api.SHA256, 3)
 
-	// Add initial leaf (using non-conflicting path from TypeScript tests)
+	// Add initial leaf
 	err := smt.AddLeaf(big.NewInt(0b1011), []byte("value11")) // 11
 	require.NoError(t, err)
 
@@ -974,7 +970,7 @@ func TestAddLeavesEmptyList(t *testing.T) {
 
 // TestAddLeaves_DuplicatePathError specifically tests the lazy-build logic for duplicate leaves.
 func TestAddLeaves_DuplicatePathError(t *testing.T) {
-	smt := NewSparseMerkleTree(api.SHA256)
+	smt := NewSparseMerkleTree(api.SHA256, 5)
 	path := big.NewInt(42)
 
 	// Create a batch containing two leaves with the exact same path.
@@ -991,10 +987,10 @@ func TestAddLeaves_DuplicatePathError(t *testing.T) {
 
 // Replace TestAddLeaves_DuplicatePathError with this new, more comprehensive test.
 func TestAddLeaves_SkipsDuplicatesAndContinues(t *testing.T) {
-	smt := NewSparseMerkleTree(api.SHA256)
+	smt := NewSparseMerkleTree(api.SHA256, 10)
 
 	// Setup: Add an initial leaf to the tree.
-	initialPath := big.NewInt(100)
+	initialPath := big.NewInt(0b10011001100)
 	initialValue := []byte("initial_value")
 	err := smt.AddLeaf(initialPath, initialValue)
 	require.NoError(t, err)
@@ -1004,9 +1000,9 @@ func TestAddLeaves_SkipsDuplicatesAndContinues(t *testing.T) {
 	// 2. A leaf that is a duplicate of one already in the tree.
 	// 3. Another new, valid leaf.
 	batch := []*Leaf{
-		NewLeaf(big.NewInt(200), []byte("new_value_A")), // Should be added
-		NewLeaf(initialPath, initialValue),              // Should be SKIPPED
-		NewLeaf(big.NewInt(300), []byte("new_value_B")), // Should be added
+		NewLeaf(big.NewInt(0b11011001100), []byte("new_value_A")), // Should be added
+		NewLeaf(initialPath, initialValue),                        // Should be SKIPPED
+		NewLeaf(big.NewInt(0b10111001100), []byte("new_value_B")), // Should be added
 	}
 
 	// Action: Process the batch. This function should now SUCCEED.
@@ -1016,11 +1012,11 @@ func TestAddLeaves_SkipsDuplicatesAndContinues(t *testing.T) {
 	// Verification: Check the final state of the tree.
 
 	// 1. Check that the new, valid leaves were added.
-	leafA, errA := smt.GetLeaf(big.NewInt(200))
+	leafA, errA := smt.GetLeaf(big.NewInt(0b11011001100))
 	require.NoError(t, errA)
 	assert.Equal(t, []byte("new_value_A"), leafA.Value)
 
-	leafB, errB := smt.GetLeaf(big.NewInt(300))
+	leafB, errB := smt.GetLeaf(big.NewInt(0b10111001100))
 	require.NoError(t, errB)
 	assert.Equal(t, []byte("new_value_B"), leafB.Value)
 
@@ -1034,11 +1030,11 @@ func TestAddLeaves_SkipsDuplicatesAndContinues(t *testing.T) {
 func TestSMTSnapshot(t *testing.T) {
 	t.Run("BasicSnapshotOperations", func(t *testing.T) {
 		// Create original tree and add some initial data
-		original := NewSparseMerkleTree(api.SHA256)
+		original := NewSparseMerkleTree(api.SHA256, 2)
 
 		// Create a snapshot to add initial data (since original tree can't be modified directly)
 		initialSnapshot := original.CreateSnapshot()
-		err := initialSnapshot.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3})
+		err := initialSnapshot.AddLeaf(big.NewInt(0b100), []byte{1, 2, 3})
 		require.NoError(t, err)
 		err = initialSnapshot.AddLeaf(big.NewInt(0b101), []byte{4, 5, 6})
 		require.NoError(t, err)
@@ -1068,10 +1064,10 @@ func TestSMTSnapshot(t *testing.T) {
 	})
 
 	t.Run("CannotModifyOriginalTree", func(t *testing.T) {
-		original := NewSparseMerkleTree(api.SHA256)
+		original := NewSparseMerkleTree(api.SHA256, 2)
 
 		// Original tree can be modified directly (backward compatibility)
-		err := original.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3})
+		err := original.AddLeaf(big.NewInt(0b100), []byte{1, 2, 3})
 		require.NoError(t, err, "Should be able to modify original tree directly for backward compatibility")
 
 		// Verify CanModify method
@@ -1088,9 +1084,9 @@ func TestSMTSnapshot(t *testing.T) {
 
 	t.Run("MultipleSnapshots", func(t *testing.T) {
 		// Create original tree with initial data
-		original := NewSparseMerkleTree(api.SHA256)
+		original := NewSparseMerkleTree(api.SHA256, 2)
 		initialSnapshot := original.CreateSnapshot()
-		err := initialSnapshot.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3}) // path 2
+		err := initialSnapshot.AddLeaf(big.NewInt(0b100), []byte{1, 2, 3}) // path 2
 		require.NoError(t, err)
 		initialSnapshot.Commit()
 
@@ -1127,11 +1123,11 @@ func TestSMTSnapshot(t *testing.T) {
 
 	t.Run("SnapshotMemoryEfficiency", func(t *testing.T) {
 		// This test verifies that snapshots share memory with the original tree
-		original := NewSparseMerkleTree(api.SHA256)
+		original := NewSparseMerkleTree(api.SHA256, 2)
 
 		// Add initial data with well-spaced paths that don't conflict
 		initialSnapshot := original.CreateSnapshot()
-		err := initialSnapshot.AddLeaf(big.NewInt(0b10), []byte{1}) // path 2
+		err := initialSnapshot.AddLeaf(big.NewInt(0b100), []byte{1}) // path 2
 		require.NoError(t, err)
 		err = initialSnapshot.AddLeaf(big.NewInt(0b101), []byte{2}) // path 5
 		require.NoError(t, err)
@@ -1154,13 +1150,13 @@ func TestSMTSnapshot(t *testing.T) {
 
 // TestSMTOrderDependencyOneByOne - SMT order dependency test when adding leaves one by one
 func TestSMTOrderDependencyOneByOne(t *testing.T) {
-	smt1 := NewSparseMerkleTree(api.SHA256)
+	smt1 := NewSparseMerkleTree(api.SHA256, 2)
 	require.NoError(t, smt1.AddLeaf(big.NewInt(5), []byte("value_1")))
 	require.NoError(t, smt1.AddLeaf(big.NewInt(6), []byte("value_2")))
 	hash1 := smt1.GetRootHashHex()
 	t.Logf("Order [5,6]: %s", hash1)
 
-	smt2 := NewSparseMerkleTree(api.SHA256)
+	smt2 := NewSparseMerkleTree(api.SHA256, 2)
 	require.NoError(t, smt2.AddLeaf(big.NewInt(6), []byte("value_2")))
 	require.NoError(t, smt2.AddLeaf(big.NewInt(5), []byte("value_1")))
 	hash2 := smt2.GetRootHashHex()
@@ -1181,12 +1177,12 @@ func TestSMTOrderDependencyBatch(t *testing.T) {
 		{Path: big.NewInt(5), Value: []byte("value_1")},
 	}
 
-	smt1 := NewSparseMerkleTree(api.SHA256)
+	smt1 := NewSparseMerkleTree(api.SHA256, 2)
 	err := smt1.AddLeaves(leaves1)
 	require.NoError(t, err)
 	hash1 := smt1.GetRootHashHex()
 
-	smt2 := NewSparseMerkleTree(api.SHA256)
+	smt2 := NewSparseMerkleTree(api.SHA256, 2)
 	err = smt2.AddLeaves(leaves2)
 	require.NoError(t, err)
 	hash2 := smt2.GetRootHashHex()
@@ -1198,12 +1194,13 @@ func TestSMTOrderDependencyBatch(t *testing.T) {
 }
 
 // TestSMTAddingNodeUnderLeaf - Test that the SMT does not allow adding child nodes under existing leaves
+// TODO: this is now a test that the tree rejects insertions with wrong key length
 func TestSMTAddingNodeUnderLeaf(t *testing.T) {
-	smt1 := NewSparseMerkleTree(api.SHA256)
+	smt1 := NewSparseMerkleTree(api.SHA256, 1)
 	require.NoError(t, smt1.AddLeaf(big.NewInt(2), []byte("leaf_1")))
 	require.Error(t, smt1.AddLeaf(big.NewInt(4), []byte("child_under_leaf_1")), "SMT should not allow adding child nodes under leaves")
 
-	smt2 := NewSparseMerkleTree(api.SHA256)
+	smt2 := NewSparseMerkleTree(api.SHA256, 1)
 	leaves2 := []*Leaf{
 		{Path: big.NewInt(2), Value: []byte("leaf_1")},
 		{Path: big.NewInt(4), Value: []byte("child_under_leaf_1")},
@@ -1212,12 +1209,13 @@ func TestSMTAddingNodeUnderLeaf(t *testing.T) {
 }
 
 // TestSMTAddingLeafAboveNode - Test that the SMT does not allow adding leaves above existing nodes
+// TODO: this is now a test that the tree rejects insertions with wrong key length
 func TestSMTAddingLeafAboveNode(t *testing.T) {
-	smt1 := NewSparseMerkleTree(api.SHA256)
+	smt1 := NewSparseMerkleTree(api.SHA256, 2)
 	require.NoError(t, smt1.AddLeaf(big.NewInt(4), []byte("leaf_1")))
 	require.Error(t, smt1.AddLeaf(big.NewInt(2), []byte("node_above_leaf_1")), "SMT should not allow adding leaves above existing nodes")
 
-	smt2 := NewSparseMerkleTree(api.SHA256)
+	smt2 := NewSparseMerkleTree(api.SHA256, 2)
 	leaves2 := []*Leaf{
 		{Path: big.NewInt(4), Value: []byte("leaf_1")},
 		{Path: big.NewInt(2), Value: []byte("node_above_leaf_1")},

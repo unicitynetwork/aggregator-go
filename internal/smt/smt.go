@@ -18,6 +18,7 @@ var (
 type (
 	// SparseMerkleTree implements a sparse merkle tree compatible with Unicity SDK
 	SparseMerkleTree struct {
+		keyLength  int // bit length of the keys in the tree
 		hasher     *api.DataHasher
 		root       *RootNode
 		isSnapshot bool              // true if this is a snapshot, false if original tree
@@ -31,8 +32,9 @@ type (
 )
 
 // NewSparseMerkleTree creates a new sparse merkle tree
-func NewSparseMerkleTree(algorithm api.HashAlgorithm) *SparseMerkleTree {
+func NewSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int) *SparseMerkleTree {
 	return &SparseMerkleTree{
+		keyLength:  keyLength,
 		hasher:     api.NewDataHasher(algorithm),
 		root:       newRootNode(nil, nil),
 		isSnapshot: false,
@@ -44,6 +46,7 @@ func NewSparseMerkleTree(algorithm api.HashAlgorithm) *SparseMerkleTree {
 // The snapshot shares nodes with the original tree (copy-on-write)
 func (smt *SparseMerkleTree) CreateSnapshot() *SmtSnapshot {
 	snapshot := &SparseMerkleTree{
+		keyLength:  smt.keyLength,
 		hasher:     api.NewDataHasher(smt.hasher.GetAlgorithm()),
 		root:       smt.root, // Share the root initially
 		isSnapshot: true,
@@ -119,21 +122,21 @@ type RootNode struct {
 	Path  *big.Int
 }
 
-// Branch interface for tree nodes (matches TypeScript Branch interface)
+// Branch interface for tree nodes
 type branch interface {
 	calculateHash(hasher *api.DataHasher) *api.DataHash
 	getPath() *big.Int
 	isLeaf() bool
 }
 
-// LeafBranch represents a leaf node (matches TypeScript LeafBranch)
+// LeafBranch represents a leaf node
 type LeafBranch struct {
 	Path  *big.Int
 	Value []byte
 	hash  *api.DataHash
 }
 
-// NodeBranch represents an internal node (matches TypeScript NodeBranch)
+// NodeBranch represents an internal node
 type NodeBranch struct {
 	Path  *big.Int
 	Left  branch
@@ -235,6 +238,10 @@ func (n *NodeBranch) isLeaf() bool {
 
 // AddLeaf adds a single leaf to the tree
 func (smt *SparseMerkleTree) AddLeaf(path *big.Int, value []byte) error {
+	if path.BitLen()-1 != smt.keyLength {
+		return fmt.Errorf("invalid key length %d, should be %d", path.BitLen()-1, smt.keyLength)
+	}
+
 	// Implement copy-on-write for snapshots only
 	if smt.isSnapshot {
 		smt.root = smt.copyOnWriteRoot()
@@ -450,6 +457,12 @@ func (smt *SparseMerkleTree) buildTree(branch branch, remainingPath *big.Int, va
 }
 
 func (smt *SparseMerkleTree) GetPath(path *big.Int) *api.MerkleTreePath {
+	if path.BitLen()-1 != smt.keyLength {
+		// TODO: better error handling
+		fmt.Printf("SparseMerkleTree.GetPath(): invalid key length %d, should be %d", path.BitLen()-1, smt.keyLength)
+		return nil
+	}
+
 	rootHash := smt.root.calculateHash(smt.hasher)
 	steps := smt.generatePath(path, smt.root.Left, smt.root.Right)
 

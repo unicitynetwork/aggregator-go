@@ -13,7 +13,7 @@ import (
 func TestSnapshotWorkflowIntegration(t *testing.T) {
 	t.Run("SnapshotIsolationFromMainSMT", func(t *testing.T) {
 		// Create main SMT and ThreadSafeSMT
-		smtInstance := smt.NewSparseMerkleTree(api.SHA256)
+		smtInstance := smt.NewSparseMerkleTree(api.SHA256, 2)
 		threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 		// Get initial state
@@ -29,7 +29,7 @@ func TestSnapshotWorkflowIntegration(t *testing.T) {
 
 		// Add data to snapshot (simulating processBatch)
 		leaves := []*smt.Leaf{
-			smt.NewLeaf(big.NewInt(0b10), []byte("value1")),
+			smt.NewLeaf(big.NewInt(0b100), []byte("value1")),
 			smt.NewLeaf(big.NewInt(0b101), []byte("value2")),
 			smt.NewLeaf(big.NewInt(0b111), []byte("value3")),
 		}

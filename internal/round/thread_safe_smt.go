@@ -203,7 +203,6 @@ func (tss *ThreadSafeSmtSnapshot) Commit(originalSMT *ThreadSafeSMT) {
 	defer originalSMT.rwMux.Unlock()
 
 	tss.snapshot.Commit()
-	return
 }
 
 // WithWriteLock executes a function while holding a write lock on the snapshot
