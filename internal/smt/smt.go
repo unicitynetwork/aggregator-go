@@ -20,7 +20,7 @@ type (
 	SparseMerkleTree struct {
 		keyLength  int // bit length of the keys in the tree
 		hasher     *api.DataHasher
-		root       *RootNode
+		root       *NodeBranch
 		isSnapshot bool              // true if this is a snapshot, false if original tree
 		original   *SparseMerkleTree // reference to original tree (nil for original)
 	}
@@ -88,14 +88,9 @@ func (smt *SparseMerkleTree) CanModify() bool {
 }
 
 // copyOnWriteRoot creates a new root if this snapshot is sharing it with the original
-func (smt *SparseMerkleTree) copyOnWriteRoot() *RootNode {
+func (smt *SparseMerkleTree) copyOnWriteRoot() *NodeBranch {
 	if smt.original != nil && smt.root == smt.original.root {
-		// Root is shared with original, create a copy
-		return &RootNode{
-			Left:  smt.root.Left,
-			Right: smt.root.Right,
-			Path:  new(big.Int).Set(smt.root.Path),
-		}
+		return newRootNode(smt.root.Left, smt.root.Right)
 	}
 	return smt.root
 }
@@ -113,13 +108,6 @@ func (smt *SparseMerkleTree) cloneBranch(branch branch) branch {
 		nodeBranch := branch.(*NodeBranch)
 		return newNodeBranch(nodeBranch.Path, nodeBranch.Left, nodeBranch.Right)
 	}
-}
-
-// RootNode represents the root of the tree
-type RootNode struct {
-	Left  branch
-	Right branch
-	Path  *big.Int
 }
 
 // Branch interface for tree nodes
@@ -142,39 +130,6 @@ type NodeBranch struct {
 	Left  branch
 	Right branch
 	hash  *api.DataHash
-}
-
-// NewRootNode creates a new root node
-func newRootNode(left, right branch) *RootNode {
-	return &RootNode{
-		Left:  left,
-		Right: right,
-		Path:  big.NewInt(1),
-	}
-}
-
-// calculateHash calculates root hash
-func (r *RootNode) calculateHash(hasher *api.DataHasher) *api.DataHash {
-	// Separate hasher object that the calculateHash() calls below do not spoil
-	rootHasher := api.NewDataHasher(hasher.GetAlgorithm())
-	rootHasher.AddData(api.CborArray(3))
-
-	pathBytes := api.BigintEncode(r.Path)
-	rootHasher.AddCborBytes(pathBytes)
-
-	if r.Left == nil {
-		rootHasher.AddCborNull()
-	} else {
-		rootHasher.AddCborBytes(r.Left.calculateHash(hasher).RawHash)
-	}
-
-	if r.Right == nil {
-		rootHasher.AddCborNull()
-	} else {
-		rootHasher.AddCborBytes(r.Right.calculateHash(hasher).RawHash)
-	}
-
-	return rootHasher.GetHash()
 }
 
 // NewLeafBranch creates a leaf branch
@@ -205,6 +160,11 @@ func (l *LeafBranch) isLeaf() bool {
 	return true
 }
 
+// NewRootNode creates a new root node
+func newRootNode(left, right branch) *NodeBranch {
+	return newNodeBranch(big.NewInt(1), left, right)
+}
+
 // NewNodeBranch creates a node branch
 func newNodeBranch(path *big.Int, left, right branch) *NodeBranch {
 	return &NodeBranch{
@@ -220,11 +180,35 @@ func (n *NodeBranch) calculateHash(hasher *api.DataHasher) *api.DataHash {
 		return n.hash
 	}
 
+	// Get the child hashes first so we can reset and reuse the hasher object
+	var leftHash *api.DataHash
+	if n.Left != nil {
+		leftHash = n.Left.calculateHash(hasher)
+	}
+
+	var rightHash *api.DataHash
+	if n.Right != nil {
+		rightHash = n.Right.calculateHash(hasher)
+	}
+
+	hasher.Reset().AddData(api.CborArray(3))
+
 	pathBytes := api.BigintEncode(n.Path)
-	leftHash := n.Left.calculateHash(hasher).RawHash
-	rightHash := n.Right.calculateHash(hasher).RawHash
-	n.hash = hasher.Reset().AddData(api.CborArray(3)).
-		AddCborBytes(pathBytes).AddCborBytes(leftHash).AddCborBytes(rightHash).GetHash()
+	hasher.AddCborBytes(pathBytes)
+
+	if leftHash == nil {
+		hasher.AddCborNull()
+	} else {
+		hasher.AddCborBytes(leftHash.RawHash)
+	}
+
+	if rightHash == nil {
+		hasher.AddCborNull()
+	} else {
+		hasher.AddCborBytes(rightHash.RawHash)
+	}
+
+	n.hash = hasher.GetHash()
 	return n.hash
 }
 
@@ -326,25 +310,7 @@ func (smt *SparseMerkleTree) GetRootHashHex() string {
 
 // GetLeaf retrieves a leaf by path (for compatibility)
 func (smt *SparseMerkleTree) GetLeaf(path *big.Int) (*LeafBranch, error) {
-	return smt.findLeaf(smt.root, path)
-}
-
-// findLeaf searches for a leaf in the tree following the same logic as addLeaf
-func (smt *SparseMerkleTree) findLeaf(node interface{}, targetPath *big.Int) (*LeafBranch, error) {
-	switch n := node.(type) {
-	case *RootNode:
-		// At root, use bit 0 to navigate (same as AddLeaf)
-		isRight := targetPath.Bit(0) == 1
-		if isRight && n.Right != nil {
-			return smt.findLeafInBranch(n.Right, targetPath)
-		} else if !isRight && n.Left != nil {
-			return smt.findLeafInBranch(n.Left, targetPath)
-		}
-		return nil, fmt.Errorf("leaf not found")
-
-	default:
-		return nil, fmt.Errorf("invalid node type")
-	}
+	return smt.findLeafInBranch(smt.root, path)
 }
 
 // findLeafInBranch searches within a branch, handling path shifting correctly
