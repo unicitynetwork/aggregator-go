@@ -117,7 +117,7 @@ type RoundMetrics struct {
 // NewRoundManager creates a new round manager
 func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, storage interfaces.Storage, leaderSelector LeaderSelector) (*RoundManager, error) {
 	// Initialize SMT with empty tree - will be replaced with restored tree in Start()
-	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
+	smtInstance := smt.NewSparseMerkleTree(api.SHA256, 16+256)
 	threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 	rm := &RoundManager{

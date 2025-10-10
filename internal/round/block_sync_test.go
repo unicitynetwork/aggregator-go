@@ -107,7 +107,7 @@ func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage, rm
 	require.NoError(t, err)
 
 	// compute rootHash
-	tmpSMT := smt.NewSparseMerkleTree(api.SHA256)
+	tmpSMT := smt.NewSparseMerkleTree(api.SHA256, 16+256)
 	require.NoError(t, tmpSMT.AddLeaves(leaves))
 	rootHash := api.NewHexBytes(tmpSMT.GetRootHash())
 
