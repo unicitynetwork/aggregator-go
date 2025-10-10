@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"sort"
 	"testing"
 	"time"
 
@@ -131,8 +132,7 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 		require.NoError(t, err, "Store should not return an error")
 
 		// Verify the record was stored by retrieving it
-		var storedRecord models.BlockRecords
-		err = storage.collection.FindOne(ctx, bson.M{"blockNumber": blockNumber}).Decode(&storedRecord)
+		storedRecord, err := storage.GetByBlockNumber(ctx, blockNumber)
 		require.NoError(t, err, "Should be able to retrieve stored record")
 
 		// Verify the stored data matches
@@ -156,8 +156,7 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 		require.NoError(t, err, "Store should not return an error")
 
 		// Verify the record was stored
-		var storedRecord models.BlockRecords
-		err = storage.collection.FindOne(ctx, bson.M{"blockNumber": blockNumber}).Decode(&storedRecord)
+		storedRecord, err := storage.GetByBlockNumber(ctx, blockNumber)
 		require.NoError(t, err, "Should be able to retrieve stored record")
 
 		// Verify the stored data
@@ -168,7 +167,7 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 
 	t.Run("should store block records with large block number", func(t *testing.T) {
 		// Create test data with large block number
-		largeNumber, ok := new(big.Int).SetString("999999999999999999999999999999999999999999", 10)
+		largeNumber, ok := new(big.Int).SetString("999999999999999999999", 10)
 		require.True(t, ok, "Should be able to create large big.Int")
 
 		blockNumber := api.NewBigInt(largeNumber)
@@ -183,12 +182,11 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 		require.NoError(t, err, "Store should not return an error")
 
 		// Verify the record was stored
-		var storedRecord models.BlockRecords
-		err = storage.collection.FindOne(ctx, bson.M{"blockNumber": blockNumber}).Decode(&storedRecord)
+		storedRecord, err := storage.GetByBlockNumber(ctx, blockNumber)
 		require.NoError(t, err, "Should be able to retrieve stored record")
 
 		// Verify the stored data
-		assert.Equal(t, blockNumber.String(), storedRecord.BlockNumber.String())
+		assert.Equal(t, 0, blockNumber.Cmp(storedRecord.BlockNumber.Int))
 		assert.Equal(t, len(requestIDs), len(storedRecord.RequestIDs))
 		assert.Equal(t, string(requestIDs[0]), string(storedRecord.RequestIDs[0]))
 	})
@@ -231,8 +229,7 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 
 		// Verify all records were stored
 		for _, tc := range testCases {
-			var storedRecord models.BlockRecords
-			err := storage.collection.FindOne(ctx, bson.M{"blockNumber": tc.blockNumber}).Decode(&storedRecord)
+			storedRecord, err := storage.GetByBlockNumber(ctx, tc.blockNumber)
 			require.NoError(t, err, "Should be able to retrieve stored record for block %s", tc.blockNumber.String())
 
 			assert.Equal(t, tc.blockNumber.String(), storedRecord.BlockNumber.String())
@@ -257,8 +254,7 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 		require.NoError(t, err, "Store should not return an error")
 
 		// Verify the record was stored
-		var storedRecord models.BlockRecords
-		err = storage.collection.FindOne(ctx, bson.M{"blockNumber": blockNumber}).Decode(&storedRecord)
+		storedRecord, err := storage.GetByBlockNumber(ctx, blockNumber)
 		require.NoError(t, err, "Should be able to retrieve stored record")
 
 		// Verify the stored data
@@ -311,7 +307,7 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 		// Attempt to store nil records
 		err := storage.Store(ctx, nil)
 		assert.Error(t, err, "Store should return an error when records is nil")
-		assert.Contains(t, err.Error(), "failed to store block records")
+		assert.ErrorContainsf(t, err, "block records is nil", "Store should return an error when records is nil")
 	})
 
 	t.Run("should store block records with very long request ID list", func(t *testing.T) {
@@ -329,8 +325,7 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 		require.NoError(t, err, "Store should not return an error")
 
 		// Verify the record was stored
-		var storedRecord models.BlockRecords
-		err = storage.collection.FindOne(ctx, bson.M{"blockNumber": blockNumber}).Decode(&storedRecord)
+		storedRecord, err := storage.GetByBlockNumber(ctx, blockNumber)
 		require.NoError(t, err, "Should be able to retrieve stored record")
 
 		// Verify the stored data
@@ -341,6 +336,234 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 		assert.Equal(t, string(requestIDs[0]), string(storedRecord.RequestIDs[0]))
 		assert.Equal(t, string(requestIDs[500]), string(storedRecord.RequestIDs[500]))
 		assert.Equal(t, string(requestIDs[999]), string(storedRecord.RequestIDs[999]))
+	})
+
+	t.Run("should handle decimal128 conversion correctly", func(t *testing.T) {
+		// Test various number formats
+		testCases := []int64{0, 1, 100, 999, 1000, 99999, 1000000}
+
+		for _, num := range testCases {
+			blockNumber := api.NewBigInt(big.NewInt(num))
+			requestIDs := []api.RequestID{
+				api.RequestID("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
+				api.RequestID("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
+			}
+			blockRecords := createTestBlockRecords(blockNumber, requestIDs)
+
+			err := storage.Store(ctx, blockRecords)
+			require.NoError(t, err, "Should store block with number %d", num)
+
+			retrieved, err := storage.GetByBlockNumber(ctx, blockNumber)
+			require.NoError(t, err, "Should retrieve block with number %d", num)
+			require.NotNil(t, retrieved, "Retrieved block should not be nil for number %d", num)
+			assert.Equal(t, 0, blockNumber.Cmp(retrieved.BlockNumber.Int), "Number should match for %d", num)
+		}
+	})
+}
+
+func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	storage := NewBlockRecordsStorage(db)
+	ctx := context.Background()
+
+	err := storage.CreateIndexes(ctx)
+	require.NoError(t, err)
+
+	requestIDs := []api.RequestID{
+		api.RequestID("0000000000000000000000000000000000000000000000000000000000000000"),
+	}
+
+	t.Run("should return nil when no block records exist", func(t *testing.T) {
+		num, err := storage.GetLatestBlock(ctx)
+		require.NoError(t, err, "GetLatestBlock should not return an error when empty")
+		assert.Nil(t, num, "GetLatestBlock should return nil when no records exist")
+	})
+
+	t.Run("should return latest block with single record", func(t *testing.T) {
+		// Store single record
+		blockNumber := api.NewBigInt(big.NewInt(5))
+		records := createTestBlockRecords(blockNumber, requestIDs)
+		err := storage.Store(ctx, records)
+		require.NoError(t, err)
+
+		// Get latest
+		latestNum, err := storage.GetLatestBlock(ctx)
+		require.NoError(t, err, "GetLatestNumber should not return an error")
+		require.NotNil(t, latestNum, "Latest number should not be nil")
+
+		assert.Equal(t, 0, blockNumber.Cmp(records.BlockNumber.Int), "Block number should match")
+	})
+
+	t.Run("should return latest block number with multiple records", func(t *testing.T) {
+		// Store multiple block records in non-sequential order
+		blockNumbers := []*big.Int{
+			big.NewInt(1),
+			big.NewInt(99),
+			big.NewInt(110),
+			big.NewInt(125),
+			big.NewInt(115),
+			big.NewInt(130),
+			big.NewInt(105),
+		}
+
+		for i, bn := range blockNumbers {
+			records := createTestBlockRecords(api.NewBigInt(bn), requestIDs)
+			err := storage.Store(ctx, records)
+			require.NoError(t, err, "Should store record %d", i)
+		}
+
+		// Get latest - should be block number 130
+		latestBlock, err := storage.GetLatestBlock(ctx)
+		require.NoError(t, err, "GetLatestNumber should not return an error")
+		require.NotNil(t, latestBlock, "Latest number should not be nil")
+
+		expectedLatest := api.NewBigInt(big.NewInt(130))
+		assert.Equal(t, 0, expectedLatest.Cmp(latestBlock.BlockNumber.Int), "Should get latest block number")
+	})
+
+	t.Run("should handle decimal128 sorting correctly for large numbers", func(t *testing.T) {
+		// Test with large numbers to ensure decimal128 sorts correctly
+		largeNumbers := []string{
+			"1000000000000000000000",
+			"999999999999999999999",
+			"1000000000000000000001",
+			"2000000000000000000000",
+		}
+
+		var expectedLatest *api.BigInt
+		for _, numStr := range largeNumbers {
+			bi := new(big.Int)
+			bi.SetString(numStr, 10)
+			blockNumber := api.NewBigInt(bi)
+			records := createTestBlockRecords(blockNumber, requestIDs)
+
+			err := storage.Store(ctx, records)
+			require.NoError(t, err, "Should store large number record")
+
+			// Track expected latest (largest number)
+			if expectedLatest == nil || blockNumber.Cmp(expectedLatest.Int) > 0 {
+				expectedLatest = blockNumber
+			}
+		}
+
+		// Get latest
+		latestBlock, err := storage.GetLatestBlock(ctx)
+		require.NoError(t, err, "GetLatestNumber should not return an error")
+		require.NotNil(t, latestBlock, "Latest number should not be nil")
+
+		assert.Equal(t, 0, expectedLatest.Cmp(latestBlock.BlockNumber.Int), "Should get latest block number")
+	})
+}
+
+func TestBlockRecordsStorage_GetNextBlock(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	storage := NewBlockRecordsStorage(db)
+	ctx := context.Background()
+
+	err := storage.CreateIndexes(ctx)
+	require.NoError(t, err)
+
+	requestIDs := []api.RequestID{
+		api.RequestID("0000000000000000000000000000000000000000000000000000000000000000"),
+	}
+
+	t.Run("should return nil when no block records exist", func(t *testing.T) {
+		next, err := storage.GetNextBlock(ctx, nil)
+		require.NoError(t, err, "GetNextBlock should not return an error when empty")
+		assert.Nil(t, next, "GetNextBlock should return nil when no records exist")
+	})
+
+	t.Run("should return the very first block when blockNumber is nil", func(t *testing.T) {
+		blockNumbers := []*big.Int{big.NewInt(10), big.NewInt(5), big.NewInt(20)}
+
+		for _, bn := range blockNumbers {
+			records := createTestBlockRecords(api.NewBigInt(bn), requestIDs)
+			err := storage.Store(ctx, records)
+			require.NoError(t, err)
+		}
+
+		first, err := storage.GetNextBlock(ctx, nil)
+		require.NoError(t, err, "GetNextBlock should not return error")
+		require.NotNil(t, first, "Should return a record")
+
+		assert.Equal(t, int64(5), first.BlockNumber.Int.Int64(), "Should return the smallest block number")
+	})
+
+	t.Run("should return the next block after given blockNumber", func(t *testing.T) {
+		blockNumbers := []*big.Int{
+			big.NewInt(1),
+			big.NewInt(99),
+			big.NewInt(100),
+			big.NewInt(110),
+			big.NewInt(120),
+			big.NewInt(130),
+		}
+
+		for _, bn := range blockNumbers {
+			records := createTestBlockRecords(api.NewBigInt(bn), requestIDs)
+			err := storage.Store(ctx, records)
+			require.NoError(t, err)
+		}
+
+		// Ask for next after 110 -> should return 120
+		start := api.NewBigInt(big.NewInt(110))
+		next, err := storage.GetNextBlock(ctx, start)
+		require.NoError(t, err, "GetNextBlock should not return error")
+		require.NotNil(t, next, "Next record should not be nil")
+
+		assert.Equal(t, int64(120), next.BlockNumber.Int.Int64())
+	})
+
+	t.Run("should return nil if no higher block exists", func(t *testing.T) {
+		blockNumbers := []*big.Int{big.NewInt(200), big.NewInt(210)}
+
+		for _, bn := range blockNumbers {
+			records := createTestBlockRecords(api.NewBigInt(bn), requestIDs)
+			err := storage.Store(ctx, records)
+			require.NoError(t, err)
+		}
+
+		// Ask for next after 210 -> should return nil
+		start := api.NewBigInt(big.NewInt(210))
+		next, err := storage.GetNextBlock(ctx, start)
+		require.NoError(t, err, "GetNextBlock should not return error")
+		assert.Nil(t, next, "Should return nil if there is no higher block")
+	})
+
+	t.Run("should handle decimal128 sorting correctly for large numbers", func(t *testing.T) {
+		largeNumbers := []string{
+			"1000000000000000000000",
+			"999999999999999999999",
+			"2000000000000000000000",
+		}
+
+		var stored []*api.BigInt
+		for _, numStr := range largeNumbers {
+			bi := new(big.Int)
+			bi.SetString(numStr, 10)
+			blockNumber := api.NewBigInt(bi)
+			stored = append(stored, blockNumber)
+
+			records := createTestBlockRecords(blockNumber, requestIDs)
+			err := storage.Store(ctx, records)
+			require.NoError(t, err)
+		}
+
+		// Sort manually to check expected "next"
+		sort.Slice(stored, func(i, j int) bool {
+			return stored[i].Int.Cmp(stored[j].Int) < 0
+		})
+
+		// Ask for next after smallest
+		next, err := storage.GetNextBlock(ctx, stored[0])
+		require.NoError(t, err)
+		require.NotNil(t, next, "Next record should not be nil")
+
+		assert.Equal(t, 0, stored[1].Cmp(next.BlockNumber.Int), "Should return the correct next block")
 	})
 }
 

@@ -20,7 +20,12 @@ type AggregatorService struct {
 	logger              *logger.Logger
 	storage             interfaces.Storage
 	roundManager        *round.RoundManager
+	leaderSelector      LeaderSelector
 	commitmentValidator *signing.CommitmentValidator
+}
+
+type LeaderSelector interface {
+	IsLeader(ctx context.Context) (bool, error)
 }
 
 // Conversion functions between API and internal model types
@@ -41,8 +46,8 @@ func apiToModelBigInt(apiBigInt *api.BigInt) *api.BigInt {
 
 func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.AggregatorRecord {
 	return &api.AggregatorRecord{
-		RequestID:             modelRecord.RequestID,
-		TransactionHash:       modelRecord.TransactionHash,
+		RequestID:       modelRecord.RequestID,
+		TransactionHash: modelRecord.TransactionHash,
 		Authenticator: api.Authenticator{
 			Algorithm: modelRecord.Authenticator.Algorithm,
 			PublicKey: modelRecord.Authenticator.PublicKey,
@@ -81,20 +86,15 @@ func modelToAPIHealthStatus(modelHealth *models.HealthStatus) *api.HealthStatus 
 }
 
 // NewAggregatorService creates a new aggregator service
-func NewAggregatorService(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*AggregatorService, error) {
-	roundManager, err := round.NewRoundManager(cfg, logger, storage)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create round manager: %w", err)
-	}
-	commitmentValidator := signing.NewCommitmentValidator()
-
+func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManager *round.RoundManager, storage interfaces.Storage, leaderSelector LeaderSelector) *AggregatorService {
 	return &AggregatorService{
 		config:              cfg,
 		logger:              logger,
 		storage:             storage,
 		roundManager:        roundManager,
-		commitmentValidator: commitmentValidator,
-	}, nil
+		leaderSelector:      leaderSelector,
+		commitmentValidator: signing.NewCommitmentValidator(),
+	}
 }
 
 // Start starts the aggregator service and round manager
@@ -131,10 +131,10 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 	if aggregateCount == 0 {
 		aggregateCount = 1 // Default to 1 if not specified
 	}
-	
+
 	commitment := models.NewCommitmentWithAggregate(
-		req.RequestID, 
-		req.TransactionHash, 
+		req.RequestID,
+		req.TransactionHash,
 		models.Authenticator{
 			Algorithm: req.Authenticator.Algorithm,
 			PublicKey: req.Authenticator.PublicKey,
@@ -223,19 +223,46 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 	}
 	merkleTreePath := as.roundManager.GetSMT().GetPath(path)
 
-	if record == nil {
-		return &api.GetInclusionProofResponse{Authenticator: nil, MerkleTreePath: merkleTreePath, TransactionHash: nil}, nil
+	// Find the latest block that matches the current SMT root hash
+	rootHash, err := api.NewHexBytesFromString(merkleTreePath.Root)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse root hash: %w", err)
+	}
+	block, err := as.storage.BlockStorage().GetLatestByRootHash(ctx, rootHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get latest block by root hash: %w", err)
+	}
+	if block == nil {
+		return nil, fmt.Errorf("no block found with root hash %s", rootHash)
 	}
 
-	// Convert model authenticator to API authenticator
-	apiAuthenticator := &api.Authenticator{
+	if record == nil {
+		// Non-inclusion proof
+		return &api.GetInclusionProofResponse{
+			InclusionProof: &api.InclusionProof{
+				Authenticator:      nil,
+				MerkleTreePath:     merkleTreePath,
+				TransactionHash:    nil,
+				UnicityCertificate: block.UnicityCertificate,
+			},
+		}, nil
+	}
+
+	authenticator := &api.Authenticator{
 		Algorithm: record.Authenticator.Algorithm,
 		PublicKey: record.Authenticator.PublicKey,
 		Signature: record.Authenticator.Signature,
-		StateHash: api.StateHash(record.Authenticator.StateHash.String()),
+		StateHash: record.Authenticator.StateHash,
 	}
 
-	return &api.GetInclusionProofResponse{Authenticator: apiAuthenticator, MerkleTreePath: merkleTreePath, TransactionHash: &record.TransactionHash}, nil
+	return &api.GetInclusionProofResponse{
+		InclusionProof: &api.InclusionProof{
+			Authenticator:      authenticator,
+			MerkleTreePath:     merkleTreePath,
+			TransactionHash:    &record.TransactionHash,
+			UnicityCertificate: block.UnicityCertificate,
+		},
+	}, nil
 }
 
 // GetNoDeletionProof retrieves the global no-deletion proof
@@ -335,11 +362,8 @@ func (as *AggregatorService) GetBlockCommitments(ctx context.Context, req *api.G
 func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthStatus, error) {
 	// Check if HA is enabled and determine role
 	var role string
-	var isLeader bool
-
-	if as.config.HA.Enabled {
-		var err error
-		isLeader, err = as.storage.LeadershipStorage().IsLeader(ctx, as.config.HA.ServerID)
+	if as.leaderSelector != nil {
+		isLeader, err := as.leaderSelector.IsLeader(ctx)
 		if err != nil {
 			as.logger.WithContext(ctx).Warn("Failed to check leadership status", "error", err.Error())
 			// Don't fail health check on leadership query failure
@@ -353,7 +377,6 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 		}
 	} else {
 		role = "standalone"
-		isLeader = true // In standalone mode, this server handles everything
 	}
 
 	status := models.NewHealthStatus(role, as.config.HA.ServerID)
@@ -366,12 +389,26 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 		status.AddDetail("database", "connected")
 	}
 
-	// Add commitment queue status
+	// Add commitment queue status and warning if too high
 	unprocessedCount, err := as.storage.CommitmentStorage().CountUnprocessed(ctx)
 	if err != nil {
 		status.AddDetail("commitment_queue", "unknown")
+		status.AddDetail("commitment_queue_status", "error")
 	} else {
 		status.AddDetail("commitment_queue", strconv.FormatInt(unprocessedCount, 10))
+
+		// Add warning if unprocessed count is concerning
+		if unprocessedCount > 10000 {
+			status.AddDetail("commitment_queue_status", "critical")
+			as.logger.WithContext(ctx).Error("Critical: High unprocessed commitment count",
+				"count", unprocessedCount)
+		} else if unprocessedCount > 5000 {
+			status.AddDetail("commitment_queue_status", "warning")
+			as.logger.WithContext(ctx).Warn("Warning: Elevated unprocessed commitment count",
+				"count", unprocessedCount)
+		} else {
+			status.AddDetail("commitment_queue_status", "healthy")
+		}
 	}
 
 	return modelToAPIHealthStatus(status), nil

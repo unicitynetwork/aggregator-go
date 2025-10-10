@@ -34,7 +34,6 @@ func (ss *SmtStorage) Store(ctx context.Context, node *models.SmtNode) error {
 		"$setOnInsert": bson.M{
 			"key":       node.Key,
 			"value":     node.Value,
-			"hash":      node.Hash,
 			"createdAt": node.CreatedAt,
 		},
 	}
@@ -47,29 +46,27 @@ func (ss *SmtStorage) Store(ctx context.Context, node *models.SmtNode) error {
 	return nil
 }
 
-// StoreBatch stores multiple SMT nodes using bulk upsert operations
+// StoreBatch stores multiple SMT nodes using insert operations, skipping duplicates
 func (ss *SmtStorage) StoreBatch(ctx context.Context, nodes []*models.SmtNode) error {
 	if len(nodes) == 0 {
 		return nil
 	}
 
-	operations := make([]mongo.WriteModel, len(nodes))
+	documents := make([]interface{}, len(nodes))
 	for i, node := range nodes {
-		filter := bson.M{"key": node.Key}
-		update := bson.M{
-			"$setOnInsert": bson.M{
-				"key":       node.Key,
-				"value":     node.Value,
-				"hash":      node.Hash,
-				"createdAt": node.CreatedAt,
-			},
+		documents[i] = bson.M{
+			"key":       node.Key,
+			"value":     node.Value,
+			"createdAt": node.CreatedAt,
 		}
-		operations[i] = mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true)
 	}
 
-	opts := options.BulkWrite().SetOrdered(false)
-	_, err := ss.collection.BulkWrite(ctx, operations, opts)
+	opts := options.InsertMany().SetOrdered(false)
+	_, err := ss.collection.InsertMany(ctx, documents, opts)
 	if err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return nil
+		}
 		return fmt.Errorf("failed to store SMT nodes batch: %w", err)
 	}
 	return nil
@@ -86,6 +83,25 @@ func (ss *SmtStorage) GetByKey(ctx context.Context, key api.HexBytes) (*models.S
 		return nil, fmt.Errorf("failed to get SMT node by key: %w", err)
 	}
 	return &node, nil
+}
+
+// GetByKeys retrieves multiple SMT nodes by their keys
+func (ss *SmtStorage) GetByKeys(ctx context.Context, keys []api.HexBytes) ([]*models.SmtNode, error) {
+	if len(keys) == 0 {
+		return []*models.SmtNode{}, nil
+	}
+	filter := bson.M{"key": bson.M{"$in": keys}}
+	cursor, err := ss.collection.Find(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query SMT nodes by keys: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var nodes []*models.SmtNode
+	if err := cursor.All(ctx, &nodes); err != nil {
+		return nil, fmt.Errorf("failed to decode SMT nodes: %w", err)
+	}
+	return nodes, nil
 }
 
 // Delete removes an SMT node
@@ -180,9 +196,6 @@ func (ss *SmtStorage) CreateIndexes(ctx context.Context) error {
 		{
 			Keys:    bson.D{{Key: "key", Value: 1}},
 			Options: options.Index().SetUnique(true),
-		},
-		{
-			Keys: bson.D{{Key: "hash", Value: 1}},
 		},
 		{
 			Keys: bson.D{{Key: "createdAt", Value: -1}},

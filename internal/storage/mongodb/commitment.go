@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
@@ -55,35 +56,56 @@ func (cs *CommitmentStorage) GetByRequestID(ctx context.Context, requestID api.R
 
 // GetUnprocessedBatch retrieves a batch of unprocessed commitments
 func (cs *CommitmentStorage) GetUnprocessedBatch(ctx context.Context, limit int) ([]*models.Commitment, error) {
+	commitments, _, err := cs.GetUnprocessedBatchWithCursor(ctx, "", limit)
+	return commitments, err
+}
+
+// GetUnprocessedBatchWithCursor retrieves a batch of unprocessed commitments with cursor-based pagination
+func (cs *CommitmentStorage) GetUnprocessedBatchWithCursor(ctx context.Context, lastID string, limit int) ([]*models.Commitment, string, error) {
 	filter := bson.M{"processedAt": bson.M{"$exists": false}}
+
+	// If we have a cursor, only get commitments after that ID
+	if lastID != "" {
+		objID, err := primitive.ObjectIDFromHex(lastID)
+		if err == nil {
+			filter["_id"] = bson.M{"$gt": objID}
+		}
+	}
+
 	opts := options.Find().
 		SetLimit(int64(limit)).
-		SetSort(bson.M{"createdAt": 1}) // Oldest first
+		SetSort(bson.M{"_id": 1}) // Sort by ID for stable cursor
 
 	cursor, err := cs.collection.Find(ctx, filter, opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find unprocessed commitments: %w", err)
+		return nil, "", fmt.Errorf("failed to find unprocessed commitments: %w", err)
 	}
 	defer cursor.Close(ctx)
 
 	var commitments []*models.Commitment
+	var newCursor string
+
 	for cursor.Next(ctx) {
 		var commitment models.Commitment
 		if err := cursor.Decode(&commitment); err != nil {
-			return nil, fmt.Errorf("failed to decode commitment: %w", err)
+			return nil, "", fmt.Errorf("failed to decode commitment: %w", err)
 		}
 		// Handle backward compatibility: default to 1 if AggregateRequestCount is 0
 		if commitment.AggregateRequestCount == 0 {
 			commitment.AggregateRequestCount = 1
 		}
 		commitments = append(commitments, &commitment)
+		// Update cursor to the last fetched ID
+		if commitment.ID != primitive.NilObjectID {
+			newCursor = commitment.ID.Hex()
+		}
 	}
 
 	if err := cursor.Err(); err != nil {
-		return nil, fmt.Errorf("cursor error: %w", err)
+		return nil, "", fmt.Errorf("cursor error: %w", err)
 	}
 
-	return commitments, nil
+	return commitments, newCursor, nil
 }
 
 // MarkProcessed marks commitments as processed

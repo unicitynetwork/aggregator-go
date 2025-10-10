@@ -29,7 +29,7 @@ func TestAggregatorRecordBackwardCompatibility(t *testing.T) {
 		record, err := bsonRecord.FromBSON()
 		require.NoError(t, err)
 		require.NotNil(t, record)
-		
+
 		// Should default to 1 for backward compatibility
 		require.Equal(t, uint64(1), record.AggregateRequestCount)
 	})
@@ -55,7 +55,7 @@ func TestAggregatorRecordBackwardCompatibility(t *testing.T) {
 		record, err := bsonRecord.FromBSON()
 		require.NoError(t, err)
 		require.NotNil(t, record)
-		
+
 		// Should preserve the actual value
 		require.Equal(t, uint64(500), record.AggregateRequestCount)
 	})

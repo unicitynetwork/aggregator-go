@@ -245,9 +245,14 @@ type GetInclusionProofRequest struct {
 
 // GetInclusionProofResponse represents the get_inclusion_proof JSON-RPC response
 type GetInclusionProofResponse struct {
-	Authenticator   *Authenticator   `json:"authenticator"`
-	MerkleTreePath  *MerkleTreePath  `json:"merkleTreePath"`
-	TransactionHash *TransactionHash `json:"transactionHash"`
+	InclusionProof *InclusionProof `json:"inclusionProof"`
+}
+
+type InclusionProof struct {
+	Authenticator      *Authenticator   `json:"authenticator"`
+	MerkleTreePath     *MerkleTreePath  `json:"merkleTreePath"`
+	TransactionHash    *TransactionHash `json:"transactionHash"`
+	UnicityCertificate HexBytes         `json:"unicityCertificate"`
 }
 
 // GetNoDeletionProofResponse represents the get_no_deletion_proof JSON-RPC response

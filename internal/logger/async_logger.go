@@ -20,10 +20,10 @@ type AsyncLogger struct {
 }
 
 type logEntry struct {
-	ctx    context.Context
-	level  slog.Level
-	msg    string
-	args   []any
+	ctx   context.Context
+	level slog.Level
+	msg   string
+	args  []any
 }
 
 // AsyncLoggerWrapper wraps both the Logger interface and the AsyncLogger functionality
@@ -47,23 +47,23 @@ func NewAsyncLogger(baseLogger *Logger, bufferSize int) *AsyncLoggerWrapper {
 	if bufferSize <= 0 {
 		bufferSize = 10000 // Default buffer size
 	}
-	
+
 	al := &AsyncLogger{
 		logger:     baseLogger,
 		entries:    make(chan logEntry, bufferSize),
 		bufferSize: bufferSize,
 	}
-	
+
 	// Start the background worker
 	al.wg.Add(1)
 	go al.worker()
-	
+
 	// Create a new Logger that wraps the async logger
 	handler := &asyncHandler{
 		asyncLogger: al,
 		baseHandler: baseLogger.Logger.Handler(),
 	}
-	
+
 	return &AsyncLoggerWrapper{
 		Logger: &Logger{
 			Logger: slog.New(handler),
@@ -75,17 +75,17 @@ func NewAsyncLogger(baseLogger *Logger, bufferSize int) *AsyncLoggerWrapper {
 // worker processes log entries from the channel
 func (al *AsyncLogger) worker() {
 	defer al.wg.Done()
-	
+
 	// Batch processing for better performance
 	const batchSize = 100
 	batch := make([]logEntry, 0, batchSize)
 	ticker := time.NewTicker(10 * time.Millisecond) // Flush every 10ms if batch not full
 	defer ticker.Stop()
-	
+
 	// Periodic reporting of dropped logs
 	reportTicker := time.NewTicker(30 * time.Second)
 	defer reportTicker.Stop()
-	
+
 	for {
 		select {
 		case entry, ok := <-al.entries:
@@ -94,22 +94,22 @@ func (al *AsyncLogger) worker() {
 				al.flushBatch(batch)
 				return
 			}
-			
+
 			batch = append(batch, entry)
-			
+
 			// Flush if batch is full
 			if len(batch) >= batchSize {
 				al.flushBatch(batch)
 				batch = batch[:0]
 			}
-			
+
 		case <-ticker.C:
 			// Periodic flush to prevent log delays
 			if len(batch) > 0 {
 				al.flushBatch(batch)
 				batch = batch[:0]
 			}
-			
+
 		case <-reportTicker.C:
 			// Periodic reporting of dropped logs
 			if dropped := al.droppedLogs.Load(); dropped > 0 {
@@ -144,7 +144,7 @@ func (al *AsyncLogger) Stop() {
 	if al.stopped.CompareAndSwap(false, true) {
 		close(al.entries)
 		al.wg.Wait()
-		
+
 		// Report final dropped count if any
 		if dropped := al.droppedLogs.Load(); dropped > 0 {
 			al.logger.Warn("Async logger shutdown - final dropped log count",
@@ -186,7 +186,7 @@ func (acl *AsyncContextLogger) log(level slog.Level, msg string, args ...any) {
 		}
 		return
 	}
-	
+
 	// Try to send to channel, drop if full to prevent blocking
 	select {
 	case acl.AsyncLogger.entries <- logEntry{
@@ -241,14 +241,14 @@ func (h *asyncHandler) Handle(ctx context.Context, record slog.Record) error {
 		// Fallback to synchronous logging if async logger is stopped
 		return h.baseHandler.Handle(ctx, record)
 	}
-	
+
 	// Convert record to our log entry format
 	args := make([]any, 0, record.NumAttrs()*2)
 	record.Attrs(func(attr slog.Attr) bool {
 		args = append(args, attr.Key, attr.Value.Any())
 		return true
 	})
-	
+
 	// Try to send to channel, drop if full to prevent blocking
 	select {
 	case h.asyncLogger.entries <- logEntry{
@@ -288,7 +288,7 @@ func (h *asyncHandler) WithGroup(name string) slog.Handler {
 func (al *AsyncLogger) checkAndReportDropped() {
 	current := al.droppedLogs.Load()
 	last := al.lastReported.Load()
-	
+
 	// Report every 1000 drops or if it's the first drop
 	if current-last >= 1000 || (current > 0 && last == 0) {
 		// Try to update lastReported atomically

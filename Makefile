@@ -39,6 +39,18 @@ performance-test:
 	@echo "Starting performance test (make sure aggregator is running on localhost:3000)..."
 	@./$(BUILD_DIR)/performance-test
 
+# Run performance test with custom URL and auth header
+performance-test-auth:
+	@echo "Building performance test..."
+	@mkdir -p $(BUILD_DIR)
+	@go build -o $(BUILD_DIR)/performance-test ./cmd/performance-test
+	@if [ -z "$(URL)" ]; then \
+		echo "Error: URL parameter required. Usage: make performance-test-auth URL=http://localhost:8080 AUTH='Bearer token'"; \
+		exit 1; \
+	fi
+	@echo "Starting performance test against $(URL)..."
+	@AGGREGATOR_URL="$(URL)" AUTH_HEADER="$(AUTH)" ./$(BUILD_DIR)/performance-test
+
 # Format code
 fmt:
 	@echo "Formatting code..."
@@ -71,12 +83,27 @@ docker-run-clean:
 	@docker compose down
 	@rm -rf ./data
 	@mkdir -p ./data/genesis ./data/genesis-root ./data/mongodb_data && chmod -R 777 ./data
-	@USER_UID=$$(id -u) USER_GID=$$(id -g) docker compose up --force-recreate -d --build
+	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose up --force-recreate -d --build
 	@echo "Services rebuilt with user UID=$$(id -u):$$(id -g)"
 
 docker-restart-aggregator:
 	@echo "Rebuilding and restarting aggregator service..."
 	@docker compose stop aggregator
 	@docker compose build aggregator
-	@docker compose up -d --force-recreate --no-deps aggregator
+	@LOG_LEVEL=debug docker compose up -d --force-recreate --no-deps aggregator
 	@echo "Aggregator service restarted"
+
+docker-run-ha-clean:
+	@echo "Rebuilding services with clean state and HA enabled as current user..."
+	@docker compose -f ha-compose.yml down
+	@rm -rf ./data
+	@mkdir -p ./data/genesis ./data/genesis-root ./data/mongodb_data && chmod -R 777 ./data
+	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose -f ha-compose.yml up --force-recreate -d --build
+	@echo "Services rebuilt with user UID=$$(id -u):$$(id -g)"
+
+docker-restart-ha:
+	@echo "Rebuilding and restarting HA aggregator services..."
+	@docker compose -f ha-compose.yml stop aggregator-1 aggregator-2
+	@docker compose -f ha-compose.yml build aggregator-1 aggregator-2
+	@LOG_LEVEL=debug docker compose -f ha-compose.yml up -d --force-recreate --no-deps aggregator-1 aggregator-2
+	@echo "HA Aggregator services restarted"

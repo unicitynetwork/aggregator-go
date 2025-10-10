@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
@@ -29,7 +30,10 @@ func NewBlockRecordsStorage(db *mongo.Database) *BlockRecordsStorage {
 
 // Store stores a new block records entry
 func (brs *BlockRecordsStorage) Store(ctx context.Context, records *models.BlockRecords) error {
-	_, err := brs.collection.InsertOne(ctx, records)
+	if records == nil {
+		return errors.New("block records is nil")
+	}
+	_, err := brs.collection.InsertOne(ctx, records.ToBSON())
 	if err != nil {
 		return fmt.Errorf("failed to store block records: %w", err)
 	}
@@ -38,15 +42,21 @@ func (brs *BlockRecordsStorage) Store(ctx context.Context, records *models.Block
 
 // GetByBlockNumber retrieves block records by block number
 func (brs *BlockRecordsStorage) GetByBlockNumber(ctx context.Context, blockNumber *api.BigInt) (*models.BlockRecords, error) {
-	var records models.BlockRecords
-	err := brs.collection.FindOne(ctx, bson.M{"blockNumber": blockNumber.String()}).Decode(&records)
+	var result models.BlockRecordsBSON
+	filter := bson.M{"blockNumber": bigIntToDecimal128(blockNumber)}
+	err := brs.collection.FindOne(ctx, filter).Decode(&result)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get block records by block number: %w", err)
 	}
-	return &records, nil
+
+	blockRecords, err := result.FromBSON()
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+	}
+	return blockRecords, nil
 }
 
 // GetByRequestID retrieves the block number for a request ID
@@ -55,7 +65,7 @@ func (brs *BlockRecordsStorage) GetByRequestID(ctx context.Context, requestID ap
 	opts := options.FindOne().SetProjection(bson.M{"blockNumber": 1})
 
 	var result struct {
-		BlockNumber *api.BigInt `bson:"blockNumber"`
+		BlockNumber primitive.Decimal128 `bson:"blockNumber"`
 	}
 
 	err := brs.collection.FindOne(ctx, filter, opts).Decode(&result)
@@ -66,7 +76,11 @@ func (brs *BlockRecordsStorage) GetByRequestID(ctx context.Context, requestID ap
 		return nil, fmt.Errorf("failed to get block number by request ID: %w", err)
 	}
 
-	return result.BlockNumber, nil
+	blockNumber, err := api.NewBigIntFromString(result.BlockNumber.String())
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse block number: %w", err)
+	}
+	return blockNumber, nil
 }
 
 // Count returns the total number of block records
@@ -76,6 +90,53 @@ func (brs *BlockRecordsStorage) Count(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("failed to count block records: %w", err)
 	}
 	return count, nil
+}
+
+// GetNextBlock retrieves the next block record after the given block number.
+// If blockNumber is nil then returns the very first block.
+func (brs *BlockRecordsStorage) GetNextBlock(ctx context.Context, blockNumber *api.BigInt) (*models.BlockRecords, error) {
+	var filter bson.M
+	if blockNumber != nil {
+		filter = bson.M{"blockNumber": bson.M{"$gt": bigIntToDecimal128(blockNumber)}}
+	} else {
+		filter = bson.M{}
+	}
+	opts := options.FindOne().SetSort(bson.D{{Key: "blockNumber", Value: 1}})
+
+	var result models.BlockRecordsBSON
+	err := brs.collection.FindOne(ctx, filter, opts).Decode(&result)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get next block record: %w", err)
+	}
+
+	blockRecord, err := result.FromBSON()
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+	}
+	return blockRecord, nil
+}
+
+// GetLatestBlock retrieves the latest block
+func (brs *BlockRecordsStorage) GetLatestBlock(ctx context.Context) (*models.BlockRecords, error) {
+	opts := options.FindOne().SetSort(bson.D{{Key: "blockNumber", Value: -1}})
+
+	var result models.BlockRecordsBSON
+	err := brs.collection.FindOne(ctx, bson.M{}, opts).Decode(&result)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get latest block record: %w", err)
+	}
+
+	blockRecord, err := result.FromBSON()
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+	}
+	return blockRecord, nil
 }
 
 // CreateIndexes creates necessary indexes for the block records collection
@@ -97,6 +158,5 @@ func (brs *BlockRecordsStorage) CreateIndexes(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create block records indexes: %w", err)
 	}
-
 	return nil
 }

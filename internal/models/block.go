@@ -5,8 +5,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // Block represents a blockchain block
@@ -43,7 +44,7 @@ func (b *Block) ToBSON() *BlockBSON {
 		indexDecimal = primitive.NewDecimal128(0, 0)
 	}
 
-	blockBSON := &BlockBSON{
+	return &BlockBSON{
 		Index:               indexDecimal,
 		ChainID:             b.ChainID,
 		Version:             b.Version,
@@ -54,8 +55,6 @@ func (b *Block) ToBSON() *BlockBSON {
 		CreatedAt:           strconv.FormatInt(b.CreatedAt.UnixMilli(), 10),
 		UnicityCertificate:  b.UnicityCertificate.String(),
 	}
-
-	return blockBSON
 }
 
 // FromBSON converts BlockBSON back to Block
@@ -119,36 +118,18 @@ func NewBlock(index *api.BigInt, chainID, version, forkID string, rootHash, prev
 	}
 }
 
-// BlockRecords represents the mapping of block numbers to request IDs
-type BlockRecords struct {
-	BlockNumber *api.BigInt     `json:"blockNumber" bson:"blockNumber"`
-	RequestIDs  []api.RequestID `json:"requestIds" bson:"requestIds"`
-	CreatedAt   *api.Timestamp  `json:"createdAt" bson:"createdAt"`
-}
-
-// NewBlockRecords creates a new block records entry
-func NewBlockRecords(blockNumber *api.BigInt, requestIDs []api.RequestID) *BlockRecords {
-	return &BlockRecords{
-		BlockNumber: blockNumber,
-		RequestIDs:  requestIDs,
-		CreatedAt:   api.Now(),
-	}
-}
-
 // SmtNode represents a Sparse Merkle Tree node
 type SmtNode struct {
 	Key       api.HexBytes   `json:"key" bson:"key"`
 	Value     api.HexBytes   `json:"value" bson:"value"`
-	Hash      api.HexBytes   `json:"hash" bson:"hash"`
 	CreatedAt *api.Timestamp `json:"createdAt" bson:"createdAt"`
 }
 
 // NewSmtNode creates a new SMT node
-func NewSmtNode(key, value, hash api.HexBytes) *SmtNode {
+func NewSmtNode(key, value api.HexBytes) *SmtNode {
 	return &SmtNode{
 		Key:       key,
 		Value:     value,
-		Hash:      hash,
 		CreatedAt: api.Now(),
 	}
 }
