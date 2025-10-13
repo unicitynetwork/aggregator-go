@@ -310,12 +310,16 @@ func (smt *SparseMerkleTree) AddLeaves(leaves []*Leaf) error {
 
 // GetRootHash returns the root hash as imprint
 func (smt *SparseMerkleTree) GetRootHash() []byte {
-	return smt.root.calculateHash(smt.hasher).GetImprint()
+	// Create a new hasher to ensure thread safety
+	hasher := api.NewDataHasher(smt.hasher.GetAlgorithm())
+	return smt.root.calculateHash(hasher).GetImprint()
 }
 
 // GetRootHashHex returns the root hash as hex string
 func (smt *SparseMerkleTree) GetRootHashHex() string {
-	return smt.root.calculateHash(smt.hasher).ToHex()
+	// Create a new hasher to ensure thread safety
+	hasher := api.NewDataHasher(smt.hasher.GetAlgorithm())
+	return smt.root.calculateHash(hasher).ToHex()
 }
 
 // GetLeaf retrieves a leaf by path (for compatibility)
@@ -451,8 +455,11 @@ func (smt *SparseMerkleTree) buildTree(branch branch, remainingPath *big.Int, va
 }
 
 func (smt *SparseMerkleTree) GetPath(path *big.Int) *api.MerkleTreePath {
-	rootHash := smt.root.calculateHash(smt.hasher)
-	steps := smt.generatePath(path, smt.root.Left, smt.root.Right)
+	// Create a new hasher to ensure thread safety
+	hasher := api.NewDataHasher(smt.hasher.GetAlgorithm())
+
+	rootHash := smt.root.calculateHash(hasher)
+	steps := smt.generatePath(hasher, path, smt.root.Left, smt.root.Right)
 
 	return &api.MerkleTreePath{
 		Root:  rootHash.ToHex(),
@@ -461,7 +468,7 @@ func (smt *SparseMerkleTree) GetPath(path *big.Int) *api.MerkleTreePath {
 }
 
 // generatePath recursively generates the Merkle tree path steps
-func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right branch) []api.MerkleTreeStep {
+func (smt *SparseMerkleTree) generatePath(hasher *api.DataHasher, remainingPath *big.Int, left, right branch) []api.MerkleTreeStep {
 	// Determine if we should go right (remainingPath & 1n)
 	isRight := remainingPath.Bit(0) == 1
 
@@ -481,7 +488,7 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right br
 			Branch: nil, // nil indicates no branch exists
 		}
 		if siblingBranch != nil {
-			siblingHash := siblingBranch.calculateHash(smt.hasher)
+			siblingHash := siblingBranch.calculateHash(hasher)
 			siblingHex := fmt.Sprintf("%x", siblingHash.RawHash) // Use only hash data without algorithm prefix
 			step.Sibling = []string{siblingHex}
 		}
@@ -493,28 +500,28 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right br
 
 	if branch.getPath().Cmp(commonPath.path) == 0 {
 		if branch.isLeaf() {
-			return []api.MerkleTreeStep{smt.createMerkleTreeStep(branch.getPath(), branch, siblingBranch)}
+			return []api.MerkleTreeStep{smt.createMerkleTreeStep(hasher, branch.getPath(), branch, siblingBranch)}
 		}
 
 		// If path has ended, return the current non-leaf branch data
 		shifted := new(big.Int).Rsh(remainingPath, commonPath.length)
 		if shifted.Cmp(big.NewInt(1)) == 0 {
-			return []api.MerkleTreeStep{smt.createMerkleTreeStep(branch.getPath(), branch, siblingBranch)}
+			return []api.MerkleTreeStep{smt.createMerkleTreeStep(hasher, branch.getPath(), branch, siblingBranch)}
 		}
 
 		// Continue recursively into the branch
 		nodeBranch, ok := branch.(*NodeBranch)
 		if !ok {
 			// Should not happen if IsLeaf() returned false
-			return []api.MerkleTreeStep{smt.createMerkleTreeStep(branch.getPath(), branch, siblingBranch)}
+			return []api.MerkleTreeStep{smt.createMerkleTreeStep(hasher, branch.getPath(), branch, siblingBranch)}
 		}
 
 		// Recursively generate path for the shifted remaining path
 		shiftedRemaining := new(big.Int).Rsh(remainingPath, commonPath.length)
-		recursiveSteps := smt.generatePath(shiftedRemaining, nodeBranch.Left, nodeBranch.Right)
+		recursiveSteps := smt.generatePath(hasher, shiftedRemaining, nodeBranch.Left, nodeBranch.Right)
 
 		// Create the current step without branch (since we went into it)
-		currentStep := smt.createMerkleTreeStep(branch.getPath(), nil, siblingBranch)
+		currentStep := smt.createMerkleTreeStep(hasher, branch.getPath(), nil, siblingBranch)
 
 		// Prepend recursive steps to current step (TypeScript: [...recursiveSteps, currentStep])
 		steps := make([]api.MerkleTreeStep, 0, len(recursiveSteps)+1)
@@ -523,11 +530,11 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, left, right br
 		return steps
 	}
 
-	return []api.MerkleTreeStep{smt.createMerkleTreeStep(branch.getPath(), branch, siblingBranch)}
+	return []api.MerkleTreeStep{smt.createMerkleTreeStep(hasher, branch.getPath(), branch, siblingBranch)}
 }
 
 // createMerkleTreeStep creates a api.MerkleTreeStep with proper branch and sibling handling
-func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, siblingBranch branch) api.MerkleTreeStep {
+func (smt *SparseMerkleTree) createMerkleTreeStep(hasher *api.DataHasher, path *big.Int, branch, siblingBranch branch) api.MerkleTreeStep {
 	step := api.MerkleTreeStep{
 		Path:    path.String(),
 		Branch:  nil, // Initialize as nil
@@ -542,7 +549,7 @@ func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, sibling
 			step.Branch = []string{hex.EncodeToString(leafBranch.Value)}
 		} else {
 			// Otherwise use branch children hash data
-			step.Branch = []string{hex.EncodeToString(branch.(*NodeBranch).childrenHashData(smt.hasher).RawHash)}
+			step.Branch = []string{hex.EncodeToString(branch.(*NodeBranch).childrenHashData(hasher).RawHash)}
 		}
 	} else {
 		// No branch, but we need to distinguish between:
@@ -554,7 +561,7 @@ func (smt *SparseMerkleTree) createMerkleTreeStep(path *big.Int, branch, sibling
 
 	// Add sibling hash if sibling exists
 	if siblingBranch != nil {
-		siblingHash := siblingBranch.calculateHash(smt.hasher)
+		siblingHash := siblingBranch.calculateHash(hasher)
 		siblingHex := fmt.Sprintf("%x", siblingHash.RawHash) // Use only hash data without algorithm prefix
 		step.Sibling = []string{siblingHex}
 	}
