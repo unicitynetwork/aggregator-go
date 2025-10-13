@@ -1,4 +1,92 @@
 services:
+  certbot:
+    image: certbot/certbot
+    container_name: proxy-certbot
+    network_mode: "host"
+    restart: unless-stopped
+    environment:
+      - DOMAIN=goggregator-test.unicity.network
+      - EMAIL=${CERTBOT_EMAIL:-admin@unicity.network}
+    volumes:
+      - letsencrypt_certs:/etc/letsencrypt
+      - acme_webroot:/var/www/certbot
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /etc/letsencrypt/live/goggregator-test.unicity.network/haproxy.pem && test -f /etc/letsencrypt/ssl-dhparams.pem"]
+      interval: 5s
+      timeout: 5s
+      retries: 120
+      start_period: 60s
+    entrypoint: >
+      sh -c "
+        set -e;
+        DOMAIN=\"$${DOMAIN:-goggregator-test.unicity.network}\";
+        EMAIL=\"$${EMAIL:-admin@unicity.network}\";
+        LE_PATH=\"/etc/letsencrypt/live/$$DOMAIN\";
+        WEBROOT=\"/var/www/certbot\";
+
+        echo '=== Certbot Auto-Configuration Starting ===';
+
+        # Check if certificate already exists
+        if [ ! -f \"$$LE_PATH/fullchain.pem\" ]; then
+          echo 'No existing certificate found. Obtaining new certificate...';
+          echo \"Email: $$EMAIL\";
+          echo \"Domain: $$DOMAIN\";
+
+          # Obtain initial certificate using standalone mode
+          # (port 80 is available since HAProxy hasn't started yet)
+          certbot certonly \
+            --standalone \
+            --non-interactive \
+            --agree-tos \
+            --email \"$$EMAIL\" \
+            --no-eff-email \
+            -d \"$$DOMAIN\" || {
+              echo 'ERROR: Failed to obtain certificate. Check DNS and network connectivity.';
+              exit 1;
+            };
+
+          echo 'Certificate obtained successfully!';
+        else
+          echo 'Existing certificate found. Skipping initial acquisition.';
+        fi;
+
+        # Generate DH parameters if they don't exist
+        if [ ! -f /etc/letsencrypt/ssl-dhparams.pem ]; then
+          echo 'Generating DH parameters (this may take a few minutes)...';
+          openssl dhparam -out /etc/letsencrypt/ssl-dhparams.pem 2048;
+          echo 'DH parameters generated.';
+        else
+          echo 'DH parameters already exist.';
+        fi;
+
+        # Create HAProxy-compatible certificate file
+        echo 'Creating HAProxy certificate bundle...';
+        cat \"$$LE_PATH/privkey.pem\" \"$$LE_PATH/fullchain.pem\" > \"$$LE_PATH/haproxy.pem\";
+        chmod -R 755 /etc/letsencrypt/live;
+        chmod -R 755 /etc/letsencrypt/archive;
+        echo 'HAProxy certificate bundle created.';
+
+        echo '=== Initial setup complete. Service is healthy. ===';
+
+        # Wait a moment for HAProxy to start
+        sleep 5;
+
+        # Main renewal loop
+        echo 'Starting renewal loop (checks every 12 hours)...';
+        while :; do
+          echo \"[$(date)] Running renewal check...\";
+
+          certbot renew \
+            --webroot \
+            --webroot-path=\"$$WEBROOT\" \
+            --deploy-hook \"cat $$LE_PATH/privkey.pem $$LE_PATH/fullchain.pem > $$LE_PATH/haproxy.pem && chmod -R 755 /etc/letsencrypt/live && chmod -R 755 /etc/letsencrypt/archive && kill -SIGUSR2 1\" \
+            2>&1 || echo 'Renewal check completed (no renewal needed or failed).';
+
+          echo \"[$(date)] Next check in 12 hours.\";
+          sleep 12h & wait $${!};
+        done;
+      "
+
   haproxy:
     image: haproxy:2.8
     container_name: proxy-haproxy
@@ -12,12 +100,15 @@ services:
       - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
       - letsencrypt_certs:/etc/letsencrypt:ro
 
-  # Nginx serves ACME challenge files for certbot
+  # Nginx serves ACME challenge files for certbot renewals
   nginx-acme:
     image: nginx:alpine
     container_name: proxy-nginx-acme
     network_mode: "host"
     restart: unless-stopped
+    depends_on:
+      certbot:
+        condition: service_healthy
     volumes:
       - acme_webroot:/usr/share/nginx/html:ro
     command: >
@@ -30,42 +121,6 @@ services:
           }
         }' > /etc/nginx/conf.d/default.conf &&
         nginx -g 'daemon off;'
-      "
-
-  certbot:
-    image: certbot/certbot
-    container_name: proxy-certbot
-    restart: unless-stopped
-    volumes:
-      - letsencrypt_certs:/etc/letsencrypt
-      - acme_webroot:/var/www/certbot
-      - /var/run/docker.sock:/var/run/docker.sock
-    healthcheck:
-      test: ["CMD-SHELL", "test -f /etc/letsencrypt/live/goggregator-test.unicity.network/haproxy.pem"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    entrypoint: >
-      sh -c "
-        # Define variables
-        DOMAIN=\"goggregator-test.unicity.network\";
-        LE_PATH=\"/etc/letsencrypt/live/$$DOMAIN\";
-        WEBROOT=\"/var/www/certbot\";
-
-        # Run initial setup
-        echo 'Preparing certificates and permissions for HAProxy...';
-        cat \"$$LE_PATH/privkey.pem\" \"$$LE_PATH/fullchain.pem\" > \"$$LE_PATH/haproxy.pem\";
-        chmod -R 755 /etc/letsencrypt/live;
-        chmod -R 755 /etc/letsencrypt/archive;
-        echo 'Initial setup complete. Service is now healthy.';
-
-        # Loop for renewals (twice per day)
-        while :; do
-          echo 'Running renewal check...';
-          certbot renew --webroot --webroot-path=\"$$WEBROOT\" --deploy-hook \"cat $$LE_PATH/privkey.pem $$LE_PATH/fullchain.pem > $$LE_PATH/haproxy.pem && chmod -R 755 /etc/letsencrypt/live && chmod -R 755 /etc/letsencrypt/archive && apk add --no-cache docker-cli && docker exec proxy-haproxy kill -SIGUSR2 1\";
-          echo 'Renewal check complete. Sleeping for 12 hours...';
-          sleep 12h & wait $${!};
-        done;
       "
 
 volumes:

@@ -1,172 +1,199 @@
-# HAProxy and Let's Encrypt Deployment
+# HAProxy SSL Reverse Proxy with Auto-Renewing Let's Encrypt Certificates
 
-This guide outlines the steps to deploy the HAProxy reverse proxy with automatic SSL certificate generation via Let's Encrypt.
+Fully automated HAProxy reverse proxy with automatic SSL certificate generation and renewal via Let's Encrypt.
+
+## Features
+
+- **Zero-Configuration**: One command deploys everything
+- **Automatic SSL**: Obtains and renews Let's Encrypt certificates automatically
+- **Zero Downtime**: Certificate renewals happen without service interruption
+- **Production Ready**: Secure TLS 1.2+ with modern ciphers
 
 ## Prerequisites
 
-1.  A fresh Linux server (e.g., Ubuntu 22.04).
-2.  Your domain name's DNS A record pointing to the new server's public IP address.
-3.  Docker and Docker Compose installed.
+1.  A Linux server (e.g., Ubuntu 22.04)
+2.  **DNS A record for `goggregator-test.unicity.network` pointing to your server's IP** (CRITICAL!)
+3.  Docker and Docker Compose installed
+4.  Ports 80 and 443 open in your firewall
 
-    ```bash
-    # Install Docker
-    sudo apt-get update
-    sudo apt-get install -y docker.io
-
-    # Install Docker Compose
-    sudo apt-get install -y docker-compose
-
-    # Add your user to the docker group to run commands without sudo
-    sudo usermod -aG docker ${USER}
-    
-    # IMPORTANT: Log out and log back in for the group change to take effect.
-    ```
-
-## Deployment Steps
-
-The order of these steps is critical.
-
-### 1. Copy Configuration Files
-
-Copy your project directory (which contains `docker-compose.yml` and the `haproxy/` subdirectory) to the new server.
-
-Example using `scp`:
-```bash
-scp -r /path/to/your/project/ user@your_new_server_ip:~/
-```
-Navigate into the project directory on the new server.
-
-### 2. Configure DNS
-
-Ensure your domain **`goggregator-test.unicity.network`** points to the new server's IP address. Let's Encrypt will fail if this is not correct. Wait a few minutes for DNS to propagate.
-
-### 3. Start Temporary Nginx for Initial Certificate
-
-First, create a volume and start a temporary nginx server to handle the ACME challenge:
+### Install Docker (if needed)
 
 ```bash
-# Create the webroot volume
-docker volume create proxy_acme_webroot
+# Install Docker
+sudo apt-get update
+sudo apt-get install -y docker.io docker-compose
 
-# Start temporary nginx on port 80 to serve ACME challenges
-docker run -d --name temp-nginx \
-  -p 80:80 \
-  -v proxy_acme_webroot:/usr/share/nginx/html \
-  nginx:alpine
+# Add your user to the docker group
+sudo usermod -aG docker ${USER}
 
-# Configure nginx to serve the webroot
-docker exec temp-nginx sh -c "echo 'server {
-  listen 80;
-  server_name _;
-  location /.well-known/acme-challenge/ {
-    root /usr/share/nginx/html;
-  }
-}' > /etc/nginx/conf.d/default.conf"
-
-# Reload nginx
-docker exec temp-nginx nginx -s reload
+# IMPORTANT: Log out and log back in for the group change to take effect
 ```
 
-### 4. Obtain Initial SSL Certificate
+## Deployment
 
-Run this one-time command to get the first certificate using webroot mode.
-NB! replace `<email>` with your email address to receive notifications about certificate expiration.
+### 1. Copy Files to Server
 
 ```bash
-docker run -it --rm \
-  -v "$(pwd)/letsencrypt_certs:/etc/letsencrypt" \
-  -v proxy_acme_webroot:/var/www/certbot \
-  certbot/certbot certonly \
-  --webroot \
-  --webroot-path=/var/www/certbot \
-  --email <email> \
-  --agree-tos \
-  --no-eff-email \
-  -d goggregator-test.unicity.network
+scp -r /path/to/proxy/ user@your_server_ip:~/
+ssh user@your_server_ip
+cd ~/proxy
 ```
 
-### 5. Generate DH-Params and HAProxy Certificate
+### 2. Configure Email (Optional)
 
-Run these commands to generate security parameters and prepare the certificate for HAProxy:
+Set your email for Let's Encrypt notifications:
 
 ```bash
-# Generate DH parameters
-docker run -it --rm \
-  --entrypoint /bin/sh \
-  -v "$(pwd)/letsencrypt_certs:/etc/letsencrypt" \
-  certbot/certbot \
-  -c "openssl dhparam -out /etc/letsencrypt/ssl-dhparams.pem 2048"
-
-# Create HAProxy-compatible certificate file
-docker run -it --rm \
-  -v "$(pwd)/letsencrypt_certs:/etc/letsencrypt" \
-  certbot/certbot \
-  sh -c "cat /etc/letsencrypt/live/goggregator-test.unicity.network/privkey.pem /etc/letsencrypt/live/goggregator-test.unicity.network/fullchain.pem > /etc/letsencrypt/live/goggregator-test.unicity.network/haproxy.pem && chmod -R 755 /etc/letsencrypt/live && chmod -R 755 /etc/letsencrypt/archive"
+export CERTBOT_EMAIL=your-email@example.com
 ```
 
-### 6. Stop Temporary Nginx and Launch the Full Stack
+Or edit the `docker-compose.yml` file to change the default email.
 
-Now stop the temporary nginx and start all services:
+### 3. Deploy Everything
+
+That's it! Just run:
 
 ```bash
-# Stop and remove temporary nginx
-docker stop temp-nginx && docker rm temp-nginx
-
-# Start all services
 docker compose up -d
 ```
 
+The system will automatically:
+1. ✅ Obtain SSL certificate from Let's Encrypt
+2. ✅ Generate DH parameters for added security
+3. ✅ Configure HAProxy with HTTPS
+4. ✅ Start the reverse proxy
+5. ✅ Begin automatic renewal checks every 12 hours
+
+**First startup takes 2-3 minutes** (certificate acquisition + DH param generation).
+
 ## Verification
 
-1.  Check that all containers are running:
-    ```bash
-    docker ps
-    ```
-    You should see three containers with status `Up`:
-    - `proxy-haproxy` - HAProxy reverse proxy
-    - `proxy-certbot` - Certificate renewal service
-    - `proxy-nginx-acme` - ACME challenge server
+### Watch the Automatic Setup
 
-2.  Open your web browser and navigate to **`https://goggregator-test.unicity.network`**. The site should load securely with a valid SSL certificate.
+Monitor the initial certificate acquisition:
 
-3.  Check certificate renewal logs:
-    ```bash
-    docker logs proxy-certbot
-    ```
-    You should see successful renewal checks every 12 hours.
+```bash
+docker logs -f proxy-certbot
+```
 
-## Automatic Renewal
+You should see:
+- Certificate acquisition from Let's Encrypt
+- DH parameter generation
+- "Initial setup complete. Service is healthy."
 
-The setup includes automatic certificate renewal with the following features:
+### Check Status
 
-- **Renewal Schedule**: Certbot checks for renewal twice per day (every 12 hours)
-- **Renewal Method**: Uses webroot authentication via the nginx-acme container
-- **Zero Downtime**: HAProxy stays online during renewals; certificates are reloaded via graceful reload signal
-- **No Manual Intervention**: The entire renewal process is automated
-- **Certificate Updates**: When renewed, certificates are automatically converted to HAProxy format and permissions are fixed
+```bash
+# Verify all containers are running
+docker ps
 
-### How It Works
+# Should show:
+# - proxy-certbot (healthy)
+# - proxy-haproxy (up)
+# - proxy-nginx-acme (up)
+```
 
-1. Certbot checks if certificates need renewal (Let's Encrypt certificates are valid for 90 days; renewal happens at 30 days before expiry)
-2. If renewal is needed, certbot places challenge files in the shared webroot volume
-3. Let's Encrypt validation server requests the challenge via HTTP (port 80)
-4. HAProxy proxies `/.well-known/acme-challenge/` requests to nginx-acme on port 8080
-5. Nginx serves the challenge files from the webroot
-6. After successful validation, certbot receives the new certificate
-7. The deploy hook combines the certificate files for HAProxy and triggers a graceful reload
-8. HAProxy loads the new certificate without dropping connections
+### Test HTTPS
 
-### Troubleshooting Renewal
+Open your browser: **https://goggregator-test.unicity.network**
 
-If renewal fails, check:
+You should see:
+- ✅ Valid SSL certificate
+- ✅ Secure connection (padlock icon)
+- ✅ Your application running
+
+## How It Works
+
+### Initial Certificate Acquisition
+
+On first startup:
+1. Certbot starts and checks if certificates exist
+2. If not, obtains certificates using standalone mode (port 80 is available)
+3. Generates DH parameters for security
+4. Creates HAProxy-compatible certificate bundle
+5. Marks itself as healthy
+6. HAProxy and nginx-acme start (they wait for certbot to be healthy)
+
+### Automatic Renewal
+
+After initial setup:
+- **Schedule**: Checks every 12 hours
+- **Method**: Uses webroot mode through HAProxy (no downtime!)
+- **Trigger**: Renews 30 days before expiration
+- **Updates**: Automatically updates HAProxy without interruption
+
+**Renewal Flow:**
+1. Certbot checks if renewal needed (30 days before expiry)
+2. Places challenge files in shared volume
+3. Let's Encrypt requests challenge via HTTP
+4. HAProxy routes `/.well-known/acme-challenge/` to nginx-acme
+5. Validation succeeds, new certificate issued
+6. Deploy hook updates HAProxy cert and triggers graceful reload
+7. HAProxy loads new cert without dropping connections
+
+## Troubleshooting
+
+### Certificate Acquisition Failed
 
 ```bash
 # Check certbot logs
 docker logs proxy-certbot
 
-# Check nginx-acme is serving files
-curl http://localhost:8080/.well-known/acme-challenge/test
-
-# Manually test renewal (dry run)
-docker exec proxy-certbot certbot renew --dry-run --webroot --webroot-path=/var/www/certbot
+# Common issues:
+# 1. DNS not pointing to server - verify with: dig goggregator-test.unicity.network
+# 2. Firewall blocking port 80 - check: sudo ufw status
+# 3. Another service using port 80 - check: sudo netstat -tulpn | grep :80
 ```
+
+### Renewal Issues
+
+```bash
+# Test renewal without actually renewing
+docker exec proxy-certbot certbot renew --dry-run --webroot --webroot-path=/var/www/certbot
+
+# Check nginx-acme is working
+curl http://localhost:8080/.well-known/acme-challenge/
+
+# View renewal logs
+docker logs proxy-certbot | grep -i renew
+```
+
+### Force Certificate Renewal
+
+If you need to force a renewal (e.g., after DNS changes):
+
+```bash
+# Stop all services
+docker compose down
+
+# Remove certificate volume
+docker volume rm proxy_letsencrypt_certs
+
+# Restart (will get new certificates)
+docker compose up -d
+```
+
+## Configuration
+
+### Change Domain
+
+Edit `docker-compose.yml` and update the `DOMAIN` environment variable:
+
+```yaml
+environment:
+  - DOMAIN=your-domain.com
+  - EMAIL=${CERTBOT_EMAIL:-admin@example.com}
+```
+
+Also update `haproxy.cfg` to reference the new domain in the certificate path.
+
+### Change Email
+
+Set environment variable before starting:
+
+```bash
+export CERTBOT_EMAIL=your-email@example.com
+docker compose up -d
+```
+
+Or edit `docker-compose.yml` directly.
