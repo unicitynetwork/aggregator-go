@@ -36,6 +36,7 @@ services:
           # (port 80 is available since HAProxy hasn't started yet)
           certbot certonly \
             --standalone \
+            --preferred-challenges http \
             --non-interactive \
             --agree-tos \
             --email \"$$EMAIL\" \
