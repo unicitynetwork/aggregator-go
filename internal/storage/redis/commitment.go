@@ -96,13 +96,13 @@ func (cs *CommitmentStorage) Initialize(ctx context.Context) error {
 	}
 
 	// Start batch processor
-	cs.wg.Add(1)
-	go cs.batchProcessor()
+	cs.wg.Go(cs.batchProcessor)
 
 	// Start periodic cleanup if interval is configured
 	if cs.batchConfig.CleanupInterval > 0 {
-		cs.wg.Add(1)
-		go cs.periodicCleanup(ctx)
+		cs.wg.Go(func() {
+			cs.periodicCleanup(ctx)
+		})
 	}
 
 	return nil
@@ -126,8 +126,6 @@ func (cs *CommitmentStorage) Close(ctx context.Context) error {
 
 // batchProcessor runs in the background and processes pending commitments in batches
 func (cs *CommitmentStorage) batchProcessor() {
-	defer cs.wg.Done()
-
 	var pendingBatch []*pendingCommitment
 	var flushTimer <-chan time.Time
 
@@ -455,8 +453,6 @@ func (cs *CommitmentStorage) parseCommitment(message redis.XMessage) (*models.Co
 
 // periodicCleanup runs periodic maintenance on the stream
 func (cs *CommitmentStorage) periodicCleanup(ctx context.Context) {
-	defer cs.wg.Done()
-
 	ticker := time.NewTicker(cs.batchConfig.CleanupInterval)
 	defer ticker.Stop()
 

@@ -289,19 +289,15 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 
 		// Only persist SMT nodes if we have pending leaves
 		if len(pendingLeaves) > 0 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				smtPersistErr = rm.persistSmtNodes(ctx, pendingLeaves)
-			}()
+			})
 		}
 
 		// Always persist aggregator records if we have commitments
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			aggregatorRecordErr = rm.persistAggregatorRecords(ctx, commitments, block.Index, snapshot)
-		}()
+		})
 
 		wg.Wait()
 		persistDataTime = time.Since(persistDataStart)

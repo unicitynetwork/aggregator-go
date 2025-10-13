@@ -562,8 +562,6 @@ ProcessLoop:
 
 // redisCommitmentStreamer uses StreamCommitments to continuously stream commitments
 func (rm *RoundManager) redisCommitmentStreamer(ctx context.Context) {
-	defer rm.wg.Done()
-
 	rm.logger.WithContext(ctx).Info("Redis commitment streamer started")
 
 	err := rm.commitmentQueue.StreamCommitments(ctx, rm.commitmentStream)
@@ -578,8 +576,6 @@ func (rm *RoundManager) redisCommitmentStreamer(ctx context.Context) {
 
 // commitmentPrefetcher continuously fetches commitments from storage and feeds them into the stream
 func (rm *RoundManager) commitmentPrefetcher(ctx context.Context) {
-	defer rm.wg.Done()
-
 	rm.logger.WithContext(ctx).Info("Commitment prefetcher started")
 
 	ticker := time.NewTicker(10 * time.Millisecond) // Check more frequently for high throughput
@@ -1020,13 +1016,15 @@ func (rm *RoundManager) startCommitmentPrefetcher(ctx context.Context) {
 
 	if rm.config.Storage.UseRedisForCommitments {
 		rm.logger.WithContext(ctx).Info("Starting Redis commitment streamer")
-		rm.wg.Add(1)
-		go rm.redisCommitmentStreamer(prefetcherCtx)
+		rm.wg.Go(func() {
+			rm.redisCommitmentStreamer(prefetcherCtx)
+		})
 	} else {
 		rm.logger.WithContext(ctx).Info("Starting MongoDB commitment prefetcher")
 		rm.lastFetchedID = ""
-		rm.wg.Add(1)
-		go rm.commitmentPrefetcher(prefetcherCtx)
+		rm.wg.Go(func() {
+			rm.commitmentPrefetcher(prefetcherCtx)
+		})
 	}
 }
 
