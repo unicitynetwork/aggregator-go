@@ -12,12 +12,33 @@ services:
       - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
       - letsencrypt_certs:/etc/letsencrypt:ro
 
+  # Nginx serves ACME challenge files for certbot
+  nginx-acme:
+    image: nginx:alpine
+    container_name: proxy-nginx-acme
+    network_mode: "host"
+    restart: unless-stopped
+    volumes:
+      - acme_webroot:/usr/share/nginx/html:ro
+    command: >
+      sh -c "
+        echo 'server {
+          listen 8080;
+          server_name _;
+          location /.well-known/acme-challenge/ {
+            root /usr/share/nginx/html;
+          }
+        }' > /etc/nginx/conf.d/default.conf &&
+        nginx -g 'daemon off;'
+      "
+
   certbot:
     image: certbot/certbot
     container_name: proxy-certbot
     restart: unless-stopped
     volumes:
       - letsencrypt_certs:/etc/letsencrypt
+      - acme_webroot:/var/www/certbot
       - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD-SHELL", "test -f /etc/letsencrypt/live/goggregator-test.unicity.network/haproxy.pem"]
@@ -26,26 +47,27 @@ services:
       retries: 5
     entrypoint: >
       sh -c "
-        # Install dependencies and define variables with correct quoting
-        apk add --no-cache docker-cli;
+        # Define variables
         DOMAIN=\"goggregator-test.unicity.network\";
         LE_PATH=\"/etc/letsencrypt/live/$$DOMAIN\";
+        WEBROOT=\"/var/www/certbot\";
 
-        # Run the initial setup
+        # Run initial setup
         echo 'Preparing certificates and permissions for HAProxy...';
         cat \"$$LE_PATH/privkey.pem\" \"$$LE_PATH/fullchain.pem\" > \"$$LE_PATH/haproxy.pem\";
         chmod -R 755 /etc/letsencrypt/live;
         chmod -R 755 /etc/letsencrypt/archive;
         echo 'Initial setup complete. Service is now healthy.';
 
-        # Loop for renewals
+        # Loop for renewals (twice per day)
         while :; do
           echo 'Running renewal check...';
-          # === THIS IS THE KEY FIX: The entire certbot command is on ONE line ===
-          certbot renew --standalone --pre-hook 'docker stop proxy-haproxy' --post-hook 'docker start proxy-haproxy' --deploy-hook \"echo 'Certificate renewed, fixing permissions...'; cat $$LE_PATH/privkey.pem $$LE_PATH/fullchain.pem > $$LE_PATH/haproxy.pem; chmod -R 755 /etc/letsencrypt/live; chmod -R 755 /etc/letsencrypt/archive;\";
+          certbot renew --webroot --webroot-path=\"$$WEBROOT\" --deploy-hook \"cat $$LE_PATH/privkey.pem $$LE_PATH/fullchain.pem > $$LE_PATH/haproxy.pem && chmod -R 755 /etc/letsencrypt/live && chmod -R 755 /etc/letsencrypt/archive && apk add --no-cache docker-cli && docker exec proxy-haproxy kill -SIGUSR2 1\";
+          echo 'Renewal check complete. Sleeping for 12 hours...';
           sleep 12h & wait $${!};
         done;
       "
 
 volumes:
   letsencrypt_certs:
+  acme_webroot:
