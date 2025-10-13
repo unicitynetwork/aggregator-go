@@ -45,11 +45,9 @@ func (le *LeaderElection) Start(ctx context.Context) {
 	le.cancel = cancel
 
 	// start election polling
-	le.wg.Add(1)
-	go func() {
-		defer le.wg.Done()
+	le.wg.Go(func() {
 		le.startElectionPolling(ctx)
-	}()
+	})
 }
 
 // Shutdown stops the election polling and releases resources

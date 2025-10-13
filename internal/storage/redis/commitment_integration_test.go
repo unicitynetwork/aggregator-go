@@ -276,10 +276,7 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_HighThroughput() {
 	var producerWg sync.WaitGroup
 
 	for p := 0; p < numProducers; p++ {
-		producerWg.Add(1)
-		go func(producerID int) {
-			defer producerWg.Done()
-
+		producerWg.Go(func() {
 			ticker := time.NewTicker(time.Second / time.Duration(targetRPS/numProducers))
 			defer ticker.Stop()
 
@@ -291,17 +288,15 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_HighThroughput() {
 				commitmentNum++
 
 				// Store in background goroutine to avoid blocking
-				storeWg.Add(1)
-				go func(c *models.Commitment) {
-					defer storeWg.Done()
-					if err := suite.storage.Store(ctx, c); err != nil {
+				storeWg.Go(func() {
+					if err := suite.storage.Store(ctx, commitment); err != nil {
 						submitErrors.Add(1)
 					} else {
 						submittedCount.Add(1)
 					}
-				}(commitment)
+				})
 			}
-		}(p)
+		})
 	}
 
 	// Wait for all producers to finish submitting
