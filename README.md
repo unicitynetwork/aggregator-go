@@ -32,7 +32,7 @@ The Unicity Aggregator implements a decentralized Agent-Aggregator communication
 
 ### Prerequisites
 
-- Go 1.24 or later
+- Go 1.25 or later
 - MongoDB 4.4 or later
 - Make (optional, for using Makefile)
 

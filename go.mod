@@ -1,6 +1,6 @@
 module github.com/unicitynetwork/aggregator-go
 
-go 1.24
+go 1.25
 
 require (
 	github.com/btcsuite/btcd/btcec/v2 v2.3.5
