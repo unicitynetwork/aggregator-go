@@ -34,17 +34,10 @@ services:
 
           # Obtain initial certificate using standalone mode
           # (port 80 is available since HAProxy hasn't started yet)
-          certbot certonly \
-            --standalone \
-            --preferred-challenges http \
-            --non-interactive \
-            --agree-tos \
-            --email \"$$EMAIL\" \
-            --no-eff-email \
-            -d \"$$DOMAIN\" || {
-              echo 'ERROR: Failed to obtain certificate. Check DNS and network connectivity.';
-              exit 1;
-            };
+          certbot certonly --authenticator standalone --preferred-challenges http --non-interactive --agree-tos --email \"$$EMAIL\" --no-eff-email --domain \"$$DOMAIN\" || {
+            echo 'ERROR: Failed to obtain certificate. Check DNS and network connectivity.';
+            exit 1;
+          };
 
           echo 'Certificate obtained successfully!';
         else
@@ -77,11 +70,7 @@ services:
         while :; do
           echo \"[$(date)] Running renewal check...\";
 
-          certbot renew \
-            --webroot \
-            --webroot-path=\"$$WEBROOT\" \
-            --deploy-hook \"cat $$LE_PATH/privkey.pem $$LE_PATH/fullchain.pem > $$LE_PATH/haproxy.pem && chmod -R 755 /etc/letsencrypt/live && chmod -R 755 /etc/letsencrypt/archive && kill -SIGUSR2 1\" \
-            2>&1 || echo 'Renewal check completed (no renewal needed or failed).';
+          certbot renew --webroot --webroot-path=\"$$WEBROOT\" --deploy-hook \"cat $$LE_PATH/privkey.pem $$LE_PATH/fullchain.pem > $$LE_PATH/haproxy.pem && chmod -R 755 /etc/letsencrypt/live && chmod -R 755 /etc/letsencrypt/archive && kill -SIGUSR2 1\" 2>&1 || echo 'Renewal check completed (no renewal needed or failed).';
 
           echo \"[$(date)] Next check in 12 hours.\";
           sleep 12h & wait $${!};
