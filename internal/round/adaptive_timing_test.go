@@ -34,11 +34,8 @@ func TestAdaptiveProcessingRatio(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	// Create a mock storage
-	mockStorage := createMockStorage(t)
-
 	// Create round manager
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, mockStorage, nil)
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, nil)
 	require.NoError(t, err)
 
 	// Test initial values
@@ -132,9 +129,8 @@ func TestAdaptiveDeadlineCalculation(t *testing.T) {
 
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
-	mockStorage := createMockStorage(t)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, mockStorage, nil)
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, nil)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -200,9 +196,8 @@ func TestSMTUpdateTimeTracking(t *testing.T) {
 
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
-	mockStorage := createMockStorage(t)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, mockStorage, nil)
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -264,9 +259,8 @@ func TestStreamingMetrics(t *testing.T) {
 
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
-	mockStorage := createMockStorage(t)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, mockStorage, nil)
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, nil)
 	require.NoError(t, err)
 
 	// Set some test values
@@ -318,9 +312,8 @@ func TestAdaptiveTimingIntegration(t *testing.T) {
 
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
-	mockStorage := createMockStorage(t)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, mockStorage, nil)
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()

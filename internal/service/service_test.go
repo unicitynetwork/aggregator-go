@@ -115,19 +115,22 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	mongoStorage, err := mongodbStorage.NewStorage(*cfg)
 	require.NoError(t, err)
 
+	// Use MongoDB for both commitment queue and storage
+	commitmentQueue := mongoStorage.CommitmentQueue()
+
 	// Initialize round manager
-	roundManager, err := round.NewRoundManager(ctx, cfg, log, mongoStorage, nil)
+	roundManager, err := round.NewRoundManager(ctx, cfg, log, commitmentQueue, mongoStorage, nil)
 	require.NoError(t, err)
 
 	// Initialize service
-	aggregatorService := NewAggregatorService(cfg, log, roundManager, mongoStorage, nil)
+	aggregatorService := NewAggregatorService(cfg, log, roundManager, commitmentQueue, mongoStorage, nil)
 
 	// Start the aggregator service
 	err = aggregatorService.Start(ctx)
 	require.NoError(t, err)
 
 	// Initialize gateway server
-	server := gateway.NewServer(cfg, log, mongoStorage, aggregatorService)
+	server := gateway.NewServer(cfg, log, aggregatorService)
 
 	// Start server in a goroutine
 	go func() {
