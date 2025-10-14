@@ -46,6 +46,42 @@ func (ss *SmtStorage) Store(ctx context.Context, node *models.SmtNode) error {
 	return nil
 }
 
+// UpsertBatch stores or updates multiple SMT nodes, replacing existing values for the same keys
+func (ss *SmtStorage) UpsertBatch(ctx context.Context, nodes []*models.SmtNode) error {
+	if len(nodes) == 0 {
+		return nil
+	}
+
+	// Use bulk write operations for efficiency
+	var operations []mongo.WriteModel
+	for _, node := range nodes {
+		filter := bson.M{"key": node.Key}
+		update := bson.M{
+			"$set": bson.M{
+				"key":       node.Key,
+				"value":     node.Value,
+				"createdAt": node.CreatedAt,
+			},
+		}
+
+		operation := mongo.NewUpdateOneModel()
+		operation.SetFilter(filter)
+		operation.SetUpdate(update)
+		operation.SetUpsert(true)
+
+		operations = append(operations, operation)
+	}
+
+	// Execute bulk write
+	opts := options.BulkWrite().SetOrdered(false) // Allow partial success
+	_, err := ss.collection.BulkWrite(ctx, operations, opts)
+	if err != nil {
+		return fmt.Errorf("failed to upsert SMT nodes batch: %w", err)
+	}
+
+	return nil
+}
+
 // StoreBatch stores multiple SMT nodes using insert operations, skipping duplicates
 func (ss *SmtStorage) StoreBatch(ctx context.Context, nodes []*models.SmtNode) error {
 	if len(nodes) == 0 {

@@ -87,6 +87,9 @@ type SmtStorage interface {
 	// StoreBatch stores multiple SMT nodes
 	StoreBatch(ctx context.Context, nodes []*models.SmtNode) error
 
+	// UpsertBatch stores or updates multiple SMT nodes, replacing existing values
+	UpsertBatch(ctx context.Context, nodes []*models.SmtNode) error
+
 	// GetByKey retrieves an SMT node by key
 	GetByKey(ctx context.Context, key api.HexBytes) (*models.SmtNode, error)
 
@@ -130,6 +133,7 @@ type BlockRecordsStorage interface {
 	// GetLatestBlock retrieves the latest block
 	GetLatestBlock(ctx context.Context) (*models.BlockRecords, error)
 }
+
 
 // LeadershipStorage handles high availability leadership state
 type LeadershipStorage interface {

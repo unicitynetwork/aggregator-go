@@ -129,12 +129,13 @@ func (s *Server) handleSubmitShardRoot(ctx context.Context, params json.RawMessa
 		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
 	}
 
-	// Validate using the request's validation method
-	if err := req.Validate(); err != nil {
-		return nil, jsonrpc.NewValidationError(err.Error())
+	if len(req.ShardID) == 0 {
+		return nil, jsonrpc.NewValidationError("shardId is required")
+	}
+	if len(req.RootHash) == 0 {
+		return nil, jsonrpc.NewValidationError("rootHash is required")
 	}
 
-	// Call service
 	response, err := s.service.SubmitShardRoot(ctx, &req)
 	if err != nil {
 		s.logger.WithContext(ctx).Error("Failed to submit shard root", "error", err.Error())
@@ -151,12 +152,10 @@ func (s *Server) handleGetShardProof(ctx context.Context, params json.RawMessage
 		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
 	}
 
-	// Validate using the request's validation method
-	if err := req.Validate(); err != nil {
-		return nil, jsonrpc.NewValidationError(err.Error())
+	if len(req.ShardID) == 0 {
+		return nil, jsonrpc.NewValidationError("shardId is required")
 	}
 
-	// Call service
 	response, err := s.service.GetShardProof(ctx, &req)
 	if err != nil {
 		s.logger.WithContext(ctx).Error("Failed to get shard proof", "error", err.Error())

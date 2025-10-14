@@ -3,38 +3,40 @@ package service
 import (
 	"context"
 	"fmt"
+	"math/big"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // ParentAggregatorService implements the business logic for the parent aggregator
 type ParentAggregatorService struct {
-	config  *config.Config
-	logger  *logger.Logger
-	storage interfaces.Storage
-	// TODO: Add parent round manager when implemented
-
-	// In-memory tracking of shard root updates for current round
-	currentShardUpdates map[string]*models.ShardRootUpdate
+	config             *config.Config
+	logger             *logger.Logger
+	storage            interfaces.Storage
+	parentRoundManager *round.ParentRoundManager
 }
 
 // NewParentAggregatorService creates a new parent aggregator service
-func NewParentAggregatorService(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*ParentAggregatorService, error) {
+func NewParentAggregatorService(ctx context.Context, cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*ParentAggregatorService, error) {
 	if !cfg.Sharding.Mode.IsParent() {
 		return nil, fmt.Errorf("parent aggregator service can only be created in parent mode, got: %s", cfg.Sharding.Mode)
 	}
 
-	// TODO: Create parent round manager when implemented
+	parentRoundManager, err := round.NewParentRoundManager(ctx, cfg, logger, storage)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create parent round manager: %w", err)
+	}
 
 	return &ParentAggregatorService{
-		config:              cfg,
-		logger:              logger,
-		storage:             storage,
-		currentShardUpdates: make(map[string]*models.ShardRootUpdate),
+		config:             cfg,
+		logger:             logger,
+		storage:            storage,
+		parentRoundManager: parentRoundManager,
 	}, nil
 }
 
@@ -42,7 +44,9 @@ func NewParentAggregatorService(cfg *config.Config, logger *logger.Logger, stora
 func (pas *ParentAggregatorService) Start(ctx context.Context) error {
 	pas.logger.WithContext(ctx).Info("Starting Parent Aggregator Service")
 
-	// TODO: Start parent round manager when implemented
+	if err := pas.parentRoundManager.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start parent round manager: %w", err)
+	}
 
 	pas.logger.WithContext(ctx).Info("Parent Aggregator Service started successfully")
 	return nil
@@ -52,7 +56,10 @@ func (pas *ParentAggregatorService) Start(ctx context.Context) error {
 func (pas *ParentAggregatorService) Stop(ctx context.Context) error {
 	pas.logger.WithContext(ctx).Info("Stopping Parent Aggregator Service")
 
-	// TODO: Stop parent round manager when implemented
+	if err := pas.parentRoundManager.Stop(ctx); err != nil {
+		pas.logger.WithContext(ctx).Error("Failed to stop parent round manager", "error", err.Error())
+		return fmt.Errorf("failed to stop parent round manager: %w", err)
+	}
 
 	pas.logger.WithContext(ctx).Info("Parent Aggregator Service stopped successfully")
 	return nil
@@ -60,24 +67,26 @@ func (pas *ParentAggregatorService) Stop(ctx context.Context) error {
 
 // SubmitShardRoot handles shard root submission from child aggregators
 func (pas *ParentAggregatorService) SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) (*api.SubmitShardRootResponse, error) {
-	// Validate shard ID range
 	if err := pas.validateShardID(req.ShardID); err != nil {
-		pas.logger.WithContext(ctx).Warn("Invalid shard ID", "shardId", req.ShardID, "error", err.Error())
+		pas.logger.WithContext(ctx).Warn("Invalid shard ID", "shardId", req.ShardID.String(), "error", err.Error())
 		return &api.SubmitShardRootResponse{
 			Status: api.ShardRootStatusInvalidShardID,
 		}, nil
 	}
 
 	update := models.NewShardRootUpdate(req.ShardID, req.RootHash)
-	shardIDStr := fmt.Sprintf("%d", req.ShardID)
-	pas.currentShardUpdates[shardIDStr] = update
+
+	err := pas.parentRoundManager.SubmitShardRoot(ctx, update)
+	if err != nil {
+		pas.logger.WithContext(ctx).Error("Failed to submit shard root to round manager", "error", err.Error())
+		return &api.SubmitShardRootResponse{
+			Status: api.ShardRootStatusInternalError,
+		}, nil
+	}
 
 	pas.logger.WithContext(ctx).Info("Shard root update accepted",
-		"shardId", req.ShardID,
-		"rootHash", req.RootHash.String(),
-		"totalShards", len(pas.currentShardUpdates))
-
-	// TODO: Submit to parent round manager when implemented
+		"shardId", req.ShardID.String(),
+		"rootHash", req.RootHash.String())
 
 	return &api.SubmitShardRootResponse{
 		Status: api.ShardRootStatusSuccess,
@@ -86,30 +95,61 @@ func (pas *ParentAggregatorService) SubmitShardRoot(ctx context.Context, req *ap
 
 // GetShardProof handles shard proof requests
 func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.GetShardProofResponse, error) {
-	// Validate shard ID
 	if err := pas.validateShardID(req.ShardID); err != nil {
-		pas.logger.WithContext(ctx).Warn("Invalid shard ID for proof request", "shardId", req.ShardID, "error", err.Error())
+		pas.logger.WithContext(ctx).Warn("Invalid shard ID", "shardId", req.ShardID.String(), "error", err.Error())
 		return nil, fmt.Errorf("invalid shard ID: %w", err)
 	}
 
-	pas.logger.WithContext(ctx).Info("Shard proof requested", "shardId", req.ShardID)
+	pas.logger.WithContext(ctx).Info("Shard proof requested", "shardId", req.ShardID.String())
 
-	// TODO: Implement shard proof generation when parent SMT and round manager are ready
+	shardPath := new(big.Int).SetBytes(req.ShardID)
+	merkleTreePath := pas.parentRoundManager.GetSMT().GetPath(shardPath)
 
-	return nil, fmt.Errorf("shard proof generation not implemented yet - requires parent SMT integration")
-}
-
-// validateShardID validates that the shard ID is in the correct range
-func (pas *ParentAggregatorService) validateShardID(shardID int) error {
-	if shardID < 0 {
-		return fmt.Errorf("shard ID must be non-negative, got: %d", shardID)
+	var proofPath *api.MerkleTreePath
+	if len(merkleTreePath.Steps) > 0 && merkleTreePath.Steps[0].Branch != nil {
+		proofPath = merkleTreePath
+		pas.logger.WithContext(ctx).Info("Generated shard proof from current state",
+			"shardId", req.ShardID.String(),
+			"rootHash", merkleTreePath.Root)
+	} else {
+		proofPath = nil
+		pas.logger.WithContext(ctx).Info("Shard has not submitted root yet, returning nil proof",
+			"shardId", req.ShardID.String())
 	}
 
-	// Calculate maximum shard ID based on shard_id_length
-	maxShardID := (1 << pas.config.Sharding.ShardIDLength) - 1
-	if shardID > maxShardID {
-		return fmt.Errorf("shard ID %d exceeds maximum %d for %d-bit shard IDs",
-			shardID, maxShardID, pas.config.Sharding.ShardIDLength)
+	latestBlock, err := pas.storage.BlockStorage().GetLatest(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get latest block: %w", err)
+	}
+
+	var unicityCertificate api.HexBytes
+	if latestBlock != nil {
+		unicityCertificate = latestBlock.UnicityCertificate
+	}
+
+	return &api.GetShardProofResponse{
+		MerkleTreePath:     proofPath,
+		UnicityCertificate: unicityCertificate,
+	}, nil
+}
+
+func (pas *ParentAggregatorService) validateShardID(shardID api.HexBytes) error {
+	if len(shardID) < 2 {
+		return fmt.Errorf("shard ID too short, must have at least 2 bytes")
+	}
+
+	if shardID[0] != 0x01 {
+		return fmt.Errorf("shard ID must have 0x01 prefix, got: %s", shardID.String())
+	}
+
+	shardValueBytes := shardID[1:]
+	shardValue := new(big.Int).SetBytes(shardValueBytes)
+
+	maxShardID := int64((1 << pas.config.Sharding.ShardIDLength) - 1)
+	maxShardIDBig := big.NewInt(maxShardID)
+	if shardValue.Cmp(maxShardIDBig) > 0 {
+		return fmt.Errorf("shard ID value %s exceeds maximum %d for %d-bit shard IDs",
+			shardValue.String(), maxShardID, pas.config.Sharding.ShardIDLength)
 	}
 
 	return nil
@@ -130,9 +170,16 @@ func (pas *ParentAggregatorService) GetNoDeletionProof(ctx context.Context) (*ap
 	return nil, fmt.Errorf("get_no_deletion_proof not implemented yet in parent mode")
 }
 
-// GetBlockHeight - TODO: implement
+// GetBlockHeight retrieves the current parent block height
 func (pas *ParentAggregatorService) GetBlockHeight(ctx context.Context) (*api.GetBlockHeightResponse, error) {
-	return nil, fmt.Errorf("get_block_height not implemented yet in parent mode")
+	latestBlockNumber, err := pas.storage.BlockStorage().GetLatestNumber(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get latest parent block number: %w", err)
+	}
+
+	return &api.GetBlockHeightResponse{
+		BlockNumber: latestBlockNumber,
+	}, nil
 }
 
 // GetBlock - TODO: implement
@@ -145,7 +192,26 @@ func (pas *ParentAggregatorService) GetBlockCommitments(ctx context.Context, req
 	return nil, fmt.Errorf("get_block_commitments not implemented yet in parent mode")
 }
 
-// GetHealthStatus - TODO: implement
+// GetHealthStatus retrieves the health status of the parent aggregator service
 func (pas *ParentAggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthStatus, error) {
-	return nil, fmt.Errorf("get_health_status not implemented yet in parent mode")
+	// Check if HA is enabled and determine role
+	var role string
+	if pas.config.HA.Enabled {
+		// TODO: Add leader selector support for parent mode when HA is implemented
+		role = "parent-standalone"
+	} else {
+		role = "parent-standalone"
+	}
+
+	status := models.NewHealthStatus(role, pas.config.HA.ServerID)
+
+	// Add database connectivity check
+	if err := pas.storage.Ping(ctx); err != nil {
+		status.AddDetail("database", "disconnected")
+		pas.logger.WithContext(ctx).Error("Database health check failed", "error", err.Error())
+	} else {
+		status.AddDetail("database", "connected")
+	}
+
+	return modelToAPIHealthStatus(status), nil
 }

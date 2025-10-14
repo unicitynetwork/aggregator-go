@@ -118,6 +118,22 @@ func (s *Storage) Close(ctx context.Context) error {
 	return s.client.Disconnect(ctx)
 }
 
+// CleanAllCollections drops all collections in the database (useful for testing)
+func (s *Storage) CleanAllCollections(ctx context.Context) error {
+	collections, err := s.database.ListCollectionNames(ctx, map[string]interface{}{})
+	if err != nil {
+		return fmt.Errorf("failed to list collections: %w", err)
+	}
+
+	for _, collName := range collections {
+		if err := s.database.Collection(collName).Drop(ctx); err != nil {
+			return fmt.Errorf("failed to drop collection %s: %w", collName, err)
+		}
+	}
+
+	return nil
+}
+
 // WithTransaction executes a function within a MongoDB transaction
 func (s *Storage) WithTransaction(ctx context.Context, fn func(context.Context) error) error {
 	session, err := s.client.StartSession()

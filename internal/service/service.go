@@ -43,10 +43,17 @@ func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, 
 		}
 		return NewAggregatorService(cfg, logger, roundManager, storage, leaderSelector), nil
 	case config.ShardingModeParent:
-		return NewParentAggregatorService(cfg, logger, storage)
+		return NewParentAggregatorService(ctx, cfg, logger, storage)
 	default:
 		return nil, fmt.Errorf("unsupported sharding mode: %s", cfg.Sharding.Mode)
 	}
+}
+
+// IRoundManager defines the common interface for both regular and parent round managers
+type IRoundManager interface {
+	Start(ctx context.Context) error
+	Stop(ctx context.Context) error
+	GetSMT() *round.ThreadSafeSMT
 }
 
 // AggregatorService implements the business logic for the aggregator
@@ -54,7 +61,7 @@ type AggregatorService struct {
 	config              *config.Config
 	logger              *logger.Logger
 	storage             interfaces.Storage
-	roundManager        *round.RoundManager
+	roundManager        IRoundManager
 	leaderSelector      LeaderSelector
 	commitmentValidator *signing.CommitmentValidator
 }
