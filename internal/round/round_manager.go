@@ -10,6 +10,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/bft"
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
@@ -50,7 +51,7 @@ type Round struct {
 	PendingRecords  []*models.AggregatorRecord
 	PendingRootHash string
 	// SMT snapshot for this round - allows accumulating changes before committing
-	Snapshot *ThreadSafeSmtSnapshot
+	Snapshot *smt.ThreadSafeSmtSnapshot
 	// Store data for persistence during FinalizeBlock
 	PendingLeaves []*smt.Leaf
 	// Timing metrics for this round
@@ -59,14 +60,27 @@ type Round struct {
 	FinalizationTime time.Time // When block was actually finalized
 }
 
-// RoundManager handles the creation of blocks and processing of commitments
+// RoundManager handles the creation of blocks and processing of commitments.
+//
+// The lifecycle of the RoundManager is managed by two pairs of methods:
+//   - Start() and Stop(): These methods manage the overall lifecycle of the RoundManager instance.
+//     Start() is called once during application initialization to set up core components
+//     and restore state. Stop() is called once during application shutdown for graceful cleanup.
+//   - Activate() and Deactivate(): These methods are part of the ha.Activatable interface
+//     and manage the RoundManager's active participation in block creation based on
+//     High Availability (HA) leadership status. Activate() is called when the node
+//     becomes the leader, enabling active block processing. Deactivate() is called
+//     when the node loses leadership, putting it into a passive state.
+//     A RoundManager can be Activated and Deactivated multiple times throughout its
+//     overall Start-Stop lifecycle as leadership changes.
 type RoundManager struct {
 	config          *config.Config
 	logger          *logger.Logger
 	commitmentQueue interfaces.CommitmentQueue
 	storage         interfaces.Storage
-	smt             *ThreadSafeSMT
+	smt             *smt.ThreadSafeSMT
 	bftClient       bft.BFTClient
+	stateTracker    *state.Tracker
 
 	// Round management
 	currentRound *Round
@@ -74,15 +88,8 @@ type RoundManager struct {
 	roundTimer   *time.Timer
 	wg           sync.WaitGroup
 
-	lastSyncedRoundNumber      *big.Int
-	lastSyncedRoundNumberMutex sync.Mutex // mutex to protect the lastSyncedRoundNumber
-
 	// Round duration (configurable, default 1 second)
 	roundDuration time.Duration
-
-	// optional HA leader selector
-	leaderSelector    LeaderSelector
-	blockSyncCancelFn context.CancelFunc
 
 	// Streaming support
 	commitmentStream chan *models.Commitment
@@ -104,10 +111,6 @@ type RoundManager struct {
 	totalCommitments int64
 }
 
-type LeaderSelector interface {
-	IsLeader(ctx context.Context) (bool, error)
-}
-
 // RoundMetrics tracks performance metrics for a round
 type RoundMetrics struct {
 	CommitmentsProcessed int
@@ -117,10 +120,10 @@ type RoundMetrics struct {
 }
 
 // NewRoundManager creates a new round manager
-func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) (*RoundManager, error) {
+func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, stateTracker *state.Tracker) (*RoundManager, error) {
 	// Initialize SMT with empty tree - will be replaced with restored tree in Start()
 	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
-	threadSafeSMT := NewThreadSafeSMT(smtInstance)
+	threadSafeSMT := smt.NewThreadSafeSMT(smtInstance)
 
 	rm := &RoundManager{
 		config:              cfg,
@@ -128,7 +131,7 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 		commitmentQueue:     commitmentQueue,
 		storage:             storage,
 		smt:                 threadSafeSMT,
-		leaderSelector:      leaderSelector,
+		stateTracker:        stateTracker,
 		roundDuration:       cfg.Processing.RoundDuration,         // Configurable round duration (default 1s)
 		commitmentStream:    make(chan *models.Commitment, 10000), // Reasonable buffer for streaming
 		avgProcessingRate:   1.0,                                  // Initial estimate: 1 commitment per ms
@@ -174,26 +177,17 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to restore SMT from storage: %w", err)
 	}
 
-	if rm.config.HA.Enabled {
-		blockSyncCtx, cancel := context.WithCancel(ctx)
-		rm.blockSyncCancelFn = cancel
-		go func() {
-			rm.logger.WithContext(blockSyncCtx).Info("block sync goroutine started")
-			rm.blockSync(blockSyncCtx)
-			rm.logger.WithContext(blockSyncCtx).Info("block sync goroutine finished")
-		}()
-	} else {
-		if err := rm.bftClient.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start BFT client: %w", err)
-		}
-		rm.startCommitmentPrefetcher(ctx)
-	}
+	rm.logger.Info("Round Manager started successfully.")
 	return nil
 }
 
 // Stop gracefully stops the round manager
-func (rm *RoundManager) Stop(ctx context.Context) error {
-	rm.logger.WithContext(ctx).Info("Stopping Round Manager")
+func (rm *RoundManager) Stop(ctx context.Context) {
+	rm.logger.Info("Stopping Round Manager")
+
+	if err := rm.Deactivate(ctx); err != nil {
+		rm.logger.WithContext(ctx).Error("Failed to deactivate Round Manager", "error", err.Error())
+	}
 
 	// Stop current round timer
 	rm.roundMutex.Lock()
@@ -202,21 +196,10 @@ func (rm *RoundManager) Stop(ctx context.Context) error {
 	}
 	rm.roundMutex.Unlock()
 
-	rm.streamMutex.Lock()
-	if rm.prefetchCancel != nil {
-		rm.prefetchCancel()
-	}
-	rm.streamMutex.Unlock()
-
-	if rm.blockSyncCancelFn != nil {
-		rm.blockSyncCancelFn()
-	}
-
 	// Wait for goroutines to finish
 	rm.wg.Wait()
 
-	rm.logger.WithContext(ctx).Info("Round Manager stopped")
-	return nil
+	rm.logger.Info("Round Manager stopped")
 }
 
 // GetCurrentRound returns information about the current round
@@ -270,7 +253,7 @@ func (rm *RoundManager) GetStreamingMetrics() map[string]interface{} {
 }
 
 // GetSMT returns the thread-safe SMT instance for inclusion proof generation
-func (rm *RoundManager) GetSMT() *ThreadSafeSMT {
+func (rm *RoundManager) GetSMT() *smt.ThreadSafeSMT {
 	return rm.smt
 }
 
@@ -812,13 +795,13 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 			"rootHash", finalRootHash,
 			"latestBlockNumber", latestBlock.Index.String())
 
-		rm.setLastSyncedRoundNumber(latestBlock.Index.Int)
+		rm.stateTracker.SetLastSyncedBlock(latestBlock.Index.Int)
 	}
 
 	return latestBlock.Index, nil
 }
 
-func (rm *RoundManager) onBecomeLeader(ctx context.Context) error {
+func (rm *RoundManager) Activate(ctx context.Context) error {
 	if err := rm.bftClient.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start BFT client: %w", err)
 	}
@@ -826,180 +809,10 @@ func (rm *RoundManager) onBecomeLeader(ctx context.Context) error {
 	return nil
 }
 
-func (rm *RoundManager) onBecomeFollower() {
+func (rm *RoundManager) Deactivate(ctx context.Context) error {
 	rm.bftClient.Stop()
 	rm.stopCommitmentPrefetcher()
-}
-
-func (rm *RoundManager) blockSync(ctx context.Context) {
-	ticker := time.NewTicker(rm.roundDuration)
-	defer ticker.Stop()
-
-	var wasLeader bool
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			rm.logger.WithContext(ctx).Debug("on block sync tick")
-			isLeader, err := rm.onBlockSyncTick(ctx, wasLeader)
-			if err != nil {
-				rm.logger.WithContext(ctx).Warn("failed to sync block", "err", err.Error())
-				continue
-			}
-			rm.logger.WithContext(ctx).Debug("block sync tick finished")
-			wasLeader = isLeader
-		}
-	}
-}
-
-func (rm *RoundManager) onBlockSyncTick(ctx context.Context, wasLeader bool) (bool, error) {
-	isLeader, err := rm.leaderSelector.IsLeader(ctx)
-	if err != nil {
-		return wasLeader, fmt.Errorf("error on leader selection: %w", err)
-	}
-	// nothing to do if still leader
-	if isLeader && wasLeader {
-		rm.logger.WithContext(ctx).Debug("leader is already being synced")
-		return isLeader, nil
-	}
-	if err := rm.syncSmtToLatestBlock(ctx); err != nil {
-		return isLeader, fmt.Errorf("failed to sync smt to latest block: %w", err)
-	}
-	if !wasLeader && isLeader {
-		if err := rm.onBecomeLeader(ctx); err != nil {
-			return isLeader, fmt.Errorf("failed onBecomeLeader transition: %w", err)
-		}
-	} else if wasLeader && !isLeader {
-		rm.onBecomeFollower()
-	}
-	return isLeader, nil
-}
-
-func (rm *RoundManager) syncSmtToLatestBlock(ctx context.Context) error {
-	// fetch last synced smt block number and last stored block number
-	currBlock := rm.getLastSyncedRoundNumber()
-	endBlock, err := rm.getLastStoredBlockRecordNumber(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to fetch last stored block number: %w", err)
-	}
-	rm.logger.WithContext(ctx).Debug("block sync", "from", currBlock, "to", endBlock)
-	for currBlock.Cmp(endBlock) < 0 {
-		// fetch the next block record
-		b, err := rm.storage.BlockRecordsStorage().GetNextBlock(ctx, api.NewBigInt(currBlock))
-		if err != nil {
-			return fmt.Errorf("failed to fetch next block: %w", err)
-		}
-		if b == nil {
-			return fmt.Errorf("next block record not found block: %s", currBlock.String())
-		}
-
-		// skip empty blocks
-		if len(b.RequestIDs) == 0 {
-			rm.logger.WithContext(ctx).Debug("skipping block sync (empty block)", "nextBlock", b.BlockNumber.String())
-			currBlock = b.BlockNumber.Int
-			rm.setLastSyncedRoundNumber(currBlock)
-			continue
-		}
-		rm.logger.WithContext(ctx).Debug("updating SMT for round", "blockNumber", b.BlockNumber.String())
-
-		// apply changes from block record to SMT
-		if err := rm.updateSMTForBlock(ctx, b); err != nil {
-			return fmt.Errorf("failed to update SMT: %w", err)
-		}
-
-		currBlock = b.BlockNumber.Int
-		rm.setLastSyncedRoundNumber(currBlock)
-		rm.logger.Info("SMT updated for round", "roundNumber", currBlock)
-	}
 	return nil
-}
-
-func (rm *RoundManager) verifySMTForBlock(ctx context.Context, smtRootHash string, blockNumber *api.BigInt) error {
-	block, err := rm.storage.BlockStorage().GetByNumber(ctx, blockNumber)
-	if err != nil {
-		return fmt.Errorf("failed to fetch block: %w", err)
-	}
-	if block == nil {
-		return fmt.Errorf("block not found for block number: %s", blockNumber.String())
-	}
-	expectedRootHash := block.RootHash.String()
-	if smtRootHash != expectedRootHash {
-		return fmt.Errorf("smt root hash %s does not match latest block root hash %s",
-			smtRootHash, expectedRootHash)
-	}
-	return nil
-}
-
-func (rm *RoundManager) updateSMTForBlock(ctx context.Context, blockRecord *models.BlockRecords) error {
-	// build leaf ids while filtering duplicate blockRecord.RequestIDs
-	uniqueRequestIds := make(map[string]struct{}, len(blockRecord.RequestIDs))
-	leafIDs := make([]api.HexBytes, 0, len(blockRecord.RequestIDs))
-	for _, reqID := range blockRecord.RequestIDs {
-		// skip duplicates
-		key := string(reqID)
-		if _, exists := uniqueRequestIds[key]; exists {
-			continue
-		}
-		uniqueRequestIds[key] = struct{}{}
-
-		path, err := reqID.GetPath()
-		if err != nil {
-			return fmt.Errorf("failed to get path: %w", err)
-		}
-		leafIDs = append(leafIDs, api.NewHexBytes(path.Bytes()))
-	}
-	// load smt nodes by ids
-	smtNodes, err := rm.storage.SmtStorage().GetByKeys(ctx, leafIDs)
-	if err != nil {
-		return fmt.Errorf("failed to load smt nodes by keys: %w", err)
-	}
-	// convert smt nodes to leaves
-	leaves := make([]*smt.Leaf, 0, len(smtNodes))
-	for _, smtNode := range smtNodes {
-		leaves = append(leaves, smt.NewLeaf(new(big.Int).SetBytes(smtNode.Key), smtNode.Value))
-	}
-
-	// apply changes to smt snapshot
-	snapshot := rm.smt.CreateSnapshot()
-	smtRootHash, err := snapshot.AddLeaves(leaves)
-	if err != nil {
-		return fmt.Errorf("failed to apply SMT updates for block %s: %w", blockRecord.BlockNumber.String(), err)
-	}
-	// verify smt root hash matches block store root hash
-	if err := rm.verifySMTForBlock(ctx, smtRootHash, blockRecord.BlockNumber); err != nil {
-		return fmt.Errorf("failed to verify SMT: %w", err)
-	}
-	// commit smt snapshot
-	snapshot.Commit(rm.smt)
-
-	return nil
-}
-
-func (rm *RoundManager) setLastSyncedRoundNumber(roundNumber *big.Int) {
-	rm.lastSyncedRoundNumberMutex.Lock()
-	defer rm.lastSyncedRoundNumberMutex.Unlock()
-	rm.lastSyncedRoundNumber = roundNumber
-}
-
-func (rm *RoundManager) getLastSyncedRoundNumber() *big.Int {
-	rm.lastSyncedRoundNumberMutex.Lock()
-	defer rm.lastSyncedRoundNumberMutex.Unlock()
-	if rm.lastSyncedRoundNumber == nil {
-		return big.NewInt(0)
-	}
-	return rm.lastSyncedRoundNumber
-}
-
-func (rm *RoundManager) getLastStoredBlockRecordNumber(ctx context.Context) (*big.Int, error) {
-	blockRecord, err := rm.storage.BlockRecordsStorage().GetLatestBlock(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch latest block number: %w", err)
-	}
-	if blockRecord == nil {
-		return big.NewInt(0), nil
-	}
-	return blockRecord.BlockNumber.Int, nil
 }
 
 func (rm *RoundManager) startCommitmentPrefetcher(ctx context.Context) {
