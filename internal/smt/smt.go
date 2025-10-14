@@ -18,7 +18,7 @@ var (
 type (
 	// SparseMerkleTree implements a sparse merkle tree compatible with Unicity SDK
 	SparseMerkleTree struct {
-		hasher     *api.DataHasher
+		algorithm  api.HashAlgorithm
 		root       *RootNode
 		isSnapshot bool              // true if this is a snapshot, false if original tree
 		original   *SparseMerkleTree // reference to original tree (nil for original)
@@ -33,7 +33,7 @@ type (
 // NewSparseMerkleTree creates a new sparse merkle tree
 func NewSparseMerkleTree(algorithm api.HashAlgorithm) *SparseMerkleTree {
 	return &SparseMerkleTree{
-		hasher:     api.NewDataHasher(algorithm),
+		algorithm:  algorithm,
 		root:       newRootNode(nil, nil),
 		isSnapshot: false,
 		original:   nil,
@@ -44,7 +44,7 @@ func NewSparseMerkleTree(algorithm api.HashAlgorithm) *SparseMerkleTree {
 // The snapshot shares nodes with the original tree (copy-on-write)
 func (smt *SparseMerkleTree) CreateSnapshot() *SmtSnapshot {
 	snapshot := &SparseMerkleTree{
-		hasher:     api.NewDataHasher(smt.hasher.GetAlgorithm()),
+		algorithm:  smt.algorithm,
 		root:       smt.root, // Share the root initially
 		isSnapshot: true,
 		original:   smt,
@@ -311,14 +311,14 @@ func (smt *SparseMerkleTree) AddLeaves(leaves []*Leaf) error {
 // GetRootHash returns the root hash as imprint
 func (smt *SparseMerkleTree) GetRootHash() []byte {
 	// Create a new hasher to ensure thread safety
-	hasher := api.NewDataHasher(smt.hasher.GetAlgorithm())
+	hasher := api.NewDataHasher(smt.algorithm)
 	return smt.root.calculateHash(hasher).GetImprint()
 }
 
 // GetRootHashHex returns the root hash as hex string
 func (smt *SparseMerkleTree) GetRootHashHex() string {
 	// Create a new hasher to ensure thread safety
-	hasher := api.NewDataHasher(smt.hasher.GetAlgorithm())
+	hasher := api.NewDataHasher(smt.algorithm)
 	return smt.root.calculateHash(hasher).ToHex()
 }
 
@@ -456,7 +456,7 @@ func (smt *SparseMerkleTree) buildTree(branch branch, remainingPath *big.Int, va
 
 func (smt *SparseMerkleTree) GetPath(path *big.Int) *api.MerkleTreePath {
 	// Create a new hasher to ensure thread safety
-	hasher := api.NewDataHasher(smt.hasher.GetAlgorithm())
+	hasher := api.NewDataHasher(smt.algorithm)
 
 	rootHash := smt.root.calculateHash(hasher)
 	steps := smt.generatePath(hasher, path, smt.root.Left, smt.root.Right)
