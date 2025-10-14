@@ -1,4 +1,4 @@
-package round
+package smt
 
 import (
 	"fmt"
@@ -6,19 +6,17 @@ import (
 	"sync"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
-
-	"github.com/unicitynetwork/aggregator-go/internal/smt"
 )
 
 // ThreadSafeSMT provides thread-safe access to SMT operations
 // It prevents concurrent access during batch operations and proof generation
 type ThreadSafeSMT struct {
-	smt   *smt.SparseMerkleTree
+	smt   *SparseMerkleTree
 	rwMux sync.RWMutex // RWMutex allows multiple readers but exclusive writers
 }
 
 // NewThreadSafeSMT creates a new thread-safe SMT wrapper
-func NewThreadSafeSMT(smtInstance *smt.SparseMerkleTree) *ThreadSafeSMT {
+func NewThreadSafeSMT(smtInstance *SparseMerkleTree) *ThreadSafeSMT {
 	return &ThreadSafeSMT{
 		smt: smtInstance,
 	}
@@ -26,7 +24,7 @@ func NewThreadSafeSMT(smtInstance *smt.SparseMerkleTree) *ThreadSafeSMT {
 
 // AddLeaves adds multiple leaves to the SMT in a batch operation
 // This operation is exclusive and blocks all other operations
-func (ts *ThreadSafeSMT) AddLeaves(leaves []*smt.Leaf) (string, error) {
+func (ts *ThreadSafeSMT) AddLeaves(leaves []*Leaf) (string, error) {
 	ts.rwMux.Lock()
 	defer ts.rwMux.Unlock()
 
@@ -69,7 +67,7 @@ func (ts *ThreadSafeSMT) GetRootHash() string {
 
 // GetLeaf retrieves a leaf by path
 // This is a read operation that can be performed concurrently
-func (ts *ThreadSafeSMT) GetLeaf(path *big.Int) (*smt.LeafBranch, error) {
+func (ts *ThreadSafeSMT) GetLeaf(path *big.Int) (*LeafBranch, error) {
 	ts.rwMux.RLock()
 	defer ts.rwMux.RUnlock()
 

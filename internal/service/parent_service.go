@@ -19,25 +19,18 @@ type ParentAggregatorService struct {
 	logger             *logger.Logger
 	storage            interfaces.Storage
 	parentRoundManager *round.ParentRoundManager
+	leaderSelector     LeaderSelector
 }
 
 // NewParentAggregatorService creates a new parent aggregator service
-func NewParentAggregatorService(ctx context.Context, cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*ParentAggregatorService, error) {
-	if !cfg.Sharding.Mode.IsParent() {
-		return nil, fmt.Errorf("parent aggregator service can only be created in parent mode, got: %s", cfg.Sharding.Mode)
-	}
-
-	parentRoundManager, err := round.NewParentRoundManager(ctx, cfg, logger, storage)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create parent round manager: %w", err)
-	}
-
+func NewParentAggregatorService(cfg *config.Config, logger *logger.Logger, parentRoundManager *round.ParentRoundManager, storage interfaces.Storage, leaderSelector LeaderSelector) *ParentAggregatorService {
 	return &ParentAggregatorService{
 		config:             cfg,
 		logger:             logger,
 		storage:            storage,
 		parentRoundManager: parentRoundManager,
-	}, nil
+		leaderSelector:     leaderSelector,
+	}
 }
 
 // Start starts the parent aggregator service
@@ -196,9 +189,19 @@ func (pas *ParentAggregatorService) GetBlockCommitments(ctx context.Context, req
 func (pas *ParentAggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthStatus, error) {
 	// Check if HA is enabled and determine role
 	var role string
-	if pas.config.HA.Enabled {
-		// TODO: Add leader selector support for parent mode when HA is implemented
-		role = "parent-standalone"
+	if pas.leaderSelector != nil {
+		isLeader, err := pas.leaderSelector.IsLeader(ctx)
+		if err != nil {
+			pas.logger.WithContext(ctx).Warn("Failed to check leadership status", "error", err.Error())
+			// Don't fail health check on leadership query failure
+			isLeader = false
+		}
+
+		if isLeader {
+			role = "parent-leader"
+		} else {
+			role = "parent-follower"
+		}
 	} else {
 		role = "parent-standalone"
 	}

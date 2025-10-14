@@ -10,7 +10,6 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
-	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
@@ -19,7 +18,6 @@ import (
 type Server struct {
 	config     *config.Config
 	logger     *logger.Logger
-	storage    interfaces.Storage
 	rpcServer  *jsonrpc.Server
 	httpServer *http.Server
 	router     *gin.Engine
@@ -42,7 +40,7 @@ type Service interface {
 }
 
 // NewServer creates a new gateway server
-func NewServer(cfg *config.Config, logger *logger.Logger, storage interfaces.Storage, service Service) *Server {
+func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Server {
 	// Configure Gin
 	if cfg.Logging.Level == "debug" {
 		gin.SetMode(gin.DebugMode)
@@ -64,7 +62,6 @@ func NewServer(cfg *config.Config, logger *logger.Logger, storage interfaces.Sto
 	server := &Server{
 		config:    cfg,
 		logger:    logger,
-		storage:   storage,
 		rpcServer: rpcServer,
 		router:    router,
 		service:   service,

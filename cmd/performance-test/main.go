@@ -265,9 +265,7 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 }
 
 // Worker function that continuously submits commitments
-func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metrics, wg *sync.WaitGroup) {
-	defer wg.Done()
-
+func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metrics) {
 	ticker := time.NewTicker(time.Second / time.Duration(requestsPerSec/workerCount))
 	defer ticker.Stop()
 
@@ -390,8 +388,9 @@ func main() {
 
 	// Start commitment workers (no separate block monitor)
 	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go commitmentWorker(ctx, client, metrics, &wg)
+		wg.Go(func() {
+			commitmentWorker(ctx, client, metrics)
+		})
 	}
 
 	// Progress reporting

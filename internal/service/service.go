@@ -16,9 +16,6 @@ import (
 
 // Service defines the common interface that all service implementations must satisfy
 type Service interface {
-	Start(ctx context.Context) error
-	Stop(ctx context.Context) error
-
 	// JSON-RPC methods
 	SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error)
 	GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error)
@@ -33,35 +30,35 @@ type Service interface {
 	GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.GetShardProofResponse, error)
 }
 
-// NewService creates the appropriate service implementation based on configuration mode
-func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, storage interfaces.Storage, leaderSelector LeaderSelector) (Service, error) {
+// NewService creates the appropriate service based on sharding mode
+func NewService(cfg *config.Config, logger *logger.Logger, roundManager round.Manager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) (Service, error) {
 	switch cfg.Sharding.Mode {
 	case config.ShardingModeStandalone:
-		roundManager, err := round.NewRoundManager(ctx, cfg, logger, storage, leaderSelector)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create round manager: %w", err)
+		rm, ok := roundManager.(*round.RoundManager)
+		if !ok {
+			return nil, fmt.Errorf("invalid round manager type for standalone mode")
 		}
-		return NewAggregatorService(cfg, logger, roundManager, storage, leaderSelector), nil
+		return NewAggregatorService(cfg, logger, rm, commitmentQueue, storage, leaderSelector), nil
+
 	case config.ShardingModeParent:
-		return NewParentAggregatorService(ctx, cfg, logger, storage)
+		prm, ok := roundManager.(*round.ParentRoundManager)
+		if !ok {
+			return nil, fmt.Errorf("invalid round manager type for parent mode")
+		}
+		return NewParentAggregatorService(cfg, logger, prm, storage, leaderSelector), nil
+
 	default:
 		return nil, fmt.Errorf("unsupported sharding mode: %s", cfg.Sharding.Mode)
 	}
-}
-
-// IRoundManager defines the common interface for both regular and parent round managers
-type IRoundManager interface {
-	Start(ctx context.Context) error
-	Stop(ctx context.Context) error
-	GetSMT() *round.ThreadSafeSMT
 }
 
 // AggregatorService implements the business logic for the aggregator
 type AggregatorService struct {
 	config              *config.Config
 	logger              *logger.Logger
+	commitmentQueue     interfaces.CommitmentQueue
 	storage             interfaces.Storage
-	roundManager        IRoundManager
+	roundManager        *round.RoundManager
 	leaderSelector      LeaderSelector
 	commitmentValidator *signing.CommitmentValidator
 }
@@ -128,42 +125,16 @@ func modelToAPIHealthStatus(modelHealth *models.HealthStatus) *api.HealthStatus 
 }
 
 // NewAggregatorService creates a new aggregator service
-func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManager *round.RoundManager, storage interfaces.Storage, leaderSelector LeaderSelector) *AggregatorService {
+func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManager *round.RoundManager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) *AggregatorService {
 	return &AggregatorService{
 		config:              cfg,
 		logger:              logger,
+		commitmentQueue:     commitmentQueue,
 		storage:             storage,
 		roundManager:        roundManager,
 		leaderSelector:      leaderSelector,
 		commitmentValidator: signing.NewCommitmentValidator(),
 	}
-}
-
-// Start starts the aggregator service and round manager
-func (as *AggregatorService) Start(ctx context.Context) error {
-	as.logger.WithContext(ctx).Info("Starting Aggregator Service")
-
-	// Start the round manager
-	if err := as.roundManager.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start round manager: %w", err)
-	}
-
-	as.logger.WithContext(ctx).Info("Aggregator Service started successfully")
-	return nil
-}
-
-// Stop stops the aggregator service and round manager
-func (as *AggregatorService) Stop(ctx context.Context) error {
-	as.logger.WithContext(ctx).Info("Stopping Aggregator Service")
-
-	// Stop the round manager
-	if err := as.roundManager.Stop(ctx); err != nil {
-		as.logger.WithContext(ctx).Error("Failed to stop round manager", "error", err.Error())
-		return fmt.Errorf("failed to stop round manager: %w", err)
-	}
-
-	as.logger.WithContext(ctx).Info("Aggregator Service stopped successfully")
-	return nil
 }
 
 // SubmitCommitment handles commitment submission
@@ -203,20 +174,20 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 		}, nil
 	}
 
-	// Check if commitment already exists
-	existing, err := as.storage.CommitmentStorage().GetByRequestID(ctx, req.RequestID)
+	// Check if commitment already processed
+	existingRecord, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, req.RequestID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check existing commitment: %w", err)
+		return nil, fmt.Errorf("failed to check existing aggregator record: %w", err)
 	}
 
-	if existing != nil {
+	if existingRecord != nil {
 		return &api.SubmitCommitmentResponse{
 			Status: "REQUEST_ID_EXISTS",
 		}, nil
 	}
 
 	// Store commitment
-	if err := as.storage.CommitmentStorage().Store(ctx, commitment); err != nil {
+	if err := as.commitmentQueue.Store(ctx, commitment); err != nil {
 		return nil, fmt.Errorf("failed to store commitment: %w", err)
 	}
 
@@ -432,7 +403,7 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 	}
 
 	// Add commitment queue status and warning if too high
-	unprocessedCount, err := as.storage.CommitmentStorage().CountUnprocessed(ctx)
+	unprocessedCount, err := as.commitmentQueue.CountUnprocessed(ctx)
 	if err != nil {
 		status.AddDetail("commitment_queue", "unknown")
 		status.AddDetail("commitment_queue_status", "error")

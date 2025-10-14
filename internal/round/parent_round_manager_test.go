@@ -112,8 +112,12 @@ func (suite *ParentRoundManagerTestSuite) TestBasicRoundLifecycle() {
 	suite.Require().NoError(err)
 	defer prm.Stop(ctx) // Stop round manager before cleanup to avoid disconnection errors
 
-	// Start the parent round manager (will start first round)
+	// Start the parent round manager (initialization and SMT restoration)
 	err = prm.Start(ctx)
+	suite.Require().NoError(err)
+
+	// Activate the round manager to start round processing
+	err = prm.Activate(ctx)
 	suite.Require().NoError(err)
 
 	// Create 2 shard updates
@@ -156,6 +160,10 @@ func (suite *ParentRoundManagerTestSuite) TestMultiRoundUpdates() {
 	defer prm.Stop(ctx) // Stop round manager before cleanup to avoid disconnection errors
 
 	err = prm.Start(ctx)
+	suite.Require().NoError(err)
+
+	// Activate the round manager to start round processing
+	err = prm.Activate(ctx)
 	suite.Require().NoError(err)
 
 	shard0ID := makeShardID(0)
@@ -218,6 +226,10 @@ func (suite *ParentRoundManagerTestSuite) TestMultipleShards() {
 	err = prm.Start(ctx)
 	suite.Require().NoError(err)
 
+	// Activate the round manager to start round processing
+	err = prm.Activate(ctx)
+	suite.Require().NoError(err)
+
 	// Submit 4 different shard updates
 	shard0ID := makeShardID(0)
 	shard1ID := makeShardID(1)
@@ -264,6 +276,10 @@ func (suite *ParentRoundManagerTestSuite) TestEmptyRound() {
 	err = prm.Start(ctx)
 	suite.Require().NoError(err)
 
+	// Activate the round manager to start round processing
+	err = prm.Activate(ctx)
+	suite.Require().NoError(err)
+
 	// Get the initial root (should be empty tree root)
 	initialRoot := prm.parentSMT.GetRootHash()
 	suite.Require().NotNil(initialRoot, "Initial root should exist")
@@ -293,6 +309,10 @@ func (suite *ParentRoundManagerTestSuite) TestDuplicateShardUpdate() {
 	defer prm.Stop(ctx)
 
 	err = prm.Start(ctx)
+	suite.Require().NoError(err)
+
+	// Activate the round manager to start round processing
+	err = prm.Activate(ctx)
 	suite.Require().NoError(err)
 
 	shard0ID := makeShardID(0)
@@ -333,6 +353,10 @@ func (suite *ParentRoundManagerTestSuite) TestSameShardMultipleValues() {
 	err = prm.Start(ctx)
 	suite.Require().NoError(err)
 
+	// Activate the round manager to start round processing
+	err = prm.Activate(ctx)
+	suite.Require().NoError(err)
+
 	shard0ID := makeShardID(0)
 	latestValue := makeTestHash(0xCC)
 
@@ -359,7 +383,7 @@ func (suite *ParentRoundManagerTestSuite) TestSameShardMultipleValues() {
 
 	// Create a reference SMT with only the latest value to verify
 	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
-	referenceSMT := NewThreadSafeSMT(smtInstance)
+	referenceSMT := smt.NewThreadSafeSMT(smtInstance)
 
 	// Add the latest value as a pre-hashed leaf (same way ParentRoundManager does it)
 	err = referenceSMT.AddPreHashedLeaf(update3.GetPath(), latestValue)

@@ -25,7 +25,7 @@ type ParentRound struct {
 	Block        *models.Block
 
 	// SMT snapshot for this round - allows accumulating shard changes before committing
-	Snapshot *ThreadSafeSmtSnapshot
+	Snapshot *smt.ThreadSafeSmtSnapshot
 
 	// Store processed data for persistence during FinalizeBlock
 	ProcessedShardUpdates map[string]*models.ShardRootUpdate // Shard updates that were actually processed into the parent SMT
@@ -41,7 +41,7 @@ type ParentRoundManager struct {
 	config    *config.Config
 	logger    *logger.Logger
 	storage   interfaces.Storage
-	parentSMT *ThreadSafeSMT
+	parentSMT *smt.ThreadSafeSMT
 	bftClient bft.BFTClient
 
 	// Round management
@@ -61,7 +61,7 @@ type ParentRoundManager struct {
 func NewParentRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*ParentRoundManager, error) {
 	// Initialize parent SMT with empty tree - will be enhanced when SMT team adds mutable leaf support
 	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
-	parentSMT := NewThreadSafeSMT(smtInstance)
+	parentSMT := smt.NewThreadSafeSMT(smtInstance)
 
 	prm := &ParentRoundManager{
 		config:        cfg,
@@ -100,63 +100,28 @@ func NewParentRoundManager(ctx context.Context, cfg *config.Config, logger *logg
 	return prm, nil
 }
 
-// Start starts the parent round manager
+// Start performs initialization and SMT restoration (called once at startup)
 func (prm *ParentRoundManager) Start(ctx context.Context) error {
 	prm.logger.WithContext(ctx).Info("Starting Parent Round Manager",
 		"roundDuration", prm.roundDuration.String())
-
-	prm.roundMutex.Lock()
-	defer prm.roundMutex.Unlock()
 
 	// Reconstruct parent SMT from latest block record if available
 	if err := prm.reconstructParentSMT(ctx); err != nil {
 		return fmt.Errorf("failed to reconstruct parent SMT: %w", err)
 	}
 
-	// Get latest block number to determine starting round
-	latestBlockNumber, err := prm.storage.BlockStorage().GetLatestNumber(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get latest block number: %w", err)
-	}
-
-	// Calculate next round number
-	var nextRoundNumber *api.BigInt
-	if latestBlockNumber == nil {
-		nextRoundNumber = api.NewBigInt(nil)
-		nextRoundNumber.SetInt64(1)
-	} else {
-		nextRoundNumber = api.NewBigInt(nil)
-		nextRoundNumber.Set(latestBlockNumber.Int)
-		nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
-	}
-
-	// Start BFT client
-	if err := prm.bftClient.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start BFT client: %w", err)
-	}
-
-	// Start first round
-	if err := prm.startNewRound(ctx, nextRoundNumber); err != nil {
-		return fmt.Errorf("failed to start initial round: %w", err)
-	}
-
-	prm.logger.WithContext(ctx).Info("Parent Round Manager started successfully",
-		"initialRound", nextRoundNumber.String())
-
+	prm.logger.WithContext(ctx).Info("Parent Round Manager started successfully")
 	return nil
 }
 
-// Stop stops the parent round manager
+// Stop gracefully stops the parent round manager (called once at shutdown)
 func (prm *ParentRoundManager) Stop(ctx context.Context) error {
 	prm.logger.WithContext(ctx).Info("Stopping Parent Round Manager")
 
-	prm.roundMutex.Lock()
-	close(prm.stopChan)
-	if prm.roundTimer != nil {
-		prm.roundTimer.Stop()
-		prm.roundTimer = nil
+	// Deactivate first
+	if err := prm.Deactivate(ctx); err != nil {
+		prm.logger.WithContext(ctx).Error("Failed to deactivate Parent Round Manager", "error", err.Error())
 	}
-	prm.roundMutex.Unlock()
 
 	// Wait for goroutines to finish
 	prm.wg.Wait()
@@ -354,8 +319,65 @@ func (prm *ParentRoundManager) GetCurrentRound() interface{} {
 }
 
 // GetSMT returns the parent SMT instance
-func (prm *ParentRoundManager) GetSMT() *ThreadSafeSMT {
+func (prm *ParentRoundManager) GetSMT() *smt.ThreadSafeSMT {
 	return prm.parentSMT
+}
+
+// Activate starts active round processing (called when node becomes leader in HA mode)
+func (prm *ParentRoundManager) Activate(ctx context.Context) error {
+	prm.logger.WithContext(ctx).Info("Activating parent round manager")
+
+	// Start BFT client
+	if err := prm.bftClient.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start BFT client: %w", err)
+	}
+
+	// Get latest block number to determine starting round
+	latestBlockNumber, err := prm.storage.BlockStorage().GetLatestNumber(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get latest block number: %w", err)
+	}
+
+	// Calculate next round number
+	var nextRoundNumber *api.BigInt
+	if latestBlockNumber == nil {
+		nextRoundNumber = api.NewBigInt(nil)
+		nextRoundNumber.SetInt64(1)
+	} else {
+		nextRoundNumber = api.NewBigInt(nil)
+		nextRoundNumber.Set(latestBlockNumber.Int)
+		nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
+	}
+
+	// Start first round
+	if err := prm.startNewRound(ctx, nextRoundNumber); err != nil {
+		return fmt.Errorf("failed to start initial round: %w", err)
+	}
+
+	prm.logger.WithContext(ctx).Info("Parent round manager activated successfully",
+		"initialRound", nextRoundNumber.String())
+
+	return nil
+}
+
+// Deactivate stops active round processing (called when node loses leadership in HA mode)
+func (prm *ParentRoundManager) Deactivate(ctx context.Context) error {
+	prm.logger.WithContext(ctx).Info("Deactivating parent round manager")
+
+	// Stop BFT client
+	prm.bftClient.Stop()
+
+	// Stop current round timer
+	prm.roundMutex.Lock()
+	if prm.roundTimer != nil {
+		prm.roundTimer.Stop()
+		prm.roundTimer = nil
+	}
+	prm.currentRound = nil
+	prm.roundMutex.Unlock()
+
+	prm.logger.WithContext(ctx).Info("Parent round manager deactivated successfully")
+	return nil
 }
 
 // FinalizeBlock is called by BFT client when block is finalized
@@ -365,7 +387,7 @@ func (prm *ParentRoundManager) FinalizeBlock(ctx context.Context, block *models.
 
 	prm.roundMutex.RLock()
 	var processedShardUpdates map[string]*models.ShardRootUpdate
-	var snapshot *ThreadSafeSmtSnapshot
+	var snapshot *smt.ThreadSafeSmtSnapshot
 	if prm.currentRound != nil && prm.currentRound.ProcessedShardUpdates != nil {
 		processedShardUpdates = make(map[string]*models.ShardRootUpdate)
 		for shardKey, update := range prm.currentRound.ProcessedShardUpdates {

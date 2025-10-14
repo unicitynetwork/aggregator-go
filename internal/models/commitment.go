@@ -1,21 +1,14 @@
 package models
 
 import (
+	"crypto/sha256"
 	"fmt"
-	"strconv"
-	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
-
-// Authenticator represents the authentication data for a commitment
-type Authenticator struct {
-	Algorithm string        `json:"algorithm" bson:"algorithm"`
-	PublicKey api.HexBytes  `json:"publicKey" bson:"publicKey"`
-	Signature api.HexBytes  `json:"signature" bson:"signature"`
-	StateHash api.StateHash `json:"stateHash" bson:"stateHash"`
-}
 
 // Commitment represents a state transition request
 type Commitment struct {
@@ -26,6 +19,14 @@ type Commitment struct {
 	AggregateRequestCount uint64              `json:"aggregateRequestCount" bson:"aggregateRequestCount"`
 	CreatedAt             *api.Timestamp      `json:"createdAt" bson:"createdAt"`
 	ProcessedAt           *api.Timestamp      `json:"processedAt,omitempty" bson:"processedAt,omitempty"`
+}
+
+// Authenticator represents the authentication data for a commitment
+type Authenticator struct {
+	Algorithm string        `json:"algorithm" bson:"algorithm"`
+	PublicKey api.HexBytes  `json:"publicKey" bson:"publicKey"`
+	Signature api.HexBytes  `json:"signature" bson:"signature"`
+	StateHash api.StateHash `json:"stateHash" bson:"stateHash"`
 }
 
 // NewCommitment creates a new commitment
@@ -50,139 +51,52 @@ func NewCommitmentWithAggregate(requestID api.RequestID, transactionHash api.Tra
 	}
 }
 
-// AggregatorRecord represents a finalized commitment with proof data
-type AggregatorRecord struct {
-	RequestID             api.RequestID       `json:"requestId" bson:"requestId"`
-	TransactionHash       api.TransactionHash `json:"transactionHash" bson:"transactionHash"`
-	Authenticator         Authenticator       `json:"authenticator" bson:"authenticator"`
-	AggregateRequestCount uint64              `json:"aggregateRequestCount" bson:"aggregateRequestCount"`
-	BlockNumber           *api.BigInt         `json:"blockNumber" bson:"blockNumber"`
-	LeafIndex             *api.BigInt         `json:"leafIndex" bson:"leafIndex"`
-	CreatedAt             *api.Timestamp      `json:"createdAt" bson:"createdAt"`
-	FinalizedAt           *api.Timestamp      `json:"finalizedAt" bson:"finalizedAt"`
-}
-
-// NewAggregatorRecord creates a new aggregator record from a commitment
-func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *api.BigInt) *AggregatorRecord {
-	return &AggregatorRecord{
-		RequestID:             commitment.RequestID,
-		TransactionHash:       commitment.TransactionHash,
-		Authenticator:         commitment.Authenticator,
-		AggregateRequestCount: commitment.AggregateRequestCount,
-		BlockNumber:           blockNumber,
-		LeafIndex:             leafIndex,
-		CreatedAt:             commitment.CreatedAt,
-		FinalizedAt:           api.Now(),
-	}
-}
-
-// AggregatorRecordBSON represents the BSON version of AggregatorRecord for MongoDB storage
-type AggregatorRecordBSON struct {
-	RequestID             string            `bson:"requestId"`
-	TransactionHash       string            `bson:"transactionHash"`
-	Authenticator         AuthenticatorBSON `bson:"authenticator"`
-	AggregateRequestCount uint64            `bson:"aggregateRequestCount"`
-	BlockNumber           string            `bson:"blockNumber"`
-	LeafIndex             string            `bson:"leafIndex"`
-	CreatedAt             string            `bson:"createdAt"`
-	FinalizedAt           string            `bson:"finalizedAt"`
-}
-
-// AuthenticatorBSON represents the BSON version of Authenticator
-type AuthenticatorBSON struct {
-	Algorithm string `bson:"algorithm"`
-	PublicKey string `bson:"publicKey"`
-	Signature string `bson:"signature"`
-	StateHash string `bson:"stateHash"`
-}
-
-// ToBSON converts AggregatorRecord to AggregatorRecordBSON for MongoDB storage
-func (ar *AggregatorRecord) ToBSON() *AggregatorRecordBSON {
-	return &AggregatorRecordBSON{
-		RequestID:       string(ar.RequestID),
-		TransactionHash: string(ar.TransactionHash),
-		Authenticator: AuthenticatorBSON{
-			Algorithm: ar.Authenticator.Algorithm,
-			PublicKey: ar.Authenticator.PublicKey.String(),
-			Signature: ar.Authenticator.Signature.String(),
-			StateHash: ar.Authenticator.StateHash.String(),
-		},
-		AggregateRequestCount: ar.AggregateRequestCount,
-		BlockNumber:           ar.BlockNumber.String(),
-		LeafIndex:             ar.LeafIndex.String(),
-		CreatedAt:             strconv.FormatInt(ar.CreatedAt.UnixMilli(), 10),
-		FinalizedAt:           strconv.FormatInt(ar.FinalizedAt.UnixMilli(), 10),
-	}
-}
-
-// FromBSON converts AggregatorRecordBSON back to AggregatorRecord
-func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
-	//requestID, err := NewRequestID(arb.RequestID)
-	//if err != nil {
-	//	return nil, fmt.Errorf("failed to parse requestID: %w", err)
-	//}
-	//
-	//transactionHash, err := NewTransactionHash(arb.TransactionHash)
-	//if err != nil {
-	//	return nil, fmt.Errorf("failed to parse transactionHash: %w", err)
-	//}
-	//
-	blockNumber, err := api.NewBigIntFromString(arb.BlockNumber)
+// CreateLeafValue creates the value to store in the SMT leaf for a commitment
+// This matches the TypeScript LeafValue.create() method exactly:
+// - CBOR encode the authenticator as an array [algorithm, publicKey, signature, stateHashImprint]
+// - Hash the CBOR-encoded authenticator and transaction hash imprint using SHA256
+// - Return as DataHash imprint format (2-byte algorithm prefix + hash)
+func (c *Commitment) CreateLeafValue() ([]byte, error) {
+	// Get the state hash imprint for CBOR encoding
+	stateHashImprint, err := c.Authenticator.StateHash.Imprint()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse blockNumber: %w", err)
+		return nil, fmt.Errorf("failed to get state hash imprint: %w", err)
 	}
 
-	leafIndex, err := api.NewBigIntFromString(arb.LeafIndex)
+	// CBOR encode the authenticator as an array (matching TypeScript authenticator.toCBOR())
+	// TypeScript: [algorithm, publicKey, signature.encode(), stateHash.imprint]
+	authenticatorArray := []interface{}{
+		c.Authenticator.Algorithm,         // algorithm as text string
+		[]byte(c.Authenticator.PublicKey), // publicKey as byte string
+		[]byte(c.Authenticator.Signature), // signature as byte string
+		stateHashImprint,                  // stateHash.imprint as byte string
+	}
+
+	authenticatorCBOR, err := cbor.Marshal(authenticatorArray)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse leafIndex: %w", err)
+		return nil, fmt.Errorf("failed to CBOR encode authenticator: %w", err)
 	}
 
-	publicKey, err := api.NewHexBytesFromString(arb.Authenticator.PublicKey)
+	// Get the transaction hash imprint
+	transactionHashImprint, err := c.TransactionHash.Imprint()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse publicKey: %w", err)
+		return nil, fmt.Errorf("failed to get transaction hash imprint: %w", err)
 	}
 
-	signature, err := api.NewHexBytesFromString(arb.Authenticator.Signature)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse signature: %w", err)
-	}
+	// Create SHA256 hasher and update with CBOR-encoded authenticator and transaction hash imprint
+	// This matches the TypeScript DataHasher(SHA256).update(authenticator.toCBOR()).update(transactionHash.imprint).digest()
+	hasher := sha256.New()
+	hasher.Write(authenticatorCBOR)
+	hasher.Write(transactionHashImprint)
 
-	//stateHash, err := NewHexBytesFromString(arb.Authenticator.StateHash)
-	//if err != nil {
-	//	return nil, fmt.Errorf("failed to parse stateHash: %w", err)
-	//}
+	// Get the final hash
+	hash := hasher.Sum(nil)
 
-	createdAtMillis, err := strconv.ParseInt(arb.CreatedAt, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse createdAt: %w", err)
-	}
-	createdAt := &api.Timestamp{Time: time.UnixMilli(createdAtMillis)}
+	// Return as DataHash imprint with SHA256 algorithm prefix (0x00, 0x00)
+	imprint := make([]byte, 2+len(hash))
+	imprint[0] = 0x00 // SHA256 algorithm high byte
+	imprint[1] = 0x00 // SHA256 algorithm low byte
+	copy(imprint[2:], hash[:])
 
-	finalizedAtMillis, err := strconv.ParseInt(arb.FinalizedAt, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse finalizedAt: %w", err)
-	}
-	finalizedAt := &api.Timestamp{Time: time.UnixMilli(finalizedAtMillis)}
-
-	// Default AggregateRequestCount to 1 if not present (backward compatibility)
-	aggregateRequestCount := arb.AggregateRequestCount
-	if aggregateRequestCount == 0 {
-		aggregateRequestCount = 1
-	}
-
-	return &AggregatorRecord{
-		RequestID:       api.RequestID(arb.RequestID),
-		TransactionHash: api.TransactionHash(arb.TransactionHash),
-		Authenticator: Authenticator{
-			Algorithm: arb.Authenticator.Algorithm,
-			PublicKey: publicKey,
-			Signature: signature,
-			StateHash: api.StateHash(arb.Authenticator.StateHash),
-		},
-		AggregateRequestCount: aggregateRequestCount,
-		BlockNumber:           blockNumber,
-		LeafIndex:             leafIndex,
-		CreatedAt:             createdAt,
-		FinalizedAt:           finalizedAt,
-	}, nil
+	return imprint, nil
 }

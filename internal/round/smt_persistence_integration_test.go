@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
@@ -56,7 +57,7 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
 	require.NoError(t, err, "Should create RoundManager")
 
 	// Test persistence
@@ -75,16 +76,12 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 	freshHash := freshSmt.GetRootHashHex()
 
 	// Create RoundManager and call Start() to trigger restoration
-	restoredRm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
+	restoredRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
 	require.NoError(t, err, "Should create RoundManager")
 
 	err = restoredRm.Start(ctx)
 	require.NoError(t, err, "SMT restoration should succeed")
-	defer func() {
-		if err := restoredRm.Stop(ctx); err != nil {
-			t.Logf("Failed to stop restored RoundManager: %v", err)
-		}
-	}()
+	defer restoredRm.Stop(ctx)
 	restoredHash := restoredRm.smt.GetRootHash()
 
 	assert.Equal(t, freshHash, restoredHash, "Restored SMT should have same root hash as fresh SMT")
@@ -111,7 +108,7 @@ func TestLargeSmtRestoration(t *testing.T) {
 			RoundDuration: time.Second,
 		},
 	}
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
 	require.NoError(t, err, "Should create RoundManager")
 
 	const testNodeCount = 2500 // Ensure multiple chunks (chunkSize = 1000 in round_manager.go)
@@ -140,16 +137,12 @@ func TestLargeSmtRestoration(t *testing.T) {
 	require.Equal(t, int64(testNodeCount), count, "Should have stored all nodes")
 
 	// Create new RoundManager and call Start() to restore from storage (uses multiple chunks)
-	newRm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
+	newRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
 	require.NoError(t, err, "Should create new RoundManager")
 
 	err = newRm.Start(ctx)
 	require.NoError(t, err, "Large SMT restoration should succeed")
-	defer func() {
-		if err := newRm.Stop(ctx); err != nil {
-			t.Logf("Failed to stop new RoundManager: %v", err)
-		}
-	}()
+	defer newRm.Stop(ctx)
 
 	restoredHash := newRm.smt.GetRootHash()
 
@@ -180,7 +173,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
 	require.NoError(t, err, "Should create RoundManager")
 
 	rm.currentRound = &Round{
@@ -228,17 +221,13 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	assert.Equal(t, int64(len(testCommitments)), count, "Should have persisted SMT nodes for all commitments")
 
 	// Simulate service restart with new round manager
-	newRm, err := NewRoundManager(ctx, &config.Config{Processing: config.ProcessingConfig{RoundDuration: time.Second}}, testLogger, storage, nil)
+	newRm, err := NewRoundManager(ctx, &config.Config{Processing: config.ProcessingConfig{RoundDuration: time.Second}}, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
 	require.NoError(t, err, "NewRoundManager should succeed after restart")
 
 	// Call Start() to trigger SMT restoration
 	err = newRm.Start(ctx)
 	require.NoError(t, err, "Start should succeed and restore SMT")
-	defer func() {
-		if err := newRm.Stop(ctx); err != nil {
-			t.Logf("Failed to stop restarted RoundManager: %v", err)
-		}
-	}()
+	defer newRm.Stop(ctx)
 
 	// Verify restored SMT has correct data
 	restoredRootHash := newRm.smt.GetRootHash()
@@ -300,7 +289,7 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 	cfg := &config.Config{
 		Processing: config.ProcessingConfig{RoundDuration: time.Second},
 	}
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
 	require.NoError(t, err, "Should create RoundManager")
 
 	// Persist SMT nodes to storage
@@ -309,16 +298,12 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 
 	// Test 1: Successful verification (matching root hash)
 	t.Run("SuccessfulVerification", func(t *testing.T) {
-		successRm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
+		successRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
 		require.NoError(t, err, "Should create RoundManager")
 
 		err = successRm.Start(ctx)
 		require.NoError(t, err, "SMT restoration should succeed when root hashes match")
-		defer func() {
-			if err := successRm.Stop(ctx); err != nil {
-				t.Logf("Failed to stop RoundManager: %v", err)
-			}
-		}()
+		defer successRm.Stop(ctx)
 
 		// Verify the restored SMT has the correct hash
 		restoredHash := successRm.smt.GetRootHash()
@@ -344,7 +329,7 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 		err = storage.BlockStorage().Store(ctx, wrongBlock)
 		require.NoError(t, err, "Should store wrong test block")
 
-		failRm, err := NewRoundManager(ctx, cfg, testLogger, storage, nil)
+		failRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
 		require.NoError(t, err, "Should create RoundManager")
 
 		// This should fail because the restored SMT root hash doesn't match the latest block

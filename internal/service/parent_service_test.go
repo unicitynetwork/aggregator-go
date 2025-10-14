@@ -65,27 +65,32 @@ func (suite *ParentServiceTestSuite) TearDownSuite() {
 func (suite *ParentServiceTestSuite) SetupTest() {
 	ctx := context.Background()
 
-	// Create parent service (which creates its own round manager)
+	// Create parent round manager
 	var err error
-	suite.service, err = NewParentAggregatorService(ctx, suite.cfg, suite.logger, suite.storage)
-	require.NoError(suite.T(), err, "Should create parent service")
+	suite.prm, err = round.NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage)
+	require.NoError(suite.T(), err, "Should create parent round manager")
+	require.NotNil(suite.T(), suite.prm, "Parent round manager should not be nil")
+
+	// Start the round manager
+	err = suite.prm.Start(ctx)
+	require.NoError(suite.T(), err, "Should start parent round manager")
+
+	// Activate the round manager (starts rounds)
+	err = suite.prm.Activate(ctx)
+	require.NoError(suite.T(), err, "Should activate parent round manager")
+
+	// Create parent service with the round manager
+	suite.service = NewParentAggregatorService(suite.cfg, suite.logger, suite.prm, suite.storage, nil)
 	require.NotNil(suite.T(), suite.service, "Parent service should not be nil")
-
-	// Start the service (which starts the round manager)
-	err = suite.service.Start(ctx)
-	require.NoError(suite.T(), err, "Should start parent service")
-
-	// Store reference to round manager for verification
-	suite.prm = suite.service.parentRoundManager
 }
 
 // TearDownTest runs after each test
 func (suite *ParentServiceTestSuite) TearDownTest() {
 	ctx := context.Background()
 
-	// Stop service (which stops the round manager)
-	if suite.service != nil {
-		suite.service.Stop(ctx)
+	// Stop round manager
+	if suite.prm != nil {
+		suite.prm.Stop(ctx)
 	}
 
 	// Clean all collections
