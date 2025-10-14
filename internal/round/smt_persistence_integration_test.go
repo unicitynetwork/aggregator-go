@@ -48,6 +48,10 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 		{Path: big.NewInt(15), Value: []byte("test_value_15")},
 		{Path: big.NewInt(16), Value: []byte("test_value_16")},
 	}
+	keyLen := 16 + 256
+	for _, t := range testLeaves {
+		t.Path = new(big.Int).SetBit(t.Path, keyLen, 1)
+	}
 
 	cfg := &config.Config{
 		Processing: config.ProcessingConfig{
@@ -70,7 +74,7 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 	assert.Equal(t, int64(len(testLeaves)), count, "Should have stored all SMT nodes")
 
 	// Test restoration produces same root hash as fresh SMT
-	freshSmt := smt.NewSparseMerkleTree(api.SHA256)
+	freshSmt := smt.NewSparseMerkleTree(api.SHA256, keyLen)
 	err = freshSmt.AddLeaves(testLeaves)
 	require.NoError(t, err, "Fresh SMT should accept leaves")
 	freshHash := freshSmt.GetRootHashHex()
@@ -115,14 +119,15 @@ func TestLargeSmtRestoration(t *testing.T) {
 
 	// Create large dataset with non-sequential paths to test ordering
 	testLeaves := make([]*smt.Leaf, testNodeCount)
+	keyLen := 16 + 256
 	for i := 0; i < testNodeCount; i++ {
-		path := big.NewInt(int64((i + 1) * 700000))
+		path := new(big.Int).SetBit(big.NewInt(int64((i+1)*700000)), keyLen, 1)
 		value := []byte(fmt.Sprintf("large_test_value_%d", i))
 		testLeaves[i] = smt.NewLeaf(path, value)
 	}
 
 	// Create fresh SMT for comparison
-	freshSmt := smt.NewSparseMerkleTree(api.SHA256)
+	freshSmt := smt.NewSparseMerkleTree(api.SHA256, keyLen)
 	err = freshSmt.AddLeaves(testLeaves)
 	require.NoError(t, err, "Fresh SMT AddLeaves should succeed")
 	freshHash := freshSmt.GetRootHashHex()
@@ -256,13 +261,17 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 
 	// Create test data
 	testLeaves := []*smt.Leaf{
-		{Path: big.NewInt(10), Value: []byte("block_test_value_10")},
-		{Path: big.NewInt(20), Value: []byte("block_test_value_20")},
-		{Path: big.NewInt(30), Value: []byte("block_test_value_30")},
+		{Path: big.NewInt(0x110), Value: []byte("block_test_value_10")},
+		{Path: big.NewInt(0x120), Value: []byte("block_test_value_20")},
+		{Path: big.NewInt(0x130), Value: []byte("block_test_value_30")},
+	}
+	keyLen := 16 + 256
+	for _, t := range testLeaves {
+		t.Path = new(big.Int).SetBit(t.Path, keyLen, 1)
 	}
 
 	// Create fresh SMT to get expected root hash
-	freshSmt := smt.NewSparseMerkleTree(api.SHA256)
+	freshSmt := smt.NewSparseMerkleTree(api.SHA256, keyLen)
 	err = freshSmt.AddLeaves(testLeaves)
 	require.NoError(t, err, "Fresh SMT should accept leaves")
 	expectedRootHash := freshSmt.GetRootHashHex()
