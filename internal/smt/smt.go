@@ -19,7 +19,7 @@ type (
 	// SparseMerkleTree implements a sparse merkle tree compatible with Unicity SDK
 	SparseMerkleTree struct {
 		keyLength  int // bit length of the keys in the tree
-		hasher     *api.DataHasher
+		algorithm  api.HashAlgorithm
 		root       *NodeBranch
 		isSnapshot bool              // true if this is a snapshot, false if original tree
 		original   *SparseMerkleTree // reference to original tree (nil for original)
@@ -38,7 +38,7 @@ func NewSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int) *SparseMerk
 	}
 	return &SparseMerkleTree{
 		keyLength:  keyLength,
-		hasher:     api.NewDataHasher(algorithm),
+		algorithm:  algorithm,
 		root:       newRootNode(nil, nil),
 		isSnapshot: false,
 		original:   nil,
@@ -50,7 +50,7 @@ func NewSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int) *SparseMerk
 func (smt *SparseMerkleTree) CreateSnapshot() *SmtSnapshot {
 	snapshot := &SparseMerkleTree{
 		keyLength:  smt.keyLength,
-		hasher:     api.NewDataHasher(smt.hasher.GetAlgorithm()),
+		algorithm:  smt.algorithm,
 		root:       smt.root, // Share the root initially
 		isSnapshot: true,
 		original:   smt,
@@ -303,12 +303,16 @@ func (smt *SparseMerkleTree) AddLeaves(leaves []*Leaf) error {
 
 // GetRootHash returns the root hash as imprint
 func (smt *SparseMerkleTree) GetRootHash() []byte {
-	return smt.root.calculateHash(smt.hasher).GetImprint()
+	// Create a new hasher to ensure thread safety
+	hasher := api.NewDataHasher(smt.algorithm)
+	return smt.root.calculateHash(hasher).GetImprint()
 }
 
 // GetRootHashHex returns the root hash as hex string
 func (smt *SparseMerkleTree) GetRootHashHex() string {
-	return smt.root.calculateHash(smt.hasher).ToHex()
+	// Create a new hasher to ensure thread safety
+	hasher := api.NewDataHasher(smt.algorithm)
+	return smt.root.calculateHash(hasher).ToHex()
 }
 
 // GetLeaf retrieves a leaf by path (for compatibility)
@@ -432,8 +436,11 @@ func (smt *SparseMerkleTree) GetPath(path *big.Int) *api.MerkleTreePath {
 		return nil
 	}
 
-	rootHash := smt.root.calculateHash(smt.hasher)
-	steps := smt.generatePath(path, smt.root)
+	// Create a new hasher to ensure thread safety
+	hasher := api.NewDataHasher(smt.algorithm)
+
+	rootHash := smt.root.calculateHash(hasher)
+	steps := smt.generatePath(hasher, path, smt.root)
 
 	return &api.MerkleTreePath{
 		Root:  rootHash.ToHex(),
@@ -442,7 +449,7 @@ func (smt *SparseMerkleTree) GetPath(path *big.Int) *api.MerkleTreePath {
 }
 
 // generatePath recursively generates the Merkle tree path steps
-func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, currentNode branch) []api.MerkleTreeStep {
+func (smt *SparseMerkleTree) generatePath(hasher *api.DataHasher, remainingPath *big.Int, currentNode branch) []api.MerkleTreeStep {
 	if remainingPath.BitLen() < 2 {
 		panic("Invalid remaining path, must be internal logic error")
 	}
@@ -469,8 +476,8 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, currentNode br
 		// Root node is a special case, because of its empty path
 		// Create the corresponding 2-step proof
 		// No nil children in non-root nodes
-		leftHash := hex.EncodeToString(currentBranch.Left.calculateHash(smt.hasher).RawHash)
-		rightHash := hex.EncodeToString(currentBranch.Right.calculateHash(smt.hasher).RawHash)
+		leftHash := hex.EncodeToString(currentBranch.Left.calculateHash(hasher).RawHash)
+		rightHash := hex.EncodeToString(currentBranch.Right.calculateHash(hasher).RawHash)
 		// This looks weird, but see the effect in api.MerkleTreePath.Verify()
 		return []api.MerkleTreeStep{
 			{Path: "0", Data: &rightHash},
@@ -499,11 +506,11 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, currentNode br
 		// There may be nil children here
 		var leftHash, rightHash *string
 		if currentBranch.Left != nil {
-			tmp := hex.EncodeToString(currentBranch.Left.calculateHash(smt.hasher).RawHash)
+			tmp := hex.EncodeToString(currentBranch.Left.calculateHash(hasher).RawHash)
 			leftHash = &tmp
 		}
 		if currentBranch.Right != nil {
-			tmp := hex.EncodeToString(currentBranch.Right.calculateHash(smt.hasher).RawHash)
+			tmp := hex.EncodeToString(currentBranch.Right.calculateHash(hasher).RawHash)
 			rightHash = &tmp
 		}
 		// This looks weird, but see the effect in api.MerkleTreePath.Verify()
@@ -513,14 +520,14 @@ func (smt *SparseMerkleTree) generatePath(remainingPath *big.Int, currentNode br
 		}
 	}
 
-	steps := smt.generatePath(remainingPath, target)
+	steps := smt.generatePath(hasher, remainingPath, target)
 
 	// Add the step for the current branch
 	step := api.MerkleTreeStep{
 		Path: currentBranch.Path.String(),
 	}
 	if sibling != nil {
-		tmp := hex.EncodeToString(sibling.calculateHash(smt.hasher).RawHash)
+		tmp := hex.EncodeToString(sibling.calculateHash(hasher).RawHash)
 		step.Data = &tmp
 	}
 	return append(steps, step)

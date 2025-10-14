@@ -55,8 +55,7 @@ func NewAsyncLogger(baseLogger *Logger, bufferSize int) *AsyncLoggerWrapper {
 	}
 
 	// Start the background worker
-	al.wg.Add(1)
-	go al.worker()
+	al.wg.Go(al.worker)
 
 	// Create a new Logger that wraps the async logger
 	handler := &asyncHandler{
@@ -74,8 +73,6 @@ func NewAsyncLogger(baseLogger *Logger, bufferSize int) *AsyncLoggerWrapper {
 
 // worker processes log entries from the channel
 func (al *AsyncLogger) worker() {
-	defer al.wg.Done()
-
 	// Batch processing for better performance
 	const batchSize = 100
 	batch := make([]logEntry, 0, batchSize)

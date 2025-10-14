@@ -1,4 +1,4 @@
-package round
+package smt
 
 import (
 	"math/big"
@@ -6,14 +6,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/unicitynetwork/aggregator-go/internal/smt"
+
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 func TestSnapshotWorkflowIntegration(t *testing.T) {
 	t.Run("SnapshotIsolationFromMainSMT", func(t *testing.T) {
 		// Create main SMT and ThreadSafeSMT
-		smtInstance := smt.NewSparseMerkleTree(api.SHA256, 2)
+		smtInstance := NewSparseMerkleTree(api.SHA256, 2)
 		threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 		// Get initial state
@@ -28,10 +28,10 @@ func TestSnapshotWorkflowIntegration(t *testing.T) {
 		assert.Equal(t, initialHash, snapshotHash, "Snapshot should initially match main SMT")
 
 		// Add data to snapshot (simulating processBatch)
-		leaves := []*smt.Leaf{
-			smt.NewLeaf(big.NewInt(0b100), []byte("value1")),
-			smt.NewLeaf(big.NewInt(0b101), []byte("value2")),
-			smt.NewLeaf(big.NewInt(0b111), []byte("value3")),
+		leaves := []*Leaf{
+			NewLeaf(big.NewInt(0b100), []byte("value1")),
+			NewLeaf(big.NewInt(0b101), []byte("value2")),
+			NewLeaf(big.NewInt(0b111), []byte("value3")),
 		}
 
 		rootHash, err := snapshot.AddLeaves(leaves)

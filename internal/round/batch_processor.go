@@ -2,13 +2,10 @@ package round
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"math/big"
 	"sync"
 	"time"
-
-	"github.com/fxamacker/cbor/v2"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
@@ -35,7 +32,7 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 		}
 
 		// Create leaf value (hash of commitment data)
-		leafValue, err := rm.createLeafValue(commitment)
+		leafValue, err := commitment.CreateLeafValue()
 		if err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to create leaf value",
 				"requestID", commitment.RequestID.String(),
@@ -60,56 +57,6 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 	}
 
 	return nil
-}
-
-// createLeafValue creates the value to store in the SMT leaf for a commitment
-// This matches the TypeScript LeafValue.create() method exactly:
-// - CBOR encode the authenticator as an array [algorithm, publicKey, signature, stateHashImprint]
-// - Hash the CBOR-encoded authenticator and transaction hash imprint using SHA256
-// - Return as DataHash imprint format (2-byte algorithm prefix + hash)
-func (rm *RoundManager) createLeafValue(commitment *models.Commitment) ([]byte, error) {
-	// Get the state hash imprint for CBOR encoding
-	stateHashImprint, err := commitment.Authenticator.StateHash.Imprint()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get state hash imprint: %w", err)
-	}
-
-	// CBOR encode the authenticator as an array (matching TypeScript authenticator.toCBOR())
-	// TypeScript: [algorithm, publicKey, signature.encode(), stateHash.imprint]
-	authenticatorArray := []interface{}{
-		commitment.Authenticator.Algorithm,         // algorithm as text string
-		[]byte(commitment.Authenticator.PublicKey), // publicKey as byte string
-		[]byte(commitment.Authenticator.Signature), // signature as byte string
-		stateHashImprint,                           // stateHash.imprint as byte string
-	}
-
-	authenticatorCBOR, err := cbor.Marshal(authenticatorArray)
-	if err != nil {
-		return nil, fmt.Errorf("failed to CBOR encode authenticator: %w", err)
-	}
-
-	// Get the transaction hash imprint
-	transactionHashImprint, err := commitment.TransactionHash.Imprint()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get transaction hash imprint: %w", err)
-	}
-
-	// Create SHA256 hasher and update with CBOR-encoded authenticator and transaction hash imprint
-	// This matches the TypeScript DataHasher(SHA256).update(authenticator.toCBOR()).update(transactionHash.imprint).digest()
-	hasher := sha256.New()
-	hasher.Write(authenticatorCBOR)
-	hasher.Write(transactionHashImprint)
-
-	// Get the final hash
-	hash := hasher.Sum(nil)
-
-	// Return as DataHash imprint with SHA256 algorithm prefix (0x00, 0x00)
-	imprint := make([]byte, 2+len(hash))
-	imprint[0] = 0x00 // SHA256 algorithm high byte
-	imprint[1] = 0x00 // SHA256 algorithm low byte
-	copy(imprint[2:], hash[:])
-
-	return imprint, nil
 }
 
 // ProposeBlock creates and proposes a new block with the given data
@@ -188,10 +135,11 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		"rootHash", block.RootHash.String(),
 		"hasUnicityCertificate", block.UnicityCertificate != nil)
 
-	// Track the actual finalization time
 	finalizationStartTime := time.Now()
 	var proposalTime time.Time
 	var processingTime time.Duration
+	var markProcessedStart, storeBlockStart, persistDataStart, commitSnapshotStart time.Time
+	var markProcessedTime, storeBlockTime, persistDataTime, commitSnapshotTime time.Duration
 
 	// Get timing metrics from the round if available
 	rm.roundMutex.Lock()
@@ -234,12 +182,14 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 			"commitmentCount", len(requestIDs))
 
 		// Mark commitments as processed BEFORE storing the block
-		if err := rm.storage.CommitmentStorage().MarkProcessed(ctx, requestIDs); err != nil {
+		markProcessedStart = time.Now()
+		if err := rm.commitmentQueue.MarkProcessed(ctx, requestIDs); err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to mark commitments as processed",
 				"error", err.Error(),
 				"blockNumber", block.Index.String())
 			return fmt.Errorf("failed to mark commitments as processed: %w", err)
 		}
+		markProcessedTime = time.Since(markProcessedStart)
 
 		rm.logger.WithContext(ctx).Info("Successfully prepared commitment data",
 			"count", len(requestIDs),
@@ -253,6 +203,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	rm.logger.WithContext(ctx).Debug("Storing block in database",
 		"blockNumber", block.Index.String())
 
+	storeBlockStart = time.Now()
 	if err := rm.storage.BlockStorage().Store(ctx, block); err != nil {
 		rm.logger.WithContext(ctx).Error("Failed to store block",
 			"blockNumber", block.Index.String(),
@@ -264,6 +215,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	if err := rm.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds)); err != nil {
 		return fmt.Errorf("failed to store block record: %w", err)
 	}
+	storeBlockTime = time.Since(storeBlockStart)
 
 	// Now that block is stored with unicity certificate, persist SMT nodes and aggregator records
 	rm.roundMutex.Lock()
@@ -278,26 +230,24 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 
 	// Store SMT nodes and aggregator records if we have commitments
 	if len(commitments) > 0 {
+		persistDataStart = time.Now()
 		var wg sync.WaitGroup
 		var smtPersistErr, aggregatorRecordErr error
 
 		// Only persist SMT nodes if we have pending leaves
 		if len(pendingLeaves) > 0 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				smtPersistErr = rm.persistSmtNodes(ctx, pendingLeaves)
-			}()
+			})
 		}
 
 		// Always persist aggregator records if we have commitments
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			aggregatorRecordErr = rm.persistAggregatorRecords(ctx, commitments, block.Index, snapshot)
-		}()
+		wg.Go(func() {
+			aggregatorRecordErr = rm.persistAggregatorRecords(ctx, commitments, block.Index)
+		})
 
 		wg.Wait()
+		persistDataTime = time.Since(persistDataStart)
 
 		if smtPersistErr != nil {
 			return fmt.Errorf("failed to persist SMT nodes: %w", smtPersistErr)
@@ -316,10 +266,12 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	// This ensures the SMT state only reflects successfully persisted blocks
 
 	if snapshot != nil {
+		commitSnapshotStart = time.Now()
 		rm.logger.WithContext(ctx).Info("Committing snapshot to main SMT after successful block storage",
 			"blockNumber", block.Index.String())
 
 		snapshot.Commit(rm.smt)
+		commitSnapshotTime = time.Since(commitSnapshotStart)
 
 		rm.logger.WithContext(ctx).Info("Successfully committed snapshot to main SMT",
 			"blockNumber", block.Index.String())
@@ -341,30 +293,53 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	// Calculate actual finalization metrics
 	actualFinalizationTime := time.Since(finalizationStartTime)
 	var totalRoundTime time.Duration
+	var bftWaitTime time.Duration
+
 	if !proposalTime.IsZero() {
 		// Calculate time from proposal to actual finalization
-		timeFromProposalToFinalization := finalizationStartTime.Sub(proposalTime)
+		bftWaitTime = finalizationStartTime.Sub(proposalTime)
 
 		// Update the average finalization time with the actual measurement
-		rm.avgFinalizationTime = (rm.avgFinalizationTime*4 + actualFinalizationTime + timeFromProposalToFinalization) / 5
+		rm.avgFinalizationTime = (rm.avgFinalizationTime*4 + actualFinalizationTime + bftWaitTime) / 5
 
 		// Calculate total round time (processing + waiting for UC + finalization)
-		totalRoundTime = processingTime + timeFromProposalToFinalization + actualFinalizationTime
+		totalRoundTime = processingTime + bftWaitTime + actualFinalizationTime
 
 		rm.logger.WithContext(ctx).Debug("Finalization timing metrics",
 			"blockNumber", block.Index.String(),
 			"processingTime", processingTime,
-			"proposalToUCTime", timeFromProposalToFinalization,
+			"proposalToUCTime", bftWaitTime,
 			"finalizationTime", actualFinalizationTime,
 			"totalRoundTime", totalRoundTime,
 			"avgFinalizationTime", rm.avgFinalizationTime)
 	}
 
+	// Get commitment count for performance summary
+	rm.roundMutex.RLock()
+	commitmentCount := 0
+	if rm.currentRound != nil {
+		commitmentCount = len(rm.currentRound.Commitments)
+	}
+	rm.roundMutex.RUnlock()
+
+	// Log comprehensive performance summary
+	rm.logger.WithContext(ctx).Info("PERF: Round completed",
+		"blockNumber", block.Index.String(),
+		"commitments", commitmentCount,
+		"totalRoundTime", totalRoundTime.String(),
+		"processingTime", processingTime.String(),
+		"bftWaitTime", bftWaitTime.String(),
+		"finalizationTime", actualFinalizationTime.String(),
+		"markProcessedTime", markProcessedTime.String(),
+		"storeBlockTime", storeBlockTime.String(),
+		"persistDataTime", persistDataTime.String(),
+		"commitSnapshotTime", commitSnapshotTime.String())
+
 	rm.logger.WithContext(ctx).Info("Block finalized and stored successfully",
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String())
 
-	rm.setLastSyncedRoundNumber(block.Index.Int)
+	rm.stateTracker.SetLastSyncedBlock(block.Index.Int)
 
 	return nil
 }
@@ -397,7 +372,7 @@ func (rm *RoundManager) persistSmtNodes(ctx context.Context, leaves []*smt.Leaf)
 }
 
 // persistAggregatorRecords generates aggregator records and stores them to database
-func (rm *RoundManager) persistAggregatorRecords(ctx context.Context, commitments []*models.Commitment, blockIndex *api.BigInt, snapshot *ThreadSafeSmtSnapshot) error {
+func (rm *RoundManager) persistAggregatorRecords(ctx context.Context, commitments []*models.Commitment, blockIndex *api.BigInt) error {
 	if len(commitments) == 0 {
 		return nil
 	}

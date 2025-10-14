@@ -1,4 +1,4 @@
-package round
+package smt
 
 import (
 	"encoding/json"
@@ -6,14 +6,14 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
 	"github.com/unicitynetwork/aggregator-go/internal/models"
-	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 func TestAddLeaves_DebugInvalidPath(t *testing.T) {
 
-	addCommitment := func(tree *smt.SparseMerkleTree, commJson map[string]interface{}) string {
+	addCommitment := func(tree *SparseMerkleTree, commJson map[string]interface{}) string {
 		commJsonBytes, err := json.Marshal(commJson)
 		require.NoError(t, err, "Failed to marshal commitment JSON")
 		commitment := &models.Commitment{}
@@ -22,18 +22,16 @@ func TestAddLeaves_DebugInvalidPath(t *testing.T) {
 		path, err := commitment.RequestID.GetPath()
 		require.NoError(t, err)
 
-		rm := &RoundManager{}
-
 		// Create leaf value (hash of commitment data)
-		leafValue, err := rm.createLeafValue(commitment)
+		leafValue, err := commitment.CreateLeafValue()
 		require.NoError(t, err)
 
-		leaf := &smt.Leaf{
+		leaf := &Leaf{
 			Path:  path,
 			Value: leafValue,
 		}
 
-		err = tree.AddLeaves([]*smt.Leaf{leaf})
+		err = tree.AddLeaves([]*Leaf{leaf})
 		require.NoError(t, err, "Expected error due to invalid path")
 
 		// now validate the path of request
@@ -52,7 +50,7 @@ func TestAddLeaves_DebugInvalidPath(t *testing.T) {
 		return rh
 	}
 
-	_smt := smt.NewSparseMerkleTree(api.SHA256, 16+256)
+	_smt := NewSparseMerkleTree(api.SHA256, 16+256)
 	{ // mint commitment
 		commJson := map[string]interface{}{
 			"requestId":       "00007d535ade796772c5088b095e79a18e282437ee8d8238f5aa9d9c61694948ba9e",

@@ -24,7 +24,7 @@ type LeaderElection struct {
 	cancel context.CancelFunc // election polling thread cancel signal
 }
 
-func NewLeaderElection(cfg config.HAConfig, log *logger.Logger, storage interfaces.LeadershipStorage) *LeaderElection {
+func NewLeaderElection(log *logger.Logger, cfg config.HAConfig, storage interfaces.LeadershipStorage) *LeaderElection {
 	return &LeaderElection{
 		log:                     log,
 		storage:                 storage,
@@ -45,15 +45,13 @@ func (le *LeaderElection) Start(ctx context.Context) {
 	le.cancel = cancel
 
 	// start election polling
-	le.wg.Add(1)
-	go func() {
-		defer le.wg.Done()
+	le.wg.Go(func() {
 		le.startElectionPolling(ctx)
-	}()
+	})
 }
 
-// Shutdown stops the election polling and releases resources
-func (le *LeaderElection) Shutdown(ctx context.Context) error {
+// Stop stops the election polling and releases resources
+func (le *LeaderElection) Stop(ctx context.Context) {
 	// cancel election polling thread
 	if le.cancel != nil {
 		le.cancel()
@@ -62,11 +60,10 @@ func (le *LeaderElection) Shutdown(ctx context.Context) error {
 	le.wg.Wait()
 
 	if _, err := le.storage.ReleaseLock(ctx, le.lockID, le.serverID); err != nil {
-		return fmt.Errorf("error releasing leadership lock: %v", err)
+		le.log.WithComponent("leader-election").Error("Error releasing leadership lock", "error", err.Error())
 	}
 
 	le.log.WithComponent("leader-election").Info("Shutdown completed", "serverID", le.serverID)
-	return nil
 }
 
 // startHeartbeat long polling function that periodically updates the lock,

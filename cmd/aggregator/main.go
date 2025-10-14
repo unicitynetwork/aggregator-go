@@ -11,10 +11,11 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
 	"github.com/unicitynetwork/aggregator-go/internal/ha"
+	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/service"
-	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
+	"github.com/unicitynetwork/aggregator-go/internal/storage"
 )
 
 // gracefulExit flushes async logger and exits with the given code
@@ -67,16 +68,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Initialize storage
-	storage, err := mongodb.NewStorage(*cfg)
+	commitmentQueue, storageInstance, err := storage.NewStorage(cfg, log)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to initialize storage", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
 	}
 
-	// Test database connection
+	if cfg.Storage.UseRedisForCommitments {
+		log.WithComponent("main").Info("Using Redis for commitment queue and MongoDB for persistence",
+			"redis_host", cfg.Redis.Host,
+			"redis_port", cfg.Redis.Port,
+			"flush_interval", cfg.Storage.RedisFlushInterval,
+			"max_batch_size", cfg.Storage.RedisMaxBatchSize)
+	} else {
+		log.WithComponent("main").Info("Using MongoDB for all storage")
+	}
+
 	connectionTestCtx, connectionTestCancelFn := context.WithTimeout(ctx, 10*time.Second)
-	if err := storage.Ping(connectionTestCtx); err != nil {
+	if err := storageInstance.Ping(connectionTestCtx); err != nil {
 		connectionTestCancelFn()
 		log.WithComponent("main").Error("Failed to connect to database", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
@@ -85,33 +94,52 @@ func main() {
 
 	log.WithComponent("main").Info("Database connection established")
 
-	// start leader election service
-	var leaderElection *ha.LeaderElection
-	if cfg.HA.Enabled {
-		leaderElection = ha.NewLeaderElection(cfg.HA, log, storage.LeadershipStorage())
-		leaderElection.Start(ctx)
-		log.WithComponent("main").Info("High availability mode leader election started")
-	} else {
-		log.WithComponent("main").Info("High availability mode is disabled")
+	if err := commitmentQueue.Initialize(ctx); err != nil {
+		log.WithComponent("main").Error("Failed to initialize commitment queue", "error", err.Error())
+		gracefulExit(asyncLogger, 1)
 	}
 
-	roundManager, err := round.NewRoundManager(ctx, cfg, log, storage, leaderElection)
+	// Create the shared state tracker for block sync height
+	stateTracker := state.NewSyncStateTracker()
+
+	// Create the Round Manager
+	roundManager, err := round.NewRoundManager(ctx, cfg, log, commitmentQueue, storageInstance, stateTracker)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to create round manager", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
 	}
 
-	// Initialize service
-	aggregatorService := service.NewAggregatorService(cfg, log, roundManager, storage, leaderElection)
-
-	// Start the aggregator service
-	if err := aggregatorService.Start(ctx); err != nil {
-		log.WithComponent("main").Error("Failed to start aggregator service", "error", err.Error())
+	// Perform initial SMT restoration. This is required in all modes.
+	if err := roundManager.Start(ctx); err != nil {
+		log.WithComponent("main").Error("Failed to start round manager", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
 	}
 
+	// Initialize HA Manager if enabled
+	var haManager *ha.HAManager
+	var leaderSelector *ha.LeaderElection
+	if cfg.HA.Enabled {
+		log.WithComponent("main").Info("High availability mode enabled")
+		leaderSelector = ha.NewLeaderElection(log, cfg.HA, storageInstance.LeadershipStorage())
+		leaderSelector.Start(ctx)
+
+		haManager = ha.NewHAManager(log, roundManager, leaderSelector, storageInstance, roundManager.GetSMT(), stateTracker, cfg.Processing.RoundDuration)
+		haManager.Start(ctx)
+
+	} else {
+		log.WithComponent("main").Info("High availability mode is disabled, running as standalone leader")
+		// In non-HA mode, the node is always the leader, so activate it directly.
+		if err := roundManager.Activate(ctx); err != nil {
+			log.WithComponent("main").Error("Failed to activate round manager", "error", err.Error())
+			gracefulExit(asyncLogger, 1)
+		}
+	}
+
+	// Initialize service
+	aggregatorService := service.NewAggregatorService(cfg, log, roundManager, commitmentQueue, storageInstance, leaderSelector)
+
 	// Initialize gateway server
-	server := gateway.NewServer(cfg, log, storage, aggregatorService)
+	server := gateway.NewServer(cfg, log, aggregatorService)
 
 	// Start server in a goroutine
 	go func() {
@@ -138,20 +166,24 @@ func main() {
 		log.WithComponent("main").Error("Failed to stop server gracefully", "error", err.Error())
 	}
 
-	// Stop aggregator service
-	if err := aggregatorService.Stop(shutdownCtx); err != nil {
-		log.WithComponent("main").Error("Failed to stop aggregator service gracefully", "error", err.Error())
+	// Stop round manager
+	roundManager.Stop(shutdownCtx)
+
+	// Stop leader selector if it was started
+	if leaderSelector != nil {
+		leaderSelector.Stop(shutdownCtx)
 	}
 
-	// Stop leader election service
-	if leaderElection != nil {
-		if err := leaderElection.Shutdown(shutdownCtx); err != nil {
-			log.WithComponent("main").Error("Failed to stop leader election", "error", err.Error())
-		}
+	// Stop HA Manager if it was started
+	if haManager != nil {
+		haManager.Stop()
 	}
 
-	// Close storage
-	if err := storage.Close(shutdownCtx); err != nil {
+	// Close storage backends
+	if err := commitmentQueue.Close(shutdownCtx); err != nil {
+		log.WithComponent("main").Error("Failed to close commitment queue gracefully", "error", err.Error())
+	}
+	if err := storageInstance.Close(shutdownCtx); err != nil {
 		log.WithComponent("main").Error("Failed to close storage gracefully", "error", err.Error())
 	}
 

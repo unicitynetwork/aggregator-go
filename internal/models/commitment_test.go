@@ -1,4 +1,4 @@
-package round
+package models
 
 import (
 	"crypto/sha256"
@@ -9,16 +9,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // TestCreateLeafValue tests the createLeafValue function to ensure it matches
 // the TypeScript LeafValue.create() implementation exactly
 func TestCreateLeafValue(t *testing.T) {
-	// Create a mock RoundManager for testing
-	rm := &RoundManager{}
-
 	t.Run("should create expected leaf value", func(t *testing.T) {
 		// Create test data
 		publicKeyHex := "02bf8d9e7687f66c7fce1e98edbc05566f7db740030722cf6cf62aca035c5035ea"
@@ -43,7 +39,7 @@ func TestCreateLeafValue(t *testing.T) {
 		require.NoError(t, err)
 
 		// Create authenticator
-		authenticator := models.Authenticator{
+		authenticator := Authenticator{
 			Algorithm: "secp256k1",
 			PublicKey: api.NewHexBytes(publicKey),
 			Signature: api.NewHexBytes(signature),
@@ -51,10 +47,10 @@ func TestCreateLeafValue(t *testing.T) {
 		}
 
 		// Create commitment
-		commitment := models.NewCommitment(requestID, transactionHash, authenticator)
+		commitment := NewCommitment(requestID, transactionHash, authenticator)
 
 		// Call createLeafValue
-		leafValue, err := rm.createLeafValue(commitment)
+		leafValue, err := commitment.CreateLeafValue()
 		require.NoError(t, err)
 		require.NotNil(t, leafValue)
 
@@ -90,7 +86,7 @@ func TestCreateLeafValue(t *testing.T) {
 		require.NoError(t, err)
 
 		// Create authenticator
-		authenticator := models.Authenticator{
+		authenticator := Authenticator{
 			Algorithm: "secp256k1",
 			PublicKey: api.NewHexBytes(publicKey),
 			Signature: api.NewHexBytes(signature),
@@ -98,10 +94,10 @@ func TestCreateLeafValue(t *testing.T) {
 		}
 
 		// Create commitment
-		commitment := models.NewCommitment(requestID, transactionHash, authenticator)
+		commitment := NewCommitment(requestID, transactionHash, authenticator)
 
 		// Call createLeafValue
-		leafValue, err := rm.createLeafValue(commitment)
+		leafValue, err := commitment.CreateLeafValue()
 		require.NoError(t, err)
 		require.NotNil(t, leafValue)
 
@@ -113,14 +109,14 @@ func TestCreateLeafValue(t *testing.T) {
 		assert.Equal(t, byte(0x00), leafValue[1])
 
 		// Verify the leaf value is deterministic by calling again
-		leafValue2, err := rm.createLeafValue(commitment)
+		leafValue2, err := commitment.CreateLeafValue()
 		require.NoError(t, err)
 		assert.Equal(t, leafValue, leafValue2)
 	})
 
 	t.Run("should match manual CBOR encoding and hashing", func(t *testing.T) {
 		// Create test data
-		authenticator := models.Authenticator{
+		authenticator := Authenticator{
 			Algorithm: "secp256k1",
 			PublicKey: api.NewHexBytes([]byte{0x02, 0x79, 0xbe, 0x66}),
 			Signature: api.NewHexBytes([]byte{0xa0, 0xb3, 0x7f, 0x8f}),
@@ -133,10 +129,10 @@ func TestCreateLeafValue(t *testing.T) {
 		requestID, err := api.CreateRequestID(authenticator.PublicKey, authenticator.StateHash)
 		require.NoError(t, err)
 
-		commitment := models.NewCommitment(requestID, transactionHash, authenticator)
+		commitment := NewCommitment(requestID, transactionHash, authenticator)
 
 		// Get leaf value from our function
-		leafValue, err := rm.createLeafValue(commitment)
+		leafValue, err := commitment.CreateLeafValue()
 		require.NoError(t, err)
 
 		// Manually replicate the expected process
@@ -220,16 +216,16 @@ func TestCreateLeafValue(t *testing.T) {
 				requestID, err := api.CreateRequestID(tc.publicKey, stateHash)
 				require.NoError(t, err)
 
-				authenticator := models.Authenticator{
+				authenticator := Authenticator{
 					Algorithm: tc.algorithm,
 					PublicKey: api.NewHexBytes(tc.publicKey),
 					Signature: api.NewHexBytes(tc.signature),
 					StateHash: stateHash,
 				}
 
-				commitment := models.NewCommitment(requestID, transactionHash, authenticator)
+				commitment := NewCommitment(requestID, transactionHash, authenticator)
 
-				leafValue, err := rm.createLeafValue(commitment)
+				leafValue, err := commitment.CreateLeafValue()
 				require.NoError(t, err)
 				require.NotNil(t, leafValue)
 				assert.Equal(t, 34, len(leafValue)) // DataHash imprint: 2 bytes algorithm + 32 bytes SHA256
@@ -252,16 +248,16 @@ func TestCreateLeafValue(t *testing.T) {
 		requestID, err := api.CreateRequestID([]byte{0x01}, stateHash)
 		require.NoError(t, err)
 
-		authenticator := models.Authenticator{
+		authenticator := Authenticator{
 			Algorithm: "test",
 			PublicKey: api.NewHexBytes([]byte{0x01}),
 			Signature: api.NewHexBytes([]byte{0x02}),
 			StateHash: stateHash,
 		}
 
-		commitment := models.NewCommitment(requestID, transactionHash, authenticator)
+		commitment := NewCommitment(requestID, transactionHash, authenticator)
 
-		leafValue, err := rm.createLeafValue(commitment)
+		leafValue, err := commitment.CreateLeafValue()
 		require.NoError(t, err)
 		require.NotNil(t, leafValue)
 	})
@@ -274,7 +270,7 @@ func TestCreateLeafValue(t *testing.T) {
 		requestID, err := api.CreateRequestID([]byte{0x01}, stateHash)
 		require.NoError(t, err)
 
-		authenticator := models.Authenticator{
+		authenticator := Authenticator{
 			Algorithm: "test",
 			PublicKey: api.NewHexBytes([]byte{0x01}),
 			Signature: api.NewHexBytes([]byte{0x02}),
@@ -283,9 +279,9 @@ func TestCreateLeafValue(t *testing.T) {
 
 		// Create invalid transaction hash (contains invalid hex characters)
 		invalidTransactionHash := api.ImprintHexString("invalid")
-		commitment := models.NewCommitment(requestID, invalidTransactionHash, authenticator)
+		commitment := NewCommitment(requestID, invalidTransactionHash, authenticator)
 
-		leafValue, err := rm.createLeafValue(commitment)
+		leafValue, err := commitment.CreateLeafValue()
 		require.Error(t, err)
 		require.Nil(t, leafValue)
 		assert.Contains(t, err.Error(), "failed to get transaction hash imprint")
@@ -311,27 +307,27 @@ func TestCreateLeafValue(t *testing.T) {
 		requestID2, err := api.CreateRequestID([]byte{0x02}, stateHash2)
 		require.NoError(t, err)
 
-		authenticator1 := models.Authenticator{
+		authenticator1 := Authenticator{
 			Algorithm: "test",
 			PublicKey: api.NewHexBytes([]byte{0x01}),
 			Signature: api.NewHexBytes([]byte{0x02}),
 			StateHash: stateHash1,
 		}
 
-		authenticator2 := models.Authenticator{
+		authenticator2 := Authenticator{
 			Algorithm: "test",
 			PublicKey: api.NewHexBytes([]byte{0x02}),
 			Signature: api.NewHexBytes([]byte{0x03}),
 			StateHash: stateHash2,
 		}
 
-		commitment1 := models.NewCommitment(requestID1, transactionHash1, authenticator1)
-		commitment2 := models.NewCommitment(requestID2, transactionHash2, authenticator2)
+		commitment1 := NewCommitment(requestID1, transactionHash1, authenticator1)
+		commitment2 := NewCommitment(requestID2, transactionHash2, authenticator2)
 
-		leafValue1, err := rm.createLeafValue(commitment1)
+		leafValue1, err := commitment1.CreateLeafValue()
 		require.NoError(t, err)
 
-		leafValue2, err := rm.createLeafValue(commitment2)
+		leafValue2, err := commitment2.CreateLeafValue()
 		require.NoError(t, err)
 
 		// Values should be different
@@ -341,8 +337,6 @@ func TestCreateLeafValue(t *testing.T) {
 
 // BenchmarkCreateLeafValue benchmarks the createLeafValue function
 func BenchmarkCreateLeafValue(b *testing.B) {
-	rm := &RoundManager{}
-
 	// Setup test data
 	publicKey := []byte{0x02, 0x79, 0xbe, 0x66}
 	signature := []byte{0xa0, 0xb3, 0x7f, 0x8f}
@@ -350,18 +344,18 @@ func BenchmarkCreateLeafValue(b *testing.B) {
 	transactionHash, _ := api.NewImprintHexString("0000feedcafe")
 	requestID, _ := api.CreateRequestID(publicKey, stateHash)
 
-	authenticator := models.Authenticator{
+	authenticator := Authenticator{
 		Algorithm: "secp256k1",
 		PublicKey: api.NewHexBytes(publicKey),
 		Signature: api.NewHexBytes(signature),
 		StateHash: stateHash,
 	}
 
-	commitment := models.NewCommitment(requestID, transactionHash, authenticator)
+	commitment := NewCommitment(requestID, transactionHash, authenticator)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := rm.createLeafValue(commitment)
+		_, err := commitment.CreateLeafValue()
 		if err != nil {
 			b.Fatal(err)
 		}

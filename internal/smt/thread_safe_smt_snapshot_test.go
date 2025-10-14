@@ -1,4 +1,4 @@
-package round
+package smt
 
 import (
 	"math/big"
@@ -6,14 +6,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/unicitynetwork/aggregator-go/internal/smt"
+
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 func TestThreadSafeSMTSnapshot(t *testing.T) {
 	t.Run("BasicSnapshotOperations", func(t *testing.T) {
 		// Create ThreadSafeSMT instance
-		smtInstance := smt.NewSparseMerkleTree(api.SHA256, 2)
+		smtInstance := NewSparseMerkleTree(api.SHA256, 2)
 		threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 		// Add initial data to the original SMT using a snapshot
@@ -53,17 +53,17 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 
 	t.Run("BatchOperationsInSnapshot", func(t *testing.T) {
 		// Create ThreadSafeSMT instance
-		smtInstance := smt.NewSparseMerkleTree(api.SHA256, 2)
+		smtInstance := NewSparseMerkleTree(api.SHA256, 2)
 		threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 		// Create snapshot
 		snapshot := threadSafeSMT.CreateSnapshot()
 
 		// Prepare batch of leaves
-		leaves := []*smt.Leaf{
-			smt.NewLeaf(big.NewInt(0b100), []byte{1}),
-			smt.NewLeaf(big.NewInt(0b101), []byte{2}),
-			smt.NewLeaf(big.NewInt(0b111), []byte{3}),
+		leaves := []*Leaf{
+			NewLeaf(big.NewInt(0b100), []byte{1}),
+			NewLeaf(big.NewInt(0b101), []byte{2}),
+			NewLeaf(big.NewInt(0b111), []byte{3}),
 		}
 
 		// Add leaves in batch
@@ -85,7 +85,7 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 
 	t.Run("ConcurrentSnapshots", func(t *testing.T) {
 		// Create ThreadSafeSMT instance with initial data
-		smtInstance := smt.NewSparseMerkleTree(api.SHA256, 2)
+		smtInstance := NewSparseMerkleTree(api.SHA256, 2)
 		threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 		// Add initial data
@@ -123,7 +123,7 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 	})
 
 	t.Run("SnapshotStats", func(t *testing.T) {
-		smtInstance := smt.NewSparseMerkleTree(api.SHA256, 1)
+		smtInstance := NewSparseMerkleTree(api.SHA256, 1)
 		threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 		snapshot := threadSafeSMT.CreateSnapshot()
@@ -137,7 +137,7 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 	})
 
 	t.Run("SnapshotWriteOperations", func(t *testing.T) {
-		smtInstance := smt.NewSparseMerkleTree(api.SHA256, 2)
+		smtInstance := NewSparseMerkleTree(api.SHA256, 2)
 		threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 		// Add data via snapshot
@@ -149,7 +149,7 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 		require.NoError(t, err)
 
 		// Test with write locks for adding more data
-		err = snapshot.WithWriteLock(func(snap *smt.SmtSnapshot) error {
+		err = snapshot.WithWriteLock(func(snap *SmtSnapshot) error {
 			return snap.AddLeaf(big.NewInt(0b111), []byte{4, 5, 6})
 		})
 		require.NoError(t, err, "Should be able to use WithWriteLock")
