@@ -6,6 +6,7 @@ services:
     restart: unless-stopped
     environment:
       - DOMAIN=goggregator-test.unicity.network
+      - ADDITIONAL_DOMAINS=faucet.unicity.network
       - EMAIL=${CERTBOT_EMAIL:-admin@unicity.network}
     volumes:
       - letsencrypt_certs:/etc/letsencrypt
@@ -20,6 +21,7 @@ services:
       sh -c "
         set -e;
         DOMAIN=\"$${DOMAIN:-goggregator-test.unicity.network}\";
+        ADDITIONAL_DOMAINS=\"$${ADDITIONAL_DOMAINS:-}\";
         EMAIL=\"$${EMAIL:-admin@unicity.network}\";
         LE_PATH=\"/etc/letsencrypt/live/$$DOMAIN\";
         WEBROOT=\"/var/www/certbot\";
@@ -30,11 +32,20 @@ services:
         if [ ! -f \"$$LE_PATH/fullchain.pem\" ]; then
           echo 'No existing certificate found. Obtaining new certificate...';
           echo \"Email: $$EMAIL\";
-          echo \"Domain: $$DOMAIN\";
+          echo \"Primary domain: $$DOMAIN\";
+
+          # Build domain list
+          DOMAIN_ARGS=\"--domain $$DOMAIN\";
+          if [ -n \"$$ADDITIONAL_DOMAINS\" ]; then
+            echo \"Additional domains: $$ADDITIONAL_DOMAINS\";
+            for additional in $$(echo \"$$ADDITIONAL_DOMAINS\" | tr ',' ' '); do
+              DOMAIN_ARGS=\"$$DOMAIN_ARGS --domain $$additional\";
+            done;
+          fi;
 
           # Obtain initial certificate using standalone mode
           # (port 80 is available since HAProxy hasn't started yet)
-          certbot certonly --authenticator standalone --preferred-challenges http --non-interactive --agree-tos --email \"$$EMAIL\" --no-eff-email --domain \"$$DOMAIN\" || {
+          certbot certonly --authenticator standalone --preferred-challenges http --non-interactive --agree-tos --email \"$$EMAIL\" --no-eff-email $$DOMAIN_ARGS || {
             echo 'ERROR: Failed to obtain certificate. Check DNS and network connectivity.';
             exit 1;
           };
