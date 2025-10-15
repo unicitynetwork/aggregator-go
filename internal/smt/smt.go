@@ -16,7 +16,7 @@ var (
 )
 
 type (
-	// SparseMerkleTree implements a sparse merkle tree compatible with Unicity SDK
+	// SparseMerkleTree implements a sparse Merkle tree compatible with Unicity SDK
 	SparseMerkleTree struct {
 		keyLength  int // bit length of the keys in the tree
 		algorithm  api.HashAlgorithm
@@ -31,7 +31,7 @@ type (
 	}
 )
 
-// NewSparseMerkleTree creates a new sparse merkle tree
+// NewSparseMerkleTree creates a new sparse Merkle tree for a monolithic aggregator
 func NewSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int) *SparseMerkleTree {
 	if keyLength <= 0 {
 		panic("SMT key length must be positive")
@@ -39,7 +39,26 @@ func NewSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int) *SparseMerk
 	return &SparseMerkleTree{
 		keyLength:  keyLength,
 		algorithm:  algorithm,
-		root:       newRootNode(nil, nil),
+		root:       newNodeBranch(big.NewInt(1), nil, nil),
+		isSnapshot: false,
+		original:   nil,
+	}
+}
+
+// NewChildSparseMerkleTree creates a new sparse Merkle tree for a child aggregator in sharded setup
+func NewChildSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int, shardID int64) *SparseMerkleTree {
+	if keyLength <= 0 {
+		panic("SMT key length must be positive")
+	}
+	if shardID <= 1 {
+		panic("Shard ID must be positive and have at least 2 bits")
+	}
+	path := big.NewInt(shardID)
+	path.Rsh(path, uint(path.BitLen()-2))
+	return &SparseMerkleTree{
+		keyLength:  keyLength,
+		algorithm:  algorithm,
+		root:       newNodeBranch(path, nil, nil),
 		isSnapshot: false,
 		original:   nil,
 	}
@@ -93,7 +112,7 @@ func (smt *SparseMerkleTree) CanModify() bool {
 // copyOnWriteRoot creates a new root if this snapshot is sharing it with the original
 func (smt *SparseMerkleTree) copyOnWriteRoot() *NodeBranch {
 	if smt.original != nil && smt.root == smt.original.root {
-		return newRootNode(smt.root.Left, smt.root.Right)
+		return newNodeBranch(smt.root.Path, smt.root.Left, smt.root.Right)
 	}
 	return smt.root
 }
@@ -161,11 +180,6 @@ func (l *LeafBranch) getPath() *big.Int {
 
 func (l *LeafBranch) isLeaf() bool {
 	return true
-}
-
-// NewRootNode creates a new root node
-func newRootNode(left, right branch) *NodeBranch {
-	return newNodeBranch(big.NewInt(1), left, right)
 }
 
 // NewNodeBranch creates a node branch
@@ -277,7 +291,7 @@ func (smt *SparseMerkleTree) AddLeaf(path *big.Int, value []byte) error {
 		right = smt.root.Right
 	}
 
-	smt.root = newRootNode(left, right)
+	smt.root = newNodeBranch(smt.root.Path, left, right)
 	return nil
 }
 

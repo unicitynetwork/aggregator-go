@@ -58,6 +58,42 @@ func TestSMTGetRoot(t *testing.T) {
 	})
 }
 
+func TestChildSMTGetRoot(t *testing.T) {
+	t.Run("LeftOfTwoLeaves", func(t *testing.T) {
+		smt := NewChildSparseMerkleTree(api.SHA256, 1, 0b10)
+		smt.AddLeaf(big.NewInt(0b10), []byte{0x61})
+
+		expected := "0000256aedd9f31e69a4b0803616beab77234bae5dff519a10e519a0753be49f0534"
+		require.Equal(t, expected, smt.GetRootHashHex())
+	})
+
+	t.Run("RightOfTwoLeaves", func(t *testing.T) {
+		smt := NewChildSparseMerkleTree(api.SHA256, 1, 0b11)
+		smt.AddLeaf(big.NewInt(0b11), []byte{0x62})
+
+		expected := "0000e777763b4ce391c2f8acdf480dd64758bc8063a3aa5f62670a499a61d3bc7b9a"
+		require.Equal(t, expected, smt.GetRootHashHex())
+	})
+
+	t.Run("LeftOfFourLeaves", func(t *testing.T) {
+		smt := NewChildSparseMerkleTree(api.SHA256, 2, 0b100)
+		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
+		smt.AddLeaf(big.NewInt(0b111), []byte{0x62})
+
+		expected := "0000a602dc13e4932c8d58196cdd34b44c44ff457323e7dcec9e5ea05d789bd28936"
+		require.Equal(t, expected, smt.GetRootHashHex())
+	})
+
+	t.Run("RightOfFourLeaves", func(t *testing.T) {
+		smt := NewChildSparseMerkleTree(api.SHA256, 2, 0b11)
+		smt.AddLeaf(big.NewInt(0b100), []byte{0x63})
+		smt.AddLeaf(big.NewInt(0b111), []byte{0x64})
+
+		expected := "0000d1d4fd1c4b4e332427d726c39a2cea17ed4c59bff0458232ccb36199bb8849af"
+		require.Equal(t, expected, smt.GetRootHashHex())
+	})
+}
+
 // TestSMTBatchOperations tests batch functionality
 func TestSMTBatchOperations(t *testing.T) {
 	t.Run("SimpleRetrievalTest", func(t *testing.T) {
