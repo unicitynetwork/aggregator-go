@@ -15,12 +15,14 @@ import (
 
 // TestSMTGetRoot test basic SMT root hash computation
 func TestSMTGetRoot(t *testing.T) {
+	// "Singleton" example from the spec
 	t.Run("EmptyTree", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
 		expected := "00001e54402898172f2948615fb17627733abbd120a85381c624ad060d28321be672"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
+	// "Left Child Only" example from the spec
 	t.Run("LeftLeaf", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
 		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
@@ -29,6 +31,7 @@ func TestSMTGetRoot(t *testing.T) {
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
+	// "Right Child Only" example from the spec
 	t.Run("RightLeaf", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
 		smt.AddLeaf(big.NewInt(0b111), []byte{0x62})
@@ -37,6 +40,7 @@ func TestSMTGetRoot(t *testing.T) {
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
+	// "Two Leaves" example from the spec
 	t.Run("TwoLeaves", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
 		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
@@ -46,6 +50,7 @@ func TestSMTGetRoot(t *testing.T) {
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
+	// "Four Leaves" example from the spec
 	t.Run("FourLeaves", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 3)
 		smt.AddLeaf(big.NewInt(0b1000), []byte{0x61})
@@ -59,6 +64,7 @@ func TestSMTGetRoot(t *testing.T) {
 }
 
 func TestChildSMTGetRoot(t *testing.T) {
+	// Left child of the "Two Leaves, Sharded" exampe from the spec
 	t.Run("LeftOfTwoLeaves", func(t *testing.T) {
 		smt := NewChildSparseMerkleTree(api.SHA256, 1, 0b10)
 		smt.AddLeaf(big.NewInt(0b10), []byte{0x61})
@@ -67,6 +73,7 @@ func TestChildSMTGetRoot(t *testing.T) {
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
+	// Right child of the "Two Leaves, Sharded" exampe from the spec
 	t.Run("RightOfTwoLeaves", func(t *testing.T) {
 		smt := NewChildSparseMerkleTree(api.SHA256, 1, 0b11)
 		smt.AddLeaf(big.NewInt(0b11), []byte{0x62})
@@ -75,6 +82,7 @@ func TestChildSMTGetRoot(t *testing.T) {
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
+	// Left child of the "Four Leaves, Sharded" exampe from the spec
 	t.Run("LeftOfFourLeaves", func(t *testing.T) {
 		smt := NewChildSparseMerkleTree(api.SHA256, 2, 0b100)
 		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
@@ -84,12 +92,39 @@ func TestChildSMTGetRoot(t *testing.T) {
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
+	// Right child of the "Four Leaves, Sharded" exampe from the spec
 	t.Run("RightOfFourLeaves", func(t *testing.T) {
 		smt := NewChildSparseMerkleTree(api.SHA256, 2, 0b11)
 		smt.AddLeaf(big.NewInt(0b100), []byte{0x63})
 		smt.AddLeaf(big.NewInt(0b111), []byte{0x64})
 
 		expected := "0000d1d4fd1c4b4e332427d726c39a2cea17ed4c59bff0458232ccb36199bb8849af"
+		require.Equal(t, expected, smt.GetRootHashHex())
+	})
+}
+
+func TestParentSMTGetRoot(t *testing.T) {
+	// Parent of the "Two Leaves, Sharded" exampe from the spec
+	t.Run("TwoLeaves", func(t *testing.T) {
+		left, _ := hex.DecodeString("256aedd9f31e69a4b0803616beab77234bae5dff519a10e519a0753be49f0534")
+		right, _ := hex.DecodeString("e777763b4ce391c2f8acdf480dd64758bc8063a3aa5f62670a499a61d3bc7b9a")
+		smt := NewParentSparseMerkleTree(api.SHA256, 1)
+		smt.AddLeaf(big.NewInt(0b10), left)
+		smt.AddLeaf(big.NewInt(0b11), right)
+
+		expected := "0000413b961d0069adfea0b4e122cf6dbf98e0a01ef7fd573d68c084ddfa03e4f9d6"
+		require.Equal(t, expected, smt.GetRootHashHex())
+	})
+
+	// Parent of the "Four Leaves, Sharded" exampe from the spec
+	t.Run("LeftOfFourLeaves", func(t *testing.T) {
+		left, _ := hex.DecodeString("a602dc13e4932c8d58196cdd34b44c44ff457323e7dcec9e5ea05d789bd28936")
+		right, _ := hex.DecodeString("d1d4fd1c4b4e332427d726c39a2cea17ed4c59bff0458232ccb36199bb8849af")
+		smt := NewParentSparseMerkleTree(api.SHA256, 2)
+		smt.AddLeaf(big.NewInt(0b100), left)
+		smt.AddLeaf(big.NewInt(0b111), right)
+
+		expected := "0000ee27435446dd026d9f6baca2033ebffe2d29d8948eb81bf9250f7512323c6cbc"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 }

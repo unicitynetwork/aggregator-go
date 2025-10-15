@@ -18,7 +18,8 @@ var (
 type (
 	// SparseMerkleTree implements a sparse Merkle tree compatible with Unicity SDK
 	SparseMerkleTree struct {
-		keyLength  int // bit length of the keys in the tree
+		parentMode bool // true if this tree operates in "parent mode"
+		keyLength  int  // bit length of the keys in the tree
 		algorithm  api.HashAlgorithm
 		root       *NodeBranch
 		isSnapshot bool              // true if this is a snapshot, false if original tree
@@ -37,6 +38,7 @@ func NewSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int) *SparseMerk
 		panic("SMT key length must be positive")
 	}
 	return &SparseMerkleTree{
+		parentMode: false,
 		keyLength:  keyLength,
 		algorithm:  algorithm,
 		root:       newNodeBranch(big.NewInt(1), nil, nil),
@@ -56,6 +58,7 @@ func NewChildSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int, shardI
 	path := big.NewInt(shardID)
 	path.Rsh(path, uint(path.BitLen()-2))
 	return &SparseMerkleTree{
+		parentMode: false,
 		keyLength:  keyLength,
 		algorithm:  algorithm,
 		root:       newNodeBranch(path, nil, nil),
@@ -64,10 +67,40 @@ func NewChildSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int, shardI
 	}
 }
 
+// NewParentSparseMerkleTree creates a new sparse Merkle tree for the parent aggregator in sharded setup
+func NewParentSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int) *SparseMerkleTree {
+	tree := NewSparseMerkleTree(algorithm, keyLength)
+	tree.parentMode = true
+
+	// Populate all leaves with null hashes
+	// To allow the child aggregators to compute the correct root hashes
+	// for their respective leaves in the parent aggregator's tree, the
+	// parent tree is fully populated (thus not a sparse tree at all)
+	// It is expected that these nulls will be replaced from the stored
+	// state at once after the tree is initially constructed, but still
+	// better to ensure all the leaves exist; otherwise the hash values
+	// of siblings of the missing nodes would not match the structure of
+	// the tree and the corresponding inclusion proofs would fail to verify
+	tree.root.Left = populate(2, keyLength)
+	tree.root.Right = populate(3, keyLength)
+
+	return tree
+}
+
+func populate(path, levels int) branch {
+	if levels == 1 {
+		return newChildLeafBranch(big.NewInt(int64(path)), nil)
+	}
+	left := populate(2, levels-1)
+	right := populate(3, levels-1)
+	return newNodeBranch(big.NewInt(int64(path)), left, right)
+}
+
 // CreateSnapshot creates a snapshot of the current SMT state
 // The snapshot shares nodes with the original tree (copy-on-write)
 func (smt *SparseMerkleTree) CreateSnapshot() *SmtSnapshot {
 	snapshot := &SparseMerkleTree{
+		parentMode: smt.parentMode,
 		keyLength:  smt.keyLength,
 		algorithm:  smt.algorithm,
 		root:       smt.root, // Share the root initially
@@ -85,11 +118,15 @@ func (snapshot *SmtSnapshot) Commit() {
 }
 
 // AddLeaf adds a single leaf to the snapshot
+// In regular and child mode, only new leaves can be added and any attempt
+// to overwrite an existing leaf is an error; in parent mode, updates are allowed
 func (snapshot *SmtSnapshot) AddLeaf(path *big.Int, value []byte) error {
 	return snapshot.SparseMerkleTree.AddLeaf(path, value)
 }
 
 // AddLeaves adds multiple leaves to the snapshot
+// In regular and child mode, only new leaves can be added and any attempt
+// to overwrite an existing leaf is an error; in parent mode, updates are allowed
 func (snapshot *SmtSnapshot) AddLeaves(leaves []*Leaf) error {
 	return snapshot.SparseMerkleTree.AddLeaves(leaves)
 }
@@ -141,9 +178,10 @@ type branch interface {
 
 // LeafBranch represents a leaf node
 type LeafBranch struct {
-	Path  *big.Int
-	Value []byte
-	hash  *api.DataHash
+	Path       *big.Int
+	Value      []byte
+	parentMode bool // true if this is in a tree thet operates in "parent mode"
+	hash       *api.DataHash
 }
 
 // NodeBranch represents an internal node
@@ -154,12 +192,26 @@ type NodeBranch struct {
 	hash  *api.DataHash
 }
 
-// NewLeafBranch creates a leaf branch
+// NewLeafBranch creates a regular leaf branch
 func newLeafBranch(path *big.Int, value []byte) *LeafBranch {
 	return &LeafBranch{
-		Path:  new(big.Int).Set(path),
-		Value: append([]byte(nil), value...),
+		Path:       new(big.Int).Set(path),
+		Value:      append([]byte(nil), value...),
+		parentMode: false,
 		// Hash will be computed on demand
+	}
+}
+
+// NewChildLeafBranch creates a parent tree leaf containing the root hash of a child tree
+func newChildLeafBranch(path *big.Int, value []byte) *LeafBranch {
+	if value != nil {
+		value = append([]byte(nil), value...)
+	}
+	return &LeafBranch{
+		Path:       new(big.Int).Set(path),
+		Value:      value,
+		parentMode: true,
+		// Hash will be set on demand
 	}
 }
 
@@ -168,9 +220,15 @@ func (l *LeafBranch) calculateHash(hasher *api.DataHasher) *api.DataHash {
 		return l.hash
 	}
 
-	pathBytes := api.BigintEncode(l.Path)
-	l.hash = hasher.Reset().AddData(api.CborArray(2)).
-		AddCborBytes(pathBytes).AddCborBytes(l.Value).GetHash()
+	if l.parentMode {
+		if l.Value != nil {
+			l.hash = api.NewDataHash(hasher.GetAlgorithm(), l.Value)
+		}
+	} else {
+		pathBytes := api.BigintEncode(l.Path)
+		l.hash = hasher.Reset().AddData(api.CborArray(2)).
+			AddCborBytes(pathBytes).AddCborBytes(l.Value).GetHash()
+	}
 	return l.hash
 }
 
@@ -375,7 +433,9 @@ func (smt *SparseMerkleTree) buildTree(branch branch, remainingPath *big.Int, va
 	// Special checks for adding a leaf that already exists in the tree
 	if branch.isLeaf() && branch.getPath().Cmp(remainingPath) == 0 {
 		leafBranch := branch.(*LeafBranch)
-		if bytes.Equal(leafBranch.Value, value) {
+		if leafBranch.parentMode {
+			return newChildLeafBranch(leafBranch.Path, value), nil
+		} else if bytes.Equal(leafBranch.Value, value) {
 			return nil, ErrDuplicateLeaf
 		} else {
 			return nil, ErrLeafModification
