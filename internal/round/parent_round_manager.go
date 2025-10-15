@@ -162,6 +162,9 @@ func (prm *ParentRoundManager) startNewRound(ctx context.Context, roundNumber *a
 	prm.logger.WithContext(ctx).Info("Starting new parent round",
 		"roundNumber", roundNumber.String())
 
+	prm.roundMutex.Lock()
+	defer prm.roundMutex.Unlock()
+
 	// Stop existing timer if any
 	if prm.roundTimer != nil {
 		prm.roundTimer.Stop()
@@ -235,7 +238,12 @@ func (prm *ParentRoundManager) processRound(ctx context.Context, round *ParentRo
 
 	var parentRootHash api.HexBytes
 	if len(round.ProcessedShardUpdates) == 0 {
-		parentRootHash = api.HexBytes(round.Snapshot.GetRootHash())
+		rootHashHex := round.Snapshot.GetRootHash()
+		parsedRoot, err := api.NewHexBytesFromString(rootHashHex)
+		if err != nil {
+			return fmt.Errorf("failed to parse parent SMT root hash %q: %w", rootHashHex, err)
+		}
+		parentRootHash = parsedRoot
 		prm.logger.WithContext(ctx).Info("Empty parent round, using current SMT root hash",
 			"rootHash", parentRootHash.String())
 	} else {
@@ -256,7 +264,12 @@ func (prm *ParentRoundManager) processRound(ctx context.Context, round *ParentRo
 			return fmt.Errorf("failed to add shard leaves to parent SMT snapshot: %w", err)
 		}
 
-		parentRootHash = api.HexBytes(rootHashStr)
+		parsedRoot, err := api.NewHexBytesFromString(rootHashStr)
+		if err != nil {
+			return fmt.Errorf("failed to parse updated parent SMT root hash %q: %w", rootHashStr, err)
+		}
+
+		parentRootHash = parsedRoot
 		prm.logger.WithContext(ctx).Info("Added shard updates to parent SMT snapshot",
 			"shardCount", len(round.ProcessedShardUpdates),
 			"newRootHash", parentRootHash.String())
