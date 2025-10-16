@@ -1332,7 +1332,7 @@ func TestJoinPaths(t *testing.T) {
 		left.AddLeaf(big.NewInt(0b100), []byte{0x61})
 		left.AddLeaf(big.NewInt(0b111), []byte{0x62})
 
-		right := NewChildSparseMerkleTree(api.SHA256, 1, 0b111)
+		right := NewChildSparseMerkleTree(api.SHA256, 2, 0b111)
 		right.AddLeaf(big.NewInt(0b100), []byte{0x63})
 		right.AddLeaf(big.NewInt(0b111), []byte{0x64})
 
@@ -1362,18 +1362,18 @@ func TestJoinPaths(t *testing.T) {
 		assert.True(t, res2.PathValid)
 		assert.True(t, res2.PathIncluded)
 
-		child3 := left.GetPath(big.NewInt(0b100))
+		child3 := right.GetPath(big.NewInt(0b100))
 		parent3 := parent.GetPath(big.NewInt(0b111))
 		path3, err := JoinPaths(child3, parent3)
 		assert.Nil(t, err)
 		assert.NotNil(t, path3)
-		res3, err := path1.Verify(big.NewInt(0b10011))
+		res3, err := path3.Verify(big.NewInt(0b10011))
 		assert.Nil(t, err)
 		assert.NotNil(t, res3)
 		assert.True(t, res3.PathValid)
 		assert.True(t, res3.PathIncluded)
 
-		child4 := left.GetPath(big.NewInt(0b111))
+		child4 := right.GetPath(big.NewInt(0b111))
 		parent4 := parent.GetPath(big.NewInt(0b111))
 		path4, err := JoinPaths(child4, parent4)
 		assert.Nil(t, err)
