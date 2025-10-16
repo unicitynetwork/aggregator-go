@@ -30,13 +30,7 @@ func NewSmtStorage(db *mongo.Database) *SmtStorage {
 // Store stores a new SMT node using upsert to handle duplicates gracefully
 func (ss *SmtStorage) Store(ctx context.Context, node *models.SmtNode) error {
 	filter := bson.M{"key": node.Key}
-	update := bson.M{
-		"$setOnInsert": bson.M{
-			"key":       node.Key,
-			"value":     node.Value,
-			"createdAt": node.CreatedAt,
-		},
-	}
+	update := bson.M{"$setOnInsert": node.ToBSON()}
 	opts := options.Update().SetUpsert(true)
 
 	_, err := ss.collection.UpdateOne(ctx, filter, update, opts)
@@ -56,13 +50,7 @@ func (ss *SmtStorage) UpsertBatch(ctx context.Context, nodes []*models.SmtNode) 
 	var operations []mongo.WriteModel
 	for _, node := range nodes {
 		filter := bson.M{"key": node.Key}
-		update := bson.M{
-			"$set": bson.M{
-				"key":       node.Key,
-				"value":     node.Value,
-				"createdAt": node.CreatedAt,
-			},
-		}
+		update := bson.M{"$set": node.ToBSON()}
 
 		operation := mongo.NewUpdateOneModel()
 		operation.SetFilter(filter)
@@ -90,11 +78,7 @@ func (ss *SmtStorage) StoreBatch(ctx context.Context, nodes []*models.SmtNode) e
 
 	documents := make([]interface{}, len(nodes))
 	for i, node := range nodes {
-		documents[i] = bson.M{
-			"key":       node.Key,
-			"value":     node.Value,
-			"createdAt": node.CreatedAt,
-		}
+		documents[i] = node.ToBSON()
 	}
 
 	opts := options.InsertMany().SetOrdered(false)
@@ -110,15 +94,15 @@ func (ss *SmtStorage) StoreBatch(ctx context.Context, nodes []*models.SmtNode) e
 
 // GetByKey retrieves an SMT node by key
 func (ss *SmtStorage) GetByKey(ctx context.Context, key api.HexBytes) (*models.SmtNode, error) {
-	var node models.SmtNode
-	err := ss.collection.FindOne(ctx, bson.M{"key": key}).Decode(&node)
+	var nodeBSON models.SmtNodeBSON
+	err := ss.collection.FindOne(ctx, bson.M{"key": key}).Decode(&nodeBSON)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get SMT node by key: %w", err)
 	}
-	return &node, nil
+	return nodeBSON.FromBSON(), nil
 }
 
 // GetByKeys retrieves multiple SMT nodes by their keys
@@ -134,8 +118,16 @@ func (ss *SmtStorage) GetByKeys(ctx context.Context, keys []api.HexBytes) ([]*mo
 	defer cursor.Close(ctx)
 
 	var nodes []*models.SmtNode
-	if err := cursor.All(ctx, &nodes); err != nil {
-		return nil, fmt.Errorf("failed to decode SMT nodes: %w", err)
+	for cursor.Next(ctx) {
+		var nodeBSON models.SmtNodeBSON
+		if err := cursor.Decode(&nodeBSON); err != nil {
+			return nil, fmt.Errorf("failed to decode SMT node: %w", err)
+		}
+		nodes = append(nodes, nodeBSON.FromBSON())
+	}
+
+	if err := cursor.Err(); err != nil {
+		return nil, fmt.Errorf("cursor error: %w", err)
 	}
 	return nodes, nil
 }
@@ -183,11 +175,11 @@ func (ss *SmtStorage) GetAll(ctx context.Context) ([]*models.SmtNode, error) {
 
 	var nodes []*models.SmtNode
 	for cursor.Next(ctx) {
-		var node models.SmtNode
-		if err := cursor.Decode(&node); err != nil {
+		var nodeBSON models.SmtNodeBSON
+		if err := cursor.Decode(&nodeBSON); err != nil {
 			return nil, fmt.Errorf("failed to decode SMT node: %w", err)
 		}
-		nodes = append(nodes, &node)
+		nodes = append(nodes, nodeBSON.FromBSON())
 	}
 
 	if err := cursor.Err(); err != nil {
@@ -212,11 +204,11 @@ func (ss *SmtStorage) GetChunked(ctx context.Context, offset, limit int) ([]*mod
 
 	var nodes []*models.SmtNode
 	for cursor.Next(ctx) {
-		var node models.SmtNode
-		if err := cursor.Decode(&node); err != nil {
+		var nodeBSON models.SmtNodeBSON
+		if err := cursor.Decode(&nodeBSON); err != nil {
 			return nil, fmt.Errorf("failed to decode SMT node: %w", err)
 		}
-		nodes = append(nodes, &node)
+		nodes = append(nodes, nodeBSON.FromBSON())
 	}
 
 	if err := cursor.Err(); err != nil {
