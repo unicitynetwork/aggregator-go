@@ -129,7 +129,7 @@ func (s *Server) handleSubmitShardRoot(ctx context.Context, params json.RawMessa
 		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
 	}
 
-	if len(req.ShardID) == 0 {
+	if req.ShardID == 0 {
 		return nil, jsonrpc.NewValidationError("shardId is required")
 	}
 	if len(req.RootHash) == 0 {
@@ -152,7 +152,7 @@ func (s *Server) handleGetShardProof(ctx context.Context, params json.RawMessage
 		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
 	}
 
-	if len(req.ShardID) == 0 {
+	if req.ShardID == 0 {
 		return nil, jsonrpc.NewValidationError("shardId is required")
 	}
 

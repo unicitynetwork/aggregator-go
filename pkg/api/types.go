@@ -149,28 +149,32 @@ func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *BigInt)
 
 // Block represents a blockchain block
 type Block struct {
-	Index               *BigInt    `json:"index"`
-	ChainID             string     `json:"chainId"`
-	Version             string     `json:"version"`
-	ForkID              string     `json:"forkId"`
-	RootHash            HexBytes   `json:"rootHash"`
-	PreviousBlockHash   HexBytes   `json:"previousBlockHash"`
-	NoDeletionProofHash HexBytes   `json:"noDeletionProofHash"`
-	CreatedAt           *Timestamp `json:"createdAt"`
-	UnicityCertificate  HexBytes   `json:"unicityCertificate"`
+	Index                *BigInt         `json:"index"`
+	ChainID              string          `json:"chainId"`
+	ShardID              int             `json:"shardId"`
+	Version              string          `json:"version"`
+	ForkID               string          `json:"forkId"`
+	RootHash             HexBytes        `json:"rootHash"`
+	PreviousBlockHash    HexBytes        `json:"previousBlockHash"`
+	NoDeletionProofHash  HexBytes        `json:"noDeletionProofHash"`
+	CreatedAt            *Timestamp      `json:"createdAt"`
+	UnicityCertificate   HexBytes        `json:"unicityCertificate"`
+	ParentMerkleTreePath *MerkleTreePath `json:"parentMerkleTreePath,omitempty"` // child mode only
 }
 
 // NewBlock creates a new block
-func NewBlock(index *BigInt, chainID, version, forkID string, rootHash, previousBlockHash, unicityCertificate HexBytes) *Block {
+func NewBlock(index *BigInt, chainID string, shardID int, version, forkID string, rootHash, previousBlockHash, uc HexBytes, parentMerkleTreePath *MerkleTreePath) *Block {
 	return &Block{
-		Index:              index,
-		ChainID:            chainID,
-		Version:            version,
-		ForkID:             forkID,
-		RootHash:           rootHash,
-		PreviousBlockHash:  previousBlockHash,
-		CreatedAt:          Now(),
-		UnicityCertificate: unicityCertificate,
+		Index:                index,
+		ChainID:              chainID,
+		ShardID:              shardID,
+		Version:              version,
+		ForkID:               forkID,
+		RootHash:             rootHash,
+		PreviousBlockHash:    previousBlockHash,
+		CreatedAt:            Now(),
+		UnicityCertificate:   uc,
+		ParentMerkleTreePath: parentMerkleTreePath,
 	}
 }
 
@@ -255,6 +259,11 @@ type InclusionProof struct {
 	UnicityCertificate HexBytes         `json:"unicityCertificate"`
 }
 
+type RootShardInclusionProof struct {
+	MerkleTreePath     *MerkleTreePath `json:"merkleTreePath"`
+	UnicityCertificate HexBytes        `json:"unicityCertificate"`
+}
+
 // GetNoDeletionProofResponse represents the get_no_deletion_proof JSON-RPC response
 type GetNoDeletionProofResponse struct {
 	NoDeletionProof *NoDeletionProof `json:"noDeletionProof"`
@@ -296,7 +305,7 @@ const (
 
 // SubmitShardRootRequest represents the submit_shard_root JSON-RPC request
 type SubmitShardRootRequest struct {
-	ShardID  HexBytes `json:"shardId"`  // Shard identifier with 0x01 prefix (e.g., "0104" for shard 4)
+	ShardID  int      `json:"shardId"`
 	RootHash HexBytes `json:"rootHash"` // Raw root hash from child SMT
 }
 
@@ -307,7 +316,7 @@ type SubmitShardRootResponse struct {
 
 // GetShardProofRequest represents the get_shard_proof JSON-RPC request
 type GetShardProofRequest struct {
-	ShardID HexBytes `json:"shardId"` // Shard identifier with 0x01 prefix (e.g., "0104" for shard 4)
+	ShardID int `json:"shardId"`
 }
 
 // GetShardProofResponse represents the get_shard_proof JSON-RPC response

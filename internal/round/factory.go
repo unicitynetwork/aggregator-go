@@ -7,6 +7,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
@@ -24,11 +25,12 @@ type Manager interface {
 func NewManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, stateTracker *state.Tracker) (Manager, error) {
 	switch cfg.Sharding.Mode {
 	case config.ShardingModeStandalone:
-		return NewRoundManager(ctx, cfg, logger, commitmentQueue, storage, stateTracker)
-
+		return NewRoundManager(ctx, cfg, logger, commitmentQueue, storage, nil, stateTracker)
 	case config.ShardingModeParent:
 		return NewParentRoundManager(ctx, cfg, logger, storage)
-
+	case config.ShardingModeChild:
+		rootAggregatorClient := sharding.NewRootAggregatorClient(cfg.Sharding.Child.ParentRpcAddr)
+		return NewRoundManager(ctx, cfg, logger, commitmentQueue, storage, rootAggregatorClient, stateTracker)
 	default:
 		return nil, fmt.Errorf("unsupported sharding mode: %s", cfg.Sharding.Mode)
 	}

@@ -44,7 +44,7 @@ func (m *mockActivatable) Deactivate(_ context.Context) error {
 }
 
 func TestHAManager(t *testing.T) {
-	storage, cleanup := testutil.SetupTestStorage(t, config.Config{
+	storage := testutil.SetupTestStorage(t, config.Config{
 		Database: config.DatabaseConfig{
 			Database:               "test_block_sync",
 			ConnectTimeout:         30 * time.Second,
@@ -55,7 +55,6 @@ func TestHAManager(t *testing.T) {
 			MaxConnIdleTime:        5 * time.Minute,
 		},
 	})
-	defer cleanup()
 
 	ctx := context.Background()
 	cfg := &config.Config{
@@ -72,7 +71,7 @@ func TestHAManager(t *testing.T) {
 	callback := newMockActivatable()
 	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256))
 	stateTracker := state.NewSyncStateTracker()
-	ham := NewHAManager(testLogger, callback, mockLeader, storage, smtInstance, stateTracker, cfg.Processing.RoundDuration)
+	ham := NewHAManager(testLogger, callback, mockLeader, storage, smtInstance, 0, stateTracker, cfg.Processing.RoundDuration)
 
 	// verify Activate/Deactivate has not been called initially
 	require.Equal(t, int32(0), callback.activateCalled.Load(), "Activate should not be called initially")

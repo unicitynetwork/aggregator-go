@@ -123,7 +123,7 @@ func main() {
 		leaderSelector = ha.NewLeaderElection(log, cfg.HA, storageInstance.LeadershipStorage())
 		leaderSelector.Start(ctx)
 
-		haManager = ha.NewHAManager(log, roundManager, leaderSelector, storageInstance, roundManager.GetSMT(), stateTracker, cfg.Processing.RoundDuration)
+		haManager = ha.NewHAManager(log, roundManager, leaderSelector, storageInstance, roundManager.GetSMT(), cfg.Sharding.Child.ShardID, stateTracker, cfg.Processing.RoundDuration)
 		haManager.Start(ctx)
 	} else {
 		log.WithComponent("main").Info("High availability mode is disabled, running as standalone leader")
@@ -135,7 +135,7 @@ func main() {
 	}
 
 	// Create service with round manager and leader selector
-	aggregatorService, err := service.NewService(cfg, log, roundManager, commitmentQueue, storageInstance, leaderSelector)
+	aggregatorService, err := service.NewService(ctx, cfg, log, roundManager, commitmentQueue, storageInstance, leaderSelector)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to create service", "error", err.Error())
 		gracefulExit(asyncLogger, 1)

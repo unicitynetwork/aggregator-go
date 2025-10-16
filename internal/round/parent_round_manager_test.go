@@ -50,7 +50,7 @@ func (suite *ParentRoundManagerTestSuite) SetupSuite() {
 	}
 
 	// Create storage once for all tests (reuses same MongoDB container)
-	suite.storage, suite.cleanup = testutil.SetupTestStorage(suite.T(), *suite.cfg)
+	suite.storage = testutil.SetupTestStorage(suite.T(), *suite.cfg)
 }
 
 // TearDownSuite runs once after all tests
@@ -77,11 +77,6 @@ func makeTestHash(value byte) []byte {
 	hash := make([]byte, 32)
 	hash[0] = value
 	return hash
-}
-
-func makeShardID(shardNum byte) api.HexBytes {
-	// Shard ID format: 0x01 prefix + shard number
-	return api.HexBytes{0x01, shardNum}
 }
 
 // Test 1: Initialization
@@ -121,8 +116,8 @@ func (suite *ParentRoundManagerTestSuite) TestBasicRoundLifecycle() {
 	suite.Require().NoError(err)
 
 	// Create 2 shard updates
-	shard0ID := makeShardID(0) // 0x0100
-	shard1ID := makeShardID(1) // 0x0101
+	shard0ID := 2 // 0b10
+	shard1ID := 3 // 0b11
 
 	shard0Root := makeTestHash(0xAA)
 	shard1Root := makeTestHash(0xBB)
@@ -167,8 +162,8 @@ func (suite *ParentRoundManagerTestSuite) TestMultiRoundUpdates() {
 	err = prm.Activate(ctx)
 	suite.Require().NoError(err)
 
-	shard0ID := makeShardID(0)
-	shard1ID := makeShardID(1)
+	shard0ID := 2
+	shard1ID := 3
 
 	// Round 1: Both shards submit initial roots
 	suite.T().Log("=== Round 1: Initial shard roots ===")
@@ -232,10 +227,10 @@ func (suite *ParentRoundManagerTestSuite) TestMultipleShards() {
 	suite.Require().NoError(err)
 
 	// Submit 4 different shard updates
-	shard0ID := makeShardID(0)
-	shard1ID := makeShardID(1)
-	shard2ID := makeShardID(2)
-	shard3ID := makeShardID(3)
+	shard0ID := 1
+	shard1ID := 2
+	shard2ID := 3
+	shard3ID := 4
 
 	update0 := models.NewShardRootUpdate(shard0ID, makeTestHash(0x10))
 	update1 := models.NewShardRootUpdate(shard1ID, makeTestHash(0x20))
@@ -316,7 +311,7 @@ func (suite *ParentRoundManagerTestSuite) TestDuplicateShardUpdate() {
 	err = prm.Activate(ctx)
 	suite.Require().NoError(err)
 
-	shard0ID := makeShardID(0)
+	shard0ID := 1
 	shard0Root := makeTestHash(0xAA)
 
 	// Submit the same shard update twice with the same value
@@ -359,7 +354,7 @@ func (suite *ParentRoundManagerTestSuite) TestSameShardMultipleValues() {
 	err = prm.Activate(ctx)
 	suite.Require().NoError(err)
 
-	shard0ID := makeShardID(0)
+	shard0ID := 1
 	latestValue := makeTestHash(0xCC)
 
 	// Submit 3 different updates for the same shard
@@ -413,7 +408,7 @@ func (suite *ParentRoundManagerTestSuite) TestBlockRootMatchesSMTRoot() {
 	err = prm.Activate(ctx)
 	suite.Require().NoError(err)
 
-	shardID := makeShardID(0)
+	shardID := 1
 	update := models.NewShardRootUpdate(shardID, makeTestHash(0xAB))
 	err = prm.SubmitShardRoot(ctx, update)
 	suite.Require().NoError(err)

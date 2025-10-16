@@ -36,8 +36,7 @@ var conf = config.Config{
 
 // TestSmtPersistenceAndRestoration tests SMT persistence and restoration with consistent root hashes
 func TestSmtPersistenceAndRestoration(t *testing.T) {
-	storage, cleanup := testutil.SetupTestStorage(t, conf)
-	defer cleanup()
+	storage := testutil.SetupTestStorage(t, conf)
 
 	ctx := context.Background()
 
@@ -57,7 +56,7 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker())
 	require.NoError(t, err, "Should create RoundManager")
 
 	// Test persistence
@@ -76,7 +75,7 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 	freshHash := freshSmt.GetRootHashHex()
 
 	// Create RoundManager and call Start() to trigger restoration
-	restoredRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
+	restoredRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker())
 	require.NoError(t, err, "Should create RoundManager")
 
 	err = restoredRm.Start(ctx)
@@ -96,8 +95,7 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 
 // TestLargeSmtRestoration tests multi-chunk restoration with large dataset
 func TestLargeSmtRestoration(t *testing.T) {
-	storage, cleanup := testutil.SetupTestStorage(t, conf)
-	defer cleanup()
+	storage := testutil.SetupTestStorage(t, conf)
 
 	ctx := context.Background()
 	testLogger, err := logger.New("info", "text", "stdout", false)
@@ -108,7 +106,7 @@ func TestLargeSmtRestoration(t *testing.T) {
 			RoundDuration: time.Second,
 		},
 	}
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker())
 	require.NoError(t, err, "Should create RoundManager")
 
 	const testNodeCount = 2500 // Ensure multiple chunks (chunkSize = 1000 in round_manager.go)
@@ -137,7 +135,7 @@ func TestLargeSmtRestoration(t *testing.T) {
 	require.Equal(t, int64(testNodeCount), count, "Should have stored all nodes")
 
 	// Create new RoundManager and call Start() to restore from storage (uses multiple chunks)
-	newRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
+	newRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker())
 	require.NoError(t, err, "Should create new RoundManager")
 
 	err = newRm.Start(ctx)
@@ -152,8 +150,7 @@ func TestLargeSmtRestoration(t *testing.T) {
 
 // TestCompleteWorkflowWithRestart tests end-to-end workflow including service restart simulation
 func TestCompleteWorkflowWithRestart(t *testing.T) {
-	storage, cleanup := testutil.SetupTestStorage(t, conf)
-	defer cleanup()
+	storage := testutil.SetupTestStorage(t, conf)
 
 	ctx := context.Background()
 
@@ -173,7 +170,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker())
 	require.NoError(t, err, "Should create RoundManager")
 
 	rm.currentRound = &Round{
@@ -206,10 +203,13 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	block := models.NewBlock(
 		blockNumber,
 		"unicity",
+		0,
 		"1.0",
 		"mainnet",
 		rootHashBytes,
 		api.HexBytes{},
+		nil,
+		nil,
 	)
 
 	err = rm.FinalizeBlock(ctx, block)
@@ -221,7 +221,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	assert.Equal(t, int64(len(testCommitments)), count, "Should have persisted SMT nodes for all commitments")
 
 	// Simulate service restart with new round manager
-	newRm, err := NewRoundManager(ctx, &config.Config{Processing: config.ProcessingConfig{RoundDuration: time.Second}}, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
+	newRm, err := NewRoundManager(ctx, &config.Config{Processing: config.ProcessingConfig{RoundDuration: time.Second}}, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker())
 	require.NoError(t, err, "NewRoundManager should succeed after restart")
 
 	// Call Start() to trigger SMT restoration
@@ -235,7 +235,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 
 	// Verify inclusion proofs work after restart
 	for _, commitment := range testCommitments {
-		path, err := commitment.RequestID.GetPath()
+		path, err := commitment.RequestID.GetPath(0)
 		require.NoError(t, err, "Should be able to get path from request ID")
 
 		merkleTreePath := newRm.smt.GetPath(path)
@@ -247,8 +247,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 
 // TestSmtRestorationWithBlockVerification tests that SMT restoration verifies against existing blocks
 func TestSmtRestorationWithBlockVerification(t *testing.T) {
-	storage, cleanup := testutil.SetupTestStorage(t, conf)
-	defer cleanup()
+	storage := testutil.SetupTestStorage(t, conf)
 
 	ctx := context.Background()
 	testLogger, err := logger.New("info", "text", "stdout", false)
@@ -270,15 +269,17 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 
 	// Create a block with the expected root hash
 	block := &models.Block{
-		Index:               api.NewBigInt(big.NewInt(1)),
-		ChainID:             "test-chain",
-		Version:             "1.0.0",
-		ForkID:              "test-fork",
-		RootHash:            api.HexBytes(expectedRootHashBytes), // Use bytes, not hex string
-		PreviousBlockHash:   api.HexBytes("0000000000000000000000000000000000000000000000000000000000000000"),
-		NoDeletionProofHash: api.HexBytes(""),
-		CreatedAt:           api.NewTimestamp(time.Now()),
-		UnicityCertificate:  api.HexBytes("certificate_data"),
+		Index:                api.NewBigInt(big.NewInt(1)),
+		ChainID:              "test-chain",
+		ShardID:              0,
+		Version:              "1.0.0",
+		ForkID:               "test-fork",
+		RootHash:             api.HexBytes(expectedRootHashBytes), // Use bytes, not hex string
+		PreviousBlockHash:    api.HexBytes("0000000000000000000000000000000000000000000000000000000000000000"),
+		NoDeletionProofHash:  api.HexBytes(""),
+		CreatedAt:            api.NewTimestamp(time.Now()),
+		UnicityCertificate:   api.HexBytes("certificate_data"),
+		ParentMerkleTreePath: nil,
 	}
 
 	// Store the block
@@ -289,7 +290,7 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 	cfg := &config.Config{
 		Processing: config.ProcessingConfig{RoundDuration: time.Second},
 	}
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker())
 	require.NoError(t, err, "Should create RoundManager")
 
 	// Persist SMT nodes to storage
@@ -298,7 +299,7 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 
 	// Test 1: Successful verification (matching root hash)
 	t.Run("SuccessfulVerification", func(t *testing.T) {
-		successRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
+		successRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker())
 		require.NoError(t, err, "Should create RoundManager")
 
 		err = successRm.Start(ctx)
@@ -314,22 +315,24 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 	t.Run("FailedVerification", func(t *testing.T) {
 		// Create a block with a different root hash to simulate mismatch
 		wrongBlock := &models.Block{
-			Index:               api.NewBigInt(big.NewInt(2)),
-			ChainID:             "test-chain",
-			Version:             "1.0.0",
-			ForkID:              "test-fork",
-			RootHash:            api.HexBytes("wrong_root_hash_value"), // Intentionally wrong hash
-			PreviousBlockHash:   api.HexBytes("0000000000000000000000000000000000000000000000000000000000000001"),
-			NoDeletionProofHash: api.HexBytes(""),
-			CreatedAt:           api.NewTimestamp(time.Now()),
-			UnicityCertificate:  api.HexBytes("certificate_data"),
+			Index:                api.NewBigInt(big.NewInt(2)),
+			ChainID:              "test-chain",
+			ShardID:              0,
+			Version:              "1.0.0",
+			ForkID:               "test-fork",
+			RootHash:             api.HexBytes("wrong_root_hash_value"), // Intentionally wrong hash
+			PreviousBlockHash:    api.HexBytes("0000000000000000000000000000000000000000000000000000000000000001"),
+			NoDeletionProofHash:  api.HexBytes(""),
+			CreatedAt:            api.NewTimestamp(time.Now()),
+			UnicityCertificate:   api.HexBytes("certificate_data"),
+			ParentMerkleTreePath: nil,
 		}
 
 		// Store the wrong block (this will become the "latest" block)
 		err = storage.BlockStorage().Store(ctx, wrongBlock)
 		require.NoError(t, err, "Should store wrong test block")
 
-		failRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, state.NewSyncStateTracker())
+		failRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker())
 		require.NoError(t, err, "Should create RoundManager")
 
 		// This should fail because the restored SMT root hash doesn't match the latest block

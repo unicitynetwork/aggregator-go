@@ -33,8 +33,7 @@ var conf = config.Config{
 }
 
 func TestLeaderElection_LockContention(t *testing.T) {
-	storage, cleanup := testutil.SetupTestStorage(t, conf)
-	defer cleanup()
+	storage := testutil.SetupTestStorage(t, conf)
 
 	log, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
@@ -78,8 +77,7 @@ func TestLeaderElection_LockContention(t *testing.T) {
 }
 
 func TestLeaderElection_Failover(t *testing.T) {
-	storage, cleanup := testutil.SetupTestStorage(t, conf)
-	defer cleanup()
+	storage := testutil.SetupTestStorage(t, conf)
 
 	log, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)

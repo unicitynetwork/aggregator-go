@@ -27,6 +27,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
+	"github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	mongodbStorage "github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -120,7 +121,8 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	commitmentQueue := mongoStorage.CommitmentQueue()
 
 	// Initialize round manager
-	roundManager, err := round.NewRoundManager(ctx, cfg, log, commitmentQueue, mongoStorage, state.NewSyncStateTracker())
+	rootAggregatorClient := sharding.NewRootAggregatorClientStub()
+	roundManager, err := round.NewRoundManager(ctx, cfg, log, commitmentQueue, mongoStorage, rootAggregatorClient, state.NewSyncStateTracker())
 	require.NoError(t, err)
 
 	// Start the round manager (restores SMT)
@@ -259,7 +261,7 @@ func validateInclusionProof(t *testing.T, proof *api.InclusionProof, requestID a
 		assert.NotNil(t, proof.MerkleTreePath.Steps, "Merkle path should have steps")
 
 		// Verify Merkle tree path with request ID
-		requestIDBigInt, err := requestID.GetPath()
+		requestIDBigInt, err := requestID.GetPath(0)
 		require.NoError(t, err, "Should be able to get path from requestID")
 
 		verificationResult, err := proof.MerkleTreePath.Verify(requestIDBigInt)

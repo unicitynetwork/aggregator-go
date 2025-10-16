@@ -19,7 +19,7 @@ import (
 )
 
 func TestBlockSync(t *testing.T) {
-	storage, cleanup := testutil.SetupTestStorage(t, config.Config{
+	storage := testutil.SetupTestStorage(t, config.Config{
 		Database: config.DatabaseConfig{
 			Database:               "test_block_sync",
 			ConnectTimeout:         30 * time.Second,
@@ -30,7 +30,6 @@ func TestBlockSync(t *testing.T) {
 			MaxConnIdleTime:        5 * time.Minute,
 		},
 	})
-	defer cleanup()
 
 	ctx := context.Background()
 	testLogger, err := logger.New("info", "text", "stdout", false)
@@ -40,7 +39,7 @@ func TestBlockSync(t *testing.T) {
 	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
 	threadSafeSMT := smt.NewThreadSafeSMT(smtInstance)
 	stateTracker := state.NewSyncStateTracker()
-	syncer := newBlockSyncer(testLogger, storage, threadSafeSMT, stateTracker)
+	syncer := newBlockSyncer(testLogger, storage, threadSafeSMT, 0, stateTracker)
 
 	// simulate leader creating a block
 	rootHash := createBlock(ctx, t, storage)
@@ -66,7 +65,7 @@ func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage) ap
 	leaves := make([]*smt.Leaf, len(testCommitments))
 	records := make([]*models.AggregatorRecord, len(testCommitments))
 	for i, c := range testCommitments {
-		path, err := c.RequestID.GetPath()
+		path, err := c.RequestID.GetPath(0)
 		require.NoError(t, err)
 
 		val, err := c.CreateLeafValue()
@@ -95,7 +94,7 @@ func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage) ap
 	rootHash := api.NewHexBytes(tmpSMT.GetRootHash())
 
 	// persist block
-	block := models.NewBlock(blockNumber, "unicity", "1.0", "mainnet", rootHash, nil)
+	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", rootHash, nil, nil, nil)
 	err = storage.BlockStorage().Store(ctx, block)
 	require.NoError(t, err)
 
