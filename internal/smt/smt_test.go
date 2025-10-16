@@ -730,7 +730,7 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		require.Len(t, path.Steps, 2, "Should have two steps")
 
 		step0 := path.Steps[0]
-		require.Equal(t, "0", step0.Path, "Input step path")
+		require.Equal(t, "1", step0.Path, "Input step path")
 		require.Nil(t, step0.Data, "Empty tree step should have no data")
 
 		step1 := path.Steps[1]

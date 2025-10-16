@@ -533,9 +533,13 @@ func (smt *SparseMerkleTree) generatePath(hasher *api.DataHasher, remainingPath 
 		// Create the corresponding leaf hash step
 		currentLeaf, _ := currentNode.(*LeafBranch)
 		path := currentLeaf.Path.String()
-		data := hex.EncodeToString(currentLeaf.Value)
+		var data *string
+		if currentLeaf.Value != nil {
+			tmp := hex.EncodeToString(currentLeaf.Value)
+			data = &tmp
+		}
 		return []api.MerkleTreeStep{
-			{Path: path, Data: &data},
+			{Path: path, Data: data},
 		}
 	}
 
@@ -544,65 +548,53 @@ func (smt *SparseMerkleTree) generatePath(hasher *api.DataHasher, remainingPath 
 		panic("Unknown target branch type")
 	}
 
+	var leftHash, rightHash *string
+	if currentBranch.Left != nil {
+		hash := currentBranch.Left.calculateHash(hasher)
+		if hash != nil {
+			tmp := hex.EncodeToString(hash.RawHash)
+			leftHash = &tmp
+		}
+	}
+	if currentBranch.Right != nil {
+		hash := currentBranch.Right.calculateHash(hasher)
+		if hash != nil {
+			tmp := hex.EncodeToString(hash.RawHash)
+			rightHash = &tmp
+		}
+	}
+
 	commonPath := calculateCommonPath(remainingPath, currentBranch.Path)
 	if commonPath.length < uint(currentBranch.Path.BitLen()-1) {
 		// Remaining path diverges or ends here
-		// Root node is a special case, because of its empty path
 		// Create the corresponding 2-step proof
-		// No nil children in non-root nodes
-		leftHash := hex.EncodeToString(currentBranch.Left.calculateHash(hasher).RawHash)
-		rightHash := hex.EncodeToString(currentBranch.Right.calculateHash(hasher).RawHash)
-		// This looks weird, but see the effect in api.MerkleTreePath.Verify()
 		return []api.MerkleTreeStep{
-			{Path: "0", Data: &rightHash},
-			{Path: currentBranch.Path.String(), Data: &leftHash},
+			{Path: "0", Data: leftHash},
+			{Path: currentBranch.Path.String(), Data: rightHash},
 		}
 	}
 
 	// Trim remaining path for descending into subtree
 	remainingPath = new(big.Int).Rsh(remainingPath, commonPath.length)
 
-	var target, sibling branch
+	var step api.MerkleTreeStep
+	var steps []api.MerkleTreeStep
 	if remainingPath.Bit(0) == 0 {
-		// Target in the left child
-		target = currentBranch.Left
-		sibling = currentBranch.Right
+		// Target in the left child, right child is sibling
+		step = api.MerkleTreeStep{Path: currentBranch.Path.String(), Data: rightHash}
+		if leftHash == nil {
+			steps = []api.MerkleTreeStep{{Path: "0", Data: nil}}
+		} else {
+			steps = smt.generatePath(hasher, remainingPath, currentBranch.Left)
+		}
 	} else {
-		// Target in the right child
-		target = currentBranch.Right
-		sibling = currentBranch.Left
-	}
-
-	if target == nil {
-		// Target branch empty
-		// This can happen only at the root node
-		// Create the 2-step exclusion proof
-		// There may be nil children here
-		var leftHash, rightHash *string
-		if currentBranch.Left != nil {
-			tmp := hex.EncodeToString(currentBranch.Left.calculateHash(hasher).RawHash)
-			leftHash = &tmp
+		step = api.MerkleTreeStep{Path: currentBranch.Path.String(), Data: leftHash}
+		// Target in the right child, left child is sibling
+		if rightHash == nil {
+			steps = []api.MerkleTreeStep{{Path: "1", Data: nil}}
+		} else {
+			steps = smt.generatePath(hasher, remainingPath, currentBranch.Right)
 		}
-		if currentBranch.Right != nil {
-			tmp := hex.EncodeToString(currentBranch.Right.calculateHash(hasher).RawHash)
-			rightHash = &tmp
-		}
-		// This looks weird, but see the effect in api.MerkleTreePath.Verify()
-		return []api.MerkleTreeStep{
-			{Path: "0", Data: rightHash},
-			{Path: "1", Data: leftHash},
-		}
-	}
-
-	steps := smt.generatePath(hasher, remainingPath, target)
-
-	// Add the step for the current branch
-	step := api.MerkleTreeStep{
-		Path: currentBranch.Path.String(),
-	}
-	if sibling != nil {
-		tmp := hex.EncodeToString(sibling.calculateHash(hasher).RawHash)
-		step.Data = &tmp
 	}
 	return append(steps, step)
 }
