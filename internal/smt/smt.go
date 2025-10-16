@@ -406,12 +406,12 @@ func (smt *SparseMerkleTree) findLeafInBranch(branch branch, targetPath *big.Int
 		commonPath := calculateCommonPath(targetPath, b.Path)
 
 		// Check if targetPath can be in this subtree
-		if commonPath.path.Cmp(targetPath) == 0 {
+		if commonPath.Cmp(targetPath) == 0 {
 			return nil, fmt.Errorf("leaf not found")
 		}
 
 		// Navigate using the same logic as buildTree
-		shifted := new(big.Int).Rsh(targetPath, commonPath.length)
+		shifted := new(big.Int).Rsh(targetPath, uint(commonPath.BitLen()-1))
 		isRight := shifted.Bit(0) == 1
 
 		// KEY FIX: Pass the shifted path to match tree construction
@@ -443,59 +443,59 @@ func (smt *SparseMerkleTree) buildTree(branch branch, remainingPath *big.Int, va
 	}
 
 	commonPath := calculateCommonPath(remainingPath, branch.getPath())
-	shifted := new(big.Int).Rsh(remainingPath, commonPath.length)
+	shifted := new(big.Int).Rsh(remainingPath, uint(commonPath.BitLen()-1))
 	isRight := shifted.Bit(0) == 1
 
-	if commonPath.path.Cmp(remainingPath) == 0 {
-		return nil, fmt.Errorf("cannot add leaf inside branch, commonPath: '%s', remainingPath: '%s'", commonPath.path, remainingPath)
+	if commonPath.Cmp(remainingPath) == 0 {
+		return nil, fmt.Errorf("cannot add leaf inside branch, commonPath: '%s', remainingPath: '%s'", commonPath, remainingPath)
 	}
 
 	// If a leaf must be split from the middle
 	if branch.isLeaf() {
 		leafBranch := branch.(*LeafBranch)
-		if commonPath.path.Cmp(leafBranch.Path) == 0 {
+		if commonPath.Cmp(leafBranch.Path) == 0 {
 			return nil, fmt.Errorf("cannot extend tree through leaf")
 		}
 
 		// TypeScript: branch.path >> commonPath.length
-		oldBranchPath := new(big.Int).Rsh(leafBranch.Path, commonPath.length)
+		oldBranchPath := new(big.Int).Rsh(leafBranch.Path, uint(commonPath.BitLen()-1))
 		oldBranch := newLeafBranch(oldBranchPath, leafBranch.Value)
 
 		// TypeScript: remainingPath >> commonPath.length
-		newBranchPath := new(big.Int).Rsh(remainingPath, commonPath.length)
+		newBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.BitLen()-1))
 		newBranch := newLeafBranch(newBranchPath, value)
 
 		if isRight {
-			return newNodeBranch(commonPath.path, oldBranch, newBranch), nil
+			return newNodeBranch(commonPath, oldBranch, newBranch), nil
 		} else {
-			return newNodeBranch(commonPath.path, newBranch, oldBranch), nil
+			return newNodeBranch(commonPath, newBranch, oldBranch), nil
 		}
 	}
 
 	// If node branch is split in the middle
 	nodeBranch := branch.(*NodeBranch)
-	if commonPath.path.Cmp(nodeBranch.Path) < 0 {
-		newBranchPath := new(big.Int).Rsh(remainingPath, commonPath.length)
+	if commonPath.Cmp(nodeBranch.Path) < 0 {
+		newBranchPath := new(big.Int).Rsh(remainingPath, uint(commonPath.BitLen()-1))
 		newBranch := newLeafBranch(newBranchPath, value)
 
-		oldBranchPath := new(big.Int).Rsh(nodeBranch.Path, commonPath.length)
+		oldBranchPath := new(big.Int).Rsh(nodeBranch.Path, uint(commonPath.BitLen()-1))
 		oldBranch := newNodeBranch(oldBranchPath, nodeBranch.Left, nodeBranch.Right)
 
 		if isRight {
-			return newNodeBranch(commonPath.path, oldBranch, newBranch), nil
+			return newNodeBranch(commonPath, oldBranch, newBranch), nil
 		} else {
-			return newNodeBranch(commonPath.path, newBranch, oldBranch), nil
+			return newNodeBranch(commonPath, newBranch, oldBranch), nil
 		}
 	}
 
 	if isRight {
-		newRight, err := smt.buildTree(nodeBranch.Right, new(big.Int).Rsh(remainingPath, commonPath.length), value)
+		newRight, err := smt.buildTree(nodeBranch.Right, new(big.Int).Rsh(remainingPath, uint(commonPath.BitLen()-1)), value)
 		if err != nil {
 			return nil, err
 		}
 		return newNodeBranch(nodeBranch.Path, nodeBranch.Left, newRight), nil
 	} else {
-		newLeft, err := smt.buildTree(nodeBranch.Left, new(big.Int).Rsh(remainingPath, commonPath.length), value)
+		newLeft, err := smt.buildTree(nodeBranch.Left, new(big.Int).Rsh(remainingPath, uint(commonPath.BitLen()-1)), value)
 		if err != nil {
 			return nil, err
 		}
@@ -564,18 +564,21 @@ func (smt *SparseMerkleTree) generatePath(hasher *api.DataHasher, remainingPath 
 		}
 	}
 
-	commonPath := calculateCommonPath(remainingPath, currentBranch.Path)
-	if commonPath.length < uint(currentBranch.Path.BitLen()-1) {
-		// Remaining path diverges or ends here
-		// Create the corresponding 2-step proof
-		return []api.MerkleTreeStep{
-			{Path: "0", Data: leftHash},
-			{Path: currentBranch.Path.String(), Data: rightHash},
+	commonPath := big.NewInt(1)
+	if currentBranch != smt.root {
+		commonPath = calculateCommonPath(remainingPath, currentBranch.Path)
+		if commonPath.BitLen() < currentBranch.Path.BitLen() {
+			// Remaining path diverges or ends here
+			// Create the corresponding 2-step proof
+			return []api.MerkleTreeStep{
+				{Path: "0", Data: leftHash},
+				{Path: currentBranch.Path.String(), Data: rightHash},
+			}
 		}
 	}
 
 	// Trim remaining path for descending into subtree
-	remainingPath = new(big.Int).Rsh(remainingPath, commonPath.length)
+	remainingPath = new(big.Int).Rsh(remainingPath, uint(commonPath.BitLen()-1))
 
 	var step api.MerkleTreeStep
 	var steps []api.MerkleTreeStep
@@ -600,10 +603,7 @@ func (smt *SparseMerkleTree) generatePath(hasher *api.DataHasher, remainingPath 
 }
 
 // calculateCommonPath computes the longest common prefix of path1 and path2
-func calculateCommonPath(path1, path2 *big.Int) struct {
-	length uint
-	path   *big.Int
-} {
+func calculateCommonPath(path1, path2 *big.Int) *big.Int {
 	if path1.Sign() != 1 || path2.Sign() != 1 {
 		panic("Non-positive path value")
 	}
@@ -619,10 +619,7 @@ func calculateCommonPath(path1, path2 *big.Int) struct {
 	res.And(res, path1)                                // res &= path
 	res.Or(res, mask)                                  // res |= mask
 
-	return struct {
-		length uint
-		path   *big.Int
-	}{uint(pos), res}
+	return res
 }
 
 // Leaf represents a leaf to be inserted (for batch operations)
@@ -637,4 +634,26 @@ func NewLeaf(path *big.Int, value []byte) *Leaf {
 		Path:  new(big.Int).Set(path),
 		Value: append([]byte(nil), value...),
 	}
+}
+
+// JoinPaths joins the hash proofs from a child and parent in sharded setting
+func JoinPaths(child, parent *api.MerkleTreePath) (*api.MerkleTreePath, error) {
+	if len(child.Root) < 4 {
+		return nil, fmt.Errorf("invalid child root hash format")
+	}
+	if len(parent.Steps) == 0 {
+		return nil, fmt.Errorf("empty parent hash steps")
+	}
+	if parent.Steps[0].Data == nil || *parent.Steps[0].Data != child.Root[4:] {
+		return nil, fmt.Errorf("can't join paths: child root hash does not match parent input hash")
+
+	}
+	steps := make([]api.MerkleTreeStep, len(child.Steps)+len(parent.Steps)-1)
+	copy(steps, child.Steps)
+	copy(steps[len(child.Steps):], parent.Steps[1:])
+
+	return &api.MerkleTreePath{
+		Root:  parent.Root,
+		Steps: steps,
+	}, nil
 }
