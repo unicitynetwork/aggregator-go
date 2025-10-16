@@ -6,11 +6,9 @@ import (
 	"strconv"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
-	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
-	"github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -33,7 +31,7 @@ type Service interface {
 }
 
 // NewService creates the appropriate service based on sharding mode
-func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, roundManager round.Manager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector, stateTracker *state.Tracker) (Service, error) {
+func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, roundManager round.Manager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) (Service, error) {
 	switch cfg.Sharding.Mode {
 	case config.ShardingModeStandalone:
 		rm, ok := roundManager.(*round.RoundManager)
@@ -47,13 +45,7 @@ func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, 
 			return nil, fmt.Errorf("invalid round manager type for parent mode")
 		}
 		return NewParentAggregatorService(cfg, logger, prm, storage, leaderSelector), nil
-
 	case config.ShardingModeChild:
-		rootAggregatorClient := sharding.NewRootAggregatorClient(cfg.Sharding.Child.ParentRpcAddr)
-		roundManager, err := round.NewRoundManager(ctx, cfg, logger, commitmentQueue, storage, rootAggregatorClient, stateTracker)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create round manager for child mode: %w", err)
-		}
 		return NewAggregatorService(cfg, logger, roundManager, commitmentQueue, storage, leaderSelector), nil
 	default:
 		return nil, fmt.Errorf("unsupported sharding mode: %s", cfg.Sharding.Mode)
@@ -66,7 +58,7 @@ type AggregatorService struct {
 	logger              *logger.Logger
 	commitmentQueue     interfaces.CommitmentQueue
 	storage             interfaces.Storage
-	roundManager        *round.RoundManager
+	roundManager        round.Manager
 	leaderSelector      LeaderSelector
 	commitmentValidator *signing.CommitmentValidator
 }
@@ -135,7 +127,7 @@ func modelToAPIHealthStatus(modelHealth *models.HealthStatus) *api.HealthStatus 
 }
 
 // NewAggregatorService creates a new aggregator service
-func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManager *round.RoundManager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) *AggregatorService {
+func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManager round.Manager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) *AggregatorService {
 	return &AggregatorService{
 		config:              cfg,
 		logger:              logger,

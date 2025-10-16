@@ -135,7 +135,7 @@ func main() {
 	}
 
 	// Create service with round manager and leader selector
-	aggregatorService, err := service.NewService(ctx, cfg, log, roundManager, commitmentQueue, storageInstance, leaderSelector, stateTracker)
+	aggregatorService, err := service.NewService(ctx, cfg, log, roundManager, commitmentQueue, storageInstance, leaderSelector)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to create service", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
