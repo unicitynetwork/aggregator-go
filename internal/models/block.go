@@ -104,6 +104,7 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse parentMerkleTreePath: %w", err)
 		}
+		parentMerkleTreePath = &api.MerkleTreePath{}
 		if err := json.Unmarshal(hexBytes, parentMerkleTreePath); err != nil {
 			return nil, fmt.Errorf("failed to parse parentMerkleTreePath: %w", err)
 		}
