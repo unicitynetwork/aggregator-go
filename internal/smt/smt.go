@@ -50,7 +50,7 @@ func NewSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int) *SparseMerk
 }
 
 // NewChildSparseMerkleTree creates a new sparse Merkle tree for a child aggregator in sharded setup
-func NewChildSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int, shardID int64) *SparseMerkleTree {
+func NewChildSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int, shardID api.ShardID) *SparseMerkleTree {
 	if keyLength <= 0 {
 		panic("SMT key length must be positive")
 	}
