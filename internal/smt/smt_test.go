@@ -1272,34 +1272,25 @@ func TestSMTOrderDependencyBatch(t *testing.T) {
 	assert.Equal(t, hash1, hash2, "SMT additions should be order-independent")
 }
 
-// TestSMTAddingNodeUnderLeaf - Test that the SMT does not allow adding child nodes under existing leaves
-// TODO: this is now a test that the tree rejects insertions with wrong key length
-func TestSMTAddingNodeUnderLeaf(t *testing.T) {
-	smt1 := NewSparseMerkleTree(api.SHA256, 1)
-	require.NoError(t, smt1.AddLeaf(big.NewInt(2), []byte("leaf_1")))
-	require.Error(t, smt1.AddLeaf(big.NewInt(4), []byte("child_under_leaf_1")), "SMT should not allow adding child nodes under leaves")
+// TestSMTKeyLength - Test that the SMT does not allow adding leaves with wrong key lengths
+func TestSMTKeyLength(t *testing.T) {
+	smt := NewSparseMerkleTree(api.SHA256, 3)
 
-	smt2 := NewSparseMerkleTree(api.SHA256, 1)
-	leaves2 := []*Leaf{
-		{Path: big.NewInt(2), Value: []byte("leaf_1")},
-		{Path: big.NewInt(4), Value: []byte("child_under_leaf_1")},
+	require.Error(t, smt.AddLeaf(big.NewInt(0b100), []byte("leaf_1")), "SMT should not allow adding leaves with too short keys")
+
+	leaves1 := []*Leaf{
+		{Path: big.NewInt(0b1000), Value: []byte("leaf_1")}, // OK
+		{Path: big.NewInt(0b111), Value: []byte("leaf_2")},  // too short key
 	}
-	require.Error(t, smt2.AddLeaves(leaves2), "SMT should not allow adding child nodes under leaves, even in a batch")
-}
+	require.Error(t, smt.AddLeaves(leaves1), "SMT should not allow adding leaves with too short keys, even in a batch")
 
-// TestSMTAddingLeafAboveNode - Test that the SMT does not allow adding leaves above existing nodes
-// TODO: this is now a test that the tree rejects insertions with wrong key length
-func TestSMTAddingLeafAboveNode(t *testing.T) {
-	smt1 := NewSparseMerkleTree(api.SHA256, 2)
-	require.NoError(t, smt1.AddLeaf(big.NewInt(4), []byte("leaf_1")))
-	require.Error(t, smt1.AddLeaf(big.NewInt(2), []byte("node_above_leaf_1")), "SMT should not allow adding leaves above existing nodes")
+	require.Error(t, smt.AddLeaf(big.NewInt(0b10000), []byte("leaf_1")), "SMT should not allow adding leaves with too long keys")
 
-	smt2 := NewSparseMerkleTree(api.SHA256, 2)
 	leaves2 := []*Leaf{
-		{Path: big.NewInt(4), Value: []byte("leaf_1")},
-		{Path: big.NewInt(2), Value: []byte("node_above_leaf_1")},
+		{Path: big.NewInt(0b1000), Value: []byte("leaf_1")},  // OK
+		{Path: big.NewInt(0b11111), Value: []byte("leaf_2")}, // too long key
 	}
-	require.Error(t, smt2.AddLeaves(leaves2), "SMT should not allow adding leaves above existing nodes, even in a batch")
+	require.Error(t, smt.AddLeaves(leaves2), "SMT should not allow adding leaves with too long keys, even in a batch")
 }
 
 func TestJoinPaths(t *testing.T) {
