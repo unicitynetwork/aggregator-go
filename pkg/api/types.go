@@ -7,9 +7,6 @@ import (
 	"fmt"
 	"strconv"
 	"time"
-
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/bsontype"
 )
 
 // Basic types for API
@@ -89,33 +86,6 @@ func (t *Timestamp) UnmarshalJSON(data []byte) error {
 	millis, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid timestamp: %w", err)
-	}
-
-	t.Time = time.UnixMilli(millis)
-	return nil
-}
-
-// MarshalBSONValue implements bson.ValueMarshaler
-func (t *Timestamp) MarshalBSONValue() (bsontype.Type, []byte, error) {
-	if t == nil {
-		return bson.TypeNull, nil, nil
-	}
-	// Use Unix timestamp in milliseconds as int64 for BSON
-	millis := t.Time.UnixMilli()
-	return bson.MarshalValue(millis)
-}
-
-// UnmarshalBSONValue implements bson.ValueUnmarshaler
-func (t *Timestamp) UnmarshalBSONValue(bsonType bsontype.Type, data []byte) error {
-	if bsonType == bson.TypeNull {
-		t.Time = time.Time{}
-		return nil
-	}
-
-	var millis int64
-	err := bson.UnmarshalValue(bsonType, data, &millis)
-	if err != nil {
-		return err
 	}
 
 	t.Time = time.UnixMilli(millis)

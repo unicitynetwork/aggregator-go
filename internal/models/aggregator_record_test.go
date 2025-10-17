@@ -2,6 +2,7 @@ package models
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -21,8 +22,8 @@ func TestBackwardCompatibility(t *testing.T) {
 			// AggregateRequestCount is intentionally not set (will be 0)
 			BlockNumber: "100",
 			LeafIndex:   "5",
-			CreatedAt:   "1700000000000",
-			FinalizedAt: "1700000001000",
+			CreatedAt:   time.UnixMilli(1700000000000),
+			FinalizedAt: time.UnixMilli(1700000001000),
 		}
 
 		record, err := bsonRecord.FromBSON()
@@ -47,8 +48,8 @@ func TestBackwardCompatibility(t *testing.T) {
 			AggregateRequestCount: 500,
 			BlockNumber:           "100",
 			LeafIndex:             "5",
-			CreatedAt:             "1700000000000",
-			FinalizedAt:           "1700000001000",
+			CreatedAt:             time.UnixMilli(1700000000000),
+			FinalizedAt:           time.UnixMilli(1700000001000),
 		}
 
 		record, err := bsonRecord.FromBSON()
