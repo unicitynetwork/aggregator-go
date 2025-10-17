@@ -486,7 +486,8 @@ func TestSMTGetPath(t *testing.T) {
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Test getting path for an existing leaf
-		merklePath := smt.GetPath(path)
+		merklePath, err := smt.GetPath(path)
+		require.NoError(t, err)
 		require.NotNil(t, merklePath, "GetPath should return a path")
 		require.Equal(t, smt.GetRootHashHex(), merklePath.Root, "Root hash should match expected value")
 		require.NotNil(t, merklePath.Steps, "Steps should not be nil")
@@ -512,7 +513,8 @@ func TestSMTGetPath(t *testing.T) {
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Test getting path for an existing leaf
-		path := smt.GetPath(big.NewInt(0b10))
+		path, err := smt.GetPath(big.NewInt(0b10))
+		require.NoError(t, err)
 		require.NotNil(t, path, "GetPath should return a path")
 		require.NotEmpty(t, path.Root, "Root hash should not be empty")
 		require.NotNil(t, path.Steps, "Steps should not be nil")
@@ -532,7 +534,8 @@ func TestSMTGetPath(t *testing.T) {
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Test getting path for a non-existent leaf
-		path := smt.GetPath(big.NewInt(0b11))
+		path, err := smt.GetPath(big.NewInt(0b11))
+		require.NoError(t, err)
 		require.NotNil(t, path, "GetPath should return a path even for non-existent leaves")
 		require.NotEmpty(t, path.Root, "Root hash should not be empty")
 		require.NotNil(t, path.Steps, "Steps should not be nil")
@@ -551,7 +554,8 @@ func TestSMTGetPath(t *testing.T) {
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Test path structure
-		path := smt.GetPath(big.NewInt(0b10))
+		path, err := smt.GetPath(big.NewInt(0b10))
+		require.NoError(t, err)
 		require.NotNil(t, path, "GetPath should return a path")
 
 		// Verify step structure
@@ -567,7 +571,8 @@ func TestSMTGetPath(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 1)
 
 		// Test getting path from empty tree
-		path := smt.GetPath(big.NewInt(0b10))
+		path, err := smt.GetPath(big.NewInt(0b10))
+		require.NoError(t, err)
 		require.NotNil(t, path, "GetPath should return a path even for empty tree")
 		require.NotEmpty(t, path.Root, "Root hash should not be empty even for empty tree")
 		require.NotNil(t, path.Steps, "Steps should not be nil")
@@ -588,7 +593,8 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Get path for the leaf
-		path := smt.GetPath(leafPath)
+		path, err := smt.GetPath(leafPath)
+		require.NoError(t, err)
 		require.NotNil(t, path, "GetPath should return a path")
 		require.Equal(t, smt.GetRootHashHex(), path.Root, "Path root should match tree root")
 
@@ -614,13 +620,15 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		require.NoError(t, err, "AddLeaf 2 failed")
 
 		// Get path for first leaf
-		merkPath1 := smt.GetPath(path1)
+		merkPath1, err := smt.GetPath(path1)
+		require.NoError(t, err)
 		require.NotNil(t, merkPath1, "GetPath should return a path")
 		require.Equal(t, smt.GetRootHashHex(), merkPath1.Root, "Path root should match tree root")
 		require.NotEmpty(t, merkPath1.Steps, "Should have steps")
 
 		// Get path for second leaf
-		merkPath2 := smt.GetPath(path2)
+		merkPath2, err := smt.GetPath(path2)
+		require.NoError(t, err)
 		require.NotNil(t, merkPath2, "GetPath should return a path")
 		require.Equal(t, smt.GetRootHashHex(), merkPath2.Root, "Path root should match tree root")
 		require.NotEmpty(t, merkPath2.Steps, "Should have steps")
@@ -654,8 +662,8 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 
 		// Try to get path for non-existent leaf
 		nonExistentPath := big.NewInt(0b111)
-		merkPath := smt.GetPath(nonExistentPath)
-
+		merkPath, err := smt.GetPath(nonExistentPath)
+		require.NoError(t, err)
 		require.NotNil(t, merkPath, "GetPath should return a path even for non-existent paths")
 		require.Equal(t, smt.GetRootHashHex(), merkPath.Root, "Path root should match tree root")
 		require.NotEmpty(t, merkPath.Steps, "Should have steps even for non-existent path")
@@ -693,7 +701,8 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		rootHash := smt.GetRootHashHex()
 
 		for i, path := range testPaths {
-			merkPath := smt.GetPath(path)
+			merkPath, err := smt.GetPath(path)
+			require.NoError(t, err)
 			require.NotNil(t, merkPath, "GetPath should return a path for leaf %d", i)
 			require.Equal(t, rootHash, merkPath.Root, "All paths should have same root")
 			require.NotEmpty(t, merkPath.Steps, "Path should have steps for leaf %d", i)
@@ -721,7 +730,8 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
 
 		// Get path from empty tree
-		path := smt.GetPath(big.NewInt(0b101))
+		path, err := smt.GetPath(big.NewInt(0b101))
+		require.NoError(t, err)
 		require.NotNil(t, path, "GetPath should return a path even for empty tree")
 		require.NotEmpty(t, path.Root, "Root should not be empty even for empty tree")
 		require.NotNil(t, path.Steps, "Steps should not be nil")
@@ -759,7 +769,8 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 
 		// Get paths and validate structure
 		for _, leaf := range testLeaves {
-			merkPath := smt.GetPath(leaf.path)
+			merkPath, err := smt.GetPath(leaf.path)
+			require.NoError(t, err)
 			require.NotNil(t, merkPath, "GetPath should return a path")
 
 			// Validate path structure for verification compatibility
@@ -796,10 +807,10 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Get paths multiple times and verify consistency
-		merkPath1a := smt.GetPath(path1)
-		merkPath1b := smt.GetPath(path1)
-		merkPath2a := smt.GetPath(path2)
-		merkPath2b := smt.GetPath(path2)
+		merkPath1a, _ := smt.GetPath(path1)
+		merkPath1b, _ := smt.GetPath(path1)
+		merkPath2a, _ := smt.GetPath(path2)
+		merkPath2b, _ := smt.GetPath(path2)
 
 		// Same path should return identical results
 		require.Equal(t, merkPath1a.Root, merkPath1b.Root, "Same path should have same root")
@@ -846,7 +857,8 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 				require.NoError(t, err, "AddLeaf failed for %s", tc.name)
 
 				// Get path
-				merkPath := smt.GetPath(path)
+				merkPath, err := smt.GetPath(path)
+				require.NoError(t, err)
 				require.NotNil(t, merkPath, "GetPath should return a path for %s", tc.name)
 
 				// Verify the path representation in steps
@@ -1303,8 +1315,8 @@ func TestJoinPaths(t *testing.T) {
 		parent.AddLeaf(big.NewInt(0b10), left.GetRootHash()[2:])
 		parent.AddLeaf(big.NewInt(0b11), right.GetRootHash()[2:])
 
-		leftChild := left.GetPath(big.NewInt(0b100))
-		leftParent := parent.GetPath(big.NewInt(0b10))
+		leftChild, _ := left.GetPath(big.NewInt(0b100))
+		leftParent, _ := parent.GetPath(big.NewInt(0b10))
 		leftPath, err := JoinPaths(leftChild, leftParent)
 		assert.Nil(t, err)
 		assert.NotNil(t, leftPath)
@@ -1314,8 +1326,8 @@ func TestJoinPaths(t *testing.T) {
 		assert.True(t, leftRes.PathValid)
 		assert.True(t, leftRes.PathIncluded)
 
-		rightChild := right.GetPath(big.NewInt(0b111))
-		rightParent := parent.GetPath(big.NewInt(0b11))
+		rightChild, _ := right.GetPath(big.NewInt(0b111))
+		rightParent, _ := parent.GetPath(big.NewInt(0b11))
 		rightPath, err := JoinPaths(rightChild, rightParent)
 		assert.Nil(t, err)
 		assert.NotNil(t, rightPath)
@@ -1340,8 +1352,8 @@ func TestJoinPaths(t *testing.T) {
 		parent.AddLeaf(big.NewInt(0b100), left.GetRootHash()[2:])
 		parent.AddLeaf(big.NewInt(0b111), right.GetRootHash()[2:])
 
-		child1 := left.GetPath(big.NewInt(0b10000))
-		parent1 := parent.GetPath(big.NewInt(0b100))
+		child1, _ := left.GetPath(big.NewInt(0b10000))
+		parent1, _ := parent.GetPath(big.NewInt(0b100))
 		path1, err := JoinPaths(child1, parent1)
 		assert.Nil(t, err)
 		assert.NotNil(t, path1)
@@ -1351,8 +1363,8 @@ func TestJoinPaths(t *testing.T) {
 		assert.True(t, res1.PathValid)
 		assert.True(t, res1.PathIncluded)
 
-		child2 := left.GetPath(big.NewInt(0b11100))
-		parent2 := parent.GetPath(big.NewInt(0b100))
+		child2, _ := left.GetPath(big.NewInt(0b11100))
+		parent2, _ := parent.GetPath(big.NewInt(0b100))
 		path2, err := JoinPaths(child2, parent2)
 		assert.Nil(t, err)
 		assert.NotNil(t, path2)
@@ -1362,8 +1374,8 @@ func TestJoinPaths(t *testing.T) {
 		assert.True(t, res2.PathValid)
 		assert.True(t, res2.PathIncluded)
 
-		child3 := right.GetPath(big.NewInt(0b10011))
-		parent3 := parent.GetPath(big.NewInt(0b111))
+		child3, _ := right.GetPath(big.NewInt(0b10011))
+		parent3, _ := parent.GetPath(big.NewInt(0b111))
 		path3, err := JoinPaths(child3, parent3)
 		assert.Nil(t, err)
 		assert.NotNil(t, path3)
@@ -1373,8 +1385,8 @@ func TestJoinPaths(t *testing.T) {
 		assert.True(t, res3.PathValid)
 		assert.True(t, res3.PathIncluded)
 
-		child4 := right.GetPath(big.NewInt(0b11111))
-		parent4 := parent.GetPath(big.NewInt(0b111))
+		child4, _ := right.GetPath(big.NewInt(0b11111))
+		parent4, _ := parent.GetPath(big.NewInt(0b111))
 		path4, err := JoinPaths(child4, parent4)
 		assert.Nil(t, err)
 		assert.NotNil(t, path4)

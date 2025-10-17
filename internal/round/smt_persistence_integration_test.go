@@ -92,7 +92,8 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 
 	// Verify inclusion proofs work
 	for _, leaf := range testLeaves {
-		merkleTreePath := restoredRm.smt.GetPath(leaf.Path)
+		merkleTreePath, err := restoredRm.smt.GetPath(leaf.Path)
+		require.NoError(t, err)
 		require.NotNil(t, merkleTreePath, "Should be able to get Merkle path")
 		assert.NotEmpty(t, merkleTreePath.Root, "Merkle path should have root hash")
 	}
@@ -243,7 +244,8 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 		path, err := commitment.RequestID.GetPath()
 		require.NoError(t, err, "Should be able to get path from request ID")
 
-		merkleTreePath := newRm.smt.GetPath(path)
+		merkleTreePath, err := newRm.smt.GetPath(path)
+		require.NoError(t, err)
 		require.NotNil(t, merkleTreePath, "Should be able to get Merkle path")
 		assert.NotEmpty(t, merkleTreePath.Root, "Merkle path should have root hash")
 		assert.NotEmpty(t, merkleTreePath.Steps, "Merkle path should have steps")

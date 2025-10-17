@@ -13,6 +13,8 @@ import (
 var (
 	ErrDuplicateLeaf    = errors.New("smt: duplicate leaf")
 	ErrLeafModification = errors.New("smt: attempt to modify an existing leaf")
+	ErrKeyLength        = errors.New("smt: invalid key length")
+	ErrWrongShard       = errors.New("smt: key does not belong in this shard")
 )
 
 type (
@@ -321,10 +323,10 @@ func (n *NodeBranch) isLeaf() bool {
 // AddLeaf adds a single leaf to the tree
 func (smt *SparseMerkleTree) AddLeaf(path *big.Int, value []byte) error {
 	if path.BitLen()-1 != smt.keyLength {
-		return fmt.Errorf("invalid key length %d, should be %d", path.BitLen()-1, smt.keyLength)
+		return ErrKeyLength
 	}
 	if calculateCommonPath(path, smt.root.Path).BitLen() != smt.root.Path.BitLen() {
-		return fmt.Errorf("key %s does not belong in shard %s", path, smt.root.Path)
+		return ErrWrongShard
 	}
 
 	// Implement copy-on-write for snapshots only
@@ -529,15 +531,12 @@ func (smt *SparseMerkleTree) buildTree(branch branch, remainingPath *big.Int, va
 	}
 }
 
-func (smt *SparseMerkleTree) GetPath(path *big.Int) *api.MerkleTreePath {
-	// TODO: better error handling
+func (smt *SparseMerkleTree) GetPath(path *big.Int) (*api.MerkleTreePath, error) {
 	if path.BitLen()-1 != smt.keyLength {
-		fmt.Printf("SparseMerkleTree.GetPath(): invalid key length %d, should be %d", path.BitLen()-1, smt.keyLength)
-		return nil
+		return nil, ErrKeyLength
 	}
 	if calculateCommonPath(path, smt.root.Path).BitLen() != smt.root.Path.BitLen() {
-		fmt.Printf("SparseMerkleTree.GetPath(): key %s does not belong in shard %s", path, smt.root.Path)
-		return nil
+		return nil, ErrWrongShard
 	}
 
 	// Create a new hasher to ensure thread safety
@@ -549,7 +548,7 @@ func (smt *SparseMerkleTree) GetPath(path *big.Int) *api.MerkleTreePath {
 	return &api.MerkleTreePath{
 		Root:  rootHash.ToHex(),
 		Steps: steps,
-	}
+	}, nil
 }
 
 // generatePath recursively generates the Merkle tree path steps
