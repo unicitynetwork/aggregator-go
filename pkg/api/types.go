@@ -301,6 +301,7 @@ const (
 	ShardRootStatusInvalidShardID  = "INVALID_SHARD_ID"
 	ShardRootStatusInvalidRootHash = "INVALID_ROOT_HASH"
 	ShardRootStatusInternalError   = "INTERNAL_ERROR"
+	ShardRootStatusNotLeader       = "NOT_LEADER"
 )
 
 // SubmitShardRootRequest represents the submit_shard_root JSON-RPC request

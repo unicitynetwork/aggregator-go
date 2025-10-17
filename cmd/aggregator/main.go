@@ -123,7 +123,14 @@ func main() {
 		leaderSelector = ha.NewLeaderElection(log, cfg.HA, storageInstance.LeadershipStorage())
 		leaderSelector.Start(ctx)
 
-		haManager = ha.NewHAManager(log, roundManager, leaderSelector, storageInstance, roundManager.GetSMT(), cfg.Sharding.Child.ShardID, stateTracker, cfg.Processing.RoundDuration)
+		// Disable block syncing for parent aggregator mode
+		// Parent mode uses state-based SMT (current shard roots) rather than history-based (commitment leaves)
+		disableBlockSync := cfg.Sharding.Mode == config.ShardingModeParent
+		if disableBlockSync {
+			log.WithComponent("main").Info("Block syncing disabled for parent aggregator mode - SMT will be reconstructed on leadership transition")
+		}
+
+		haManager = ha.NewHAManager(log, roundManager, leaderSelector, storageInstance, roundManager.GetSMT(), cfg.Sharding.Child.ShardID, stateTracker, cfg.Processing.RoundDuration, disableBlockSync)
 		haManager.Start(ctx)
 	} else {
 		log.WithComponent("main").Info("High availability mode is disabled, running as standalone leader")

@@ -22,6 +22,20 @@ type ParentAggregatorService struct {
 	leaderSelector     LeaderSelector
 }
 
+func (pas *ParentAggregatorService) isLeader(ctx context.Context) (bool, error) {
+	if pas.leaderSelector == nil {
+		return true, nil
+	}
+
+	isLeader, err := pas.leaderSelector.IsLeader(ctx)
+	if err != nil {
+		pas.logger.WithContext(ctx).Error("Failed to determine leadership status", "error", err.Error())
+		return false, err
+	}
+
+	return isLeader, nil
+}
+
 // NewParentAggregatorService creates a new parent aggregator service
 func NewParentAggregatorService(cfg *config.Config, logger *logger.Logger, parentRoundManager *round.ParentRoundManager, storage interfaces.Storage, leaderSelector LeaderSelector) *ParentAggregatorService {
 	return &ParentAggregatorService{
@@ -60,6 +74,21 @@ func (pas *ParentAggregatorService) Stop(ctx context.Context) error {
 
 // SubmitShardRoot handles shard root submission from child aggregators
 func (pas *ParentAggregatorService) SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) (*api.SubmitShardRootResponse, error) {
+	isLeader, err := pas.isLeader(ctx)
+	if err != nil {
+		return &api.SubmitShardRootResponse{
+			Status: api.ShardRootStatusInternalError,
+		}, nil
+	}
+
+	if !isLeader {
+		pas.logger.WithContext(ctx).Warn("Rejecting shard root submission because node is not leader",
+			"shardId", req.ShardID)
+		return &api.SubmitShardRootResponse{
+			Status: api.ShardRootStatusNotLeader,
+		}, nil
+	}
+
 	if err := pas.validateShardID(req.ShardID); err != nil {
 		pas.logger.WithContext(ctx).Warn("Invalid shard ID", "shardId", req.ShardID, "error", err.Error())
 		return &api.SubmitShardRootResponse{
@@ -69,7 +98,7 @@ func (pas *ParentAggregatorService) SubmitShardRoot(ctx context.Context, req *ap
 
 	update := models.NewShardRootUpdate(req.ShardID, req.RootHash)
 
-	err := pas.parentRoundManager.SubmitShardRoot(ctx, update)
+	err = pas.parentRoundManager.SubmitShardRoot(ctx, update)
 	if err != nil {
 		pas.logger.WithContext(ctx).Error("Failed to submit shard root to round manager", "error", err.Error())
 		return &api.SubmitShardRootResponse{
@@ -88,6 +117,16 @@ func (pas *ParentAggregatorService) SubmitShardRoot(ctx context.Context, req *ap
 
 // GetShardProof handles shard proof requests
 func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.GetShardProofResponse, error) {
+	if pas.leaderSelector != nil {
+		isLeader, err := pas.isLeader(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine leadership status: %w", err)
+		}
+		if !isLeader {
+			pas.logger.WithContext(ctx).Debug("Serving shard proof while node is follower")
+		}
+	}
+
 	if err := pas.validateShardID(req.ShardID); err != nil {
 		pas.logger.WithContext(ctx).Warn("Invalid shard ID", "shardId", req.ShardID, "error", err.Error())
 		return nil, fmt.Errorf("invalid shard ID: %w", err)
@@ -128,21 +167,27 @@ func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.
 
 func (pas *ParentAggregatorService) validateShardID(shardID int) error {
 	if shardID == 0 {
-		return fmt.Errorf("shard it cannot be zero")
+		return fmt.Errorf("shard ID cannot be zero")
 	}
-	//
-	//if shardID[0] != 0x01 {
-	//	return fmt.Errorf("shard ID must have 0x01 prefix, got: %s", shardID.String())
-	//}
-	//
-	//shardValueBytes := shardID[1:]
-	shardValue := new(big.Int).SetInt64(int64(shardID))
 
-	maxShardID := int64((1 << pas.config.Sharding.ShardIDLength) - 1)
-	maxShardIDBig := big.NewInt(maxShardID)
-	if shardValue.Cmp(maxShardIDBig) > 0 {
-		return fmt.Errorf("shard ID value %s exceeds maximum %d for %d-bit shard IDs",
-			shardValue.String(), maxShardID, pas.config.Sharding.ShardIDLength)
+	// ShardID encoding: MSB=1 (prefix bit) + ShardIDLength bits for actual shard identifier
+	// For ShardIDLength=1: valid range is [2,3] (0b10, 0b11)
+	// For ShardIDLength=2: valid range is [4,7] (0b100-0b111)
+	// The prefix bit ensures leading zeros are preserved in the path calculation
+
+	minShardID := int64(1 << pas.config.Sharding.ShardIDLength)
+	maxShardID := int64((1 << (pas.config.Sharding.ShardIDLength + 1)) - 1)
+
+	shardValue := int64(shardID)
+
+	if shardValue < minShardID {
+		return fmt.Errorf("shard ID %d is below minimum %d for %d-bit shard IDs (MSB prefix bit not set)",
+			shardValue, minShardID, pas.config.Sharding.ShardIDLength)
+	}
+
+	if shardValue > maxShardID {
+		return fmt.Errorf("shard ID %d exceeds maximum %d for %d-bit shard IDs",
+			shardValue, maxShardID, pas.config.Sharding.ShardIDLength)
 	}
 
 	return nil

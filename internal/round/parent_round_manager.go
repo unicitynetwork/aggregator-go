@@ -22,7 +22,7 @@ type ParentRound struct {
 	Number       *api.BigInt
 	StartTime    time.Time
 	State        RoundState
-	ShardUpdates map[int]*models.ShardRootUpdate // Latest update per shard path (key is hex string)
+	ShardUpdates map[int]*models.ShardRootUpdate // Latest update per shard path (key is shard ID)
 	Block        *models.Block
 
 	// SMT snapshot for this round - allows accumulating shard changes before committing
@@ -101,15 +101,11 @@ func NewParentRoundManager(ctx context.Context, cfg *config.Config, logger *logg
 	return prm, nil
 }
 
-// Start performs initialization and SMT restoration (called once at startup)
+// Start performs initialization (called once at startup)
+// Note: SMT reconstruction is done in Activate() when the node becomes leader
 func (prm *ParentRoundManager) Start(ctx context.Context) error {
 	prm.logger.WithContext(ctx).Info("Starting Parent Round Manager",
 		"roundDuration", prm.roundDuration.String())
-
-	// Reconstruct parent SMT from latest block record if available
-	if err := prm.reconstructParentSMT(ctx); err != nil {
-		return fmt.Errorf("failed to reconstruct parent SMT: %w", err)
-	}
 
 	prm.logger.WithContext(ctx).Info("Parent Round Manager started successfully")
 	return nil
@@ -343,6 +339,13 @@ func (prm *ParentRoundManager) GetSMT() *smt.ThreadSafeSMT {
 // Activate starts active round processing (called when node becomes leader in HA mode)
 func (prm *ParentRoundManager) Activate(ctx context.Context) error {
 	prm.logger.WithContext(ctx).Info("Activating parent round manager")
+
+	// Reconstruct parent SMT from current shard states in storage
+	// This ensures the follower-turned-leader has the latest state
+	prm.logger.WithContext(ctx).Info("Reconstructing parent SMT from storage on leadership transition")
+	if err := prm.reconstructParentSMT(ctx); err != nil {
+		return fmt.Errorf("failed to reconstruct parent SMT on activation: %w", err)
+	}
 
 	// Start BFT client
 	if err := prm.bftClient.Start(ctx); err != nil {

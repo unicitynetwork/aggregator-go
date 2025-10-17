@@ -28,6 +28,18 @@ type ParentServiceTestSuite struct {
 	prm     *round.ParentRoundManager
 }
 
+type staticLeaderSelector struct {
+	leader bool
+	err    error
+}
+
+func (s *staticLeaderSelector) IsLeader(ctx context.Context) (bool, error) {
+	if s.err != nil {
+		return false, s.err
+	}
+	return s.leader, nil
+}
+
 // SetupSuite runs once before all tests
 func (suite *ParentServiceTestSuite) SetupSuite() {
 	var err error
@@ -37,7 +49,7 @@ func (suite *ParentServiceTestSuite) SetupSuite() {
 	suite.cfg = &config.Config{
 		Sharding: config.ShardingConfig{
 			Mode:          config.ShardingModeParent,
-			ShardIDLength: 4, // 4 bits = 16 possible shards
+			ShardIDLength: 2, // 2 bits = 4 possible shards [4,5,6,7]
 		},
 		Database: config.DatabaseConfig{
 			Database:       "test_parent_service",
@@ -126,24 +138,41 @@ func (suite *ParentServiceTestSuite) waitForShardToExist(ctx context.Context, sh
 	}
 }
 
-// Test 1: SubmitShardRoot - Valid Submission
+// SubmitShardRoot - Valid Submission
 func (suite *ParentServiceTestSuite) TestSubmitShardRoot_ValidSubmission() {
 	ctx := context.Background()
 
 	request := &api.SubmitShardRootRequest{
-		ShardID:  1,
+		ShardID:  4, // 0b100 - valid for 2-bit sharding
 		RootHash: makeTestHash(0xAA),
 	}
 
 	response, err := suite.service.SubmitShardRoot(ctx, request)
 	suite.Require().NoError(err, "Valid submission should succeed")
 	suite.Require().NotNil(response, "Response should not be nil")
-	suite.Assert().Equal("SUCCESS", response.Status, "Response should indicate success")
+	suite.Assert().Equal(api.ShardRootStatusSuccess, response.Status, "Response should indicate success")
 
 	suite.T().Log("✓ Valid shard root submission accepted")
 }
 
-// Test 2: SubmitShardRoot - Invalid ShardID (empty)
+func (suite *ParentServiceTestSuite) TestSubmitShardRoot_NotLeader() {
+	ctx := context.Background()
+
+	notLeaderSelector := &staticLeaderSelector{leader: false}
+	suite.service = NewParentAggregatorService(suite.cfg, suite.logger, suite.prm, suite.storage, notLeaderSelector)
+
+	request := &api.SubmitShardRootRequest{
+		ShardID:  4,
+		RootHash: makeTestHash(0xAA),
+	}
+
+	response, err := suite.service.SubmitShardRoot(ctx, request)
+	suite.Require().NoError(err, "Follower rejection should not return Go error")
+	suite.Require().NotNil(response, "Response should not be nil")
+	suite.Assert().Equal(api.ShardRootStatusNotLeader, response.Status, "Follower should reject shard submissions with NOT_LEADER")
+}
+
+// SubmitShardRoot - Invalid ShardID (empty)
 func (suite *ParentServiceTestSuite) TestSubmitShardRoot_EmptyShardID() {
 	ctx := context.Background()
 
@@ -160,7 +189,39 @@ func (suite *ParentServiceTestSuite) TestSubmitShardRoot_EmptyShardID() {
 	suite.T().Log("✓ Empty shard ID rejected correctly")
 }
 
-// Test 5: SubmitShardRoot - Verify Update is Queued
+// SubmitShardRoot - Invalid ShardID (out of range)
+func (suite *ParentServiceTestSuite) TestSubmitShardRoot_OutOfRange() {
+	ctx := context.Background()
+
+	// Test shard ID below minimum (MSB not set)
+	// For ShardIDLength=2, valid range is [4,7] (0b100-0b111)
+	// ShardID=1 (0b001) has no MSB prefix bit
+	requestLow := &api.SubmitShardRootRequest{
+		ShardID:  1, // Below minimum
+		RootHash: makeTestHash(0xAA),
+	}
+
+	responseLow, err := suite.service.SubmitShardRoot(ctx, requestLow)
+	suite.Require().NoError(err, "Should not return Go error")
+	suite.Require().NotNil(responseLow, "Response should not be nil")
+	suite.Assert().Equal(api.ShardRootStatusInvalidShardID, responseLow.Status, "Should return INVALID_SHARD_ID for below minimum")
+
+	// Test shard ID above maximum
+	// ShardID=8 (0b1000) exceeds the 2-bit range
+	requestHigh := &api.SubmitShardRootRequest{
+		ShardID:  8, // Above maximum
+		RootHash: makeTestHash(0xBB),
+	}
+
+	responseHigh, err := suite.service.SubmitShardRoot(ctx, requestHigh)
+	suite.Require().NoError(err, "Should not return Go error")
+	suite.Require().NotNil(responseHigh, "Response should not be nil")
+	suite.Assert().Equal(api.ShardRootStatusInvalidShardID, responseHigh.Status, "Should return INVALID_SHARD_ID for above maximum")
+
+	suite.T().Log("✓ Out of range shard IDs rejected correctly")
+}
+
+// SubmitShardRoot - Verify Update is Queued
 func (suite *ParentServiceTestSuite) TestSubmitShardRoot_UpdateQueued() {
 	ctx := context.Background()
 
@@ -186,11 +247,11 @@ func (suite *ParentServiceTestSuite) TestSubmitShardRoot_UpdateQueued() {
 	suite.T().Log("✓ Shard update was queued and processed correctly")
 }
 
-// Test 6: GetShardProof - Success (existing shard with real child SMT)
+// GetShardProof - Success (existing shard with real child SMT)
 func (suite *ParentServiceTestSuite) TestGetShardProof_Success() {
 	ctx := context.Background()
 
-	shard0ID := 1
+	shard0ID := 4 // 0b100 - valid for 2-bit sharding
 
 	// TODO(SMT): Child would extract root hash from their SMT and send to parent
 	childRootRaw := makeTestHash(0xAA)
@@ -230,12 +291,12 @@ func (suite *ParentServiceTestSuite) TestGetShardProof_Success() {
 	suite.T().Log("✓ GetShardProof returned valid and verifiable proof")
 }
 
-// Test 7: GetShardProof - Non-existent Shard (returns nil MerkleTreePath)
+// GetShardProof - Non-existent Shard (returns nil MerkleTreePath)
 func (suite *ParentServiceTestSuite) TestGetShardProof_NonExistentShard() {
 	ctx := context.Background()
 
 	// Submit one shard
-	shard0ID := 0b11
+	shard0ID := 0b100 // 4 - valid for 2-bit sharding
 	submitReq := &api.SubmitShardRootRequest{
 		ShardID:  shard0ID,
 		RootHash: makeTestHash(0xAA),
@@ -247,7 +308,7 @@ func (suite *ParentServiceTestSuite) TestGetShardProof_NonExistentShard() {
 	suite.waitForShardToExist(ctx, shard0ID)
 
 	// Request proof for a shard that was never submitted
-	shard5ID := 0b10
+	shard5ID := 0b101 // 5 - valid for 2-bit sharding
 	proofReq := &api.GetShardProofRequest{
 		ShardID: shard5ID,
 	}
@@ -260,12 +321,12 @@ func (suite *ParentServiceTestSuite) TestGetShardProof_NonExistentShard() {
 	suite.T().Log("✓ GetShardProof returns nil MerkleTreePath for non-existent shard")
 }
 
-// Test 8: GetShardProof - Empty Tree (no shards submitted yet)
+// GetShardProof - Empty Tree (no shards submitted yet)
 func (suite *ParentServiceTestSuite) TestGetShardProof_EmptyTree() {
 	ctx := context.Background()
 
 	// Request proof before any shards have been submitted
-	shard0ID := 1
+	shard0ID := 4 // 0b100 - valid for 2-bit sharding
 	proofReq := &api.GetShardProofRequest{
 		ShardID: shard0ID,
 	}
@@ -278,7 +339,7 @@ func (suite *ParentServiceTestSuite) TestGetShardProof_EmptyTree() {
 	suite.T().Log("✓ GetShardProof returns nil MerkleTreePath for empty tree")
 }
 
-// Test 11: GetShardProof - Multiple Shards (verify each has correct proof)
+// GetShardProof - Multiple Shards (verify each has correct proof)
 func (suite *ParentServiceTestSuite) TestGetShardProof_MultipleShards() {
 	ctx := context.Background()
 

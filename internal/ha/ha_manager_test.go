@@ -71,7 +71,8 @@ func TestHAManager(t *testing.T) {
 	callback := newMockActivatable()
 	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256))
 	stateTracker := state.NewSyncStateTracker()
-	ham := NewHAManager(testLogger, callback, mockLeader, storage, smtInstance, 0, stateTracker, cfg.Processing.RoundDuration)
+	disableBlockSync := false
+	ham := NewHAManager(testLogger, callback, mockLeader, storage, smtInstance, 0, stateTracker, cfg.Processing.RoundDuration, disableBlockSync)
 
 	// verify Activate/Deactivate has not been called initially
 	require.Equal(t, int32(0), callback.activateCalled.Load(), "Activate should not be called initially")

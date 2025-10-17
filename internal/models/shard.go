@@ -35,10 +35,6 @@ func (sru *ShardRootUpdate) Validate() error {
 		return fmt.Errorf("shard ID cannot be empty")
 	}
 
-	//if sru.ShardID[0] != 0x01 {
-	//	return fmt.Errorf("shard ID must have 0x01 prefix")
-	//}
-
 	if len(sru.RootHash) == 0 {
 		return fmt.Errorf("root hash cannot be empty")
 	}
