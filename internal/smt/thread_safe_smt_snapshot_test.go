@@ -13,13 +13,13 @@ import (
 func TestThreadSafeSMTSnapshot(t *testing.T) {
 	t.Run("BasicSnapshotOperations", func(t *testing.T) {
 		// Create ThreadSafeSMT instance
-		smtInstance := NewSparseMerkleTree(api.SHA256)
+		smtInstance := NewSparseMerkleTree(api.SHA256, 2)
 		threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 		// Add initial data to the original SMT using a snapshot
 		// (since the original SMT can't be modified directly)
 		initialSnapshot := threadSafeSMT.CreateSnapshot()
-		err := initialSnapshot.AddLeaf(big.NewInt(0b10), []byte{1, 2, 3})
+		err := initialSnapshot.AddLeaf(big.NewInt(0b100), []byte{1, 2, 3})
 		require.NoError(t, err, "Should be able to add leaf to initial snapshot")
 
 		err = initialSnapshot.AddLeaf(big.NewInt(0b101), []byte{4, 5, 6})
@@ -53,7 +53,7 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 
 	t.Run("BatchOperationsInSnapshot", func(t *testing.T) {
 		// Create ThreadSafeSMT instance
-		smtInstance := NewSparseMerkleTree(api.SHA256)
+		smtInstance := NewSparseMerkleTree(api.SHA256, 2)
 		threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 		// Create snapshot
@@ -61,7 +61,7 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 
 		// Prepare batch of leaves
 		leaves := []*Leaf{
-			NewLeaf(big.NewInt(0b10), []byte{1}),
+			NewLeaf(big.NewInt(0b100), []byte{1}),
 			NewLeaf(big.NewInt(0b101), []byte{2}),
 			NewLeaf(big.NewInt(0b111), []byte{3}),
 		}
@@ -85,12 +85,12 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 
 	t.Run("ConcurrentSnapshots", func(t *testing.T) {
 		// Create ThreadSafeSMT instance with initial data
-		smtInstance := NewSparseMerkleTree(api.SHA256)
+		smtInstance := NewSparseMerkleTree(api.SHA256, 2)
 		threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 		// Add initial data
 		initialSnapshot := threadSafeSMT.CreateSnapshot()
-		err := initialSnapshot.AddLeaf(big.NewInt(0b10), []byte{1})
+		err := initialSnapshot.AddLeaf(big.NewInt(0b100), []byte{1})
 		require.NoError(t, err)
 		initialSnapshot.Commit(threadSafeSMT)
 
@@ -123,7 +123,7 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 	})
 
 	t.Run("SnapshotStats", func(t *testing.T) {
-		smtInstance := NewSparseMerkleTree(api.SHA256)
+		smtInstance := NewSparseMerkleTree(api.SHA256, 1)
 		threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 		snapshot := threadSafeSMT.CreateSnapshot()
@@ -137,7 +137,7 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 	})
 
 	t.Run("SnapshotWriteOperations", func(t *testing.T) {
-		smtInstance := NewSparseMerkleTree(api.SHA256)
+		smtInstance := NewSparseMerkleTree(api.SHA256, 2)
 		threadSafeSMT := NewThreadSafeSMT(smtInstance)
 
 		// Add data via snapshot
@@ -167,7 +167,8 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 		assert.Equal(t, value, leaf.Value, "Retrieved leaf value should match")
 
 		// Test path generation on original SMT
-		merkleTreePath := threadSafeSMT.GetPath(path)
+		merkleTreePath, err := threadSafeSMT.GetPath(path)
+		require.NoError(t, err)
 		assert.NotNil(t, merkleTreePath, "Should be able to get Merkle tree path from original SMT")
 		assert.NotEmpty(t, merkleTreePath.Root, "Root should not be empty")
 		assert.NotEmpty(t, merkleTreePath.Steps, "Steps should not be empty")

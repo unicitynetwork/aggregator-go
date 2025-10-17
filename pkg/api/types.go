@@ -15,6 +15,7 @@ import (
 // Basic types for API
 type StateHash = ImprintHexString
 type TransactionHash = ImprintHexString
+type ShardID = int64
 
 // Authenticator represents the authentication data for a commitment
 type Authenticator struct {

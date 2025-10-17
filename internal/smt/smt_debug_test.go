@@ -35,7 +35,8 @@ func TestAddLeaves_DebugInvalidPath(t *testing.T) {
 		require.NoError(t, err, "Expected error due to invalid path")
 
 		// now validate the path of request
-		merkleTreePath := tree.GetPath(path)
+		merkleTreePath, err := tree.GetPath(path)
+		require.NoError(t, err)
 		require.NotNil(t, merkleTreePath, "Expected non-nil Merkle tree path for valid request ID")
 
 		res, err := merkleTreePath.Verify(path)
@@ -50,7 +51,7 @@ func TestAddLeaves_DebugInvalidPath(t *testing.T) {
 		return rh
 	}
 
-	_smt := NewSparseMerkleTree(api.SHA256)
+	_smt := NewSparseMerkleTree(api.SHA256, 16+256)
 	{ // mint commitment
 		commJson := map[string]interface{}{
 			"requestId":       "00007d535ade796772c5088b095e79a18e282437ee8d8238f5aa9d9c61694948ba9e",
@@ -84,7 +85,8 @@ func TestAddLeaves_DebugInvalidPath(t *testing.T) {
 		require.NoError(t, err, "Failed to create request ID")
 		path, err := req.GetPath(0)
 		require.NoError(t, err)
-		merkleTreePath := _smt.GetPath(path)
+		merkleTreePath, err := _smt.GetPath(path)
+		require.NoError(t, err)
 		require.NotNil(t, merkleTreePath, "Expected non-nil Merkle tree path for valid request ID")
 
 		res, err := merkleTreePath.Verify(path)

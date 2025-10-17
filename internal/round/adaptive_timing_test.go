@@ -217,9 +217,9 @@ func TestSMTUpdateTimeTracking(t *testing.T) {
 		commitments := make([]*models.Commitment, 100)
 		for j := 0; j < 100; j++ {
 			// Generate random IDs for testing
-			reqIDBytes := make([]byte, 34)
+			reqIDBytes := make([]byte, 32)
 			rand.Read(reqIDBytes)
-			txHashBytes := make([]byte, 34)
+			txHashBytes := make([]byte, 32)
 			rand.Read(txHashBytes)
 
 			commitments[j] = &models.Commitment{

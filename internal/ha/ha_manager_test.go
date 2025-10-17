@@ -69,7 +69,7 @@ func TestHAManager(t *testing.T) {
 	mockLeader := &mockLeaderSelector{}
 	mockLeader.isLeader.Store(false)
 	callback := newMockActivatable()
-	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256))
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
 	stateTracker := state.NewSyncStateTracker()
 	disableBlockSync := false
 	ham := NewHAManager(testLogger, callback, mockLeader, storage, smtInstance, 0, stateTracker, cfg.Processing.RoundDuration, disableBlockSync)
