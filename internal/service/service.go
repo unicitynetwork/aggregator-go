@@ -196,7 +196,10 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 	if err != nil {
 		return nil, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
 	}
-	merkleTreePath := as.roundManager.GetSMT().GetPath(path)
+	merkleTreePath, err := as.roundManager.GetSMT().GetPath(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get inclusion proof for request ID %s: %w", req.RequestID, err)
+	}
 
 	// Find the latest block that matches the current SMT root hash
 	rootHash, err := api.NewHexBytesFromString(merkleTreePath.Root)
