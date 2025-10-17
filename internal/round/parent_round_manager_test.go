@@ -379,7 +379,7 @@ func (suite *ParentRoundManagerTestSuite) TestSameShardMultipleValues() {
 	suite.Require().NotNil(parentRoot, "Parent root should be calculated")
 
 	// Create a reference SMT with only the latest value to verify
-	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
+	smtInstance := smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)
 	referenceSMT := smt.NewThreadSafeSMT(smtInstance)
 
 	// Add the latest value as a pre-hashed leaf (same way ParentRoundManager does it)

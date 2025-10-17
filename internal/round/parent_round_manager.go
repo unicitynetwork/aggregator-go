@@ -60,8 +60,8 @@ type ParentRoundManager struct {
 
 // NewParentRoundManager creates a new parent round manager
 func NewParentRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*ParentRoundManager, error) {
-	// Initialize parent SMT with empty tree - will be enhanced when SMT team adds mutable leaf support
-	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
+	// Initialize parent SMT in parent mode with support for mutable leaves
+	smtInstance := smt.NewParentSparseMerkleTree(api.SHA256, cfg.Sharding.ShardIDLength)
 	parentSMT := smt.NewThreadSafeSMT(smtInstance)
 
 	prm := &ParentRoundManager{

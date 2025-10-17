@@ -135,10 +135,13 @@ func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.
 	pas.logger.WithContext(ctx).Info("Shard proof requested", "shardId", req.ShardID)
 
 	shardPath := new(big.Int).SetInt64(int64(req.ShardID))
-	merkleTreePath := pas.parentRoundManager.GetSMT().GetPath(shardPath)
+	merkleTreePath, err := pas.parentRoundManager.GetSMT().GetPath(shardPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get merkle tree path: %w", err)
+	}
 
 	var proofPath *api.MerkleTreePath
-	if len(merkleTreePath.Steps) > 0 && merkleTreePath.Steps[0].Branch != nil {
+	if len(merkleTreePath.Steps) > 0 && merkleTreePath.Steps[0].Data != nil {
 		proofPath = merkleTreePath
 		pas.logger.WithContext(ctx).Info("Generated shard proof from current state",
 			"shardId", req.ShardID,
