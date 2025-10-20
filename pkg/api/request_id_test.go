@@ -4,7 +4,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math/big"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -601,50 +600,6 @@ func TestImprintHexString_BSONComprehensive(t *testing.T) {
 			}
 
 			t.Logf("✓ %s: %s -> BSON -> %s", tc.description, string(tc.value), string(unmarshaledDoc.Value))
-		})
-	}
-}
-
-func TestRequestID_GetPath(t *testing.T) {
-	testCases := []struct {
-		name      string
-		reqID     string
-		shardID   int
-		resultInt int
-	}{
-		{name: "no sharding 1", reqID: "00", shardID: 0, resultInt: 0b100000000}, // 0x0100 >> 0
-		{name: "no sharding 2", reqID: "01", shardID: 0, resultInt: 0b100000001}, // 0x0101 >> 0
-		{name: "no sharding 3", reqID: "FF", shardID: 0, resultInt: 0b111111111}, // 0x01FF >> 0
-
-		{name: "two shards 1 (rightmost bit is removed)", reqID: "00", shardID: 0b10, resultInt: 0b10000000}, // 0x0100 >> 1
-		{name: "two shards 2 (rightmost bit is removed)", reqID: "00", shardID: 0b11, resultInt: 0b10000000}, // 0x0100 >> 1
-		{name: "two shards 3 (rightmost bit is removed)", reqID: "01", shardID: 0b10, resultInt: 0b10000000}, // 0x0101 >> 1
-		{name: "two shards 4 (rightmost bit is removed)", reqID: "01", shardID: 0b11, resultInt: 0b10000000}, // 0x0101 >> 1
-		{name: "two shards 5 (rightmost bit is removed)", reqID: "FF", shardID: 0b10, resultInt: 0b11111111}, // 0x01FF >> 1
-		{name: "two shards 6 (rightmost bit is removed)", reqID: "FF", shardID: 0b11, resultInt: 0b11111111}, // 0x01FF >> 1
-
-		{name: "three shards 1 (2 rightmost bits removed)", reqID: "00", shardID: 0b100, resultInt: 0b1000000}, // 0x0100 >> 2
-		{name: "three shards 2 (2 rightmost bits removed)", reqID: "00", shardID: 0b101, resultInt: 0b1000000},
-		{name: "three shards 3 (2 rightmost bits removed)", reqID: "00", shardID: 0b110, resultInt: 0b1000000},
-		{name: "three shards 4 (2 rightmost bits removed)", reqID: "00", shardID: 0b111, resultInt: 0b1000000},
-		{name: "three shards 5 (2 rightmost bits removed)", reqID: "01", shardID: 0b100, resultInt: 0b1000000}, // 0x0101 >> 2
-		{name: "three shards 6 (2 rightmost bits removed)", reqID: "01", shardID: 0b101, resultInt: 0b1000000},
-		{name: "three shards 7 (2 rightmost bits removed)", reqID: "01", shardID: 0b110, resultInt: 0b1000000},
-		{name: "three shards 8 (2 rightmost bits removed)", reqID: "01", shardID: 0b111, resultInt: 0b1000000},
-		{name: "three shards 9 (2 rightmost bits removed)", reqID: "FF", shardID: 0b100, resultInt: 0b1111111}, // 0x01FF >> 2
-		{name: "three shards 10 (2 rightmost bits removed)", reqID: "FF", shardID: 0b101, resultInt: 0b1111111},
-		{name: "three shards 11 (2 rightmost bits removed)", reqID: "FF", shardID: 0b110, resultInt: 0b1111111},
-		{name: "three shards 12 (2 rightmost bits removed)", reqID: "FF", shardID: 0b111, resultInt: 0b1111111},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			requestID := ImprintHexString(tc.reqID)
-			path, err := requestID.GetPath(tc.shardID)
-			require.NoError(t, err)
-
-			expectedPath := big.NewInt(0).SetInt64(int64(tc.resultInt))
-			assert.Equal(t, expectedPath, path)
 		})
 	}
 }

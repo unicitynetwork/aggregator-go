@@ -14,7 +14,7 @@ import (
 type Block struct {
 	Index                *api.BigInt         `json:"index"`
 	ChainID              string              `json:"chainId"`
-	ShardID              int                 `json:"shardId"`
+	ShardID              api.ShardID         `json:"shardId"`
 	Version              string              `json:"version"`
 	ForkID               string              `json:"forkId"`
 	RootHash             api.HexBytes        `json:"rootHash"`
@@ -29,7 +29,7 @@ type Block struct {
 type BlockBSON struct {
 	Index               primitive.Decimal128 `bson:"index"`
 	ChainID             string               `bson:"chainId"`
-	ShardID             int                  `bson:"shardId"`
+	ShardID             api.ShardID          `bson:"shardId"`
 	Version             string               `bson:"version"`
 	ForkID              string               `bson:"forkId"`
 	RootHash            string               `bson:"rootHash"`

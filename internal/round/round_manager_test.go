@@ -13,6 +13,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	testsharding "github.com/unicitynetwork/aggregator-go/internal/sharding"
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -43,7 +44,7 @@ func TestParentShardIntegration_GoodCase(t *testing.T) {
 	rootAggregatorClient := testsharding.NewRootAggregatorClientStub()
 
 	// create round manager
-	rm, err := NewRoundManager(ctx, &cfg, testLogger, storage.CommitmentQueue(), storage, rootAggregatorClient, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(ctx, &cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), storage.CommitmentQueue(), storage, rootAggregatorClient, state.NewSyncStateTracker())
 	require.NoError(t, err)
 
 	// start round manager
@@ -95,7 +96,7 @@ func TestParentShardIntegration_RoundProcessingError(t *testing.T) {
 	rootAggregatorClient.SetSubmissionError(errors.New("some error"))
 
 	// create round manager
-	rm, err := NewRoundManager(ctx, &cfg, testLogger, storage.CommitmentQueue(), storage, rootAggregatorClient, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(ctx, &cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), storage.CommitmentQueue(), storage, rootAggregatorClient, state.NewSyncStateTracker())
 	require.NoError(t, err)
 
 	// start round manager

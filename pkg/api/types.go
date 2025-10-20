@@ -12,7 +12,7 @@ import (
 // Basic types for API
 type StateHash = ImprintHexString
 type TransactionHash = ImprintHexString
-type ShardID = int64
+type ShardID = int
 
 // Authenticator represents the authentication data for a commitment
 type Authenticator struct {
@@ -122,7 +122,7 @@ func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *BigInt)
 type Block struct {
 	Index                *BigInt         `json:"index"`
 	ChainID              string          `json:"chainId"`
-	ShardID              int             `json:"shardId"`
+	ShardID              ShardID         `json:"shardId"`
 	Version              string          `json:"version"`
 	ForkID               string          `json:"forkId"`
 	RootHash             HexBytes        `json:"rootHash"`

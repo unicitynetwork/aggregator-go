@@ -24,7 +24,7 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 	leaves := make([]*smt.Leaf, 0, len(commitments))
 	for _, commitment := range commitments {
 		// Generate leaf path from requestID
-		path, err := commitment.RequestID.GetPath(rm.config.Sharding.Child.ShardID)
+		path, err := commitment.RequestID.GetPath()
 		if err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
 				"requestID", commitment.RequestID.String(),
