@@ -14,6 +14,8 @@ import (
 	"github.com/unicitynetwork/bft-core/partition"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
+
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // Config represents the application configuration
@@ -154,7 +156,7 @@ type ShardingConfig struct {
 
 type ChildConfig struct {
 	ParentRpcAddr      string        `mapstructure:"parent_rpc_addr"`
-	ShardID            int           `mapstructure:"shard_id"`
+	ShardID            api.ShardID   `mapstructure:"shard_id"`
 	RoundDuration      time.Duration `mapstructure:"round_duration"`
 	ParentPollTimeout  time.Duration `mapstructure:"parent_poll_timeout"`
 	ParentPollInterval time.Duration `mapstructure:"parent_poll_interval"`
@@ -275,6 +277,13 @@ func Load() (*Config, error) {
 		Sharding: ShardingConfig{
 			Mode:          ShardingMode(getEnvOrDefault("SHARDING_MODE", "standalone")),
 			ShardIDLength: getEnvIntOrDefault("SHARD_ID_LENGTH", 4),
+			Child: ChildConfig{
+				ParentRpcAddr:      getEnvOrDefault("SHARDING_CHILD_PARENT_RPC_ADDR", "http://localhost:3009"),
+				ShardID:            getEnvIntOrDefault("SHARDING_CHILD_SHARD_ID", 0),
+				RoundDuration:      getEnvDurationOrDefault("SHARDING_CHILD_ROUND_DURATION", "1s"),
+				ParentPollTimeout:  getEnvDurationOrDefault("SHARDING_CHILD_PARENT_POLL_TIMEOUT", "5s"),
+				ParentPollInterval: getEnvDurationOrDefault("SHARDING_CHILD_PARENT_POLL_INTERVAL", "100ms"),
+			},
 		},
 	}
 	config.BFT = BFTConfig{
