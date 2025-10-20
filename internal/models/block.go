@@ -3,7 +3,6 @@ package models
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -36,7 +35,7 @@ type BlockBSON struct {
 	RootHash            string               `bson:"rootHash"`
 	PreviousBlockHash   string               `bson:"previousBlockHash"`
 	NoDeletionProofHash string               `bson:"noDeletionProofHash,omitempty"`
-	CreatedAt           string               `bson:"createdAt"`
+	CreatedAt           time.Time            `bson:"createdAt"`
 	UnicityCertificate  string               `bson:"unicityCertificate"`
 	MerkleTreePath      string               `bson:"merkleTreePath,omitempty"` // child mode only
 }
@@ -64,7 +63,7 @@ func (b *Block) ToBSON() (*BlockBSON, error) {
 		RootHash:            b.RootHash.String(),
 		PreviousBlockHash:   b.PreviousBlockHash.String(),
 		NoDeletionProofHash: b.NoDeletionProofHash.String(),
-		CreatedAt:           strconv.FormatInt(b.CreatedAt.UnixMilli(), 10),
+		CreatedAt:           b.CreatedAt.Time,
 		UnicityCertificate:  b.UnicityCertificate.String(),
 		MerkleTreePath:      merkleTreePath,
 	}, nil
@@ -76,12 +75,6 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse index: %w", err)
 	}
-
-	createdAtMillis, err := strconv.ParseInt(bb.CreatedAt, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse createdAt: %w", err)
-	}
-	createdAt := &api.Timestamp{Time: time.UnixMilli(createdAtMillis)}
 
 	rootHash, err := api.NewHexBytesFromString(bb.RootHash)
 	if err != nil {
@@ -124,7 +117,7 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 		RootHash:             rootHash,
 		PreviousBlockHash:    previousBlockHash,
 		NoDeletionProofHash:  noDeletionProofHash,
-		CreatedAt:            createdAt,
+		CreatedAt:            api.NewTimestamp(bb.CreatedAt),
 		UnicityCertificate:   unicityCertificate,
 		ParentMerkleTreePath: parentMerkleTreePath,
 	}, nil
@@ -143,21 +136,5 @@ func NewBlock(index *api.BigInt, chainID string, shardID int, version, forkID st
 		CreatedAt:            api.Now(),
 		UnicityCertificate:   uc,
 		ParentMerkleTreePath: parentMerkleTreePath,
-	}
-}
-
-// SmtNode represents a Sparse Merkle Tree node
-type SmtNode struct {
-	Key       api.HexBytes   `json:"key" bson:"key"`
-	Value     api.HexBytes   `json:"value" bson:"value"`
-	CreatedAt *api.Timestamp `json:"createdAt" bson:"createdAt"`
-}
-
-// NewSmtNode creates a new SMT node
-func NewSmtNode(key, value api.HexBytes) *SmtNode {
-	return &SmtNode{
-		Key:       key,
-		Value:     value,
-		CreatedAt: api.Now(),
 	}
 }
