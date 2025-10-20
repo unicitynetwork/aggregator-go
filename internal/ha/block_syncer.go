@@ -18,11 +18,11 @@ type blockSyncer struct {
 	logger       *logger.Logger
 	storage      interfaces.Storage
 	smt          *smt.ThreadSafeSMT
-	shardID      int
+	shardID      api.ShardID
 	stateTracker *state.Tracker
 }
 
-func newBlockSyncer(logger *logger.Logger, storage interfaces.Storage, smt *smt.ThreadSafeSMT, shardID int, stateTracker *state.Tracker) *blockSyncer {
+func newBlockSyncer(logger *logger.Logger, storage interfaces.Storage, smt *smt.ThreadSafeSMT, shardID api.ShardID, stateTracker *state.Tracker) *blockSyncer {
 	return &blockSyncer{
 		logger:       logger,
 		storage:      storage,
@@ -99,7 +99,7 @@ func (bs *blockSyncer) updateSMTForBlock(ctx context.Context, blockRecord *model
 		}
 		uniqueRequestIds[key] = struct{}{}
 
-		path, err := reqID.GetPath(bs.shardID)
+		path, err := reqID.GetPath()
 		if err != nil {
 			return fmt.Errorf("failed to get path: %w", err)
 		}

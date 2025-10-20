@@ -221,12 +221,12 @@ func TestMerkleTreePathVerify(t *testing.T) {
 
 		req1, err := api.NewImprintHexString(requestID1)
 		require.NoError(t, err)
-		path1, err := req1.GetPath(0)
+		path1, err := req1.GetPath()
 		require.NoError(t, err)
 
 		req2, err := api.NewImprintHexString(requestID2)
 		require.NoError(t, err)
-		path2, err := req2.GetPath(0)
+		path2, err := req2.GetPath()
 		require.NoError(t, err)
 
 		// Add to tree

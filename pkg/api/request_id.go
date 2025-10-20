@@ -16,18 +16,13 @@ type RequestID = ImprintHexString
 // ImprintHexString represents a hex string (4 chars (two bytes) algorithm + n-byte chars hash)
 type ImprintHexString string
 
-func (r RequestID) GetPath(shardID int) (*big.Int, error) {
+func (r RequestID) GetPath() (*big.Int, error) {
 	// Converts RequestID hex string to a big.Int for use as an SMT path.
 	// Prefixes with "0x01" to preserve leading zero bits in the original hex string,
 	// ensuring consistent path representation in the Sparse Merkle Tree.
 	path, ok := new(big.Int).SetString("0x01"+string(r), 0)
 	if !ok {
 		return nil, fmt.Errorf("failed to convert requestID %s to path", r)
-	}
-	// remove (rightmost) shard identifier bits if sharding is enabled
-	if shardID != 0 {
-		n := big.NewInt(0).SetInt64(int64(shardID)).BitLen() - 1
-		path.Rsh(path, uint(n))
 	}
 	return path, nil
 }

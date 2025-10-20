@@ -57,7 +57,7 @@ func NewChildSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int, shardI
 	if shardID <= 1 {
 		panic("Shard ID must be positive and have at least 2 bits")
 	}
-	path := big.NewInt(shardID)
+	path := big.NewInt(int64(shardID))
 	if path.BitLen() > keyLength {
 		panic("Shard ID must be shorter than SMT key length")
 	}

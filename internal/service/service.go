@@ -10,6 +10,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -231,7 +232,7 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		return nil, fmt.Errorf("request ID validation failed: %w", err)
 	}
 
-	path, err := req.RequestID.GetPath(as.config.Sharding.Child.ShardID)
+	path, err := req.RequestID.GetPath()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
 	}
@@ -253,8 +254,12 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		return nil, fmt.Errorf("no block found with root hash %s", rootHash)
 	}
 
+	// Join parent and child SMT paths if sharding mode is enabled
 	if as.config.Sharding.Mode == config.ShardingModeChild {
-		// TODO prepend the hashing steps to the current merkle path to root aggregator merkle path
+		merkleTreePath, err = smt.JoinPaths(merkleTreePath, block.ParentMerkleTreePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to join parent and child aggregator paths: %w", err)
+		}
 	}
 
 	// First check if commitment exists in aggregator records (finalized)

@@ -65,7 +65,7 @@ func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage) ap
 	leaves := make([]*smt.Leaf, len(testCommitments))
 	records := make([]*models.AggregatorRecord, len(testCommitments))
 	for i, c := range testCommitments {
-		path, err := c.RequestID.GetPath(0)
+		path, err := c.RequestID.GetPath()
 		require.NoError(t, err)
 
 		val, err := c.CreateLeafValue()

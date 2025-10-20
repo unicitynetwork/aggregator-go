@@ -10,6 +10,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 type (
@@ -48,7 +49,7 @@ func NewHAManager(logger *logger.Logger,
 	leaderSelector LeaderSelector,
 	storage interfaces.Storage,
 	smt *smt.ThreadSafeSMT,
-	shardID int,
+	shardID api.ShardID,
 	stateTracker *state.Tracker,
 	syncInterval time.Duration,
 	disableBlockSync bool, // Set true for parent mode where block syncing is not needed

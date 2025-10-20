@@ -126,17 +126,13 @@ type RoundMetrics struct {
 }
 
 // NewRoundManager creates a new round manager
-func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, rootAggregatorClient RootAggregatorClient, stateTracker *state.Tracker) (*RoundManager, error) {
-	// Initialize SMT with empty tree - will be replaced with restored tree in Start()
-	smtInstance := smt.NewSparseMerkleTree(api.SHA256, 16+256)
-	threadSafeSMT := smt.NewThreadSafeSMT(smtInstance)
-
+func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, smtInstance *smt.SparseMerkleTree, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, rootAggregatorClient RootAggregatorClient, stateTracker *state.Tracker) (*RoundManager, error) {
 	rm := &RoundManager{
 		config:              cfg,
 		logger:              logger,
 		commitmentQueue:     commitmentQueue,
 		storage:             storage,
-		smt:                 threadSafeSMT,
+		smt:                 smt.NewThreadSafeSMT(smtInstance),
 		rootClient:          rootAggregatorClient,
 		stateTracker:        stateTracker,
 		roundDuration:       cfg.Processing.RoundDuration,         // Configurable round duration (default 1s)
