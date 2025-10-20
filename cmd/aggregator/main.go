@@ -116,12 +116,12 @@ func main() {
 	}
 
 	// Initialize leader selector and HA Manager if enabled
+	var ls leaderSelector
 	var haManager *ha.HAManager
-	var leaderSelector *ha.LeaderElection
 	if cfg.HA.Enabled {
 		log.WithComponent("main").Info("High availability mode enabled")
-		leaderSelector = ha.NewLeaderElection(log, cfg.HA, storageInstance.LeadershipStorage())
-		leaderSelector.Start(ctx)
+		ls = ha.NewLeaderElection(log, cfg.HA, storageInstance.LeadershipStorage())
+		ls.Start(ctx)
 
 		// Disable block syncing for parent aggregator mode
 		// Parent mode uses state-based SMT (current shard roots) rather than history-based (commitment leaves)
@@ -130,7 +130,7 @@ func main() {
 			log.WithComponent("main").Info("Block syncing disabled for parent aggregator mode - SMT will be reconstructed on leadership transition")
 		}
 
-		haManager = ha.NewHAManager(log, roundManager, leaderSelector, storageInstance, roundManager.GetSMT(), cfg.Sharding.Child.ShardID, stateTracker, cfg.Processing.RoundDuration, disableBlockSync)
+		haManager = ha.NewHAManager(log, roundManager, ls, storageInstance, roundManager.GetSMT(), cfg.Sharding.Child.ShardID, stateTracker, cfg.Processing.RoundDuration, disableBlockSync)
 		haManager.Start(ctx)
 	} else {
 		log.WithComponent("main").Info("High availability mode is disabled, running as standalone leader")
@@ -141,8 +141,7 @@ func main() {
 		}
 	}
 
-	// Create service with round manager and leader selector
-	aggregatorService, err := service.NewService(ctx, cfg, log, roundManager, commitmentQueue, storageInstance, leaderSelector)
+	aggregatorService, err := service.NewService(ctx, cfg, log, roundManager, commitmentQueue, storageInstance, ls)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to create service", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
@@ -182,8 +181,8 @@ func main() {
 	}
 
 	// Stop leader selector if it was started
-	if leaderSelector != nil {
-		leaderSelector.Stop(shutdownCtx)
+	if ls != nil {
+		ls.Stop(shutdownCtx)
 	}
 
 	// Stop round manager
@@ -205,4 +204,10 @@ func main() {
 	if asyncLogger != nil {
 		asyncLogger.Stop()
 	}
+}
+
+type leaderSelector interface {
+	IsLeader(ctx context.Context) (bool, error)
+	Start(ctx context.Context)
+	Stop(ctx context.Context)
 }
