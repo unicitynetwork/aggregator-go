@@ -255,7 +255,6 @@ func (prm *ParentRoundManager) processRound(ctx context.Context, round *ParentRo
 			leaves = append(leaves, leaf)
 		}
 
-		// TODO(SMT): add option to update existing leaves
 		rootHashStr, err := round.Snapshot.AddLeaves(leaves)
 		if err != nil {
 			return fmt.Errorf("failed to add shard leaves to parent SMT snapshot: %w", err)

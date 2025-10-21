@@ -130,9 +130,21 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		return nil
 	case config.ShardingModeChild:
 		rm.logger.WithContext(ctx).Info("Submitting root hash to parent shard", "rootHash", rootHash)
+
+		// Strip algorithm prefix (first 2 bytes) before sending to parent
+		// Parent SMT stores raw 32-byte hashes, not the full 34-byte format with algorithm ID
+		// This is required for JoinPaths to work correctly when combining child and parent proofs
+		if len(rootHashBytes) < 2 {
+			return fmt.Errorf("root hash too short: expected at least 2 bytes for algorithm prefix, got %d", len(rootHashBytes))
+		}
+		rootHashRaw := rootHashBytes[2:] // Remove algorithm identifier
+		if len(rootHashRaw) != 32 {
+			return fmt.Errorf("child root hash has invalid length after stripping prefix: expected 32 bytes, got %d", len(rootHashRaw))
+		}
+
 		request := &api.SubmitShardRootRequest{
 			ShardID:  rm.config.Sharding.Child.ShardID,
-			RootHash: rootHashBytes,
+			RootHash: rootHashRaw,
 		}
 		if err := rm.rootClient.SubmitShardRoot(ctx, request); err != nil {
 			return fmt.Errorf("failed to submit root hash to parent shard: %w", err)

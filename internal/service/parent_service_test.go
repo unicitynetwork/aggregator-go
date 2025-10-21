@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -247,48 +248,75 @@ func (suite *ParentServiceTestSuite) TestSubmitShardRoot_UpdateQueued() {
 	suite.T().Log("✓ Shard update was queued and processed correctly")
 }
 
-// GetShardProof - Success (existing shard with real child SMT)
+// GetShardProof - Success - Full E2E test with child SMT, proof joining, and verification
 func (suite *ParentServiceTestSuite) TestGetShardProof_Success() {
 	ctx := context.Background()
 
-	shard0ID := 4 // 0b100 - valid for 2-bit sharding
+	shard0ID := 4 // 0b100 - valid for 2-bit sharding (ShardIDLength=2)
 
-	// TODO(SMT): Child would extract root hash from their SMT and send to parent
-	childRootRaw := makeTestHash(0xAA)
+	// 1. Create a real child SMT with some data (simulating what child aggregator does)
+	childSMT := smt.NewChildSparseMerkleTree(api.SHA256, 4, shard0ID)
 
-	// Submit the child root to parent
+	// Add some leaves to the child SMT
+	testLeafPath := big.NewInt(0b10000) // Request ID within this shard
+	testLeafValue := []byte{0x61}       // Commitment data
+	err := childSMT.AddLeaf(testLeafPath, testLeafValue)
+	suite.Require().NoError(err, "Should add leaf to child SMT")
+
+	// 2. Extract child root hash (what child aggregator would submit to parent)
+	childRootHash := childSMT.GetRootHash()
+	suite.Require().NotEmpty(childRootHash, "Child SMT should have root hash")
+	suite.T().Logf("Child SMT root hash: %x", childRootHash)
+
+	// 3. Submit child root to parent (strip algorithm prefix - first 2 bytes)
+	// This is required for JoinPaths to work: parent stores raw 32-byte hashes
+	childRootRaw := childRootHash[2:] // Remove algorithm identifier (2 bytes)
+	suite.Require().True(len(childRootRaw) == 32, "Root hash should be 32 bytes after stripping prefix")
+	suite.T().Logf("Sending %d bytes to parent (WITHOUT algorithm prefix)", len(childRootRaw))
+
 	submitReq := &api.SubmitShardRootRequest{
 		ShardID:  shard0ID,
 		RootHash: childRootRaw,
 	}
-	_, err := suite.service.SubmitShardRoot(ctx, submitReq)
+	_, err = suite.service.SubmitShardRoot(ctx, submitReq)
 	suite.Require().NoError(err)
 
-	// Wait for round to process by polling for the shard to exist
+	// 4. Wait for round to process
 	suite.waitForShardToExist(ctx, shard0ID)
 
-	// Request proof for the shard
+	// 5. Get child proof from child SMT
+	childProof, err := childSMT.GetPath(testLeafPath)
+	suite.Require().NoError(err, "Should get child proof")
+	suite.Require().NotNil(childProof, "Child proof should not be nil")
+	suite.T().Logf("Child proof has %d steps", len(childProof.Steps))
+
+	// 6. Request parent proof from parent aggregator
 	proofReq := &api.GetShardProofRequest{
 		ShardID: shard0ID,
 	}
+	parentResponse, err := suite.service.GetShardProof(ctx, proofReq)
+	suite.Require().NoError(err, "Should get parent proof successfully")
+	suite.Require().NotNil(parentResponse, "Parent response should not be nil")
+	suite.Require().NotNil(parentResponse.MerkleTreePath, "Parent proof should not be nil")
+	suite.T().Logf("Parent proof has %d steps", len(parentResponse.MerkleTreePath.Steps))
 
-	response, err := suite.service.GetShardProof(ctx, proofReq)
-	suite.Require().NoError(err, "Should get proof successfully")
-	suite.Require().NotNil(response, "Response should not be nil")
-	suite.Assert().NotNil(response.MerkleTreePath, "MerkleTreePath should not be nil")
-	suite.Assert().NotEmpty(response.MerkleTreePath.Steps, "Proof should have steps")
+	// 7. Join child and parent proofs
+	joinedProof, err := smt.JoinPaths(childProof, parentResponse.MerkleTreePath)
+	suite.Require().NoError(err, "Should join proofs successfully")
+	suite.Require().NotNil(joinedProof, "Joined proof should not be nil")
+	suite.T().Logf("Joined proof has %d steps", len(joinedProof.Steps))
 
-	// Verify that the proof can be validated
-	// Convert shard ID to big.Int for verification (the path in the parent SMT)
-	shardPath := new(big.Int).SetInt64(int64(shard0ID))
-	result, err := response.MerkleTreePath.Verify(shardPath)
+	// 8. Verify the joined proof
+	result, err := joinedProof.Verify(testLeafPath)
 	suite.Require().NoError(err, "Proof verification should not error")
+	suite.Require().NotNil(result, "Verification result should not be nil")
 
 	// Both PathValid and PathIncluded should be true
-	suite.Assert().True(result.PathValid, "Proof path must be valid")
-	suite.Assert().True(result.PathIncluded, "Proof should show path is included")
+	suite.Assert().True(result.PathValid, "Joined proof path must be valid")
+	suite.Assert().True(result.PathIncluded, "Joined proof should show path is included")
+	suite.Assert().True(result.Result, "Overall verification result should be true")
 
-	suite.T().Log("✓ GetShardProof returned valid and verifiable proof")
+	suite.T().Log("✓ End-to-end test: child SMT → parent submission → proof joining → verification SUCCESS")
 }
 
 // GetShardProof - Non-existent Shard (returns nil MerkleTreePath)
