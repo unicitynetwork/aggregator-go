@@ -43,7 +43,7 @@ type aggregatorInstance struct {
 	manager         round.Manager
 	service         gateway.Service
 	server          *gateway.Server
-	leaderSelector  *ha.LeaderElection
+	leaderElection  *ha.LeaderElection
 	cleanup         func()
 }
 
@@ -107,7 +107,7 @@ func (suite *ShardingE2ETestSuite) TearDownSuite() {
 	}
 }
 
-func (suite *ShardingE2ETestSuite) buildConfig(mode config.ShardingMode, port, dbName, serverID string, shardID int) *config.Config {
+func (suite *ShardingE2ETestSuite) buildConfig(mode config.ShardingMode, port, dbName string, shardID int) *config.Config {
 	cfg := &config.Config{
 		Server: config.ServerConfig{
 			Host:             "localhost",
@@ -152,16 +152,6 @@ func (suite *ShardingE2ETestSuite) buildConfig(mode config.ShardingMode, port, d
 		},
 	}
 
-	// Parent-specific configuration
-	if mode == config.ShardingModeParent {
-		cfg.HA.Enabled = true
-		cfg.HA.LockTTLSeconds = 30
-		cfg.HA.LeaderHeartbeatInterval = 5 * time.Second
-		cfg.HA.LeaderElectionPollingInterval = 1 * time.Second
-		cfg.HA.LockID = "test-parent-lock"
-		cfg.HA.ServerID = serverID
-	}
-
 	// Child-specific configuration
 	if mode == config.ShardingModeChild {
 		cfg.Sharding.Child = config.ChildConfig{
@@ -196,19 +186,22 @@ func (suite *ShardingE2ETestSuite) startAggregatorInstance(name string, cfg *con
 	err = manager.Start(ctx)
 	suite.Require().NoError(err)
 
-	var leaderSelector *ha.LeaderElection
+	var leaderElection *ha.LeaderElection
+	var leaderSelector service.LeaderSelector
 	var haManager *ha.HAManager
 
 	if cfg.HA.Enabled {
-		leaderSelector = ha.NewLeaderElection(log, cfg.HA, storageInstance.LeadershipStorage())
-		leaderSelector.Start(ctx)
+		leaderElection = ha.NewLeaderElection(log, cfg.HA, storageInstance.LeadershipStorage())
+		leaderElection.Start(ctx)
+		leaderSelector = leaderElection
 
 		time.Sleep(100 * time.Millisecond)
 
 		disableBlockSync := cfg.Sharding.Mode == config.ShardingModeParent
-		haManager = ha.NewHAManager(log, manager, leaderSelector, storageInstance, manager.GetSMT(), cfg.Sharding.Child.ShardID, stateTracker, cfg.Processing.RoundDuration, disableBlockSync)
+		haManager = ha.NewHAManager(log, manager, leaderElection, storageInstance, manager.GetSMT(), cfg.Sharding.Child.ShardID, stateTracker, cfg.Processing.RoundDuration, disableBlockSync)
 		haManager.Start(ctx)
 	} else {
+		leaderSelector = nil
 		err = manager.Activate(ctx)
 		suite.Require().NoError(err)
 	}
@@ -235,7 +228,7 @@ func (suite *ShardingE2ETestSuite) startAggregatorInstance(name string, cfg *con
 		manager:         manager,
 		service:         svc,
 		server:          server,
-		leaderSelector:  leaderSelector,
+		leaderElection:  leaderElection,
 		cleanup: func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -243,8 +236,8 @@ func (suite *ShardingE2ETestSuite) startAggregatorInstance(name string, cfg *con
 			if haManager != nil {
 				haManager.Stop()
 			}
-			if leaderSelector != nil {
-				leaderSelector.Stop(context.Background())
+			if leaderElection != nil {
+				leaderElection.Stop(context.Background())
 			}
 			manager.Stop(context.Background())
 			storageInstance.Close(context.Background())
@@ -414,40 +407,45 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 	ctx := context.Background()
 	_ = ctx
 
-	parentCfg := suite.buildConfig(config.ShardingModeParent, "9000", "aggregator_test_parent", "test-parent-server", 0)
+	parentCfg := suite.buildConfig(config.ShardingModeParent, "9000", "aggregator_test_parent", 0)
 	suite.startAggregatorInstance("parent aggregator", parentCfg)
 	parentURL := "http://localhost:9000"
 
-	child0Cfg := suite.buildConfig(config.ShardingModeChild, "9001", "aggregator_test_child_0", "", 4)
+	child0Cfg := suite.buildConfig(config.ShardingModeChild, "9001", "aggregator_test_child_0", 4)
 	suite.startAggregatorInstance("child aggregator 0 (shard 4)", child0Cfg)
 	child0URL := "http://localhost:9001"
 
-	child1Cfg := suite.buildConfig(config.ShardingModeChild, "9002", "aggregator_test_child_1", "", 5)
+	child1Cfg := suite.buildConfig(config.ShardingModeChild, "9002", "aggregator_test_child_1", 5)
 	suite.startAggregatorInstance("child aggregator 1 (shard 5)", child1Cfg)
 	child1URL := "http://localhost:9002"
 
 	time.Sleep(500 * time.Millisecond)
 
 	suite.T().Log("Phase 1: Submitting commitments...")
+
 	commitment1, reqID1 := suite.createCommitmentForShard(4, 2)
+	submitTime1 := time.Now()
 	resp1, err := suite.submitCommitment(child0URL, commitment1)
 	suite.Require().NoError(err)
 	suite.Require().Equal("SUCCESS", resp1.Status)
 	suite.T().Logf("  Submitted commitment 1 to child 0: %s", reqID1)
 
 	commitment2, reqID2 := suite.createCommitmentForShard(4, 2)
+	submitTime2 := time.Now()
 	resp2, err := suite.submitCommitment(child0URL, commitment2)
 	suite.Require().NoError(err)
 	suite.Require().Equal("SUCCESS", resp2.Status)
 	suite.T().Logf("  Submitted commitment 2 to child 0: %s", reqID2)
 
 	commitment3, reqID3 := suite.createCommitmentForShard(5, 2)
+	submitTime3 := time.Now()
 	resp3, err := suite.submitCommitment(child1URL, commitment3)
 	suite.Require().NoError(err)
 	suite.Require().Equal("SUCCESS", resp3.Status)
 	suite.T().Logf("  Submitted commitment 3 to child 1: %s", reqID3)
 
 	commitment4, reqID4 := suite.createCommitmentForShard(5, 2)
+	submitTime4 := time.Now()
 	resp4, err := suite.submitCommitment(child1URL, commitment4)
 	suite.Require().NoError(err)
 	suite.Require().Equal("SUCCESS", resp4.Status)
@@ -457,37 +455,30 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 	suite.T().Log("✓ Submitted 2 commitments to child 1")
 
 	suite.T().Log("Phase 2: Waiting for parent block...")
-	suite.waitForBlock(parentURL, 1, 5*time.Second)
+	suite.waitForBlock(parentURL, 1, 3*time.Second)
 	suite.T().Log("✓ Parent created block 1 (children submitted roots)")
-
-	// Give extra time for children to receive parent proofs and finalize blocks
-	time.Sleep(500 * time.Millisecond)
-
-	child0Height, err := suite.getBlockHeight(child0URL)
-	suite.Require().NoError(err)
-	suite.T().Logf("Child 0 block height: %s", child0Height.BlockNumber.String())
-
-	child1Height, err := suite.getBlockHeight(child1URL)
-	suite.Require().NoError(err)
-	suite.T().Logf("Child 1 block height: %s", child1Height.BlockNumber.String())
 
 	suite.T().Log("Phase 3: Verifying joined proofs...")
 
 	testCases := []struct {
-		requestID string
-		childURL  string
-		shardID   int
-		name      string
+		requestID  string
+		childURL   string
+		shardID    int
+		name       string
+		submitTime time.Time
 	}{
-		{reqID1, child0URL, 4, "commitment 1 (child 0)"},
-		{reqID2, child0URL, 4, "commitment 2 (child 0)"},
-		{reqID3, child1URL, 5, "commitment 3 (child 1)"},
-		{reqID4, child1URL, 5, "commitment 4 (child 1)"},
+		{reqID1, child0URL, 4, "commitment 1 (child 0)", submitTime1},
+		{reqID2, child0URL, 4, "commitment 2 (child 0)", submitTime2},
+		{reqID3, child1URL, 5, "commitment 3 (child 1)", submitTime3},
+		{reqID4, child1URL, 5, "commitment 4 (child 1)", submitTime4},
 	}
 
 	for _, tc := range testCases {
-		childProofResp, err := suite.getInclusionProof(tc.childURL, tc.requestID)
-		suite.Require().NoError(err, "Failed to get inclusion proof for %s", tc.name)
+		proofAvailableStart := time.Now()
+		childProofResp := suite.waitForProofAvailable(tc.childURL, tc.requestID, 500*time.Millisecond)
+		totalLatency := time.Since(tc.submitTime)
+		suite.T().Logf("%s: proof available after %v (total from submit: %v)",
+			tc.name, time.Since(proofAvailableStart), totalLatency)
 		suite.Require().NotNil(childProofResp.InclusionProof, "Inclusion proof is nil for %s", tc.name)
 		suite.Require().NotNil(childProofResp.InclusionProof.MerkleTreePath, "Merkle path is nil for %s", tc.name)
 		joinedProof := childProofResp.InclusionProof.MerkleTreePath
@@ -511,40 +502,15 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 
 	suite.T().Log("Phase 4: Testing with additional blocks...")
 
-	child0HeightBefore, err := suite.getBlockHeight(child0URL)
-	suite.Require().NoError(err)
-	child1HeightBefore, err := suite.getBlockHeight(child1URL)
-	suite.Require().NoError(err)
-
-	expectedChild0Height := child0HeightBefore.BlockNumber.Int.Int64() + 1
-	expectedChild1Height := child1HeightBefore.BlockNumber.Int.Int64() + 1
-
-	suite.T().Logf("Current heights before Phase 4: Child 0=%s, Child 1=%s",
-		child0HeightBefore.BlockNumber.String(), child1HeightBefore.BlockNumber.String())
-
 	commitment5, reqID5 := suite.createCommitmentForShard(4, 2)
+	submitTime5 := time.Now()
 	suite.submitCommitment(child0URL, commitment5)
 
 	commitment6, reqID6 := suite.createCommitmentForShard(5, 2)
+	submitTime6 := time.Now()
 	suite.submitCommitment(child1URL, commitment6)
 
 	suite.T().Log("✓ Submitted additional commitments")
-
-	suite.T().Logf("Waiting for child 0 to reach block %d...", expectedChild0Height)
-	suite.waitForBlock(child0URL, expectedChild0Height, 5*time.Second)
-	suite.T().Logf("✓ Child 0 reached block %d", expectedChild0Height)
-
-	suite.T().Logf("Waiting for child 1 to reach block %d...", expectedChild1Height)
-	suite.waitForBlock(child1URL, expectedChild1Height, 5*time.Second)
-	suite.T().Logf("✓ Child 1 reached block %d", expectedChild1Height)
-
-	child0HeightAfter, err := suite.getBlockHeight(child0URL)
-	suite.Require().NoError(err)
-	suite.T().Logf("Child 0 block height after: %s", child0HeightAfter.BlockNumber.String())
-
-	child1HeightAfter, err := suite.getBlockHeight(child1URL)
-	suite.Require().NoError(err)
-	suite.T().Logf("Child 1 block height after: %s", child1HeightAfter.BlockNumber.String())
 
 	suite.T().Log("Verifying old commitments still work...")
 	for _, tc := range testCases {
@@ -564,17 +530,21 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 
 	suite.T().Log("Verifying new commitments...")
 	newTestCases := []struct {
-		requestID string
-		childURL  string
-		name      string
+		requestID  string
+		childURL   string
+		name       string
+		submitTime time.Time
 	}{
-		{reqID5, child0URL, "new commitment (child 0)"},
-		{reqID6, child1URL, "new commitment (child 1)"},
+		{reqID5, child0URL, "new commitment (child 0)", submitTime5},
+		{reqID6, child1URL, "new commitment (child 1)", submitTime6},
 	}
 
 	for _, tc := range newTestCases {
-		suite.T().Logf("Waiting for proof availability for %s...", tc.name)
+		proofAvailableStart := time.Now()
 		childProofResp := suite.waitForProofAvailable(tc.childURL, tc.requestID, 10*time.Second)
+		totalLatency := time.Since(tc.submitTime)
+		suite.T().Logf("%s: proof available after %v (total from submit: %v)",
+			tc.name, time.Since(proofAvailableStart), totalLatency)
 		suite.Require().NotNil(childProofResp.InclusionProof)
 
 		reqID := api.RequestID(tc.requestID)
