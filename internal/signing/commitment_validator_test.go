@@ -407,6 +407,7 @@ func TestValidator_ValidationStatusString(t *testing.T) {
 		{ValidationStatusInvalidStateHashFormat, "INVALID_STATE_HASH_FORMAT"},
 		{ValidationStatusInvalidTransactionHashFormat, "INVALID_TRANSACTION_HASH_FORMAT"},
 		{ValidationStatusUnsupportedAlgorithm, "UNSUPPORTED_ALGORITHM"},
+		{ValidationStatusShardMismatch, "INVALID_SHARD"},
 		{ValidationStatus(999), "UNKNOWN"}, // Test unknown status
 	}
 

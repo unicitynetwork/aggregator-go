@@ -44,6 +44,8 @@ func (s ValidationStatus) String() string {
 		return "INVALID_TRANSACTION_HASH_FORMAT"
 	case ValidationStatusUnsupportedAlgorithm:
 		return "UNSUPPORTED_ALGORITHM"
+	case ValidationStatusShardMismatch:
+		return "INVALID_SHARD"
 	default:
 		return "UNKNOWN"
 	}

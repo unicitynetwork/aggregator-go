@@ -220,6 +220,7 @@ Submit a state transition request to the aggregation layer with cryptographic va
 - `REQUEST_ID_MISMATCH` - RequestID doesn't match SHA256(publicKey || stateHash)
 - `INVALID_STATE_HASH_FORMAT` - StateHash not in proper DataHash imprint format
 - `INVALID_TRANSACTION_HASH_FORMAT` - TransactionHash not in proper DataHash imprint format
+- `INVALID_SHARD` - The commitment was sent to the wrong shard
 - `UNSUPPORTED_ALGORITHM` - Algorithm other than secp256k1
 
 #### `get_inclusion_proof`
