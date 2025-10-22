@@ -3,7 +3,6 @@ package models
 import (
 	"math/big"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -25,10 +24,6 @@ func TestBlock_ToBSONFromBSON(t *testing.T) {
 func createTestBlock() *Block {
 	randomHash, _ := api.NewHexBytesFromString("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
-	// create timestamp with millisecond precision so that no information is lost
-	// after storing the block
-	createdAt := &api.Timestamp{Time: time.UnixMilli(time.Now().UnixMilli())}
-
 	return &Block{
 		Index:               api.NewBigInt(big.NewInt(1)),
 		ChainID:             "test-chain-id",
@@ -38,7 +33,7 @@ func createTestBlock() *Block {
 		RootHash:            randomHash,
 		PreviousBlockHash:   randomHash,
 		NoDeletionProofHash: randomHash,
-		CreatedAt:           createdAt,
+		CreatedAt:           api.Now(),
 		UnicityCertificate:  randomHash,
 		ParentMerkleTreePath: &api.MerkleTreePath{
 			Root: randomHash.String(),
