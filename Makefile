@@ -86,6 +86,14 @@ docker-run-clean:
 	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose up --force-recreate -d --build
 	@echo "Services rebuilt with user UID=$$(id -u):$$(id -g)"
 
+docker-run-clean-keep-tb:
+	@echo "Rebuilding services with clean state but preserving BFT config as current user..."
+	@docker compose down
+	@rm -rf ./data/mongodb_data ./data/redis_data
+	@mkdir -p ./data/genesis ./data/genesis-root ./data/mongodb_data ./data/redis_data && chmod -R 777 ./data
+	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose up --force-recreate -d --build
+	@echo "Services rebuilt with user UID=$$(id -u):$$(id -g)"
+
 docker-restart-aggregator:
 	@echo "Rebuilding and restarting aggregator service..."
 	@docker compose stop aggregator
