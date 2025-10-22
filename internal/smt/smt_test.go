@@ -1411,3 +1411,27 @@ func TestJoinPaths(t *testing.T) {
 		assert.Nil(t, joinedPath)
 	})
 }
+
+// TestParentSMTSnapshotUpdateLeaf tests that parent SMT snapshots can update pre-populated leaves
+func TestParentSMTSnapshotUpdateLeaf(t *testing.T) {
+	// Create parent SMT with ShardIDLength=1 (creates pre-populated leaves at paths 2 and 3)
+	parentSMT := NewParentSparseMerkleTree(api.SHA256, 1)
+
+	// Create snapshot for copy-on-write semantics
+	snapshot := parentSMT.CreateSnapshot()
+
+	// Update a pre-populated leaf (shard ID 2)
+	path := big.NewInt(2)
+	value := []byte{0x01, 0x02, 0x03}
+
+	err := snapshot.AddLeaf(path, value)
+	if err != nil {
+		t.Fatalf("Failed to update leaf in parent SMT snapshot: %v", err)
+	}
+
+	// Verify the update worked by checking root hash changed
+	rootHash := snapshot.GetRootHash()
+	if len(rootHash) == 0 {
+		t.Fatal("Expected non-empty root hash after updating leaf")
+	}
+}

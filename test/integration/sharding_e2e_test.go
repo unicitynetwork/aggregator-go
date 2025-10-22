@@ -148,7 +148,7 @@ func (suite *ShardingE2ETestSuite) buildConfig(mode config.ShardingMode, port, d
 		},
 		Sharding: config.ShardingConfig{
 			Mode:          mode,
-			ShardIDLength: 2, // 4 shards: IDs 4-7
+			ShardIDLength: 1, // 2 shards: IDs 2-3
 		},
 	}
 
@@ -397,12 +397,10 @@ func (suite *ShardingE2ETestSuite) waitForProofAvailable(url, requestID string, 
 	return nil
 }
 
-// TestShardingE2E verifies the complete hierarchical sharding flow:
-// 1. Starts a parent aggregator and 2 child aggregators (shards 4 and 5)
-// 2. Submits commitments to children → children create blocks and submit roots to parent
-// 3. Parent creates aggregated block → children poll and receive parent proofs
-// 4. Verifies that clients can retrieve and validate fully joined proofs
-// 5. Tests that proofs remain valid after additional blocks are created
+// TestShardingE2E tests hierarchical sharding with parent and child aggregators.
+// Verifies that commitments submitted to children are included in child blocks,
+// child root hashes are aggregated by the parent, and clients can retrieve
+// valid joined inclusion proofs that chain child and parent merkle paths.
 func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 	ctx := context.Background()
 	_ = ctx
@@ -411,40 +409,40 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 	suite.startAggregatorInstance("parent aggregator", parentCfg)
 	parentURL := "http://localhost:9000"
 
-	child0Cfg := suite.buildConfig(config.ShardingModeChild, "9001", "aggregator_test_child_0", 4)
-	suite.startAggregatorInstance("child aggregator 0 (shard 4)", child0Cfg)
+	child0Cfg := suite.buildConfig(config.ShardingModeChild, "9001", "aggregator_test_child_0", 2)
+	suite.startAggregatorInstance("child aggregator 0 (shard 2)", child0Cfg)
 	child0URL := "http://localhost:9001"
 
-	child1Cfg := suite.buildConfig(config.ShardingModeChild, "9002", "aggregator_test_child_1", 5)
-	suite.startAggregatorInstance("child aggregator 1 (shard 5)", child1Cfg)
+	child1Cfg := suite.buildConfig(config.ShardingModeChild, "9002", "aggregator_test_child_1", 3)
+	suite.startAggregatorInstance("child aggregator 1 (shard 3)", child1Cfg)
 	child1URL := "http://localhost:9002"
 
 	time.Sleep(500 * time.Millisecond)
 
 	suite.T().Log("Phase 1: Submitting commitments...")
 
-	commitment1, reqID1 := suite.createCommitmentForShard(4, 2)
+	commitment1, reqID1 := suite.createCommitmentForShard(2, 1)
 	submitTime1 := time.Now()
 	resp1, err := suite.submitCommitment(child0URL, commitment1)
 	suite.Require().NoError(err)
 	suite.Require().Equal("SUCCESS", resp1.Status)
 	suite.T().Logf("  Submitted commitment 1 to child 0: %s", reqID1)
 
-	commitment2, reqID2 := suite.createCommitmentForShard(4, 2)
+	commitment2, reqID2 := suite.createCommitmentForShard(2, 1)
 	submitTime2 := time.Now()
 	resp2, err := suite.submitCommitment(child0URL, commitment2)
 	suite.Require().NoError(err)
 	suite.Require().Equal("SUCCESS", resp2.Status)
 	suite.T().Logf("  Submitted commitment 2 to child 0: %s", reqID2)
 
-	commitment3, reqID3 := suite.createCommitmentForShard(5, 2)
+	commitment3, reqID3 := suite.createCommitmentForShard(3, 1)
 	submitTime3 := time.Now()
 	resp3, err := suite.submitCommitment(child1URL, commitment3)
 	suite.Require().NoError(err)
 	suite.Require().Equal("SUCCESS", resp3.Status)
 	suite.T().Logf("  Submitted commitment 3 to child 1: %s", reqID3)
 
-	commitment4, reqID4 := suite.createCommitmentForShard(5, 2)
+	commitment4, reqID4 := suite.createCommitmentForShard(3, 1)
 	submitTime4 := time.Now()
 	resp4, err := suite.submitCommitment(child1URL, commitment4)
 	suite.Require().NoError(err)
@@ -502,11 +500,11 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 
 	suite.T().Log("Phase 4: Testing with additional blocks...")
 
-	commitment5, reqID5 := suite.createCommitmentForShard(4, 2)
+	commitment5, reqID5 := suite.createCommitmentForShard(2, 1)
 	submitTime5 := time.Now()
 	suite.submitCommitment(child0URL, commitment5)
 
-	commitment6, reqID6 := suite.createCommitmentForShard(5, 2)
+	commitment6, reqID6 := suite.createCommitmentForShard(3, 1)
 	submitTime6 := time.Now()
 	suite.submitCommitment(child1URL, commitment6)
 

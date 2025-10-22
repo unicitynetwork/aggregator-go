@@ -166,7 +166,10 @@ func (smt *SparseMerkleTree) cloneBranch(branch branch) branch {
 
 	if branch.isLeaf() {
 		leafBranch := branch.(*LeafBranch)
-		return newLeafBranch(leafBranch.Path, leafBranch.Value)
+		cloned := newLeafBranch(leafBranch.Path, leafBranch.Value)
+		// Preserve the isChild flag for parent mode trees
+		cloned.isChild = leafBranch.isChild
+		return cloned
 	} else {
 		nodeBranch := branch.(*NodeBranch)
 		return newNodeBranch(nodeBranch.Path, nodeBranch.Left, nodeBranch.Right)
