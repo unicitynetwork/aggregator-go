@@ -196,7 +196,7 @@ func (rm *RoundManager) pollInclusionProof(ctx context.Context, rootHash string)
 			if err != nil {
 				return nil, fmt.Errorf("failed to fetch parent shard inclusion proof: %w", err)
 			}
-			if proof == nil {
+			if proof == nil || !proof.IsValid() {
 				rm.logger.WithContext(ctx).Debug("Parent shard inclusion proof not found, retrying...")
 				continue
 			}

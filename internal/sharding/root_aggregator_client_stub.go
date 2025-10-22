@@ -39,7 +39,7 @@ func (m *RootAggregatorClientStub) GetShardProof(ctx context.Context, request *a
 
 	if m.submissions[request.ShardID] != nil {
 		m.returnedProofCount++
-		return &api.RootShardInclusionProof{UnicityCertificate: api.HexBytes("1234")}, nil
+		return &api.RootShardInclusionProof{UnicityCertificate: api.HexBytes("1234"), MerkleTreePath: &api.MerkleTreePath{}}, nil
 	}
 	return nil, nil
 }
