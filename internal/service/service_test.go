@@ -293,9 +293,13 @@ func (suite *AggregatorTestSuite) TestInclusionProofMissingRecord() {
 	time.Sleep(3 * time.Second)
 
 	// Now test non-inclusion proof for a different request ID
+	requestId := ""
+	for i := 0; i < 2+32; i++ {
+		requestId = requestId + "00"
+	}
 	inclusionProof := makeJSONRPCRequest[api.GetInclusionProofResponse](
 		suite.T(), suite.serverAddr, "get_inclusion_proof", "test-request-id",
-		&api.GetInclusionProofRequest{RequestID: "00000000"})
+		&api.GetInclusionProofRequest{RequestID: api.RequestID(requestId)})
 
 	// Validate non-inclusion proof structure
 	suite.Nil(inclusionProof.InclusionProof.TransactionHash)

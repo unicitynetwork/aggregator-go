@@ -14,13 +14,13 @@ func BenchmarkSMTBatchAdd(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 48)
 
 		// Prepare 1000 leaves with non-conflicting paths
 		leaves := make([]*Leaf, 1000)
 		for j := 0; j < 1000; j++ {
 			// Use large spacing to avoid path conflicts: j * 100000
-			path := big.NewInt(int64((j + 1) * 100000))
+			path := big.NewInt(int64(0x1000000000000 + (j+1)*100000))
 			value := []byte("batch_value_" + path.String())
 			leaves[j] = NewLeaf(path, value)
 		}
@@ -44,14 +44,14 @@ func BenchmarkSMTIndividualAdd(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 48)
 
 		b.StartTimer()
 
 		// Add 1000 leaves one by one (tree reconstruction each time)
 		for j := 0; j < 1000; j++ {
 			// Use large spacing to avoid path conflicts: j * 100000
-			path := big.NewInt(int64((j + 1) * 100000))
+			path := big.NewInt(int64(0x1000000000000 + (j+1)*100000))
 			value := []byte("individual_value_" + path.String())
 
 			err := smt.AddLeaf(path, value)
@@ -71,13 +71,13 @@ func BenchmarkSMTLargeBatch(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 48)
 
 		// Prepare 2000 leaves with very large spacing to avoid path conflicts
 		leaves := make([]*Leaf, 2000)
 		for j := 0; j < 2000; j++ {
 			// Use massive spacing to avoid path conflicts: j * 1000000
-			path := big.NewInt(int64((j + 1) * 1000000))
+			path := big.NewInt(int64(0x1000000000000 + (j+1)*1000000))
 			value := []byte("large_batch_" + path.String())
 			leaves[j] = NewLeaf(path, value)
 		}
@@ -101,13 +101,13 @@ func BenchmarkSMTLargeIndividual(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 48)
 
 		b.StartTimer()
 
 		// Add 2000 leaves one by one - many hash calculations
 		for j := 0; j < 2000; j++ {
-			path := big.NewInt(int64((j + 1) * 1000000))
+			path := big.NewInt(int64(0x1000000000000 + (j+1)*1000000))
 			value := []byte("large_individual_" + path.String())
 
 			err := smt.AddLeaf(path, value)
@@ -127,7 +127,7 @@ func BenchmarkSMTRealWorldBatch(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 60)
 
 		// Generate 500 realistic paths using bit shifts to avoid conflicts
 		leaves := make([]*Leaf, 500)
@@ -155,7 +155,7 @@ func BenchmarkSMTRealWorldIndividual(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 60)
 
 		b.StartTimer()
 
@@ -177,9 +177,9 @@ func BenchmarkSMTRealWorldIndividual(b *testing.B) {
 // BenchmarkSMTRootHashCalculation benchmarks just the root hash calculation
 func BenchmarkSMTRootHashCalculation(b *testing.B) {
 	// Pre-populate tree
-	smt := NewSparseMerkleTree(api.SHA256)
+	smt := NewSparseMerkleTree(api.SHA256, 48)
 	for j := 0; j < 100; j++ {
-		path := big.NewInt(int64((j + 1) * 1000))
+		path := big.NewInt(int64(0x1000000000000 + (j+1)*1000))
 		value := []byte("hash_bench_value_" + path.String())
 		smt.AddLeaf(path, value)
 	}
@@ -202,17 +202,17 @@ func BenchmarkSMTKnownDataset(b *testing.B) {
 		{0b100000000, "value00000000"},
 		{0b100010000, "value00010000"},
 		{0b111100101, "value11100101"},
-		{0b1100, "value100"},
-		{0b1011, "value011"},
+		{0b110000000, "value100"},
+		{0b101100000, "value011"},
 		{0b111101111, "value11101111"},
-		{0b10001010, "value0001010"},
-		{0b11010101, "value1010101"},
+		{0b100010100, "value0001010"},
+		{0b110101010, "value1010101"},
 	}
 
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 8)
 
 		// Add all leaves and calculate hash
 		for _, data := range testData {
@@ -235,10 +235,10 @@ func BenchmarkSMTMemoryUsage(b *testing.B) {
 			b.ReportAllocs()
 
 			for i := 0; i < b.N; i++ {
-				smt := NewSparseMerkleTree(api.SHA256)
+				smt := NewSparseMerkleTree(api.SHA256, 48)
 
 				for j := 0; j < size; j++ {
-					path := big.NewInt(int64((j + 1) * 10000))
+					path := big.NewInt(int64(0x1000000000000 + (j+1)*10000))
 					value := []byte("memory_test_value_" + path.String())
 					smt.AddLeaf(path, value)
 				}
@@ -252,7 +252,7 @@ func BenchmarkSMTMemoryUsage(b *testing.B) {
 // BenchmarkSMTLeafRetrieval benchmarks leaf retrieval performance
 func BenchmarkSMTLeafRetrieval(b *testing.B) {
 	// Pre-populate tree with non-conflicting paths
-	smt := NewSparseMerkleTree(api.SHA256)
+	smt := NewSparseMerkleTree(api.SHA256, 12)
 
 	// Use paths with distinct bit patterns to avoid conflicts
 	basePaths := []int64{
@@ -301,7 +301,7 @@ func BenchmarkSMTMassiveScale(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			smt := NewSparseMerkleTree(api.SHA256)
+			smt := NewSparseMerkleTree(api.SHA256, 61)
 
 			// Generate 100k non-conflicting paths efficiently
 			leaves := make([]*Leaf, size)
@@ -342,7 +342,7 @@ func BenchmarkSMTProductionScale(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
-				smt := NewSparseMerkleTree(api.SHA256)
+				smt := NewSparseMerkleTree(api.SHA256, 61)
 
 				// Generate paths that won't conflict by using crypto-hash-like distribution
 				leaves := make([]*Leaf, size)
@@ -378,7 +378,7 @@ func BenchmarkSMTProductionScale(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
-				smt := NewSparseMerkleTree(api.SHA256)
+				smt := NewSparseMerkleTree(api.SHA256, 61)
 
 				b.StartTimer()
 
@@ -415,7 +415,7 @@ func BenchmarkSMTMemoryScaling(b *testing.B) {
 			b.ReportAllocs()
 
 			for i := 0; i < b.N; i++ {
-				smt := NewSparseMerkleTree(api.SHA256)
+				smt := NewSparseMerkleTree(api.SHA256, 61)
 
 				// Generate leaves
 				leaves := make([]*Leaf, size)
@@ -441,7 +441,7 @@ func BenchmarkSMTRootHashOnly(b *testing.B) {
 
 	for _, size := range sizes {
 		// Pre-build the tree
-		smt := NewSparseMerkleTree(api.SHA256)
+		smt := NewSparseMerkleTree(api.SHA256, 61)
 		leaves := make([]*Leaf, size)
 		for j := 0; j < size; j++ {
 			basePath := int64(0x3000000000000000)
@@ -476,16 +476,16 @@ func BenchmarkSMTBatchVsIndividual(b *testing.B) {
 		{0b100000000, "value00000000"},
 		{0b100010000, "value00010000"},
 		{0b111100101, "value11100101"},
-		{0b1100, "value100"},
-		{0b1011, "value011"},
+		{0b110000000, "value100"},
+		{0b101100000, "value011"},
 		{0b111101111, "value11101111"},
-		{0b10001010, "value0001010"},
-		{0b11010101, "value1010101"},
+		{0b100010100, "value0001010"},
+		{0b110101010, "value1010101"},
 	}
 
 	b.Run("Batch", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			smt := NewSparseMerkleTree(api.SHA256)
+			smt := NewSparseMerkleTree(api.SHA256, 8)
 
 			// Prepare batch
 			leaves := make([]*Leaf, len(testData))
@@ -501,7 +501,7 @@ func BenchmarkSMTBatchVsIndividual(b *testing.B) {
 
 	b.Run("Individual", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			smt := NewSparseMerkleTree(api.SHA256)
+			smt := NewSparseMerkleTree(api.SHA256, 8)
 
 			// Add one by one
 			for _, data := range testData {
@@ -513,7 +513,7 @@ func BenchmarkSMTBatchVsIndividual(b *testing.B) {
 
 	b.Run("IndividualWithHashEach", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			smt := NewSparseMerkleTree(api.SHA256)
+			smt := NewSparseMerkleTree(api.SHA256, 8)
 
 			// Add one by one with hash calculation after each
 			for _, data := range testData {
@@ -541,14 +541,14 @@ func BenchmarkSMTPerformanceComparison(b *testing.B) {
 				path  int64
 				value string
 			}{
-				path:  int64((i + 1) * 1000000), // Large spacing to avoid conflicts
+				path:  0x1000000000000 + int64((i+1)*1000000), // Large spacing to avoid conflicts
 				value: "perf_test_" + string(rune(i+48)),
 			}
 		}
 
 		b.Run(fmt.Sprintf("Batch_%d", size), func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				smt := NewSparseMerkleTree(api.SHA256)
+				smt := NewSparseMerkleTree(api.SHA256, 48)
 
 				leaves := make([]*Leaf, len(testData))
 				for j, data := range testData {
@@ -563,7 +563,7 @@ func BenchmarkSMTPerformanceComparison(b *testing.B) {
 
 		b.Run(fmt.Sprintf("Individual_%d", size), func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				smt := NewSparseMerkleTree(api.SHA256)
+				smt := NewSparseMerkleTree(api.SHA256, 48)
 
 				// Sequential: Build tree incrementally, multiple hash calculations
 				for _, data := range testData {
