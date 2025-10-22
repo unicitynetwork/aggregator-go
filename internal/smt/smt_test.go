@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 
 	"github.com/stretchr/testify/require"
@@ -1395,5 +1396,18 @@ func TestJoinPaths(t *testing.T) {
 		assert.NotNil(t, res4)
 		assert.True(t, res4.PathValid)
 		assert.True(t, res4.PathIncluded)
+	})
+
+	t.Run("NilInputDoesN otPanic", func(t *testing.T) {
+		child := &api.MerkleTreePath{Root: "1234"}
+		parent := &api.MerkleTreePath{}
+
+		joinedPath, err := JoinPaths(nil, parent)
+		assert.ErrorContains(t, err, "invalid child root hash format")
+		assert.Nil(t, joinedPath)
+
+		joinedPath, err = JoinPaths(child, nil)
+		assert.ErrorContains(t, err, "empty parent hash steps")
+		assert.Nil(t, joinedPath)
 	})
 }

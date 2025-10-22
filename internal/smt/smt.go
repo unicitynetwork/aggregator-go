@@ -675,15 +675,14 @@ func NewLeaf(path *big.Int, value []byte) *Leaf {
 
 // JoinPaths joins the hash proofs from a child and parent in sharded setting
 func JoinPaths(child, parent *api.MerkleTreePath) (*api.MerkleTreePath, error) {
-	if len(child.Root) < 4 {
-		return nil, fmt.Errorf("invalid child root hash format")
+	if child == nil || len(child.Root) < 4 {
+		return nil, errors.New("invalid child root hash format")
 	}
-	if len(parent.Steps) == 0 {
-		return nil, fmt.Errorf("empty parent hash steps")
+	if parent == nil || len(parent.Steps) == 0 {
+		return nil, errors.New("empty parent hash steps")
 	}
 	if parent.Steps[0].Data == nil || *parent.Steps[0].Data != child.Root[4:] {
-		return nil, fmt.Errorf("can't join paths: child root hash does not match parent input hash")
-
+		return nil, errors.New("can't join paths: child root hash does not match parent input hash")
 	}
 	steps := make([]api.MerkleTreeStep, len(child.Steps)+len(parent.Steps)-1)
 	copy(steps, child.Steps)
