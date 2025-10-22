@@ -115,9 +115,9 @@ func (suite *ParentRoundManagerTestSuite) TestBasicRoundLifecycle() {
 	err = prm.Activate(ctx)
 	suite.Require().NoError(err)
 
-	// Create 2 shard updates
-	shard0ID := 2 // 0b10
-	shard1ID := 3 // 0b11
+	// Create 2 shard updates (with ShardIDLength=4, valid IDs are 16-31)
+	shard0ID := 16 // 0b10000
+	shard1ID := 17 // 0b10001
 
 	shard0Root := makeTestHash(0xAA)
 	shard1Root := makeTestHash(0xBB)
@@ -162,8 +162,9 @@ func (suite *ParentRoundManagerTestSuite) TestMultiRoundUpdates() {
 	err = prm.Activate(ctx)
 	suite.Require().NoError(err)
 
-	shard0ID := 2
-	shard1ID := 3
+	// With ShardIDLength=4, valid shard IDs are 16-31
+	shard0ID := 16
+	shard1ID := 17
 
 	// Round 1: Both shards submit initial roots
 	suite.T().Log("=== Round 1: Initial shard roots ===")
@@ -226,11 +227,11 @@ func (suite *ParentRoundManagerTestSuite) TestMultipleShards() {
 	err = prm.Activate(ctx)
 	suite.Require().NoError(err)
 
-	// Submit 4 different shard updates
-	shard0ID := 1
-	shard1ID := 2
-	shard2ID := 3
-	shard3ID := 4
+	// Submit 4 different shard updates (with ShardIDLength=4, valid IDs are 16-31)
+	shard0ID := 16
+	shard1ID := 17
+	shard2ID := 18
+	shard3ID := 19
 
 	update0 := models.NewShardRootUpdate(shard0ID, makeTestHash(0x10))
 	update1 := models.NewShardRootUpdate(shard1ID, makeTestHash(0x20))
@@ -311,7 +312,8 @@ func (suite *ParentRoundManagerTestSuite) TestDuplicateShardUpdate() {
 	err = prm.Activate(ctx)
 	suite.Require().NoError(err)
 
-	shard0ID := 1
+	// With ShardIDLength=4, valid shard IDs are 16-31
+	shard0ID := 16
 	shard0Root := makeTestHash(0xAA)
 
 	// Submit the same shard update twice with the same value
@@ -354,7 +356,8 @@ func (suite *ParentRoundManagerTestSuite) TestSameShardMultipleValues() {
 	err = prm.Activate(ctx)
 	suite.Require().NoError(err)
 
-	shard0ID := 1
+	// With ShardIDLength=4, valid shard IDs are 16-31
+	shard0ID := 16
 	latestValue := makeTestHash(0xCC)
 
 	// Submit 3 different updates for the same shard
@@ -408,7 +411,8 @@ func (suite *ParentRoundManagerTestSuite) TestBlockRootMatchesSMTRoot() {
 	err = prm.Activate(ctx)
 	suite.Require().NoError(err)
 
-	shardID := 1
+	// With ShardIDLength=4, valid shard IDs are 16-31 (binary 10000-11111)
+	shardID := 16
 	update := models.NewShardRootUpdate(shardID, makeTestHash(0xAB))
 	err = prm.SubmitShardRoot(ctx, update)
 	suite.Require().NoError(err)
