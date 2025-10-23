@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,17 +43,6 @@ type JSONRPCError struct {
 	Data    string `json:"data,omitempty"`
 }
 
-// Use the public API types
-
-type GetBlockResponse struct {
-	Block Block `json:"block"`
-}
-
-type Block struct {
-	Index     string `json:"index"`
-	Timestamp string `json:"timestamp"`
-}
-
 type GetBlockCommitmentsRequest struct {
 	BlockNumber string `json:"blockNumber"`
 }
@@ -68,6 +58,19 @@ type AggregatorRecord struct {
 
 type GetBlockHeightResponse struct {
 	BlockNumber string `json:"blockNumber"`
+}
+
+type GetBlockRequest struct {
+	BlockNumber interface{} `json:"blockNumber"` // Can be number, string, or "latest"
+}
+
+type GetBlockResponse struct {
+	Block BlockInfo `json:"block"`
+}
+
+type BlockInfo struct {
+	Index     string `json:"index"`
+	CreatedAt string `json:"createdAt"` // Unix timestamp in milliseconds as string
 }
 
 type GetInclusionProofRequest struct {
@@ -101,13 +104,14 @@ const (
 	defaultAggregatorURL = "http://localhost:3000"
 	testDuration         = 10 * time.Second
 	workerCount          = 10   // Number of concurrent workers
-	requestsPerSec       = 3000 // Target requests per second
+	requestsPerSec       = 1000 // Target requests per second
 )
 
-// BlockCommitmentInfo stores block number and commitment count
+// BlockCommitmentInfo stores block number, commitment count, and timestamp
 type BlockCommitmentInfo struct {
 	BlockNumber     int64
 	CommitmentCount int
+	Timestamp       time.Time
 }
 
 // Metrics
@@ -134,7 +138,7 @@ type Metrics struct {
 	proofLatenciesMutex sync.RWMutex    // Protect latencies slice
 }
 
-func (m *Metrics) addBlockCommitmentCount(blockNumber int64, count int) {
+func (m *Metrics) addBlockCommitmentCount(blockNumber int64, count int, timestamp time.Time) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 	// Track all blocks including empty ones to show the real pattern
@@ -142,6 +146,7 @@ func (m *Metrics) addBlockCommitmentCount(blockNumber int64, count int) {
 	m.blockCommitmentInfo = append(m.blockCommitmentInfo, BlockCommitmentInfo{
 		BlockNumber:     blockNumber,
 		CommitmentCount: count,
+		Timestamp:       timestamp,
 	})
 	atomic.AddInt64(&m.totalBlockCommitments, int64(count))
 }
@@ -257,6 +262,25 @@ func (c *JSONRPCClient) call(method string, params interface{}) (*JSONRPCRespons
 	}
 
 	return &response, nil
+}
+
+// Helper function to get block timestamp
+func getBlockTimestamp(client *JSONRPCClient, blockNumber int64) time.Time {
+	blockReq := GetBlockRequest{
+		BlockNumber: fmt.Sprintf("%d", blockNumber),
+	}
+	blockResp, blockErr := client.call("get_block", blockReq)
+	if blockErr == nil && blockResp.Error == nil {
+		var blockInfo GetBlockResponse
+		blockInfoBytes, _ := json.Marshal(blockResp.Result)
+		if err := json.Unmarshal(blockInfoBytes, &blockInfo); err == nil {
+			// Parse timestamp (milliseconds as string)
+			if millis, err := strconv.ParseInt(blockInfo.Block.CreatedAt, 10, 64); err == nil {
+				return time.UnixMilli(millis)
+			}
+		}
+	}
+	return time.Now() // Fallback
 }
 
 // Generate random hex string
@@ -760,8 +784,11 @@ func main() {
 			fmt.Printf("  [DEBUG] Block %d has %d commitments not from our test\n", currentCheckBlock, notOurs)
 		}
 
+		// Get block timestamp
+		blockTimestamp := getBlockTimestamp(waitClient, currentCheckBlock)
+
 		// Track block and update counts
-		metrics.addBlockCommitmentCount(currentCheckBlock, ourCommitmentCount)
+		metrics.addBlockCommitmentCount(currentCheckBlock, ourCommitmentCount, blockTimestamp)
 		processedCount += int64(ourCommitmentCount)
 
 		if ourCommitmentCount > 0 {
@@ -840,7 +867,8 @@ func main() {
 			}
 
 			if ourCommitmentCount > 0 {
-				metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount)
+				blockTimestamp := getBlockTimestamp(waitClient, blockNum)
+				metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount, blockTimestamp)
 				processedCount += int64(ourCommitmentCount)
 				fmt.Printf("Block %d: %d our commitments (total in block: %d, running total: %d/%d)\n",
 					blockNum, ourCommitmentCount, len(commitsResp.Commitments), processedCount, successful)
@@ -925,7 +953,8 @@ func main() {
 
 							if ourCommitmentCount > 0 {
 								// Found some! Remove from retry list
-								metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount)
+								blockTimestamp := getBlockTimestamp(waitClient, blockNum)
+								metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount, blockTimestamp)
 								processedCount += int64(ourCommitmentCount)
 								fmt.Printf("Block %d (retry #%d): FOUND %d our commitments! (running total: %d/%d)\n",
 									blockNum, info.retryCount+1, ourCommitmentCount, processedCount, successful)
@@ -1011,7 +1040,8 @@ func main() {
 							}
 
 							if ourCommitmentCount > 0 {
-								metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount)
+								blockTimestamp := getBlockTimestamp(waitClient, blockNum)
+								metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount, blockTimestamp)
 								processedCount += int64(ourCommitmentCount)
 								foundInRound += ourCommitmentCount
 								fmt.Printf("  Block %d (final retry): FOUND %d commitments! (running total: %d/%d)\n",
@@ -1135,16 +1165,26 @@ func main() {
 		fmt.Printf("Empty blocks: %d\n", emptyBlocks)
 	}
 
-	// Calculate block creation rate
-	if len(metrics.blockCommitmentCounts) > 0 {
-		totalBlockTime := float64(len(metrics.blockCommitmentCounts))
-		blockCreationRate := float64(len(metrics.blockCommitmentCounts)) / totalBlockTime
-		fmt.Printf("Block creation rate: %.1f blocks/sec\n", blockCreationRate)
+	// Calculate average block finalization time using actual timestamps
+	if len(metrics.blockCommitmentInfo) > 1 {
+		firstBlockInfo := metrics.blockCommitmentInfo[0]
+		lastBlockInfo := metrics.blockCommitmentInfo[len(metrics.blockCommitmentInfo)-1]
 
-		// Calculate throughput based on non-empty blocks only
-		if nonEmptyBlocks > 0 {
-			fmt.Printf("Effective commitment throughput: %.1f commitments/sec\n",
-				float64(processedInBlocks)/totalBlockTime)
+		// Calculate actual time span from block timestamps
+		if !firstBlockInfo.Timestamp.IsZero() && !lastBlockInfo.Timestamp.IsZero() {
+			actualTimeSpan := lastBlockInfo.Timestamp.Sub(firstBlockInfo.Timestamp)
+			blockNumberSpan := lastBlockInfo.BlockNumber - firstBlockInfo.BlockNumber
+
+			if actualTimeSpan > 0 && blockNumberSpan > 0 {
+				// Average time per block
+				avgBlockTime := actualTimeSpan.Seconds() / float64(blockNumberSpan)
+
+				fmt.Printf("Block range: blocks %d to %d (%d blocks) over %.3f seconds (measured from timestamps)\n",
+					firstBlockInfo.BlockNumber, lastBlockInfo.BlockNumber, len(metrics.blockCommitmentInfo), actualTimeSpan.Seconds())
+				fmt.Printf("Average block finalization time: %.3f seconds/block\n", avgBlockTime)
+				fmt.Printf("Effective commitment throughput: %.1f commitments/sec\n",
+					float64(processedInBlocks)/actualTimeSpan.Seconds())
+			}
 		}
 	}
 
