@@ -108,7 +108,7 @@ services:
       - default
     restart: unless-stopped
     volumes:
-      - ./data/mongo-data/mongo1:/data/db
+      - ./data/mongodb_data/mongo1:/data/db
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 1s
@@ -124,7 +124,7 @@ services:
       - default
     restart: unless-stopped
     volumes:
-      - ./data/mongo-data/mongo2:/data/db
+      - ./data/mongodb_data/mongo2:/data/db
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 1s
@@ -140,7 +140,7 @@ services:
       - default
     restart: unless-stopped
     volumes:
-      - ./data/mongo-data/mongo3:/data/db
+      - ./data/mongodb_data/mongo3:/data/db
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 1s
@@ -175,7 +175,7 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
-      - "8404:8404"  # HAProxy stats page
+      - "8404:8404" # HAProxy stats page
     networks:
       - default
     volumes:
