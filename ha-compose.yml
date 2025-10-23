@@ -85,6 +85,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: aggregator-redis
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
     restart: unless-stopped
     ports:
       - "6379:6379"
@@ -150,6 +151,7 @@ services:
   mongo-setup:
     image: mongo:7.0
     container_name: mongo-setup
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
     networks:
       - default
     depends_on:
@@ -172,6 +174,7 @@ services:
   haproxy:
     image: haproxy:2.8-alpine
     container_name: haproxy
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
     restart: unless-stopped
     ports:
       - "3000:3000"
@@ -196,6 +199,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: aggregator-1
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
     restart: unless-stopped
     ports:
       - "3001:3001"
