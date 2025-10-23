@@ -22,10 +22,9 @@ type (
 )
 
 type PathVerificationResult struct {
-	PathValid         bool
-	PathIncluded      bool
-	Result            bool
-	ReconstructedPath *big.Int `json:"-"` // Exclude from JSON marshal for simplicity
+	PathValid    bool
+	PathIncluded bool
+	Result       bool
 }
 
 func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, error) {
@@ -121,9 +120,8 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 	pathIncluded := currentPath != nil && requestId.Cmp(currentPath) == 0
 
 	return &PathVerificationResult{
-		PathValid:         pathValid,
-		PathIncluded:      pathIncluded,
-		Result:            pathValid && pathIncluded,
-		ReconstructedPath: currentPath,
+		PathValid:    pathValid,
+		PathIncluded: pathIncluded,
+		Result:       pathValid && pathIncluded,
 	}, nil
 }
