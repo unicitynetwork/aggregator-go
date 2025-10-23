@@ -1,6 +1,7 @@
 package models
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -14,9 +15,9 @@ type SmtNode struct {
 }
 
 type SmtNodeBSON struct {
-	Key       api.HexBytes `bson:"key"`
-	Value     api.HexBytes `bson:"value"`
-	CreatedAt time.Time    `bson:"createdAt"`
+	Key       string    `bson:"key"`
+	Value     string    `bson:"value"`
+	CreatedAt time.Time `bson:"createdAt"`
 }
 
 func NewSmtNode(key, value api.HexBytes) *SmtNode {
@@ -29,16 +30,25 @@ func NewSmtNode(key, value api.HexBytes) *SmtNode {
 
 func (n *SmtNode) ToBSON() *SmtNodeBSON {
 	return &SmtNodeBSON{
-		Key:       n.Key,
-		Value:     n.Value,
+		Key:       n.Key.String(),
+		Value:     n.Value.String(),
 		CreatedAt: n.CreatedAt.Time,
 	}
 }
 
-func (nb *SmtNodeBSON) FromBSON() *SmtNode {
-	return &SmtNode{
-		Key:       nb.Key,
-		Value:     nb.Value,
-		CreatedAt: api.NewTimestamp(nb.CreatedAt),
+func (nb *SmtNodeBSON) FromBSON() (*SmtNode, error) {
+	key, err := api.NewHexBytesFromString(nb.Key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse key: %w", err)
 	}
+
+	val, err := api.NewHexBytesFromString(nb.Value)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse value: %w", err)
+	}
+	return &SmtNode{
+		Key:       key,
+		Value:     val,
+		CreatedAt: api.NewTimestamp(nb.CreatedAt),
+	}, nil
 }
