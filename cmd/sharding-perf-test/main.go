@@ -619,4 +619,136 @@ func main() {
 	}
 
 	fmt.Printf("========================================\n")
+
+	verifyInclusionProofs(metrics, clients)
+}
+
+func verifyInclusionProofs(metrics *Metrics, clients []*JSONRPCClient) {
+	fmt.Printf("\n\n========================================\n")
+	fmt.Printf("INCLUSION PROOF VERIFICATION\n")
+	fmt.Printf("========================================\n")
+
+	clientMap := make(map[string]*JSONRPCClient)
+	for _, c := range clients {
+		clientMap[c.url] = c
+	}
+
+	var totalToVerify, successfulVerifications, failedVerifications int64
+
+	// A channel to collect verification results
+	results := make(chan bool)
+
+	var wg sync.WaitGroup
+
+	const maxConcurrentVerifications = 100
+	semaphore := make(chan struct{}, maxConcurrentVerifications)
+
+	metrics.submittedRequestIDs.Range(func(key, value interface{}) bool {
+		requestIDStr := key.(string)
+		info := value.(*requestInfo)
+
+		if info.Found == 1 {
+			wg.Add(1)
+			atomic.AddInt64(&totalToVerify, 1)
+
+			go func(rid string, shardURL string) {
+				semaphore <- struct{}{} // Acquire token
+				defer func() {
+					<-semaphore // Release token
+					wg.Done()
+				}()
+
+				client, ok := clientMap[shardURL]
+				if !ok {
+					fmt.Printf("ERROR: No client found for shard URL %s\n", shardURL)
+					results <- false
+					return
+				}
+
+				// 1. Get inclusion proof
+				params := map[string]string{"requestId": rid}
+				resp, err := client.call("get_inclusion_proof", params)
+				if err != nil {
+					fmt.Printf("ERROR for %s: failed to get inclusion proof: %v\n", rid, err)
+					results <- false
+					return
+				}
+				if resp.Error != nil {
+					fmt.Printf("ERROR for %s: API error getting inclusion proof: %s\n", rid, resp.Error.Message)
+					results <- false
+					return
+				}
+
+				var proofResp api.GetInclusionProofResponse
+				respBytes, _ := json.Marshal(resp.Result)
+				if err := json.Unmarshal(respBytes, &proofResp); err != nil {
+					fmt.Printf("ERROR for %s: failed to parse inclusion proof response: %v\n", rid, err)
+					results <- false
+					return
+				}
+
+				if proofResp.InclusionProof == nil || proofResp.InclusionProof.MerkleTreePath == nil {
+					fmt.Printf("ERROR for %s: Inclusion proof or MerkleTreePath is nil\n", rid)
+					results <- false
+					return
+				}
+
+				// 2. Get path from request ID
+				reqID := api.RequestID(rid)
+				reqIDPath, err := reqID.GetPath()
+				if err != nil {
+					fmt.Printf("ERROR for %s: failed to get path from request ID: %v\n", rid, err)
+					results <- false
+					return
+				}
+
+				// 3. Verify proof
+				verifyResult, err := proofResp.InclusionProof.MerkleTreePath.Verify(reqIDPath)
+				if err != nil {
+					fmt.Printf("ERROR for %s: proof verification returned an error: %v\n", rid, err)
+					results <- false
+					return
+				}
+
+				if verifyResult == nil || !verifyResult.Result {
+					fmt.Printf("FAILURE for %s: Proof verification failed.\n", rid)
+					results <- false
+					return
+				}
+
+				// Success
+				results <- true
+			}(requestIDStr, info.URL)
+		}
+		return true
+	})
+
+	// Closer goroutine
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results
+	for result := range results {
+		if result {
+			atomic.AddInt64(&successfulVerifications, 1)
+		} else {
+			atomic.AddInt64(&failedVerifications, 1)
+		}
+	}
+
+	fmt.Printf("\nVerification Summary:\n")
+	fmt.Printf("Total commitments to verify: %d\n", totalToVerify)
+	fmt.Printf("Successful verifications: %d\n", successfulVerifications)
+	fmt.Printf("Failed verifications: %d\n", failedVerifications)
+
+	if failedVerifications > 0 {
+		fmt.Printf("\n⚠️  WARNING: %d inclusion proof verifications failed!\n", failedVerifications)
+	} else if totalToVerify > 0 {
+		fmt.Printf("\n✅ SUCCESS: All %d inclusion proofs verified successfully!\n", totalToVerify)
+	} else {
+		fmt.Printf("\nNo commitments were processed, nothing to verify.\n")
+	}
+	fmt.Printf("========================================\n")
 }
