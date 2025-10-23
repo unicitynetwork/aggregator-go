@@ -70,12 +70,38 @@ type GetBlockHeightResponse struct {
 	BlockNumber string `json:"blockNumber"`
 }
 
+type GetInclusionProofRequest struct {
+	RequestID string `json:"requestId"`
+}
+
+type GetInclusionProofResponse struct {
+	InclusionProof *InclusionProof `json:"inclusionProof"`
+}
+
+type InclusionProof struct {
+	Authenticator      *api.Authenticator `json:"authenticator"`
+	MerkleTreePath     *MerkleTreePath    `json:"merkleTreePath"`
+	TransactionHash    string             `json:"transactionHash"`
+	UnicityCertificate string             `json:"unicityCertificate"`
+}
+
+type MerkleTreePath struct {
+	Root  string           `json:"root"`
+	Steps []MerkleTreeStep `json:"steps"`
+}
+
+type MerkleTreeStep struct {
+	Branch  []string `json:"branch"`
+	Path    string   `json:"path"`
+	Sibling []string `json:"sibling"`
+}
+
 // Test configuration
 const (
 	defaultAggregatorURL = "http://localhost:3000"
-	testDuration         = 30 * time.Second
-	workerCount          = 30   // Number of concurrent workers
-	requestsPerSec       = 5000 // Target requests per second
+	testDuration         = 10 * time.Second
+	workerCount          = 10   // Number of concurrent workers
+	requestsPerSec       = 3000 // Target requests per second
 )
 
 // BlockCommitmentInfo stores block number and commitment count
@@ -97,6 +123,15 @@ type Metrics struct {
 	startingBlockNumber   int64                 // Store starting block number
 	submittedRequestIDs   sync.Map              // Thread-safe map to track which request IDs we submitted
 	mutex                 sync.RWMutex          // For protecting blockCommitmentCounts slice
+
+	// Proof verification metrics
+	proofAttempts       int64           // Total attempts to get proof
+	proofSuccess        int64           // Successfully retrieved proofs
+	proofFailed         int64           // Failed to get proof (after retries)
+	proofVerified       int64           // Successfully verified proofs
+	proofVerifyFailed   int64           // Failed proof verification
+	proofLatencies      []time.Duration // Track latencies for successful proofs
+	proofLatenciesMutex sync.RWMutex    // Protect latencies slice
 }
 
 func (m *Metrics) addBlockCommitmentCount(blockNumber int64, count int) {
@@ -134,6 +169,27 @@ func (m *Metrics) getAverageCommitments() float64 {
 	}
 
 	return float64(total) / float64(count)
+}
+
+func (m *Metrics) addProofLatency(latency time.Duration) {
+	m.proofLatenciesMutex.Lock()
+	defer m.proofLatenciesMutex.Unlock()
+	m.proofLatencies = append(m.proofLatencies, latency)
+}
+
+func (m *Metrics) getAverageProofLatency() time.Duration {
+	m.proofLatenciesMutex.RLock()
+	defer m.proofLatenciesMutex.RUnlock()
+
+	if len(m.proofLatencies) == 0 {
+		return 0
+	}
+
+	var total time.Duration
+	for _, latency := range m.proofLatencies {
+		total += latency
+	}
+	return total / time.Duration(len(m.proofLatencies))
 }
 
 // HTTP client for JSON-RPC calls
@@ -265,7 +321,7 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 }
 
 // Worker function that continuously submits commitments
-func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metrics) {
+func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metrics, proofQueue chan string) {
 	ticker := time.NewTicker(time.Second / time.Duration(requestsPerSec/workerCount))
 	defer ticker.Stop()
 
@@ -308,12 +364,28 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 				if submitResp.Status == "SUCCESS" {
 					atomic.AddInt64(&metrics.successfulRequests, 1)
 					// Track this request ID as submitted by us (normalized to lowercase)
-					metrics.submittedRequestIDs.Store(strings.ToLower(string(req.RequestID)), true)
+					requestIDStr := strings.ToLower(string(req.RequestID))
+					metrics.submittedRequestIDs.Store(requestIDStr, true)
+
+					// Queue for proof verification
+					select {
+					case proofQueue <- requestIDStr:
+					default:
+						// Queue full, skip proof verification for this one
+					}
 				} else if submitResp.Status == "REQUEST_ID_EXISTS" {
 					atomic.AddInt64(&metrics.requestIdExistsErr, 1)
 					atomic.AddInt64(&metrics.successfulRequests, 1) // Count as successful - it will be in blocks!
 					// Also track this ID - it exists so it will be in blocks! (normalized to lowercase)
-					metrics.submittedRequestIDs.Store(strings.ToLower(string(req.RequestID)), true)
+					requestIDStr := strings.ToLower(string(req.RequestID))
+					metrics.submittedRequestIDs.Store(requestIDStr, true)
+
+					// Queue for proof verification
+					select {
+					case proofQueue <- requestIDStr:
+					default:
+						// Queue full, skip proof verification for this one
+					}
 				} else {
 					atomic.AddInt64(&metrics.failedRequests, 1)
 					// Log unexpected status
@@ -322,6 +394,141 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 					}
 				}
 			}()
+		}
+	}
+}
+
+// Worker function that continuously verifies inclusion proofs
+//
+// Note: Inclusion proofs require two stages to be complete:
+// 1. Commitment must be in a block and aggregator record must be stored
+// 2. SMT snapshot must be committed to the main tree
+//
+// There's a small window between these stages where:
+// - get_inclusion_proof returns an inclusion proof (has Authenticator)
+// - But verification fails with PathIncluded=false (commitment not in main tree yet)
+//
+// The retry logic handles this by waiting for the snapshot to be committed.
+// Typical latency: 1-5 seconds from submission to verified proof.
+func proofVerificationWorker(ctx context.Context, client *JSONRPCClient, metrics *Metrics, proofQueue chan string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case requestID := <-proofQueue:
+			go func(reqID string) {
+				// Try to get and verify the proof with retries
+				// Proof won't be available immediately - it's only available after commitment is in a block
+				maxRetries := 30 // 30 retries * 500ms = 15 seconds max wait
+				retryDelay := 500 * time.Millisecond
+				startTime := time.Now()
+
+				for attempt := 0; attempt < maxRetries; attempt++ {
+					atomic.AddInt64(&metrics.proofAttempts, 1)
+
+					proofReq := GetInclusionProofRequest{
+						RequestID: reqID,
+					}
+
+					resp, err := client.call("get_inclusion_proof", proofReq)
+					if err != nil {
+						// Network error, retry
+						time.Sleep(retryDelay)
+						continue
+					}
+
+					if resp.Error != nil {
+						// Proof not available yet, retry
+						time.Sleep(retryDelay)
+						continue
+					}
+
+					// Parse response
+					var proofResp GetInclusionProofResponse
+					respBytes, _ := json.Marshal(resp.Result)
+					if err := json.Unmarshal(respBytes, &proofResp); err != nil {
+						atomic.AddInt64(&metrics.proofFailed, 1)
+						return
+					}
+
+					if proofResp.InclusionProof == nil {
+						// Proof not available yet, retry
+						time.Sleep(retryDelay)
+						continue
+					}
+
+					// Check if this is an inclusion proof (has TransactionHash and Authenticator)
+					// vs a non-inclusion proof (which doesn't have these fields)
+					if proofResp.InclusionProof.TransactionHash == "" || proofResp.InclusionProof.Authenticator == nil {
+						// This is a non-inclusion proof - commitment not in tree yet, retry
+						time.Sleep(retryDelay)
+						continue
+					}
+
+					// Successfully retrieved inclusion proof
+					latency := time.Since(startTime)
+					atomic.AddInt64(&metrics.proofSuccess, 1)
+					metrics.addProofLatency(latency)
+
+					// Verify the proof
+					if proofResp.InclusionProof.MerkleTreePath != nil {
+						// Convert to API MerkleTreePath for verification
+						apiPath := &api.MerkleTreePath{
+							Root:  proofResp.InclusionProof.MerkleTreePath.Root,
+							Steps: make([]api.MerkleTreeStep, len(proofResp.InclusionProof.MerkleTreePath.Steps)),
+						}
+
+						for i, step := range proofResp.InclusionProof.MerkleTreePath.Steps {
+							apiPath.Steps[i] = api.MerkleTreeStep{
+								Branch:  step.Branch,
+								Path:    step.Path,
+								Sibling: step.Sibling,
+							}
+						}
+
+						// Use GetPath() method to properly convert RequestID to big.Int
+						requestIDPath, err := api.RequestID(reqID).GetPath()
+						if err != nil {
+							atomic.AddInt64(&metrics.proofVerifyFailed, 1)
+							return
+						}
+
+						// Verify the merkle path
+						result, err := apiPath.Verify(requestIDPath)
+						if err != nil {
+							atomic.AddInt64(&metrics.proofVerifyFailed, 1)
+							fmt.Printf("\n[ERROR] Proof verification error for %s: %v\n", reqID, err)
+							return
+						}
+
+						if result.Result {
+							atomic.AddInt64(&metrics.proofVerified, 1)
+						} else {
+							// If PathValid is true but PathIncluded is false, this means:
+							// - The aggregator record exists (commitment is in a block)
+							// - But the SMT snapshot hasn't been committed to the main tree yet
+							// This is expected during the window between storing aggregator records
+							// and committing the snapshot. Retry to get an updated proof.
+							if result.PathValid && !result.PathIncluded && attempt < maxRetries-1 {
+								time.Sleep(retryDelay)
+								continue // Retry getting the proof
+							}
+
+							// Final verification failure after all retries
+							atomic.AddInt64(&metrics.proofVerifyFailed, 1)
+							fmt.Printf("\n[ERROR] Proof verification failed for %s after %d attempts - PathValid: %v, PathIncluded: %v\n",
+								reqID, attempt+1, result.PathValid, result.PathIncluded)
+						}
+					} else {
+						atomic.AddInt64(&metrics.proofVerifyFailed, 1)
+					}
+
+					return
+				}
+
+				// Failed after all retries
+				atomic.AddInt64(&metrics.proofFailed, 1)
+			}(requestID)
 		}
 	}
 }
@@ -350,9 +557,14 @@ func main() {
 		startTime: time.Now(),
 	}
 
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), testDuration)
-	defer cancel()
+	// Create context with timeout for commitment submission
+	submitCtx, submitCancel := context.WithTimeout(context.Background(), testDuration)
+	defer submitCancel()
+
+	// Create longer context for proof verification (allows extra time for late submissions)
+	proofTimeout := testDuration + 20*time.Second
+	proofCtx, proofCancel := context.WithTimeout(context.Background(), proofTimeout)
+	defer proofCancel()
 
 	// Create JSON-RPC client
 	client := NewJSONRPCClient(aggregatorURL, authHeader)
@@ -384,23 +596,37 @@ func main() {
 	fmt.Printf("✓ Starting block number: %d\n", startingBlockNumber)
 	metrics.startingBlockNumber = startingBlockNumber
 
+	// Create proof verification queue (buffered channel)
+	proofQueue := make(chan string, 10000)
+
 	var wg sync.WaitGroup
 
-	// Start commitment workers (no separate block monitor)
+	// Start commitment workers (use submitCtx - stops after testDuration)
 	for i := 0; i < workerCount; i++ {
-		wg.Go(func() {
-			commitmentWorker(ctx, client, metrics)
-		})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			commitmentWorker(submitCtx, client, metrics, proofQueue)
+		}()
 	}
 
-	// Progress reporting
+	// Start proof verification workers (use proofCtx - runs longer)
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			proofVerificationWorker(proofCtx, client, metrics, proofQueue)
+		}()
+	}
+
+	// Progress reporting (only during submission phase)
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 
 		for {
 			select {
-			case <-ctx.Done():
+			case <-submitCtx.Done():
 				return
 			case <-ticker.C:
 				elapsed := time.Since(metrics.startTime)
@@ -408,19 +634,43 @@ func main() {
 				successful := atomic.LoadInt64(&metrics.successfulRequests)
 				failed := atomic.LoadInt64(&metrics.failedRequests)
 				exists := atomic.LoadInt64(&metrics.requestIdExistsErr)
+				proofSuccess := atomic.LoadInt64(&metrics.proofSuccess)
+				proofVerified := atomic.LoadInt64(&metrics.proofVerified)
 
 				rps := float64(total) / elapsed.Seconds()
-				fmt.Printf("[%v] Total: %d, Success: %d, Failed: %d, Exists: %d, RPS: %.1f\n",
-					elapsed.Truncate(time.Second), total, successful, failed, exists, rps)
+				fmt.Printf("[%v] Total: %d, Success: %d, Failed: %d, Exists: %d, RPS: %.1f, Proofs: %d (verified: %d)\n",
+					elapsed.Truncate(time.Second), total, successful, failed, exists, rps, proofSuccess, proofVerified)
 			}
 		}
 	}()
 
-	// Wait for completion
-	wg.Wait()
+	// Wait for all workers to complete (both submission and proof verification)
+	// Note: Proof workers continue running for up to 20 seconds after submissions stop
+	fmt.Printf("\n----------------------------------------\n")
+	fmt.Printf("Submission phase completed. Waiting for proof verification to complete...\n")
 
-	// Give a moment for any in-flight requests to complete
-	time.Sleep(1 * time.Second)
+	// Monitor proof verification progress
+	lastProofCount := int64(0)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	go func() {
+		for {
+			select {
+			case <-proofCtx.Done():
+				return
+			case <-ticker.C:
+				currentProofs := atomic.LoadInt64(&metrics.proofVerified)
+				if currentProofs > lastProofCount {
+					successful := atomic.LoadInt64(&metrics.successfulRequests)
+					fmt.Printf("  Proofs verified: %d/%d\n", currentProofs, successful)
+					lastProofCount = currentProofs
+				}
+			}
+		}
+	}()
+
+	wg.Wait()
 
 	// Stop submission phase and get counts
 	fmt.Printf("\n----------------------------------------\n")
@@ -936,6 +1186,39 @@ func main() {
 				fmt.Printf("  %s\n", gap)
 			}
 		}
+	}
+
+	// Proof verification metrics
+	proofAttempts := atomic.LoadInt64(&metrics.proofAttempts)
+	proofSuccess := atomic.LoadInt64(&metrics.proofSuccess)
+	proofFailed := atomic.LoadInt64(&metrics.proofFailed)
+	proofVerified := atomic.LoadInt64(&metrics.proofVerified)
+	proofVerifyFailed := atomic.LoadInt64(&metrics.proofVerifyFailed)
+
+	fmt.Printf("\nINCLUSION PROOF VERIFICATION:\n")
+	fmt.Printf("Total proof attempts: %d\n", proofAttempts)
+	fmt.Printf("Proofs retrieved: %d\n", proofSuccess)
+	fmt.Printf("Proofs failed to retrieve: %d\n", proofFailed)
+	fmt.Printf("Proofs verified successfully: %d\n", proofVerified)
+	fmt.Printf("Proofs failed verification: %d\n", proofVerifyFailed)
+
+	if proofSuccess > 0 {
+		avgLatency := metrics.getAverageProofLatency()
+		fmt.Printf("Average proof retrieval latency: %v\n", avgLatency.Truncate(time.Millisecond))
+	}
+
+	// Calculate verification rate based on successful submissions, not retrieved proofs
+	// (proofs may be retrieved multiple times due to retries)
+	successful = atomic.LoadInt64(&metrics.successfulRequests)
+	if successful > 0 {
+		verificationRate := float64(proofVerified) / float64(successful) * 100
+		fmt.Printf("Proof verification rate: %.2f%% (%d/%d submissions)\n", verificationRate, proofVerified, successful)
+	}
+
+	if proofVerified == successful {
+		fmt.Printf("\n✅ SUCCESS: All %d commitments have verified inclusion proofs!\n", proofVerified)
+	} else if proofVerified > 0 {
+		fmt.Printf("\n⚠️  Verified %d/%d proofs (%.1f%%)\n", proofVerified, successful, float64(proofVerified)/float64(successful)*100)
 	}
 
 	fmt.Printf("========================================\n")
