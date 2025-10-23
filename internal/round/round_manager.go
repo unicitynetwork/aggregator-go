@@ -392,7 +392,11 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 
 	// Initialize commitments slice for this round
 	// Note: Any commitments consumed from the channel MUST be processed in this round
-	rm.currentRound.Commitments = make([]*models.Commitment, 0, 10000) // Larger pre-allocation for high throughput
+	capacity := 10000 // Default capacity
+	if rm.config.Processing.MaxCommitmentsPerRound > 0 {
+		capacity = rm.config.Processing.MaxCommitmentsPerRound
+	}
+	rm.currentRound.Commitments = make([]*models.Commitment, 0, capacity)
 
 	// Calculate adaptive processing deadline based on historical data
 	processingDuration := time.Duration(float64(rm.roundDuration) * rm.processingRatio)
@@ -419,6 +423,19 @@ ProcessLoop:
 			rm.roundMutex.Lock()
 			rm.currentRound.Commitments = append(rm.currentRound.Commitments, commitment)
 			commitmentsProcessed++
+			currentLen := len(rm.currentRound.Commitments)
+
+			// Process in mini-batches for SMT efficiency
+			if currentLen%100 == 0 {
+				batchStart := time.Now()
+				batchSlice := rm.currentRound.Commitments[len(rm.currentRound.Commitments)-100:]
+				if err := rm.processMiniBatch(ctx, batchSlice); err != nil {
+					rm.logger.WithContext(ctx).Error("Failed to process mini-batch",
+						"error", err.Error(),
+						"roundNumber", roundNumber.String())
+				}
+				smtUpdateTime += time.Since(batchStart)
+			}
 
 			// Check if we've reached the configured cap
 			if rm.config.Processing.MaxCommitmentsPerRound > 0 && commitmentsProcessed >= rm.config.Processing.MaxCommitmentsPerRound {
@@ -430,17 +447,6 @@ ProcessLoop:
 				break ProcessLoop
 			}
 
-			// Process in mini-batches for SMT efficiency
-			if len(rm.currentRound.Commitments)%100 == 0 {
-				// Process this mini-batch into SMT
-				batchStart := time.Now()
-				if err := rm.processMiniBatch(ctx, rm.currentRound.Commitments[len(rm.currentRound.Commitments)-100:]); err != nil {
-					rm.logger.WithContext(ctx).Error("Failed to process mini-batch",
-						"error", err.Error(),
-						"roundNumber", roundNumber.String())
-				}
-				smtUpdateTime += time.Since(batchStart)
-			}
 			rm.roundMutex.Unlock()
 
 		case <-ctx.Done():
@@ -554,10 +560,12 @@ ProcessLoop:
 	rm.totalRounds++
 	rm.totalCommitments += int64(len(rm.currentRound.Commitments))
 
+	roundTotalTime := time.Since(rm.currentRound.StartTime)
 	rm.logger.WithContext(ctx).Info("Round processing completed successfully",
 		"roundNumber", roundNumber.String(),
-		"totalRounds", rm.totalRounds,
-		"totalCommitments", rm.totalCommitments)
+		"commitments", len(rm.currentRound.Commitments),
+		"roundTotalTime", roundTotalTime,
+		"processingTime", processingTime)
 
 	return nil
 }
