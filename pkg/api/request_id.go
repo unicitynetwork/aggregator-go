@@ -6,9 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/bsontype"
 )
 
 type RequestID = ImprintHexString
@@ -120,25 +117,4 @@ func ValidateRequestID(requestID RequestID, publicKey []byte, stateHashBytes []b
 	}
 
 	return requestID == expectedRequestID, nil
-}
-
-// MarshalBSONValue implements bson.ValueMarshaler for ImprintHexString
-func (r ImprintHexString) MarshalBSONValue() (bsontype.Type, []byte, error) {
-	return bson.MarshalValue(string(r))
-}
-
-// UnmarshalBSONValue implements bson.ValueUnmarshaler for ImprintHexString
-func (r *ImprintHexString) UnmarshalBSONValue(bsonType bsontype.Type, data []byte) error {
-	var s string
-	err := bson.UnmarshalValue(bsonType, data, &s)
-	if err != nil {
-		return err
-	}
-
-	id, err := NewImprintHexString(s)
-	if err != nil {
-		return err
-	}
-	*r = id
-	return nil
 }

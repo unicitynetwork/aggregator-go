@@ -5,9 +5,15 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 func TestBackwardCompatibility(t *testing.T) {
+	blockNumber, err := primitive.ParseDecimal128("100")
+	require.NoError(t, err)
+	leafIndex, err := primitive.ParseDecimal128("4")
+	require.NoError(t, err)
+
 	t.Run("FromBSON defaults AggregateRequestCount to 1 when missing", func(t *testing.T) {
 		// Simulate an old record without AggregateRequestCount
 		bsonRecord := &AggregatorRecordBSON{
@@ -20,8 +26,8 @@ func TestBackwardCompatibility(t *testing.T) {
 				StateHash: "0000cd60",
 			},
 			// AggregateRequestCount is intentionally not set (will be 0)
-			BlockNumber: "100",
-			LeafIndex:   "5",
+			BlockNumber: blockNumber,
+			LeafIndex:   leafIndex,
 			CreatedAt:   time.UnixMilli(1700000000000),
 			FinalizedAt: time.UnixMilli(1700000001000),
 		}
@@ -46,8 +52,8 @@ func TestBackwardCompatibility(t *testing.T) {
 				StateHash: "0000cd60",
 			},
 			AggregateRequestCount: 500,
-			BlockNumber:           "100",
-			LeafIndex:             "5",
+			BlockNumber:           blockNumber,
+			LeafIndex:             leafIndex,
 			CreatedAt:             time.UnixMilli(1700000000000),
 			FinalizedAt:           time.UnixMilli(1700000001000),
 		}
