@@ -28,7 +28,8 @@ func TestMerkleTreePathVerify(t *testing.T) {
 		err := tree.AddLeaves([]*smt.Leaf{leaf})
 		require.NoError(t, err)
 
-		path := tree.GetPath(big.NewInt(42))
+		path, err := tree.GetPath(big.NewInt(42))
+		require.NoError(t, err)
 		require.NotNil(t, path)
 
 		result, err := path.Verify(big.NewInt(42))
@@ -49,7 +50,8 @@ func TestMerkleTreePathVerify(t *testing.T) {
 
 		// Verify both paths
 		for _, leafPath := range []int64{10, 12} {
-			path := tree.GetPath(big.NewInt(leafPath))
+			path, err := tree.GetPath(big.NewInt(leafPath))
+			require.NoError(t, err)
 			require.NotNil(t, path)
 
 			result, err := path.Verify(big.NewInt(leafPath))
@@ -75,7 +77,8 @@ func TestMerkleTreePathVerify(t *testing.T) {
 
 		// Verify each path
 		for _, p := range paths {
-			path := tree.GetPath(big.NewInt(0x1000000000000 + p))
+			path, err := tree.GetPath(big.NewInt(0x1000000000000 + p))
+			require.NoError(t, err)
 			require.NotNil(t, path)
 
 			result, err := path.Verify(big.NewInt(0x1000000000000 + p))
@@ -101,7 +104,8 @@ func TestMerkleTreePathVerify(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify transfer path
-		path := tree.GetPath(transferPath)
+		path, err := tree.GetPath(transferPath)
+		require.NoError(t, err)
 		require.NotNil(t, path)
 
 		result, err := path.Verify(transferPath)
@@ -110,7 +114,8 @@ func TestMerkleTreePathVerify(t *testing.T) {
 		require.True(t, result.PathValid, "Transfer path should be valid")
 
 		// Verify mint path
-		pathMint := tree.GetPath(mintPath)
+		pathMint, err := tree.GetPath(mintPath)
+		require.NoError(t, err)
 		require.NotNil(t, pathMint)
 
 		resultMint, err := pathMint.Verify(mintPath)
@@ -132,7 +137,8 @@ func TestMerkleTreePathVerify(t *testing.T) {
 		// a valid path showing where that leaf would be inserted. Since leaf 1000 goes
 		// left (bit 0 = 0) and 999 would go right (bit 0 = 1), we get a path to the
 		// empty right branch with the left subtree as sibling.
-		path := tree.GetPath(big.NewInt(999))
+		path, err := tree.GetPath(big.NewInt(999))
+		require.NoError(t, err)
 		require.NotNil(t, path)
 
 		// When we verify this path with requestId 999:
@@ -155,7 +161,8 @@ func TestMerkleTreePathVerify(t *testing.T) {
 		require.NoError(t, err)
 
 		// Get path for 5
-		path5 := tree.GetPath(big.NewInt(0x1000 + 5))
+		path5, err := tree.GetPath(big.NewInt(0x1000 + 5))
+		require.NoError(t, err)
 
 		// Try to verify with wrong requestId
 		result, err := path5.Verify(big.NewInt(0x1000 + 15))
@@ -192,7 +199,8 @@ func TestMerkleTreePathVerify(t *testing.T) {
 				require.NoError(t, err)
 
 				for _, p := range tc.paths {
-					path := tree.GetPath(big.NewInt(p))
+					path, err := tree.GetPath(big.NewInt(p))
+					require.NoError(t, err)
 					result, err := path.Verify(big.NewInt(p))
 					require.NoError(t, err)
 					require.True(t, result.PathIncluded && result.PathValid,
@@ -229,13 +237,15 @@ func TestMerkleTreePathVerify(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify paths
-		treePath1 := tree.GetPath(path1)
+		treePath1, err := tree.GetPath(path1)
+		require.NoError(t, err)
 		result1, err := treePath1.Verify(path1)
 		require.NoError(t, err)
 		require.True(t, result1.PathIncluded && result1.PathValid,
 			"RequestID1 path should be valid")
 
-		treePath2 := tree.GetPath(path2)
+		treePath2, err := tree.GetPath(path2)
+		require.NoError(t, err)
 		result2, err := treePath2.Verify(path2)
 		require.NoError(t, err)
 		require.True(t, result2.PathIncluded && result2.PathValid,
@@ -253,7 +263,8 @@ func TestMerkleTreePathVerify(t *testing.T) {
 
 			// Verify all previously added leaves still work
 			for j := int64(1); j <= i; j++ {
-				path := tree.GetPath(big.NewInt(0x100000 + j*100))
+				path, err := tree.GetPath(big.NewInt(0x100000 + j*100))
+				require.NoError(t, err)
 				result, err := path.Verify(big.NewInt(0x100000 + j*100))
 				require.NoError(t, err)
 				require.True(t, result.PathIncluded && result.PathValid,
@@ -317,7 +328,8 @@ func TestMerkleTreePathVerifyDuplicates(t *testing.T) {
 	require.Error(t, err)
 
 	// Verify the original value is still there
-	path := tree.GetPath(big.NewInt(100))
+	path, err := tree.GetPath(big.NewInt(100))
+	require.NoError(t, err)
 	result, err := path.Verify(big.NewInt(100))
 	require.NoError(t, err)
 	require.True(t, result.PathIncluded && result.PathValid,
@@ -343,7 +355,8 @@ func TestMerkleTreePathVerifyAlternateAlgorithm(t *testing.T) {
 			require.Equal(t, root[:4], fmt.Sprintf("%04x", algo))
 
 			for _, leaf := range leaves {
-				path := tree.GetPath(leaf.Path)
+				path, err := tree.GetPath(leaf.Path)
+				require.NoError(t, err)
 				require.Equal(t, root, path.Root)
 				res, err := path.Verify(leaf.Path)
 				require.NoError(t, err)

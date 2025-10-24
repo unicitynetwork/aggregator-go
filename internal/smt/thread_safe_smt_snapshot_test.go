@@ -167,7 +167,8 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 		assert.Equal(t, value, leaf.Value, "Retrieved leaf value should match")
 
 		// Test path generation on original SMT
-		merkleTreePath := threadSafeSMT.GetPath(path)
+		merkleTreePath, err := threadSafeSMT.GetPath(path)
+		require.NoError(t, err)
 		assert.NotNil(t, merkleTreePath, "Should be able to get Merkle tree path from original SMT")
 		assert.NotEmpty(t, merkleTreePath.Root, "Root should not be empty")
 		assert.NotEmpty(t, merkleTreePath.Steps, "Steps should not be empty")
