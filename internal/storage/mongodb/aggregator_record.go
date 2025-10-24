@@ -29,9 +29,11 @@ func NewAggregatorRecordStorage(db *mongo.Database) *AggregatorRecordStorage {
 
 // Store stores a new aggregator record
 func (ars *AggregatorRecordStorage) Store(ctx context.Context, record *models.AggregatorRecord) error {
-	recordBSON := record.ToBSON()
-	_, err := ars.collection.InsertOne(ctx, recordBSON)
+	recordBSON, err := record.ToBSON()
 	if err != nil {
+		return fmt.Errorf("failed to marshal aggregator record to BSON: %w", err)
+	}
+	if _, err := ars.collection.InsertOne(ctx, recordBSON); err != nil {
 		return fmt.Errorf("failed to store aggregator record: %w", err)
 	}
 	return nil
@@ -43,13 +45,17 @@ func (ars *AggregatorRecordStorage) StoreBatch(ctx context.Context, records []*m
 		return nil
 	}
 
+	var err error
 	documents := make([]interface{}, len(records))
 	for i, record := range records {
-		documents[i] = record.ToBSON()
+		documents[i], err = record.ToBSON()
+		if err != nil {
+			return fmt.Errorf("failed to marshal aggregator record to BSON: %w", err)
+		}
 	}
 
 	opts := options.InsertMany().SetOrdered(false)
-	_, err := ars.collection.InsertMany(ctx, documents, opts)
+	_, err = ars.collection.InsertMany(ctx, documents, opts)
 	if err != nil {
 		if mongo.IsDuplicateKeyError(err) {
 			return nil
