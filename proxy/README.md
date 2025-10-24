@@ -51,8 +51,6 @@ Or edit the `docker-compose.yml` file to change the default email.
 
 ### 3. Deploy Everything
 
-That's it! Just run:
-
 ```bash
 docker compose up -d
 ```
@@ -65,6 +63,23 @@ The system will automatically:
 5. ✅ Begin automatic renewal checks every 12 hours
 
 **First startup takes 2-3 minutes** (certificate acquisition + DH param generation).
+
+### 4. Setup User Authentication (Optional - for /logs endpoint)
+
+If you want to access Dozzle logs via `/logs`:
+
+```bash
+# Copy the example users file
+cp proxy/haproxy/users.cfg.example proxy/haproxy/users.cfg
+
+# Add your admin user
+./proxy/update-user.sh admin "YourSecurePassword"
+
+# Reload HAProxy (graceful, no restart needed)
+docker exec proxy-haproxy kill -SIGUSR2 1
+```
+
+**Note:** HAProxy will start successfully with an empty userlist, but `/logs` will return 401 Unauthorized until you add users.
 
 ## Verification
 
@@ -172,6 +187,79 @@ docker volume rm proxy_letsencrypt_certs
 # Restart (will get new certificates)
 docker compose up -d
 ```
+
+## Dozzle Log Viewer Access
+
+The `/logs` endpoint provides access to Dozzle (Docker log viewer) with password protection.
+
+**Access URL:** `https://goggregator-test.unicity.network/logs`
+
+### Initial Setup
+
+**IMPORTANT:** `users.cfg` is gitignored and must be created locally before deploying.
+
+```bash
+# 1. Copy the example file
+cp proxy/haproxy/users.cfg.example proxy/haproxy/users.cfg
+
+# 2. Add your first user
+./proxy/update-user.sh admin "YourSecurePassword"
+
+# 3. Verify users are configured
+cat proxy/haproxy/users.cfg
+
+# 4. Then deploy
+docker compose -f proxy/docker-compose.yml up -d
+```
+
+
+### Changing Dozzle Password (Easy Method)
+
+Use the helper script:
+
+```bash
+./proxy/update-user.sh admin "YourNewPassword"
+```
+
+Then reload HAProxy:
+```bash
+docker exec proxy-haproxy kill -SIGUSR2 1
+```
+
+### Adding More Users
+
+```bash
+./proxy/update-user.sh developer "dev@2025"
+./proxy/update-user.sh viewer "view@2025"
+```
+
+Then reload HAProxy:
+```bash
+docker exec proxy-haproxy kill -SIGUSR2 1
+```
+
+### Manual Method
+
+If you prefer to edit manually:
+
+1. Generate password hash:
+   ```bash
+   ./proxy/generate-password-hash.sh "YourPassword"
+   ```
+
+2. Edit `proxy/haproxy/users.cfg` and add/update users:
+   ```
+   userlist dozzle_users
+       user admin password $6$...hash1...
+       user viewer password $6$...hash2...
+   ```
+
+3. Reload HAProxy (graceful, no downtime):
+   ```bash
+   docker exec proxy-haproxy kill -SIGUSR2 1
+   ```
+
+**Note:** Users are stored in `proxy/haproxy/users.cfg` - you never need to touch `haproxy.cfg`!
 
 ## Configuration
 

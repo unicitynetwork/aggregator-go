@@ -99,6 +99,7 @@ services:
         condition: service_healthy
     volumes:
       - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./haproxy/users.cfg:/usr/local/etc/haproxy/users.cfg:ro
       - letsencrypt_certs:/etc/letsencrypt:ro
 
   # Nginx serves ACME challenge files for certbot renewals

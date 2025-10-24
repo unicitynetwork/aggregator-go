@@ -6,3 +6,6 @@ aggregator.log
 /performance-test
 bft-config
 /data/
+
+# HAProxy user credentials (contains passwords)
+proxy/haproxy/users.cfg
