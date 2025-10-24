@@ -189,10 +189,11 @@ services:
       aggregator-2:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "nc", "-zv", "localhost", "3000"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8404/stats"]
       interval: 10s
       timeout: 5s
       retries: 3
+      start_period: 10s
 
   aggregator-1: &aggregator-base
     build:
