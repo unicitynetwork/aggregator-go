@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -13,6 +14,8 @@ import (
 	"github.com/unicitynetwork/bft-core/partition"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
+
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // Config represents the application configuration
@@ -25,6 +28,7 @@ type Config struct {
 	Logging    LoggingConfig    `mapstructure:"logging"`
 	BFT        BFTConfig        `mapstructure:"bft"`
 	Processing ProcessingConfig `mapstructure:"processing"`
+	Sharding   ShardingConfig   `mapstructure:"sharding"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -102,6 +106,93 @@ type StorageConfig struct {
 	RedisMaxBatchSize      int           `mapstructure:"redis_max_batch_size"`
 	RedisCleanupInterval   time.Duration `mapstructure:"redis_cleanup_interval"`
 	RedisMaxStreamLength   int64         `mapstructure:"redis_max_stream_length"`
+}
+
+// ShardingMode represents the aggregator operating mode
+type ShardingMode string
+
+const (
+	ShardingModeStandalone ShardingMode = "standalone"
+	ShardingModeParent     ShardingMode = "parent"
+	ShardingModeChild      ShardingMode = "child"
+)
+
+// String returns the string representation of the sharding mode
+func (sm ShardingMode) String() string {
+	return string(sm)
+}
+
+// IsValid returns true if the sharding mode is valid
+func (sm ShardingMode) IsValid() bool {
+	switch sm {
+	case ShardingModeStandalone, ShardingModeParent, ShardingModeChild:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsStandalone returns true if this is standalone mode
+func (sm ShardingMode) IsStandalone() bool {
+	return sm == ShardingModeStandalone
+}
+
+// IsParent returns true if this is parent mode
+func (sm ShardingMode) IsParent() bool {
+	return sm == ShardingModeParent
+}
+
+// IsChild returns true if this is child mode
+func (sm ShardingMode) IsChild() bool {
+	return sm == ShardingModeChild
+}
+
+// ShardingConfig holds sharding configuration
+type ShardingConfig struct {
+	Mode          ShardingMode `mapstructure:"mode"`            // Operating mode: standalone, parent, or child
+	ShardIDLength int          `mapstructure:"shard_id_length"` // Bit length for shard IDs (e.g., 4 bits = 16 shards)
+	Child         ChildConfig  `mapstructure:"child"`           // child aggregator config
+}
+
+type ChildConfig struct {
+	ParentRpcAddr      string        `mapstructure:"parent_rpc_addr"`
+	ShardID            api.ShardID   `mapstructure:"shard_id"`
+	RoundDuration      time.Duration `mapstructure:"round_duration"`
+	ParentPollTimeout  time.Duration `mapstructure:"parent_poll_timeout"`
+	ParentPollInterval time.Duration `mapstructure:"parent_poll_interval"`
+}
+
+func (c ShardingConfig) Validate() error {
+	if c.Mode == ShardingModeChild {
+		if err := c.Child.Validate(); err != nil {
+			return fmt.Errorf("invalid child mode configuration: %w", err)
+		}
+	}
+	if c.Mode == ShardingModeStandalone {
+		if c.Child.ShardID != 0 {
+			return errors.New("shard_id must be undefined in standalone mode")
+		}
+	}
+	return nil
+}
+
+func (c ChildConfig) Validate() error {
+	if c.ParentRpcAddr == "" {
+		return errors.New("parent rpc addr is required")
+	}
+	if c.ShardID == 0 {
+		return errors.New("shard id is required")
+	}
+	if c.RoundDuration == 0 {
+		return errors.New("round duration is required")
+	}
+	if c.ParentPollTimeout == 0 {
+		return errors.New("parent poll timeout is required")
+	}
+	if c.ParentPollInterval == 0 {
+		return errors.New("parent poll interval is required")
+	}
+	return nil
 }
 
 type BFTConfig struct {
@@ -183,6 +274,17 @@ func Load() (*Config, error) {
 			RedisCleanupInterval:   getEnvDurationOrDefault("REDIS_CLEANUP_INTERVAL", "5m"),
 			RedisMaxStreamLength:   int64(getEnvIntOrDefault("REDIS_MAX_STREAM_LENGTH", 1000000)),
 		},
+		Sharding: ShardingConfig{
+			Mode:          ShardingMode(getEnvOrDefault("SHARDING_MODE", "standalone")),
+			ShardIDLength: getEnvIntOrDefault("SHARD_ID_LENGTH", 4),
+			Child: ChildConfig{
+				ParentRpcAddr:      getEnvOrDefault("SHARDING_CHILD_PARENT_RPC_ADDR", "http://localhost:3009"),
+				ShardID:            getEnvIntOrDefault("SHARDING_CHILD_SHARD_ID", 0),
+				RoundDuration:      getEnvDurationOrDefault("SHARDING_CHILD_ROUND_DURATION", "1s"),
+				ParentPollTimeout:  getEnvDurationOrDefault("SHARDING_CHILD_PARENT_POLL_TIMEOUT", "5s"),
+				ParentPollInterval: getEnvDurationOrDefault("SHARDING_CHILD_PARENT_POLL_INTERVAL", "100ms"),
+			},
+		},
 	}
 	config.BFT = BFTConfig{
 		Enabled:                    getEnvBoolOrDefault("BFT_ENABLED", true),
@@ -246,6 +348,19 @@ func (c *Config) Validate() error {
 	validLevels := []string{"debug", "info", "warn", "error", "fatal", "panic"}
 	if !contains(validLevels, strings.ToLower(c.Logging.Level)) {
 		return fmt.Errorf("invalid log level: %s", c.Logging.Level)
+	}
+
+	// Validate sharding configuration
+	if !c.Sharding.Mode.IsValid() {
+		return fmt.Errorf("invalid sharding mode: %s, must be one of: standalone, parent, child", c.Sharding.Mode)
+	}
+
+	if c.Sharding.ShardIDLength < 1 || c.Sharding.ShardIDLength > 16 {
+		return fmt.Errorf("shard ID length must be between 1 and 16 bits, got: %d", c.Sharding.ShardIDLength)
+	}
+
+	if err := c.Sharding.Validate(); err != nil {
+		return fmt.Errorf("invalid sharding configuration: %w", err)
 	}
 
 	return nil

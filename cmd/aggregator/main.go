@@ -102,41 +102,50 @@ func main() {
 	// Create the shared state tracker for block sync height
 	stateTracker := state.NewSyncStateTracker()
 
-	// Create the Round Manager
-	roundManager, err := round.NewRoundManager(ctx, cfg, log, commitmentQueue, storageInstance, stateTracker)
+	// Create round manager based on sharding mode
+	roundManager, err := round.NewManager(ctx, cfg, log, commitmentQueue, storageInstance, stateTracker)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to create round manager", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
 	}
 
-	// Perform initial SMT restoration. This is required in all modes.
+	// Initialize round manager (SMT restoration, etc.)
 	if err := roundManager.Start(ctx); err != nil {
 		log.WithComponent("main").Error("Failed to start round manager", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
 	}
 
-	// Initialize HA Manager if enabled
+	// Initialize leader selector and HA Manager if enabled
+	var ls leaderSelector
 	var haManager *ha.HAManager
-	var leaderSelector *ha.LeaderElection
 	if cfg.HA.Enabled {
 		log.WithComponent("main").Info("High availability mode enabled")
-		leaderSelector = ha.NewLeaderElection(log, cfg.HA, storageInstance.LeadershipStorage())
-		leaderSelector.Start(ctx)
+		ls = ha.NewLeaderElection(log, cfg.HA, storageInstance.LeadershipStorage())
+		ls.Start(ctx)
 
-		haManager = ha.NewHAManager(log, roundManager, leaderSelector, storageInstance, roundManager.GetSMT(), stateTracker, cfg.Processing.RoundDuration)
+		// Disable block syncing for parent aggregator mode
+		// Parent mode uses state-based SMT (current shard roots) rather than history-based (commitment leaves)
+		disableBlockSync := cfg.Sharding.Mode == config.ShardingModeParent
+		if disableBlockSync {
+			log.WithComponent("main").Info("Block syncing disabled for parent aggregator mode - SMT will be reconstructed on leadership transition")
+		}
+
+		haManager = ha.NewHAManager(log, roundManager, ls, storageInstance, roundManager.GetSMT(), cfg.Sharding.Child.ShardID, stateTracker, cfg.Processing.RoundDuration, disableBlockSync)
 		haManager.Start(ctx)
-
 	} else {
 		log.WithComponent("main").Info("High availability mode is disabled, running as standalone leader")
-		// In non-HA mode, the node is always the leader, so activate it directly.
+		// In non-HA mode, activate the round manager directly
 		if err := roundManager.Activate(ctx); err != nil {
 			log.WithComponent("main").Error("Failed to activate round manager", "error", err.Error())
 			gracefulExit(asyncLogger, 1)
 		}
 	}
 
-	// Initialize service
-	aggregatorService := service.NewAggregatorService(cfg, log, roundManager, commitmentQueue, storageInstance, leaderSelector)
+	aggregatorService, err := service.NewService(ctx, cfg, log, roundManager, commitmentQueue, storageInstance, ls)
+	if err != nil {
+		log.WithComponent("main").Error("Failed to create service", "error", err.Error())
+		gracefulExit(asyncLogger, 1)
+	}
 
 	// Initialize gateway server
 	server := gateway.NewServer(cfg, log, aggregatorService)
@@ -166,17 +175,19 @@ func main() {
 		log.WithComponent("main").Error("Failed to stop server gracefully", "error", err.Error())
 	}
 
-	// Stop round manager
-	roundManager.Stop(shutdownCtx)
-
-	// Stop leader selector if it was started
-	if leaderSelector != nil {
-		leaderSelector.Stop(shutdownCtx)
-	}
-
 	// Stop HA Manager if it was started
 	if haManager != nil {
 		haManager.Stop()
+	}
+
+	// Stop leader selector if it was started
+	if ls != nil {
+		ls.Stop(shutdownCtx)
+	}
+
+	// Stop round manager
+	if err := roundManager.Stop(shutdownCtx); err != nil {
+		log.WithComponent("main").Error("Failed to stop round manager gracefully", "error", err.Error())
 	}
 
 	// Close storage backends
@@ -193,4 +204,10 @@ func main() {
 	if asyncLogger != nil {
 		asyncLogger.Stop()
 	}
+}
+
+type leaderSelector interface {
+	IsLeader(ctx context.Context) (bool, error)
+	Start(ctx context.Context)
+	Stop(ctx context.Context)
 }

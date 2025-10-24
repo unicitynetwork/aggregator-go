@@ -65,7 +65,7 @@ func (tss *ThreadSafeSmtSnapshot) GetRootHash() string {
 	return tss.snapshot.GetRootHashHex()
 }
 
-func (tss *ThreadSafeSmtSnapshot) GetPath(path *big.Int) *api.MerkleTreePath {
+func (tss *ThreadSafeSmtSnapshot) GetPath(path *big.Int) (*api.MerkleTreePath, error) {
 	tss.rwMux.RLock()
 	defer tss.rwMux.RUnlock()
 

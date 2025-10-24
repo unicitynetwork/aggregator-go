@@ -1,20 +1,19 @@
-package models_test
+package models
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/unicitynetwork/aggregator-go/internal/models"
 )
 
 func TestBackwardCompatibility(t *testing.T) {
 	t.Run("FromBSON defaults AggregateRequestCount to 1 when missing", func(t *testing.T) {
 		// Simulate an old record without AggregateRequestCount
-		bsonRecord := &models.AggregatorRecordBSON{
+		bsonRecord := &AggregatorRecordBSON{
 			RequestID:       "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
 			TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
-			Authenticator: models.AuthenticatorBSON{
+			Authenticator: AuthenticatorBSON{
 				Algorithm: "secp256k1",
 				PublicKey: "02345678",
 				Signature: "abcdef12",
@@ -23,8 +22,8 @@ func TestBackwardCompatibility(t *testing.T) {
 			// AggregateRequestCount is intentionally not set (will be 0)
 			BlockNumber: "100",
 			LeafIndex:   "5",
-			CreatedAt:   "1700000000000",
-			FinalizedAt: "1700000001000",
+			CreatedAt:   time.UnixMilli(1700000000000),
+			FinalizedAt: time.UnixMilli(1700000001000),
 		}
 
 		record, err := bsonRecord.FromBSON()
@@ -37,10 +36,10 @@ func TestBackwardCompatibility(t *testing.T) {
 
 	t.Run("FromBSON preserves AggregateRequestCount when present", func(t *testing.T) {
 		// New record with AggregateRequestCount
-		bsonRecord := &models.AggregatorRecordBSON{
+		bsonRecord := &AggregatorRecordBSON{
 			RequestID:       "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
 			TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
-			Authenticator: models.AuthenticatorBSON{
+			Authenticator: AuthenticatorBSON{
 				Algorithm: "secp256k1",
 				PublicKey: "02345678",
 				Signature: "abcdef12",
@@ -49,8 +48,8 @@ func TestBackwardCompatibility(t *testing.T) {
 			AggregateRequestCount: 500,
 			BlockNumber:           "100",
 			LeafIndex:             "5",
-			CreatedAt:             "1700000000000",
-			FinalizedAt:           "1700000001000",
+			CreatedAt:             time.UnixMilli(1700000000000),
+			FinalizedAt:           time.UnixMilli(1700000001000),
 		}
 
 		record, err := bsonRecord.FromBSON()
@@ -63,7 +62,7 @@ func TestBackwardCompatibility(t *testing.T) {
 
 	t.Run("TotalCommitments calculation handles mixed old and new records", func(t *testing.T) {
 		// Simulate a mix of old and new records
-		records := []*models.AggregatorRecord{
+		records := []*AggregatorRecord{
 			// Old record (would have AggregateRequestCount = 0, treated as 1)
 			{AggregateRequestCount: 1},
 			// New records with explicit counts
