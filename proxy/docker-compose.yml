@@ -106,7 +106,7 @@ services:
       - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
       - ./haproxy/docker-entrypoint.sh:/docker-entrypoint.sh:ro
       - letsencrypt_certs:/etc/letsencrypt:ro
-    entrypoint: ["/docker-entrypoint.sh"]
+    entrypoint: ["/bin/sh", "/docker-entrypoint.sh"]
 
   # Nginx serves ACME challenge files for certbot renewals
   nginx-acme:
