@@ -64,22 +64,28 @@ The system will automatically:
 
 **First startup takes 2-3 minutes** (certificate acquisition + DH param generation).
 
-### 4. Setup User Authentication (Optional - for /logs endpoint)
-
-If you want to access Dozzle logs via `/logs`:
+### 4. Setup Dozzle Password (Optional - for /logs endpoint)
 
 ```bash
-# Copy the example users file
-cp proxy/haproxy/users.cfg.example proxy/haproxy/users.cfg
+# Generate password hash for your desired password
+./proxy/generate-password-hash.sh "YourSecurePassword"
 
-# Add your admin user
-./proxy/update-user.sh admin "YourSecurePassword"
+# This outputs an export command - run it:
+export DOZZLE_PASSWORD_HASH='$6$...'
 
-# Reload HAProxy (graceful, no restart needed)
-docker exec proxy-haproxy kill -SIGUSR2 1
+# To make it persistent, add to .env file
+echo "DOZZLE_PASSWORD_HASH='$6$...'" > proxy/.env
 ```
 
-**Note:** HAProxy will start successfully with an empty userlist, but `/logs` will return 401 Unauthorized until you add users.
+Then restart if HAProxy is already running:
+```bash
+docker compose -f proxy/docker-compose.yml restart haproxy
+```
+
+**Access:**
+- URL: `https://goggregator-test.unicity.network/logs`
+- Username: `admin`
+- Password: Whatever you set above
 
 ## Verification
 
@@ -192,74 +198,22 @@ docker compose up -d
 
 The `/logs` endpoint provides access to Dozzle (Docker log viewer) with password protection.
 
-**Access URL:** `https://goggregator-test.unicity.network/logs`
+**Access:** `https://goggregator-test.unicity.network/logs`
+- Username: `admin`
+- Password: Set via `DOZZLE_PASSWORD_HASH` environment variable
 
-### Initial Setup
-
-**IMPORTANT:** `users.cfg` is gitignored and must be created locally before deploying.
-
-```bash
-# 1. Copy the example file
-cp proxy/haproxy/users.cfg.example proxy/haproxy/users.cfg
-
-# 2. Add your first user
-./proxy/update-user.sh admin "YourSecurePassword"
-
-# 3. Verify users are configured
-cat proxy/haproxy/users.cfg
-
-# 4. Then deploy
-docker compose -f proxy/docker-compose.yml up -d
-```
-
-
-### Changing Dozzle Password (Easy Method)
-
-Use the helper script:
+### Changing the Password
 
 ```bash
-./proxy/update-user.sh admin "YourNewPassword"
+# Generate new password hash
+./proxy/generate-password-hash.sh "YourNewPassword"
+
+# Update .env file
+echo "DOZZLE_PASSWORD_HASH='$6$...'" > proxy/.env
+
+# Restart HAProxy
+docker compose -f proxy/docker-compose.yml restart haproxy
 ```
-
-Then reload HAProxy:
-```bash
-docker exec proxy-haproxy kill -SIGUSR2 1
-```
-
-### Adding More Users
-
-```bash
-./proxy/update-user.sh developer "dev@2025"
-./proxy/update-user.sh viewer "view@2025"
-```
-
-Then reload HAProxy:
-```bash
-docker exec proxy-haproxy kill -SIGUSR2 1
-```
-
-### Manual Method
-
-If you prefer to edit manually:
-
-1. Generate password hash:
-   ```bash
-   ./proxy/generate-password-hash.sh "YourPassword"
-   ```
-
-2. Edit `proxy/haproxy/users.cfg` and add/update users:
-   ```
-   userlist dozzle_users
-       user admin password $6$...hash1...
-       user viewer password $6$...hash2...
-   ```
-
-3. Reload HAProxy (graceful, no downtime):
-   ```bash
-   docker exec proxy-haproxy kill -SIGUSR2 1
-   ```
-
-**Note:** Users are stored in `proxy/haproxy/users.cfg` - you never need to touch `haproxy.cfg`!
 
 ## Configuration
 

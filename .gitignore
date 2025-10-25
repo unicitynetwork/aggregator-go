@@ -7,5 +7,6 @@ aggregator.log
 bft-config
 /data/
 
-# HAProxy user credentials (contains passwords)
-proxy/haproxy/users.cfg
+# Environment files with secrets
+.env
+proxy/.env

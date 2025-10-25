@@ -97,9 +97,13 @@ services:
     depends_on:
       certbot:
         condition: service_healthy
+    environment:
+      # Password hash for admin user (used for /logs endpoint)
+      # Generate with: openssl passwd -6 "yourpassword"
+      # Then set: export DOZZLE_PASSWORD_HASH='$6$...'
+      - DOZZLE_PASSWORD_HASH=${DOZZLE_PASSWORD_HASH:-}
     volumes:
       - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-      - ./haproxy/users.cfg:/usr/local/etc/haproxy/users.cfg:ro
       - letsencrypt_certs:/etc/letsencrypt:ro
 
   # Nginx serves ACME challenge files for certbot renewals
