@@ -15,8 +15,8 @@ if [ -z "$DOZZLE_PASSWORD_HASH" ]; then
     echo "Set it with: ./proxy/generate-password-hash.sh 'yourpassword'"
 fi
 
-# Substitute environment variables in config
-envsubst < "$CONFIG_TEMPLATE" > "$CONFIG_FINAL"
+# Substitute ${DOZZLE_PASSWORD_HASH} with the actual value using sed
+sed "s|\${DOZZLE_PASSWORD_HASH}|${DOZZLE_PASSWORD_HASH}|g" "$CONFIG_TEMPLATE" > "$CONFIG_FINAL"
 
 echo "Configuration prepared. Starting HAProxy..."
 
