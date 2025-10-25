@@ -99,12 +99,14 @@ services:
         condition: service_healthy
     environment:
       # Password hash for admin user (used for /logs endpoint)
-      # Generate with: openssl passwd -6 "yourpassword"
-      # Then set: export DOZZLE_PASSWORD_HASH='$6$...'
+      # Generate with: ./proxy/generate-password-hash.sh 'yourpassword'
+      # Add to .env: DOZZLE_PASSWORD_HASH=$$6$$salt$$hash (note: $$ escapes $ in .env)
       - DOZZLE_PASSWORD_HASH=${DOZZLE_PASSWORD_HASH:-}
     volumes:
       - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./haproxy/docker-entrypoint.sh:/docker-entrypoint.sh:ro
       - letsencrypt_certs:/etc/letsencrypt:ro
+    entrypoint: ["/docker-entrypoint.sh"]
 
   # Nginx serves ACME challenge files for certbot renewals
   nginx-acme:

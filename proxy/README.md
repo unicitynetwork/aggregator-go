@@ -67,25 +67,19 @@ The system will automatically:
 ### 4. Setup Dozzle Password (Optional - for /logs endpoint)
 
 ```bash
-# Generate password hash for your desired password
-./proxy/generate-password-hash.sh "YourSecurePassword"
+# This script automatically creates/updates proxy/.env with the password hash
+./proxy/generate-password-hash.sh 'YourSecurePassword'
 
-# This outputs an export command - run it:
-export DOZZLE_PASSWORD_HASH='$6$...'
-
-# To make it persistent, add to .env file
-echo "DOZZLE_PASSWORD_HASH='$6$...'" > proxy/.env
-```
-
-Then restart if HAProxy is already running:
-```bash
-docker compose -f proxy/docker-compose.yml restart haproxy
+# Then recreate HAProxy (up -d, NOT restart!)
+docker compose -f proxy/docker-compose.yml up -d haproxy
 ```
 
 **Access:**
 - URL: `https://goggregator-test.unicity.network/logs`
 - Username: `admin`
 - Password: Whatever you set above
+
+**Note:** The script automatically escapes `$` as `$$` in .env (required by Docker Compose)
 
 ## Verification
 
@@ -205,14 +199,11 @@ The `/logs` endpoint provides access to Dozzle (Docker log viewer) with password
 ### Changing the Password
 
 ```bash
-# Generate new password hash
-./proxy/generate-password-hash.sh "YourNewPassword"
+# Generate new password hash and update .env automatically
+./proxy/generate-password-hash.sh 'YourNewPassword'
 
-# Update .env file
-echo "DOZZLE_PASSWORD_HASH='$6$...'" > proxy/.env
-
-# Restart HAProxy
-docker compose -f proxy/docker-compose.yml restart haproxy
+# Recreate HAProxy (restart won't work - needs to load new env vars!)
+docker compose -f proxy/docker-compose.yml up -d haproxy
 ```
 
 ## Configuration
