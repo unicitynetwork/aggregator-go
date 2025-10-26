@@ -87,8 +87,6 @@ services:
     container_name: aggregator-redis
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     networks:
       - default
     volumes:
