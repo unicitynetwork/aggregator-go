@@ -8,6 +8,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -60,4 +61,15 @@ func createTestCommitment() *models.Commitment {
 		TransactionHash:       api.TransactionHash(transactionHashImprint),
 		AggregateRequestCount: 1,
 	}
+}
+
+func toAckEntries(commitments []*models.Commitment) []interfaces.CommitmentAck {
+	acks := make([]interfaces.CommitmentAck, len(commitments))
+	for i, commitment := range commitments {
+		acks[i] = interfaces.CommitmentAck{
+			RequestID: commitment.RequestID,
+			StreamID:  commitment.StreamID,
+		}
+	}
+	return acks
 }
