@@ -12,6 +12,7 @@ type RootAggregatorClientStub struct {
 	submissionCount    int
 	returnedProofCount int
 	submissions        map[int]*api.SubmitShardRootRequest // shardID => last request
+	submittedRootHash  api.HexBytes
 	submissionError    error
 }
 
@@ -30,6 +31,7 @@ func (m *RootAggregatorClientStub) SubmitShardRoot(ctx context.Context, request 
 	}
 	m.submissionCount++
 	m.submissions[request.ShardID] = request
+	m.submittedRootHash = request.RootHash
 	return nil
 }
 
@@ -39,7 +41,13 @@ func (m *RootAggregatorClientStub) GetShardProof(ctx context.Context, request *a
 
 	if m.submissions[request.ShardID] != nil {
 		m.returnedProofCount++
-		return &api.RootShardInclusionProof{UnicityCertificate: api.HexBytes("1234"), MerkleTreePath: &api.MerkleTreePath{}}, nil
+		submittedRootHash := m.submittedRootHash.String()
+		return &api.RootShardInclusionProof{
+			UnicityCertificate: api.HexBytes("1234"),
+			MerkleTreePath: &api.MerkleTreePath{
+				Steps: []api.MerkleTreeStep{{Data: &submittedRootHash}},
+			},
+		}, nil
 	}
 	return nil, nil
 }

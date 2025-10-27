@@ -149,8 +149,8 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		if err := rm.rootClient.SubmitShardRoot(ctx, request); err != nil {
 			return fmt.Errorf("failed to submit root hash to parent shard: %w", err)
 		}
-		rm.logger.WithContext(ctx).Info("Root hash submitted to parent, polling for inclusion proof...", "rootHash", rootHash)
-		proof, err := rm.pollInclusionProof(ctx, rootHash)
+		rm.logger.Info("Root hash submitted to parent, polling for inclusion proof...", "rootHash", rootHashRaw.String())
+		proof, err := rm.pollInclusionProof(ctx, rootHashRaw.String())
 		if err != nil {
 			return fmt.Errorf("failed to poll for parent shard inclusion proof: %w", err)
 		}
@@ -196,7 +196,7 @@ func (rm *RoundManager) pollInclusionProof(ctx context.Context, rootHash string)
 			if err != nil {
 				return nil, fmt.Errorf("failed to fetch parent shard inclusion proof: %w", err)
 			}
-			if proof == nil || !proof.IsValid() {
+			if proof == nil || !proof.IsValid(rootHash) {
 				rm.logger.WithContext(ctx).Debug("Parent shard inclusion proof not found, retrying...")
 				continue
 			}

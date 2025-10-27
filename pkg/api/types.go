@@ -323,6 +323,7 @@ func (h *HealthStatus) AddDetail(key, value string) {
 	h.Details[key] = value
 }
 
-func (r *RootShardInclusionProof) IsValid() bool {
-	return r.MerkleTreePath != nil && len(r.UnicityCertificate) > 0
+func (r *RootShardInclusionProof) IsValid(shardRootHash string) bool {
+	return r.MerkleTreePath != nil && len(r.UnicityCertificate) > 0 &&
+		len(r.MerkleTreePath.Steps) > 0 && *r.MerkleTreePath.Steps[0].Data == shardRootHash
 }
