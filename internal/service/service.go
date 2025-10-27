@@ -70,20 +70,6 @@ type LeaderSelector interface {
 
 // Conversion functions between API and internal model types
 
-func modelToAPIBigInt(modelBigInt *api.BigInt) *api.BigInt {
-	if modelBigInt == nil {
-		return nil
-	}
-	return &api.BigInt{Int: modelBigInt.Int}
-}
-
-func apiToModelBigInt(apiBigInt *api.BigInt) *api.BigInt {
-	if apiBigInt == nil {
-		return nil
-	}
-	return &api.BigInt{Int: apiBigInt.Int}
-}
-
 func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.AggregatorRecord {
 	return &api.AggregatorRecord{
 		RequestID:       modelRecord.RequestID,
@@ -95,8 +81,8 @@ func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.Aggre
 			StateHash: api.StateHash(modelRecord.Authenticator.StateHash.String()),
 		},
 		AggregateRequestCount: modelRecord.AggregateRequestCount,
-		BlockNumber:           modelToAPIBigInt(modelRecord.BlockNumber),
-		LeafIndex:             modelToAPIBigInt(modelRecord.LeafIndex),
+		BlockNumber:           modelRecord.BlockNumber,
+		LeafIndex:             modelRecord.LeafIndex,
 		CreatedAt:             modelRecord.CreatedAt,
 		FinalizedAt:           modelRecord.FinalizedAt,
 	}
@@ -104,7 +90,7 @@ func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.Aggre
 
 func modelToAPIBlock(modelBlock *models.Block) *api.Block {
 	return &api.Block{
-		Index:                modelToAPIBigInt(modelBlock.Index),
+		Index:                modelBlock.Index,
 		ChainID:              modelBlock.ChainID,
 		ShardID:              modelBlock.ShardID,
 		Version:              modelBlock.Version,
@@ -307,7 +293,7 @@ func (as *AggregatorService) GetBlockHeight(ctx context.Context) (*api.GetBlockH
 	}
 
 	return &api.GetBlockHeightResponse{
-		BlockNumber: modelToAPIBigInt(latestBlockNumber),
+		BlockNumber: latestBlockNumber,
 	}, nil
 }
 
@@ -365,7 +351,7 @@ func (as *AggregatorService) GetBlock(ctx context.Context, req *api.GetBlockRequ
 
 // GetBlockCommitments retrieves all commitments in a block
 func (as *AggregatorService) GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error) {
-	records, err := as.storage.AggregatorRecordStorage().GetByBlockNumber(ctx, apiToModelBigInt(req.BlockNumber))
+	records, err := as.storage.AggregatorRecordStorage().GetByBlockNumber(ctx, req.BlockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block commitments: %w", err)
 	}

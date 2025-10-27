@@ -58,8 +58,8 @@ func (ar *AggregatorRecord) ToBSON() (*AggregatorRecordBSON, error) {
 		return nil, fmt.Errorf("error converting leaf index to decimal-128: %w", err)
 	}
 	return &AggregatorRecordBSON{
-		RequestID:             string(ar.RequestID),
-		TransactionHash:       string(ar.TransactionHash),
+		RequestID:             ar.RequestID.String(),
+		TransactionHash:       ar.TransactionHash.String(),
 		Authenticator:         ar.Authenticator.ToBSON(),
 		AggregateRequestCount: ar.AggregateRequestCount,
 		BlockNumber:           blockNumber,
