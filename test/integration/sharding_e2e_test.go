@@ -157,7 +157,6 @@ func (suite *ShardingE2ETestSuite) buildConfig(mode config.ShardingMode, port, d
 		cfg.Sharding.Child = config.ChildConfig{
 			ParentRpcAddr:      "http://localhost:9000",
 			ShardID:            shardID,
-			RoundDuration:      100 * time.Millisecond,
 			ParentPollTimeout:  5 * time.Second,
 			ParentPollInterval: 100 * time.Millisecond,
 		}

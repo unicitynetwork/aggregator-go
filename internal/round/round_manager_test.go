@@ -32,7 +32,6 @@ func TestParentShardIntegration_GoodCase(t *testing.T) {
 			Mode: config.ShardingModeChild,
 			Child: config.ChildConfig{
 				ShardID:            0b11,
-				RoundDuration:      100 * time.Millisecond,
 				ParentPollTimeout:  5 * time.Second,
 				ParentPollInterval: 100 * time.Millisecond,
 			},
@@ -81,7 +80,6 @@ func TestParentShardIntegration_RoundProcessingError(t *testing.T) {
 			Mode: config.ShardingModeChild,
 			Child: config.ChildConfig{
 				ShardID:            0b11,
-				RoundDuration:      100 * time.Millisecond,
 				ParentPollTimeout:  5 * time.Second,
 				ParentPollInterval: 100 * time.Millisecond,
 			},
