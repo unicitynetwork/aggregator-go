@@ -67,13 +67,13 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 	receipt := false
 
 	return &api.SubmitCommitmentRequest{
-		RequestID:       api.RequestID(requestID),
-		TransactionHash: api.TransactionHash(transactionHashImprint),
+		RequestID:       requestID,
+		TransactionHash: transactionHashImprint,
 		Authenticator: api.Authenticator{
 			Algorithm: "secp256k1",
-			PublicKey: api.HexBytes(publicKeyBytes),
-			Signature: api.HexBytes(signatureBytes),
-			StateHash: api.StateHash(stateHashImprint),
+			PublicKey: publicKeyBytes,
+			Signature: signatureBytes,
+			StateHash: stateHashImprint,
 		},
 		Receipt: &receipt,
 	}
@@ -117,7 +117,7 @@ func commitmentWorker(ctx context.Context, clients []*JSONRPCClient, metrics *Me
 					return
 				}
 
-				requestIDStr := strings.ToLower(string(req.RequestID))
+				requestIDStr := strings.ToLower(req.RequestID.String())
 				if resp.Error != nil {
 					atomic.AddInt64(&shardM.failedRequests, 1)
 					if resp.Error.Message == "REQUEST_ID_EXISTS" {

@@ -19,7 +19,7 @@ type BlockRecords struct {
 // BlockRecordsBSON is the MongoDB representation of BlockRecords
 type BlockRecordsBSON struct {
 	BlockNumber primitive.Decimal128 `bson:"blockNumber"`
-	RequestIDs  []api.RequestID      `bson:"requestIds"`
+	RequestIDs  []string             `bson:"requestIds"`
 	CreatedAt   time.Time            `bson:"createdAt"`
 }
 
@@ -33,30 +33,39 @@ func NewBlockRecords(blockNumber *api.BigInt, requestIDs []api.RequestID) *Block
 }
 
 // ToBSON converts BlockRecords to BlockRecordsBSON
-func (br *BlockRecords) ToBSON() *BlockRecordsBSON {
+func (br *BlockRecords) ToBSON() (*BlockRecordsBSON, error) {
 	blockNumberDecimal, err := primitive.ParseDecimal128(br.BlockNumber.String())
 	if err != nil {
-		// This should never happen with valid BigInt, but fallback to zero
-		blockNumberDecimal = primitive.NewDecimal128(0, 0)
+		return nil, fmt.Errorf("error converting block number to decimal: %w", err)
+	}
+
+	requestIDs := make([]string, len(br.RequestIDs))
+	for i, r := range br.RequestIDs {
+		requestIDs[i] = r.String()
 	}
 
 	return &BlockRecordsBSON{
 		BlockNumber: blockNumberDecimal,
-		RequestIDs:  br.RequestIDs,
+		RequestIDs:  requestIDs,
 		CreatedAt:   br.CreatedAt.Time,
-	}
+	}, nil
 }
 
 // FromBSON converts BlockRecordsBSON to BlockRecords
 func (brb *BlockRecordsBSON) FromBSON() (*BlockRecords, error) {
-	blockNumber, err := api.NewBigIntFromString(brb.BlockNumber.String())
+	blockNumber, _, err := brb.BlockNumber.BigInt()
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse blockNumber: %w", err)
 	}
 
+	requestIDs := make([]api.RequestID, len(brb.RequestIDs))
+	for i, r := range brb.RequestIDs {
+		requestIDs[i] = api.RequestID(r)
+	}
+
 	return &BlockRecords{
-		BlockNumber: blockNumber,
-		RequestIDs:  brb.RequestIDs,
+		BlockNumber: api.NewBigInt(blockNumber),
+		RequestIDs:  requestIDs,
 		CreatedAt:   api.NewTimestamp(brb.CreatedAt),
 	}, nil
 }

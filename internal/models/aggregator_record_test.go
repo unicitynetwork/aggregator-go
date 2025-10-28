@@ -5,9 +5,17 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 func TestBackwardCompatibility(t *testing.T) {
+	blockNumber, err := primitive.ParseDecimal128("100")
+	require.NoError(t, err)
+	leafIndex, err := primitive.ParseDecimal128("4")
+	require.NoError(t, err)
+
 	t.Run("FromBSON defaults AggregateRequestCount to 1 when missing", func(t *testing.T) {
 		// Simulate an old record without AggregateRequestCount
 		bsonRecord := &AggregatorRecordBSON{
@@ -20,8 +28,8 @@ func TestBackwardCompatibility(t *testing.T) {
 				StateHash: "0000cd60",
 			},
 			// AggregateRequestCount is intentionally not set (will be 0)
-			BlockNumber: "100",
-			LeafIndex:   "5",
+			BlockNumber: blockNumber,
+			LeafIndex:   leafIndex,
 			CreatedAt:   time.UnixMilli(1700000000000),
 			FinalizedAt: time.UnixMilli(1700000001000),
 		}
@@ -46,8 +54,8 @@ func TestBackwardCompatibility(t *testing.T) {
 				StateHash: "0000cd60",
 			},
 			AggregateRequestCount: 500,
-			BlockNumber:           "100",
-			LeafIndex:             "5",
+			BlockNumber:           blockNumber,
+			LeafIndex:             leafIndex,
 			CreatedAt:             time.UnixMilli(1700000000000),
 			FinalizedAt:           time.UnixMilli(1700000001000),
 		}
@@ -82,4 +90,49 @@ func TestBackwardCompatibility(t *testing.T) {
 		// Expected: 1 + 10 + 25 + 1 + 100 = 137
 		require.Equal(t, uint64(137), totalCommitments)
 	})
+}
+
+func TestAggregatorRecordSerialization(t *testing.T) {
+	// Create AggregatorRecord
+	originalRequestID := api.RequestID("0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890")
+	originalTransactionHash := api.TransactionHash("0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890")
+	originalBlockNumber, err := api.NewBigIntFromString("123")
+	require.NoError(t, err)
+	originalLeafIndex, err := api.NewBigIntFromString("456")
+	require.NoError(t, err)
+	record := &AggregatorRecord{
+		RequestID:       originalRequestID,
+		TransactionHash: originalTransactionHash,
+		Authenticator: Authenticator{
+			Algorithm: "secp256k1",
+			PublicKey: api.HexBytes("02345678"),
+			Signature: api.HexBytes("abcdef12"),
+			StateHash: api.StateHash("0000cd60"),
+		},
+		AggregateRequestCount: 1,
+		BlockNumber:           originalBlockNumber,
+		LeafIndex:             originalLeafIndex,
+		CreatedAt:             api.Now(),
+		FinalizedAt:           api.Now(),
+	}
+
+	// Convert to BSON
+	bsonRecord, err := record.ToBSON()
+	require.NoError(t, err)
+	require.NotNil(t, bsonRecord)
+
+	// Verify RequestID and TransactionHash in BSON format
+	require.Equal(t, string(originalRequestID), bsonRecord.RequestID)
+	require.Equal(t, string(originalTransactionHash), bsonRecord.TransactionHash)
+
+	// Convert back from BSON
+	unmarshaledRecord, err := bsonRecord.FromBSON()
+	require.NoError(t, err)
+	require.NotNil(t, unmarshaledRecord)
+
+	// Verify RequestID and TransactionHash are preserved
+	require.Equal(t, originalRequestID, unmarshaledRecord.RequestID)
+	require.Equal(t, originalTransactionHash, unmarshaledRecord.TransactionHash)
+	require.Equal(t, originalBlockNumber.String(), unmarshaledRecord.BlockNumber.String())
+	require.Equal(t, originalLeafIndex.String(), unmarshaledRecord.LeafIndex.String())
 }

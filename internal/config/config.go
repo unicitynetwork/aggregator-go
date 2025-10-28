@@ -157,7 +157,6 @@ type ShardingConfig struct {
 type ChildConfig struct {
 	ParentRpcAddr      string        `mapstructure:"parent_rpc_addr"`
 	ShardID            api.ShardID   `mapstructure:"shard_id"`
-	RoundDuration      time.Duration `mapstructure:"round_duration"`
 	ParentPollTimeout  time.Duration `mapstructure:"parent_poll_timeout"`
 	ParentPollInterval time.Duration `mapstructure:"parent_poll_interval"`
 }
@@ -182,9 +181,6 @@ func (c ChildConfig) Validate() error {
 	}
 	if c.ShardID == 0 {
 		return errors.New("shard id is required")
-	}
-	if c.RoundDuration == 0 {
-		return errors.New("round duration is required")
 	}
 	if c.ParentPollTimeout == 0 {
 		return errors.New("parent poll timeout is required")
@@ -280,7 +276,6 @@ func Load() (*Config, error) {
 			Child: ChildConfig{
 				ParentRpcAddr:      getEnvOrDefault("SHARDING_CHILD_PARENT_RPC_ADDR", "http://localhost:3009"),
 				ShardID:            getEnvIntOrDefault("SHARDING_CHILD_SHARD_ID", 0),
-				RoundDuration:      getEnvDurationOrDefault("SHARDING_CHILD_ROUND_DURATION", "1s"),
 				ParentPollTimeout:  getEnvDurationOrDefault("SHARDING_CHILD_PARENT_POLL_TIMEOUT", "5s"),
 				ParentPollInterval: getEnvDurationOrDefault("SHARDING_CHILD_PARENT_POLL_INTERVAL", "100ms"),
 			},

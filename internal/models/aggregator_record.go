@@ -4,31 +4,33 @@ import (
 	"fmt"
 	"time"
 
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // AggregatorRecord represents a finalized commitment with proof data
 type AggregatorRecord struct {
-	RequestID             api.RequestID       `json:"requestId" bson:"requestId"`
-	TransactionHash       api.TransactionHash `json:"transactionHash" bson:"transactionHash"`
-	Authenticator         Authenticator       `json:"authenticator" bson:"authenticator"`
-	AggregateRequestCount uint64              `json:"aggregateRequestCount" bson:"aggregateRequestCount"`
-	BlockNumber           *api.BigInt         `json:"blockNumber" bson:"blockNumber"`
-	LeafIndex             *api.BigInt         `json:"leafIndex" bson:"leafIndex"`
-	CreatedAt             *api.Timestamp      `json:"createdAt" bson:"createdAt"`
-	FinalizedAt           *api.Timestamp      `json:"finalizedAt" bson:"finalizedAt"`
+	RequestID             api.RequestID       `json:"requestId"`
+	TransactionHash       api.TransactionHash `json:"transactionHash"`
+	Authenticator         Authenticator       `json:"authenticator"`
+	AggregateRequestCount uint64              `json:"aggregateRequestCount"`
+	BlockNumber           *api.BigInt         `json:"blockNumber"`
+	LeafIndex             *api.BigInt         `json:"leafIndex"`
+	CreatedAt             *api.Timestamp      `json:"createdAt"`
+	FinalizedAt           *api.Timestamp      `json:"finalizedAt"`
 }
 
 // AggregatorRecordBSON represents the BSON version of AggregatorRecord for MongoDB storage
 type AggregatorRecordBSON struct {
-	RequestID             string            `bson:"requestId"`
-	TransactionHash       string            `bson:"transactionHash"`
-	Authenticator         AuthenticatorBSON `bson:"authenticator"`
-	AggregateRequestCount uint64            `bson:"aggregateRequestCount"`
-	BlockNumber           string            `bson:"blockNumber"`
-	LeafIndex             string            `bson:"leafIndex"`
-	CreatedAt             time.Time         `bson:"createdAt"`
-	FinalizedAt           time.Time         `bson:"finalizedAt"`
+	RequestID             string               `bson:"requestId"`
+	TransactionHash       string               `bson:"transactionHash"`
+	Authenticator         AuthenticatorBSON    `bson:"authenticator"`
+	AggregateRequestCount uint64               `bson:"aggregateRequestCount"`
+	BlockNumber           primitive.Decimal128 `bson:"blockNumber"`
+	LeafIndex             primitive.Decimal128 `bson:"leafIndex"`
+	CreatedAt             time.Time            `bson:"createdAt"`
+	FinalizedAt           time.Time            `bson:"finalizedAt"`
 }
 
 // NewAggregatorRecord creates a new aggregator record from a commitment
@@ -46,27 +48,35 @@ func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *api.Big
 }
 
 // ToBSON converts AggregatorRecord to AggregatorRecordBSON for MongoDB storage
-func (ar *AggregatorRecord) ToBSON() *AggregatorRecordBSON {
+func (ar *AggregatorRecord) ToBSON() (*AggregatorRecordBSON, error) {
+	blockNumber, err := primitive.ParseDecimal128(ar.BlockNumber.String())
+	if err != nil {
+		return nil, fmt.Errorf("error converting block number to decimal-128: %w", err)
+	}
+	leafIndex, err := primitive.ParseDecimal128(ar.LeafIndex.String())
+	if err != nil {
+		return nil, fmt.Errorf("error converting leaf index to decimal-128: %w", err)
+	}
 	return &AggregatorRecordBSON{
-		RequestID:             string(ar.RequestID),
-		TransactionHash:       string(ar.TransactionHash),
+		RequestID:             ar.RequestID.String(),
+		TransactionHash:       ar.TransactionHash.String(),
 		Authenticator:         ar.Authenticator.ToBSON(),
 		AggregateRequestCount: ar.AggregateRequestCount,
-		BlockNumber:           ar.BlockNumber.String(),
-		LeafIndex:             ar.LeafIndex.String(),
+		BlockNumber:           blockNumber,
+		LeafIndex:             leafIndex,
 		CreatedAt:             ar.CreatedAt.Time,
 		FinalizedAt:           ar.FinalizedAt.Time,
-	}
+	}, nil
 }
 
 // FromBSON converts AggregatorRecordBSON back to AggregatorRecord
 func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
-	blockNumber, err := api.NewBigIntFromString(arb.BlockNumber)
+	blockNumber, err := api.NewBigIntFromString(arb.BlockNumber.String())
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse blockNumber: %w", err)
 	}
 
-	leafIndex, err := api.NewBigIntFromString(arb.LeafIndex)
+	leafIndex, err := api.NewBigIntFromString(arb.LeafIndex.String())
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse leafIndex: %w", err)
 	}

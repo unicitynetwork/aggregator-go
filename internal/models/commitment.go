@@ -24,13 +24,13 @@ type Commitment struct {
 
 // CommitmentBSON represents the BSON version of Commitment for MongoDB storage
 type CommitmentBSON struct {
-	ID                    primitive.ObjectID  `bson:"_id,omitempty"`
-	RequestID             api.RequestID       `bson:"requestId"`
-	TransactionHash       api.TransactionHash `bson:"transactionHash"`
-	Authenticator         AuthenticatorBSON   `bson:"authenticator"`
-	AggregateRequestCount uint64              `bson:"aggregateRequestCount"`
-	CreatedAt             time.Time           `bson:"createdAt"`
-	ProcessedAt           *time.Time          `bson:"processedAt,omitempty"`
+	ID                    primitive.ObjectID `bson:"_id,omitempty"`
+	RequestID             string             `bson:"requestId"`
+	TransactionHash       string             `bson:"transactionHash"`
+	Authenticator         AuthenticatorBSON  `bson:"authenticator"`
+	AggregateRequestCount uint64             `bson:"aggregateRequestCount"`
+	CreatedAt             time.Time          `bson:"createdAt"`
+	ProcessedAt           *time.Time         `bson:"processedAt,omitempty"`
 }
 
 // NewCommitment creates a new commitment
@@ -63,8 +63,8 @@ func (c *Commitment) ToBSON() *CommitmentBSON {
 	}
 	return &CommitmentBSON{
 		ID:                    c.ID,
-		RequestID:             c.RequestID,
-		TransactionHash:       c.TransactionHash,
+		RequestID:             c.RequestID.String(),
+		TransactionHash:       c.TransactionHash.String(),
 		Authenticator:         c.Authenticator.ToBSON(),
 		AggregateRequestCount: c.AggregateRequestCount,
 		CreatedAt:             c.CreatedAt.Time,
@@ -84,8 +84,8 @@ func (cb *CommitmentBSON) FromBSON() (*Commitment, error) {
 	}
 	return &Commitment{
 		ID:                    cb.ID,
-		RequestID:             cb.RequestID,
-		TransactionHash:       cb.TransactionHash,
+		RequestID:             api.RequestID(cb.RequestID),
+		TransactionHash:       api.TransactionHash(cb.TransactionHash),
 		Authenticator:         *authenticator,
 		AggregateRequestCount: cb.AggregateRequestCount,
 		CreatedAt:             api.NewTimestamp(cb.CreatedAt),
