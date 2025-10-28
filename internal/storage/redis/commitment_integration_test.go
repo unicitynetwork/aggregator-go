@@ -15,6 +15,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -119,12 +120,12 @@ CollectLoop:
 	require.Equal(suite.T(), len(commitments), len(streamed), "Should stream all stored commitments")
 
 	// Mark as processed
-	requestIDs := make([]api.RequestID, len(streamed))
+	acks := make([]interfaces.CommitmentAck, len(streamed))
 	for i, c := range streamed {
-		requestIDs[i] = c.RequestID
+		acks[i] = interfaces.CommitmentAck{RequestID: c.RequestID, StreamID: c.StreamID}
 	}
 
-	err := suite.storage.MarkProcessed(ctx, requestIDs)
+	err := suite.storage.MarkProcessed(ctx, acks)
 	require.NoError(suite.T(), err)
 
 	// Verify no pending
@@ -229,11 +230,7 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_HighThroughput() {
 			case c := <-commitmentChan:
 				batch = append(batch, c)
 				if len(batch) >= 1000 {
-					requestIDs := make([]api.RequestID, len(batch))
-					for i, commitment := range batch {
-						requestIDs[i] = commitment.RequestID
-					}
-					if err := suite.storage.MarkProcessed(ctx, requestIDs); err == nil {
+					if err := suite.storage.MarkProcessed(ctx, toAckEntries(batch)); err == nil {
 						processedCount.Add(int64(len(batch)))
 					}
 					batch = batch[:0]
@@ -241,11 +238,7 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_HighThroughput() {
 
 			case <-ticker.C:
 				if len(batch) > 0 {
-					requestIDs := make([]api.RequestID, len(batch))
-					for i, commitment := range batch {
-						requestIDs[i] = commitment.RequestID
-					}
-					if err := suite.storage.MarkProcessed(ctx, requestIDs); err == nil {
+					if err := suite.storage.MarkProcessed(ctx, toAckEntries(batch)); err == nil {
 						processedCount.Add(int64(len(batch)))
 					}
 					batch = batch[:0]
@@ -253,11 +246,7 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_HighThroughput() {
 
 			case <-streamCtx.Done():
 				if len(batch) > 0 {
-					requestIDs := make([]api.RequestID, len(batch))
-					for i, commitment := range batch {
-						requestIDs[i] = commitment.RequestID
-					}
-					suite.storage.MarkProcessed(ctx, requestIDs)
+					_ = suite.storage.MarkProcessed(ctx, toAckEntries(batch))
 					processedCount.Add(int64(len(batch)))
 				}
 				return
@@ -428,6 +417,74 @@ CollectLoop:
 	for requestID := range streamedIDs {
 		assert.True(suite.T(), storedIDs[requestID],
 			"Streamed commitment %s was not stored", requestID)
+	}
+}
+
+// Test 6: StreamCommitments recovers after consumer group deletion by recreating the group.
+func (suite *RedisTestSuite) TestCommitmentStream_ConsumerGroupRecovery() {
+	ctx := suite.ctx
+
+	// Store initial commitment so the stream goroutine has data to consume.
+	initial := createTestCommitment()
+	require.NoError(suite.T(), suite.storage.Store(ctx, initial))
+	time.Sleep(150 * time.Millisecond) // allow async flush
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	commitmentChan := make(chan *models.Commitment, 4)
+	var streamErr error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		streamErr = suite.storage.StreamCommitments(streamCtx, commitmentChan)
+	}()
+
+	// Expect the first commitment to arrive.
+	select {
+	case first := <-commitmentChan:
+		require.Equal(suite.T(), initial.RequestID, first.RequestID)
+	case <-time.After(2 * time.Second):
+		suite.T().Fatal("did not receive initial commitment before timeout")
+	}
+
+	// drop the consumer group while the stream is active.
+	err := suite.client.XGroupDestroy(ctx, commitmentStream, consumerGroup).Err()
+	require.NoError(suite.T(), err, "failed to destroy consumer group for test")
+
+	// Publish another commitment that should trigger the recovery path.
+	nextCommitment := createTestCommitment()
+	require.NoError(suite.T(), suite.storage.Store(ctx, nextCommitment))
+	time.Sleep(150 * time.Millisecond)
+
+	// The streaming goroutine should recreate the group and deliver the new commitment.
+	var received *models.Commitment
+	require.Eventually(suite.T(), func() bool {
+		select {
+		case c := <-commitmentChan:
+			received = c
+			return c.RequestID == nextCommitment.RequestID
+		default:
+			return false
+		}
+	}, 5*time.Second, 100*time.Millisecond, "stream did not recover after consumer group removal")
+
+	// Validate the streamed commitment.
+	require.NotNil(suite.T(), received)
+	assert.Equal(suite.T(), nextCommitment.RequestID, received.RequestID)
+	assert.NotEmpty(suite.T(), received.StreamID, "StreamID should be populated after recovery")
+
+	// Confirm the consumer group was recreated.
+	groups := suite.client.XInfoGroups(ctx, commitmentStream)
+	require.NoError(suite.T(), groups.Err())
+	assert.NotEmpty(suite.T(), groups.Val(), "consumer group should have been recreated")
+
+	// Clean up goroutine.
+	cancel()
+	wg.Wait()
+	if streamErr != nil && streamErr != context.Canceled {
+		suite.T().Logf("StreamCommitments exit error: %v", streamErr)
 	}
 }
 

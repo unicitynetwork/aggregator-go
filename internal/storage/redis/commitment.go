@@ -14,6 +14,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -89,10 +90,8 @@ func NewCommitmentStorage(client *redis.Client, serverID string, batchConfig *Ba
 
 // Initialize creates the consumer group and starts background goroutines
 func (cs *CommitmentStorage) Initialize(ctx context.Context) error {
-	err := cs.client.XGroupCreateMkStream(ctx, commitmentStream, consumerGroup, "0").Err()
-	// Ignore "BUSYGROUP" error - it means the consumer group already exists
-	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
-		return fmt.Errorf("failed to create consumer group: %w", err)
+	if err := cs.ensureConsumerGroup(ctx); err != nil {
+		return err
 	}
 
 	// Start batch processor
@@ -122,6 +121,29 @@ func (cs *CommitmentStorage) Close(ctx context.Context) error {
 	cs.wg.Wait()
 
 	return nil
+}
+
+func (cs *CommitmentStorage) ensureConsumerGroup(ctx context.Context) error {
+	err := cs.client.XGroupCreateMkStream(ctx, commitmentStream, consumerGroup, "0").Err()
+	if err != nil {
+		// Ignore "BUSYGROUP" error - group already exists
+		if strings.Contains(err.Error(), "BUSYGROUP") {
+			return nil
+		}
+		return fmt.Errorf("failed to create consumer group: %w", err)
+	}
+
+	cs.logger.WithContext(ctx).Warn("Redis consumer group recreated",
+		"stream", commitmentStream,
+		"group", consumerGroup)
+	return nil
+}
+
+func isNoGroupError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "NOGROUP")
 }
 
 // batchProcessor runs in the background and processes pending commitments in batches
@@ -325,58 +347,30 @@ func (cs *CommitmentStorage) GetUnprocessedBatchWithCursor(ctx context.Context, 
 	return nil, "", fmt.Errorf("GetUnprocessedBatchWithCursor not implemented for Redis - use StreamCommitments")
 }
 
-// MarkProcessed marks commitments as processed by acknowledging only the first N pending messages
-// where N = len(requestIDs).
-//
-// IMPORTANT: This method assumes commitments are processed in FIFO order, which is guaranteed by:
-// 1. Redis streams deliver messages in order
-// 2. Consumer groups maintain order per consumer
-// 3. The round manager processes from channel in order
-func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, requestIDs []api.RequestID) error {
-	if len(requestIDs) == 0 {
+// MarkProcessed acknowledges commitments using their Redis stream IDs.
+func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interfaces.CommitmentAck) error {
+	if len(entries) == 0 {
 		return nil
 	}
 
-	// Get pending entries for this consumer - acknowledge only the first len(requestIDs) entries
-	pending := cs.client.XPendingExt(ctx, &redis.XPendingExtArgs{
-		Stream:   commitmentStream,
-		Group:    consumerGroup,
-		Consumer: cs.consumerID,
-		Start:    "-",
-		End:      "+",
-		Count:    int64(len(requestIDs)), // Only get the exact number we need
-	})
-
-	if err := pending.Err(); err != nil {
-		if errors.Is(err, redis.Nil) {
-			return nil // No pending entries
+	streamIDs := make([]string, len(entries))
+	for i, entry := range entries {
+		if entry.StreamID == "" {
+			return fmt.Errorf("missing stream ID for requestID %s", entry.RequestID.String())
 		}
-		return fmt.Errorf("failed to get pending entries: %w", err)
+		streamIDs[i] = entry.StreamID
 	}
 
-	pendingEntries := pending.Val()
-	if len(pendingEntries) == 0 {
-		return nil // No pending entries to acknowledge
-	}
+	const maxAckBatch = 1000
+	for start := 0; start < len(streamIDs); start += maxAckBatch {
+		end := start + maxAckBatch
+		if end > len(streamIDs) {
+			end = len(streamIDs)
+		}
 
-	// Validate we have enough pending entries (defensive check)
-	if len(requestIDs) > len(pendingEntries) {
-		return fmt.Errorf("ordering assumption violated: expected at least %d pending entries but only found %d",
-			len(requestIDs), len(pendingEntries))
-	}
-
-	// Acknowledge exactly the first len(requestIDs) entries
-	ackCount := len(requestIDs)
-
-	entryIDs := make([]string, ackCount)
-	for i := 0; i < ackCount; i++ {
-		entryIDs[i] = pendingEntries[i].ID
-	}
-
-	// Use single XAck call for maximum performance
-	err := cs.client.XAck(ctx, commitmentStream, consumerGroup, entryIDs...).Err()
-	if err != nil {
-		return fmt.Errorf("failed to acknowledge entries: %w", err)
+		if err := cs.client.XAck(ctx, commitmentStream, consumerGroup, streamIDs[start:end]...).Err(); err != nil {
+			return fmt.Errorf("failed to acknowledge entries by stream ID: %w", err)
+		}
 	}
 
 	return nil
@@ -429,7 +423,20 @@ func (cs *CommitmentStorage) CountUnprocessed(ctx context.Context) (int64, error
 		if errors.Is(err, redis.Nil) {
 			return 0, nil
 		}
-		return 0, fmt.Errorf("failed to get pending count: %w", err)
+		if isNoGroupError(err) {
+			if ensureErr := cs.ensureConsumerGroup(ctx); ensureErr != nil {
+				return 0, fmt.Errorf("failed to ensure consumer group: %w", ensureErr)
+			}
+			pendingInfo = cs.client.XPending(ctx, commitmentStream, consumerGroup)
+			if err := pendingInfo.Err(); err != nil {
+				if errors.Is(err, redis.Nil) {
+					return 0, nil
+				}
+				return 0, fmt.Errorf("failed to get pending count after recreating group: %w", err)
+			}
+		} else {
+			return 0, fmt.Errorf("failed to get pending count: %w", err)
+		}
 	}
 
 	pending := pendingInfo.Val()
@@ -512,6 +519,12 @@ func (cs *CommitmentStorage) StreamCommitments(ctx context.Context, commitmentCh
 				})
 
 				if err := pendingStreams.Err(); err != nil && !errors.Is(err, redis.Nil) {
+					if isNoGroupError(err) {
+						if ensureErr := cs.ensureConsumerGroup(ctx); ensureErr != nil {
+							return fmt.Errorf("failed to ensure consumer group: %w", ensureErr)
+						}
+						continue
+					}
 					return fmt.Errorf("failed to check pending messages: %w", err)
 				}
 
@@ -542,6 +555,12 @@ func (cs *CommitmentStorage) StreamCommitments(ctx context.Context, commitmentCh
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return err // Context cancelled, exit gracefully
 				}
+				if isNoGroupError(err) {
+					if ensureErr := cs.ensureConsumerGroup(ctx); ensureErr != nil {
+						return fmt.Errorf("failed to ensure consumer group: %w", ensureErr)
+					}
+					continue
+				}
 				return fmt.Errorf("failed to read from stream: %w", err)
 			}
 
@@ -556,6 +575,9 @@ func (cs *CommitmentStorage) StreamCommitments(ctx context.Context, commitmentCh
 					if commitment == nil {
 						continue
 					}
+
+					// Attach stream ID for precise acknowledgement support
+					commitment.StreamID = message.ID
 
 					// Stream commitment directly to channel
 					select {
