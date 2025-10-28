@@ -325,5 +325,5 @@ func (h *HealthStatus) AddDetail(key, value string) {
 
 func (r *RootShardInclusionProof) IsValid(shardRootHash string) bool {
 	return r.MerkleTreePath != nil && len(r.UnicityCertificate) > 0 &&
-		len(r.MerkleTreePath.Steps) > 0 && *r.MerkleTreePath.Steps[0].Data == shardRootHash
+		len(r.MerkleTreePath.Steps) > 0 && r.MerkleTreePath.Steps[0].Data != nil && *r.MerkleTreePath.Steps[0].Data == shardRootHash
 }
