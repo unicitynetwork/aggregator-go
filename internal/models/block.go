@@ -124,7 +124,7 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 }
 
 // NewBlock creates a new block
-func NewBlock(index *api.BigInt, chainID string, shardID int, version, forkID string, rootHash, previousBlockHash, uc api.HexBytes, parentMerkleTreePath *api.MerkleTreePath) *Block {
+func NewBlock(index *api.BigInt, chainID string, shardID api.ShardID, version, forkID string, rootHash, previousBlockHash, uc api.HexBytes, parentMerkleTreePath *api.MerkleTreePath) *Block {
 	return &Block{
 		Index:                index,
 		ChainID:              chainID,

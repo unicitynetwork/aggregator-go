@@ -12,7 +12,7 @@ func TestGetShardProofRequest_UnmarshalJSON(t *testing.T) {
 	tests := []struct {
 		name        string
 		json        string
-		wantShardID int
+		wantShardID ShardID
 		wantErr     bool
 	}{
 		{

@@ -107,7 +107,7 @@ func (suite *ShardingE2ETestSuite) TearDownSuite() {
 	}
 }
 
-func (suite *ShardingE2ETestSuite) buildConfig(mode config.ShardingMode, port, dbName string, shardID int) *config.Config {
+func (suite *ShardingE2ETestSuite) buildConfig(mode config.ShardingMode, port, dbName string, shardID api.ShardID) *config.Config {
 	cfg := &config.Config{
 		Server: config.ServerConfig{
 			Host:             "localhost",
@@ -323,7 +323,7 @@ func (suite *ShardingE2ETestSuite) getBlockHeight(url string) (*api.GetBlockHeig
 	return &response, nil
 }
 
-func (suite *ShardingE2ETestSuite) createCommitmentForShard(shardID int, shardIDLength int) (*api.SubmitCommitmentRequest, string) {
+func (suite *ShardingE2ETestSuite) createCommitmentForShard(shardID api.ShardID, shardIDLength int) (*api.SubmitCommitmentRequest, string) {
 	// Shard ID is encoded in the LSBs of the requestID (see commitment_validator.go verifyShardID)
 	msbPos := shardIDLength
 	compareMask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), uint(msbPos)), big.NewInt(1))

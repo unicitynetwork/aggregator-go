@@ -120,7 +120,7 @@ func makeTestHash(value byte) []byte {
 }
 
 // waitForShardToExist polls until the shard proof is available or times out
-func (suite *ParentServiceTestSuite) waitForShardToExist(ctx context.Context, shardID int) {
+func (suite *ParentServiceTestSuite) waitForShardToExist(ctx context.Context, shardID api.ShardID) {
 	timeout := time.After(5 * time.Second)
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()

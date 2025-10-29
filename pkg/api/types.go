@@ -134,7 +134,7 @@ type Block struct {
 }
 
 // NewBlock creates a new block
-func NewBlock(index *BigInt, chainID string, shardID int, version, forkID string, rootHash, previousBlockHash, uc HexBytes, parentMerkleTreePath *MerkleTreePath) *Block {
+func NewBlock(index *BigInt, chainID string, shardID ShardID, version, forkID string, rootHash, previousBlockHash, uc HexBytes, parentMerkleTreePath *MerkleTreePath) *Block {
 	return &Block{
 		Index:                index,
 		ChainID:              chainID,
@@ -277,7 +277,7 @@ const (
 
 // SubmitShardRootRequest represents the submit_shard_root JSON-RPC request
 type SubmitShardRootRequest struct {
-	ShardID  int      `json:"shardId"`
+	ShardID  ShardID  `json:"shardId"`
 	RootHash HexBytes `json:"rootHash"` // Raw root hash from child SMT
 }
 
@@ -288,7 +288,7 @@ type SubmitShardRootResponse struct {
 
 // GetShardProofRequest represents the get_shard_proof JSON-RPC request
 type GetShardProofRequest struct {
-	ShardID int `json:"shardId"`
+	ShardID ShardID `json:"shardId"`
 }
 
 // GetShardProofResponse represents the get_shard_proof JSON-RPC response
