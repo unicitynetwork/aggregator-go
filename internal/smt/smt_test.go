@@ -1398,16 +1398,56 @@ func TestJoinPaths(t *testing.T) {
 		assert.True(t, res4.PathIncluded)
 	})
 
-	t.Run("NilInputDoesN otPanic", func(t *testing.T) {
-		child := &api.MerkleTreePath{Root: "1234"}
-		parent := &api.MerkleTreePath{}
+	t.Run("NilInputDoesNotPanic", func(t *testing.T) {
+		dummy := &api.MerkleTreePath{Root: "0000"}
 
-		joinedPath, err := JoinPaths(nil, parent)
+		joinedPath, err := JoinPaths(nil, dummy)
+		assert.ErrorContains(t, err, "nil child path")
+		assert.Nil(t, joinedPath)
+
+		joinedPath, err = JoinPaths(dummy, nil)
+		assert.ErrorContains(t, err, "nil parent path")
+		assert.Nil(t, joinedPath)
+	})
+
+	t.Run("NilRootDoesNotPanic", func(t *testing.T) {
+		dummyNil := &api.MerkleTreePath{}
+		dummyShort := &api.MerkleTreePath{Root: ""}
+		dummyOK := &api.MerkleTreePath{Root: "0000"}
+
+		joinedPath, err := JoinPaths(dummyNil, dummyOK)
 		assert.ErrorContains(t, err, "invalid child root hash format")
 		assert.Nil(t, joinedPath)
 
-		joinedPath, err = JoinPaths(child, nil)
-		assert.ErrorContains(t, err, "empty parent hash steps")
+		joinedPath, err = JoinPaths(dummyShort, dummyOK)
+		assert.ErrorContains(t, err, "invalid child root hash format")
+		assert.Nil(t, joinedPath)
+
+		joinedPath, err = JoinPaths(dummyOK, dummyNil)
+		assert.ErrorContains(t, err, "invalid parent root hash format")
+		assert.Nil(t, joinedPath)
+
+		joinedPath, err = JoinPaths(dummyOK, dummyShort)
+		assert.ErrorContains(t, err, "invalid parent root hash format")
+		assert.Nil(t, joinedPath)
+	})
+
+	t.Run("HashFunctionMismatch", func(t *testing.T) {
+		child := &api.MerkleTreePath{Root: "0000"}
+		parent := &api.MerkleTreePath{Root: "0001"}
+
+		joinedPath, err := JoinPaths(child, parent)
+		assert.ErrorContains(t, err, "child hash algorithm does not match parent")
+		assert.Nil(t, joinedPath)
+	})
+
+	t.Run("HashValueMismatch", func(t *testing.T) {
+		smt := NewSparseMerkleTree(api.SHA256, 1)
+		smt.AddLeaf(big.NewInt(0b10), []byte{0})
+		path, _ := smt.GetPath(big.NewInt(0b10))
+
+		joinedPath, err := JoinPaths(path, path)
+		assert.ErrorContains(t, err, "child root hash does not match parent input hash")
 		assert.Nil(t, joinedPath)
 	})
 }
