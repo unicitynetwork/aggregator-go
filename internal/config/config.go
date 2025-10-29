@@ -29,6 +29,14 @@ type Config struct {
 	BFT        BFTConfig        `mapstructure:"bft"`
 	Processing ProcessingConfig `mapstructure:"processing"`
 	Sharding   ShardingConfig   `mapstructure:"sharding"`
+	Chain      ChainConfig      `mapstructure:"chain"`
+}
+
+// ChainConfig holds metadata about the current chain configuration
+type ChainConfig struct {
+	ID      string `mapstructure:"id"`
+	Version string `mapstructure:"version"`
+	ForkID  string `mapstructure:"fork_id"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -207,6 +215,11 @@ type BFTConfig struct {
 // Load loads configuration from environment variables with defaults
 func Load() (*Config, error) {
 	config := &Config{
+		Chain: ChainConfig{
+			ID:      getEnvOrDefault("CHAIN_ID", "unicity"),
+			Version: getEnvOrDefault("CHAIN_VERSION", "1.0"),
+			ForkID:  getEnvOrDefault("CHAIN_FORK_ID", "mainnet"),
+		},
 		Server: ServerConfig{
 			Port:             getEnvOrDefault("PORT", "3000"),
 			Host:             getEnvOrDefault("HOST", "0.0.0.0"),
