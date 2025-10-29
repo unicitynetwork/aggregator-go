@@ -218,7 +218,7 @@ func Load() (*Config, error) {
 		Chain: ChainConfig{
 			ID:      getEnvOrDefault("CHAIN_ID", "unicity"),
 			Version: getEnvOrDefault("CHAIN_VERSION", "1.0"),
-			ForkID:  getEnvOrDefault("CHAIN_FORK_ID", "mainnet"),
+			ForkID:  getEnvOrDefault("CHAIN_FORK_ID", "testnet"),
 		},
 		Server: ServerConfig{
 			Port:             getEnvOrDefault("PORT", "3000"),
