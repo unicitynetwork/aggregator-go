@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -169,8 +170,8 @@ func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.
 }
 
 func (pas *ParentAggregatorService) validateShardID(shardID api.ShardID) error {
-	if shardID == 0 {
-		return fmt.Errorf("shard ID cannot be zero")
+	if shardID <= 1 {
+		return errors.New("shard ID must be positive and have at least 2 bits")
 	}
 
 	// ShardID encoding: MSB=1 (prefix bit) + ShardIDLength bits for actual shard identifier
