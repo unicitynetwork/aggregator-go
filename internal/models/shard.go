@@ -10,13 +10,13 @@ import (
 
 // ShardRootUpdate represents an incoming shard root submission from a child aggregator.
 type ShardRootUpdate struct {
-	ShardID   int
+	ShardID   api.ShardID
 	RootHash  api.HexBytes // Raw root hash from child SMT
 	Timestamp time.Time
 }
 
 // NewShardRootUpdate creates a new shard root update
-func NewShardRootUpdate(shardID int, rootHash api.HexBytes) *ShardRootUpdate {
+func NewShardRootUpdate(shardID api.ShardID, rootHash api.HexBytes) *ShardRootUpdate {
 	return &ShardRootUpdate{
 		ShardID:   shardID,
 		RootHash:  rootHash,

@@ -168,7 +168,7 @@ func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.
 	}, nil
 }
 
-func (pas *ParentAggregatorService) validateShardID(shardID int) error {
+func (pas *ParentAggregatorService) validateShardID(shardID api.ShardID) error {
 	if shardID == 0 {
 		return fmt.Errorf("shard ID cannot be zero")
 	}
