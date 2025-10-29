@@ -99,6 +99,14 @@ The service will start on `http://localhost:3000` by default.
 
 The service is configured via environment variables:
 
+### Chain Configuration
+
+| Variable        | Description     | Default   |
+|-----------------|-----------------|-----------|
+| `CHAIN_ID`      | Chain ID        | `unicity` |
+| `CHAIN_VERSION` | Chain version   | `1.0`     |
+| `CHAIN_FORK_ID` | Chain's Fork ID | `mainnet` |
+
 ### Server Configuration
 | Variable | Description | Default |
 |----------|-------------|---------|

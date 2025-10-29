@@ -288,10 +288,10 @@ func (prm *ParentRoundManager) processRound(ctx context.Context, round *ParentRo
 
 	block := models.NewBlock(
 		round.Number,
-		"unicity",
+		prm.config.Chain.ID,
 		0,
-		"1.0",
-		"mainnet",
+		prm.config.Chain.Version,
+		prm.config.Chain.ForkID,
 		parentRootHash,
 		previousBlockHash,
 		nil,

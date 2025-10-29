@@ -107,10 +107,10 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 	case config.ShardingModeStandalone:
 		block := models.NewBlock(
 			blockNumber,
-			"unicity",
+			rm.config.Chain.ID,
 			0,
-			"1.0",
-			"mainnet",
+			rm.config.Chain.Version,
+			rm.config.Chain.ForkID,
 			rootHashBytes,
 			parentHash,
 			nil,
@@ -156,10 +156,10 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		}
 		block := models.NewBlock(
 			blockNumber,
-			"unicity",
+			rm.config.Chain.ID,
 			request.ShardID,
-			"1.0",
-			"mainnet",
+			rm.config.Chain.Version,
+			rm.config.Chain.ForkID,
 			rootHashBytes,
 			parentHash,
 			proof.UnicityCertificate,
