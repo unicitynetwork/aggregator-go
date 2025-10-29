@@ -219,6 +219,7 @@ func (prm *ParentRoundManager) processCurrentRound(ctx context.Context) error {
 	for shardKey, update := range round.ShardUpdates {
 		round.ProcessedShardUpdates[shardKey] = update
 	}
+	clear(round.ShardUpdates)
 
 	prm.roundMutex.Unlock()
 
@@ -318,7 +319,7 @@ func (prm *ParentRoundManager) processRound(ctx context.Context, round *ParentRo
 	prm.logger.WithContext(ctx).Info("Parent round processed successfully",
 		"roundNumber", round.Number.String(),
 		"processingTime", round.ProcessingTime.String(),
-		"shardCount", len(round.ShardUpdates))
+		"shardCount", len(round.ProcessedShardUpdates))
 
 	return nil
 }

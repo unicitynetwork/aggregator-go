@@ -27,6 +27,8 @@ const (
 	RoundStateFinalizing                   // Finalizing block
 )
 
+const miniBatchSize = 100 // Number of commitments to process per SMT mini-batch
+
 func (rs RoundState) String() string {
 	switch rs {
 	case RoundStateCollecting:
@@ -426,9 +428,9 @@ ProcessLoop:
 			currentLen := len(rm.currentRound.Commitments)
 
 			// Process in mini-batches for SMT efficiency
-			if currentLen%100 == 0 {
+			if currentLen%miniBatchSize == 0 {
 				batchStart := time.Now()
-				batchSlice := rm.currentRound.Commitments[len(rm.currentRound.Commitments)-100:]
+				batchSlice := rm.currentRound.Commitments[len(rm.currentRound.Commitments)-miniBatchSize:]
 				if err := rm.processMiniBatch(ctx, batchSlice); err != nil {
 					rm.logger.WithContext(ctx).Error("Failed to process mini-batch",
 						"error", err.Error(),
@@ -466,7 +468,7 @@ ProcessLoop:
 
 	// Process any remaining commitments not in a full mini-batch
 	rm.roundMutex.Lock()
-	lastBatchStart := (commitmentsProcessed / 100) * 100
+	lastBatchStart := (commitmentsProcessed / miniBatchSize) * miniBatchSize
 	if lastBatchStart < len(rm.currentRound.Commitments) {
 		batchStart := time.Now()
 		if err := rm.processMiniBatch(ctx, rm.currentRound.Commitments[lastBatchStart:]); err != nil {
@@ -485,8 +487,9 @@ ProcessLoop:
 
 	// Update average SMT update time (exponential moving average)
 	if commitmentsProcessed > 0 {
-		avgBatchTime := smtUpdateTime / time.Duration((commitmentsProcessed+99)/100) // Number of batches
-		rm.avgSMTUpdateTime = (rm.avgSMTUpdateTime*4 + avgBatchTime) / 5             // Weight towards recent: 80/20
+		numBatches := (commitmentsProcessed + miniBatchSize - 1) / miniBatchSize // Round up
+		avgBatchTime := smtUpdateTime / time.Duration(numBatches)
+		rm.avgSMTUpdateTime = (rm.avgSMTUpdateTime*4 + avgBatchTime) / 5 // Weight towards recent: 80/20
 	}
 
 	rm.lastRoundMetrics = RoundMetrics{

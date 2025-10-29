@@ -464,10 +464,10 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 		name       string
 		submitTime time.Time
 	}{
-		{reqID1, child0URL, 4, "commitment 1 (child 0)", submitTime1},
-		{reqID2, child0URL, 4, "commitment 2 (child 0)", submitTime2},
-		{reqID3, child1URL, 5, "commitment 3 (child 1)", submitTime3},
-		{reqID4, child1URL, 5, "commitment 4 (child 1)", submitTime4},
+		{reqID1, child0URL, 2, "commitment 1 (child 0)", submitTime1},
+		{reqID2, child0URL, 2, "commitment 2 (child 0)", submitTime2},
+		{reqID3, child1URL, 3, "commitment 3 (child 1)", submitTime3},
+		{reqID4, child1URL, 3, "commitment 4 (child 1)", submitTime4},
 	}
 
 	for _, tc := range testCases {
