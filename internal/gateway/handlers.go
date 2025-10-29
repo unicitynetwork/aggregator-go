@@ -129,8 +129,8 @@ func (s *Server) handleSubmitShardRoot(ctx context.Context, params json.RawMessa
 		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
 	}
 
-	if req.ShardID == 0 {
-		return nil, jsonrpc.NewValidationError("shardId is required")
+	if req.ShardID <= 1 {
+		return nil, jsonrpc.NewValidationError("shard ID must be positive and have at least 2 bits")
 	}
 	if len(req.RootHash) == 0 {
 		return nil, jsonrpc.NewValidationError("rootHash is required")
@@ -152,8 +152,8 @@ func (s *Server) handleGetShardProof(ctx context.Context, params json.RawMessage
 		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
 	}
 
-	if req.ShardID == 0 {
-		return nil, jsonrpc.NewValidationError("shardId is required")
+	if req.ShardID <= 1 {
+		return nil, jsonrpc.NewValidationError("shard ID must be positive and have at least 2 bits")
 	}
 
 	response, err := s.service.GetShardProof(ctx, &req)

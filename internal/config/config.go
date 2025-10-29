@@ -187,8 +187,8 @@ func (c ChildConfig) Validate() error {
 	if c.ParentRpcAddr == "" {
 		return errors.New("parent rpc addr is required")
 	}
-	if c.ShardID == 0 {
-		return errors.New("shard id is required")
+	if c.ShardID <= 1 {
+		return errors.New("shard ID must be positive and have at least 2 bits")
 	}
 	if c.ParentPollTimeout == 0 {
 		return errors.New("parent poll timeout is required")

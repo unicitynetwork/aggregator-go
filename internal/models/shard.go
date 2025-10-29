@@ -31,8 +31,8 @@ func (sru *ShardRootUpdate) GetPath() *big.Int {
 
 // Validate validates the shard root update
 func (sru *ShardRootUpdate) Validate() error {
-	if sru.ShardID == 0 {
-		return fmt.Errorf("shard ID cannot be empty")
+	if sru.ShardID <= 1 {
+		return fmt.Errorf("shard ID must be positive and have at least 2 bits")
 	}
 
 	if len(sru.RootHash) == 0 {
