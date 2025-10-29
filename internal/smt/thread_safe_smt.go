@@ -45,6 +45,17 @@ func (ts *ThreadSafeSMT) AddLeaf(path *big.Int, value []byte) error {
 	return ts.smt.AddLeaf(path, value)
 }
 
+// AddPreHashedLeaf adds a leaf where the value is already a hash calculated externally
+// This operation is exclusive and blocks all other operations
+func (ts *ThreadSafeSMT) AddPreHashedLeaf(path *big.Int, hash []byte) error {
+	ts.rwMux.Lock()
+	defer ts.rwMux.Unlock()
+
+	// TODO(SMT): Implement AddPreHashedLeaf in SparseMerkleTree
+	//return ts.smt.AddPreHashedLeaf(path, hash)
+	return nil
+}
+
 // GetRootHash returns the current root hash
 // This is a read operation that can be performed concurrently
 func (ts *ThreadSafeSMT) GetRootHash() string {
@@ -65,7 +76,7 @@ func (ts *ThreadSafeSMT) GetLeaf(path *big.Int) (*LeafBranch, error) {
 
 // GetPath generates a Merkle tree path for the given path
 // This is a read operation and allows concurrent access
-func (ts *ThreadSafeSMT) GetPath(path *big.Int) *api.MerkleTreePath {
+func (ts *ThreadSafeSMT) GetPath(path *big.Int) (*api.MerkleTreePath, error) {
 	ts.rwMux.RLock()
 	defer ts.rwMux.RUnlock()
 	return ts.smt.GetPath(path)

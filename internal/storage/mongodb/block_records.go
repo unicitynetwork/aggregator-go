@@ -33,8 +33,11 @@ func (brs *BlockRecordsStorage) Store(ctx context.Context, records *models.Block
 	if records == nil {
 		return errors.New("block records is nil")
 	}
-	_, err := brs.collection.InsertOne(ctx, records.ToBSON())
+	recordsBSON, err := records.ToBSON()
 	if err != nil {
+		return fmt.Errorf("failed to convert block records to BSON: %w", err)
+	}
+	if _, err = brs.collection.InsertOne(ctx, recordsBSON); err != nil {
 		return fmt.Errorf("failed to store block records: %w", err)
 	}
 	return nil
@@ -61,7 +64,7 @@ func (brs *BlockRecordsStorage) GetByBlockNumber(ctx context.Context, blockNumbe
 
 // GetByRequestID retrieves the block number for a request ID
 func (brs *BlockRecordsStorage) GetByRequestID(ctx context.Context, requestID api.RequestID) (*api.BigInt, error) {
-	filter := bson.M{"requestIds": requestID}
+	filter := bson.M{"requestIds": requestID.String()}
 	opts := options.FindOne().SetProjection(bson.M{"blockNumber": 1})
 
 	var result struct {

@@ -27,6 +27,8 @@ const (
 	RoundStateFinalizing                   // Finalizing block
 )
 
+const miniBatchSize = 100 // Number of commitments to process per SMT mini-batch
+
 func (rs RoundState) String() string {
 	switch rs {
 	case RoundStateCollecting:
@@ -79,6 +81,7 @@ type RoundManager struct {
 	commitmentQueue interfaces.CommitmentQueue
 	storage         interfaces.Storage
 	smt             *smt.ThreadSafeSMT
+	rootClient      RootAggregatorClient
 	bftClient       bft.BFTClient
 	stateTracker    *state.Tracker
 
@@ -111,6 +114,11 @@ type RoundManager struct {
 	totalCommitments int64
 }
 
+type RootAggregatorClient interface {
+	SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) error
+	GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.RootShardInclusionProof, error)
+}
+
 // RoundMetrics tracks performance metrics for a round
 type RoundMetrics struct {
 	CommitmentsProcessed int
@@ -120,17 +128,14 @@ type RoundMetrics struct {
 }
 
 // NewRoundManager creates a new round manager
-func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, stateTracker *state.Tracker) (*RoundManager, error) {
-	// Initialize SMT with empty tree - will be replaced with restored tree in Start()
-	smtInstance := smt.NewSparseMerkleTree(api.SHA256, 16+256)
-	threadSafeSMT := smt.NewThreadSafeSMT(smtInstance)
-
+func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, smtInstance *smt.SparseMerkleTree, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, rootAggregatorClient RootAggregatorClient, stateTracker *state.Tracker) (*RoundManager, error) {
 	rm := &RoundManager{
 		config:              cfg,
 		logger:              logger,
 		commitmentQueue:     commitmentQueue,
 		storage:             storage,
-		smt:                 threadSafeSMT,
+		smt:                 smt.NewThreadSafeSMT(smtInstance),
+		rootClient:          rootAggregatorClient,
 		stateTracker:        stateTracker,
 		roundDuration:       cfg.Processing.RoundDuration,         // Configurable round duration (default 1s)
 		commitmentStream:    make(chan *models.Commitment, 10000), // Reasonable buffer for streaming
@@ -140,27 +145,30 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 		avgSMTUpdateTime:    5 * time.Millisecond,                 // Initial estimate per batch
 	}
 
-	if cfg.BFT.Enabled {
-		var err error
-		rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, logger)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create BFT client: %w", err)
-		}
-	} else {
-		nextBlockNumber := api.NewBigInt(nil)
-		lastBlockNumber := api.NewBigInt(big.NewInt(0))
-		if rm.storage != nil && rm.storage.BlockStorage() != nil {
+	// create BFT client for standalone mode
+	if cfg.Sharding.Mode == config.ShardingModeStandalone {
+		if cfg.BFT.Enabled {
 			var err error
-			lastBlockNumber, err = rm.storage.BlockStorage().GetLatestNumber(ctx)
+			rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, logger)
 			if err != nil {
-				return nil, fmt.Errorf("failed to fetch latest block number: %w", err)
+				return nil, fmt.Errorf("failed to create BFT client: %w", err)
 			}
-			if lastBlockNumber == nil {
-				lastBlockNumber = api.NewBigInt(big.NewInt(0))
+		} else {
+			nextBlockNumber := api.NewBigInt(nil)
+			lastBlockNumber := api.NewBigInt(big.NewInt(0))
+			if rm.storage != nil && rm.storage.BlockStorage() != nil {
+				var err error
+				lastBlockNumber, err = rm.storage.BlockStorage().GetLatestNumber(ctx)
+				if err != nil {
+					return nil, fmt.Errorf("failed to fetch latest block number: %w", err)
+				}
+				if lastBlockNumber == nil {
+					lastBlockNumber = api.NewBigInt(big.NewInt(0))
+				}
 			}
+			nextBlockNumber.Add(lastBlockNumber.Int, big.NewInt(1))
+			rm.bftClient = bft.NewBFTClientStub(logger, rm, nextBlockNumber)
 		}
-		nextBlockNumber.Add(lastBlockNumber.Int, big.NewInt(1))
-		rm.bftClient = bft.NewBFTClientStub(logger, rm, nextBlockNumber)
 	}
 	return rm, nil
 }
@@ -182,7 +190,7 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 }
 
 // Stop gracefully stops the round manager
-func (rm *RoundManager) Stop(ctx context.Context) {
+func (rm *RoundManager) Stop(ctx context.Context) error {
 	rm.logger.Info("Stopping Round Manager")
 
 	if err := rm.Deactivate(ctx); err != nil {
@@ -200,6 +208,7 @@ func (rm *RoundManager) Stop(ctx context.Context) {
 	rm.wg.Wait()
 
 	rm.logger.Info("Round Manager stopped")
+	return nil
 }
 
 // GetCurrentRound returns information about the current round
@@ -328,6 +337,18 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 			rm.logger.WithContext(ctx).Error("Failed to process round",
 				"roundNumber", roundNumber.String(),
 				"error", err.Error())
+
+			if rm.config.Sharding.Mode.IsChild() {
+				nextRoundNumber := big.NewInt(0).Add(roundNumber.Int, big.NewInt(1))
+				rm.logger.WithContext(ctx).Info("Attempting to start new round after processing failure.",
+					"failedRound", roundNumber.String(),
+					"nextRound", nextRoundNumber.String())
+				if startErr := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); startErr != nil {
+					rm.logger.WithContext(ctx).Error("Failed to start new round after processing error",
+						"nextRound", nextRoundNumber.String(),
+						"error", startErr)
+				}
+			}
 		}
 	})
 
@@ -373,7 +394,11 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 
 	// Initialize commitments slice for this round
 	// Note: Any commitments consumed from the channel MUST be processed in this round
-	rm.currentRound.Commitments = make([]*models.Commitment, 0, 10000) // Larger pre-allocation for high throughput
+	capacity := 10000 // Default capacity
+	if rm.config.Processing.MaxCommitmentsPerRound > 0 {
+		capacity = rm.config.Processing.MaxCommitmentsPerRound
+	}
+	rm.currentRound.Commitments = make([]*models.Commitment, 0, capacity)
 
 	// Calculate adaptive processing deadline based on historical data
 	processingDuration := time.Duration(float64(rm.roundDuration) * rm.processingRatio)
@@ -400,6 +425,19 @@ ProcessLoop:
 			rm.roundMutex.Lock()
 			rm.currentRound.Commitments = append(rm.currentRound.Commitments, commitment)
 			commitmentsProcessed++
+			currentLen := len(rm.currentRound.Commitments)
+
+			// Process in mini-batches for SMT efficiency
+			if currentLen%miniBatchSize == 0 {
+				batchStart := time.Now()
+				batchSlice := rm.currentRound.Commitments[len(rm.currentRound.Commitments)-miniBatchSize:]
+				if err := rm.processMiniBatch(ctx, batchSlice); err != nil {
+					rm.logger.WithContext(ctx).Error("Failed to process mini-batch",
+						"error", err.Error(),
+						"roundNumber", roundNumber.String())
+				}
+				smtUpdateTime += time.Since(batchStart)
+			}
 
 			// Check if we've reached the configured cap
 			if rm.config.Processing.MaxCommitmentsPerRound > 0 && commitmentsProcessed >= rm.config.Processing.MaxCommitmentsPerRound {
@@ -411,17 +449,6 @@ ProcessLoop:
 				break ProcessLoop
 			}
 
-			// Process in mini-batches for SMT efficiency
-			if len(rm.currentRound.Commitments)%100 == 0 {
-				// Process this mini-batch into SMT
-				batchStart := time.Now()
-				if err := rm.processMiniBatch(ctx, rm.currentRound.Commitments[len(rm.currentRound.Commitments)-100:]); err != nil {
-					rm.logger.WithContext(ctx).Error("Failed to process mini-batch",
-						"error", err.Error(),
-						"roundNumber", roundNumber.String())
-				}
-				smtUpdateTime += time.Since(batchStart)
-			}
 			rm.roundMutex.Unlock()
 
 		case <-ctx.Done():
@@ -441,7 +468,7 @@ ProcessLoop:
 
 	// Process any remaining commitments not in a full mini-batch
 	rm.roundMutex.Lock()
-	lastBatchStart := (commitmentsProcessed / 100) * 100
+	lastBatchStart := (commitmentsProcessed / miniBatchSize) * miniBatchSize
 	if lastBatchStart < len(rm.currentRound.Commitments) {
 		batchStart := time.Now()
 		if err := rm.processMiniBatch(ctx, rm.currentRound.Commitments[lastBatchStart:]); err != nil {
@@ -460,8 +487,9 @@ ProcessLoop:
 
 	// Update average SMT update time (exponential moving average)
 	if commitmentsProcessed > 0 {
-		avgBatchTime := smtUpdateTime / time.Duration((commitmentsProcessed+99)/100) // Number of batches
-		rm.avgSMTUpdateTime = (rm.avgSMTUpdateTime*4 + avgBatchTime) / 5             // Weight towards recent: 80/20
+		numBatches := (commitmentsProcessed + miniBatchSize - 1) / miniBatchSize // Round up
+		avgBatchTime := smtUpdateTime / time.Duration(numBatches)
+		rm.avgSMTUpdateTime = (rm.avgSMTUpdateTime*4 + avgBatchTime) / 5 // Weight towards recent: 80/20
 	}
 
 	rm.lastRoundMetrics = RoundMetrics{
@@ -535,10 +563,12 @@ ProcessLoop:
 	rm.totalRounds++
 	rm.totalCommitments += int64(len(rm.currentRound.Commitments))
 
+	roundTotalTime := time.Since(rm.currentRound.StartTime)
 	rm.logger.WithContext(ctx).Info("Round processing completed successfully",
 		"roundNumber", roundNumber.String(),
-		"totalRounds", rm.totalRounds,
-		"totalCommitments", rm.totalCommitments)
+		"commitments", len(rm.currentRound.Commitments),
+		"roundTotalTime", roundTotalTime,
+		"processingTime", processingTime)
 
 	return nil
 }
@@ -802,16 +832,38 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 }
 
 func (rm *RoundManager) Activate(ctx context.Context) error {
-	if err := rm.bftClient.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start BFT client: %w", err)
+	switch rm.config.Sharding.Mode {
+	case config.ShardingModeStandalone:
+		if err := rm.bftClient.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start BFT client: %w", err)
+		}
+	case config.ShardingModeChild:
+		roundNumber := rm.stateTracker.GetLastSyncedBlock()
+		roundNumber.Add(roundNumber, big.NewInt(1))
+		if err := rm.StartNewRound(ctx, api.NewBigInt(roundNumber)); err != nil {
+			return fmt.Errorf("failed to start new round: %w", err)
+		}
+	default:
+		return fmt.Errorf("invalid shard mode: %s", rm.config.Sharding.Mode)
 	}
+
 	rm.startCommitmentPrefetcher(ctx)
 	return nil
 }
 
 func (rm *RoundManager) Deactivate(ctx context.Context) error {
-	rm.bftClient.Stop()
 	rm.stopCommitmentPrefetcher()
+	if rm.bftClient != nil {
+		rm.bftClient.Stop()
+	}
+
+	// stop creating blocks if we become follower
+	rm.roundMutex.Lock()
+	if rm.roundTimer != nil {
+		rm.roundTimer.Stop()
+	}
+	rm.roundMutex.Unlock()
+
 	return nil
 }
 

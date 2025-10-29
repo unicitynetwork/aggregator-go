@@ -29,9 +29,11 @@ func NewAggregatorRecordStorage(db *mongo.Database) *AggregatorRecordStorage {
 
 // Store stores a new aggregator record
 func (ars *AggregatorRecordStorage) Store(ctx context.Context, record *models.AggregatorRecord) error {
-	recordBSON := record.ToBSON()
-	_, err := ars.collection.InsertOne(ctx, recordBSON)
+	recordBSON, err := record.ToBSON()
 	if err != nil {
+		return fmt.Errorf("failed to marshal aggregator record to BSON: %w", err)
+	}
+	if _, err := ars.collection.InsertOne(ctx, recordBSON); err != nil {
 		return fmt.Errorf("failed to store aggregator record: %w", err)
 	}
 	return nil
@@ -43,13 +45,17 @@ func (ars *AggregatorRecordStorage) StoreBatch(ctx context.Context, records []*m
 		return nil
 	}
 
+	var err error
 	documents := make([]interface{}, len(records))
 	for i, record := range records {
-		documents[i] = record.ToBSON()
+		documents[i], err = record.ToBSON()
+		if err != nil {
+			return fmt.Errorf("failed to marshal aggregator record to BSON: %w", err)
+		}
 	}
 
 	opts := options.InsertMany().SetOrdered(false)
-	_, err := ars.collection.InsertMany(ctx, documents, opts)
+	_, err = ars.collection.InsertMany(ctx, documents, opts)
 	if err != nil {
 		if mongo.IsDuplicateKeyError(err) {
 			return nil
@@ -79,20 +85,19 @@ func (ars *AggregatorRecordStorage) GetByRequestID(ctx context.Context, requestI
 
 // GetByBlockNumber retrieves all records for a specific block
 func (ars *AggregatorRecordStorage) GetByBlockNumber(ctx context.Context, blockNumber *api.BigInt) ([]*models.AggregatorRecord, error) {
-	filter := bson.M{"blockNumber": blockNumber.String()}
+	filter := bson.M{"blockNumber": bigIntToDecimal128(blockNumber)}
 	cursor, err := ars.collection.Find(ctx, filter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find records by block number: %w", err)
 	}
 	defer cursor.Close(ctx)
 
-	var records []*models.AggregatorRecord
+	records := make([]*models.AggregatorRecord, 0)
 	for cursor.Next(ctx) {
 		var recordBSON models.AggregatorRecordBSON
 		if err := cursor.Decode(&recordBSON); err != nil {
 			return nil, fmt.Errorf("failed to decode aggregator record: %w", err)
 		}
-
 		record, err := recordBSON.FromBSON()
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert from BSON: %w", err)

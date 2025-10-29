@@ -17,7 +17,7 @@ import (
 )
 
 // setupAggregatorRecordTestDB creates a test database connection using Testcontainers
-func setupAggregatorRecordTestDB(t *testing.T) (*mongo.Database, func()) {
+func setupAggregatorRecordTestDB(t *testing.T) *mongo.Database {
 	ctx := context.Background()
 
 	// Create MongoDB container
@@ -46,7 +46,7 @@ func setupAggregatorRecordTestDB(t *testing.T) (*mongo.Database, func()) {
 
 	db := client.Database("test_aggregator_records")
 
-	cleanup := func() {
+	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
@@ -57,9 +57,9 @@ func setupAggregatorRecordTestDB(t *testing.T) (*mongo.Database, func()) {
 		if err := mongoContainer.Terminate(ctx); err != nil {
 			t.Logf("Failed to terminate MongoDB container: %v", err)
 		}
-	}
+	})
 
-	return db, cleanup
+	return db
 }
 
 // createTestAggregatorRecord creates a test aggregator record
@@ -84,8 +84,7 @@ func createTestAggregatorRecord(requestID string, blockNumber int64, leafIndex i
 }
 
 func TestAggregatorRecordStorage_StoreBatch_DuplicateHandling(t *testing.T) {
-	db, cleanup := setupAggregatorRecordTestDB(t)
-	defer cleanup()
+	db := setupAggregatorRecordTestDB(t)
 
 	storage := NewAggregatorRecordStorage(db)
 	ctx := context.Background()
@@ -130,4 +129,70 @@ func TestAggregatorRecordStorage_StoreBatch_DuplicateHandling(t *testing.T) {
 	record1, err := storage.GetByRequestID(ctx, "request1")
 	require.NoError(t, err, "GetByRequestID should not return an error")
 	assert.NotNil(t, record1, "Original record should still exist")
+}
+
+func TestAggregatorRecordStorage_GetByBlockNumber(t *testing.T) {
+	db := setupAggregatorRecordTestDB(t)
+	storage := NewAggregatorRecordStorage(db)
+	ctx := context.Background()
+
+	// Create indexes first
+	err := storage.CreateIndexes(ctx)
+	require.NoError(t, err, "CreateIndexes should not return an error")
+
+	t.Run("should return empty slice when no records exist", func(t *testing.T) {
+		blockNum := api.NewBigInt(big.NewInt(100))
+		retrieved, err := storage.GetByBlockNumber(ctx, blockNum)
+		require.NoError(t, err)
+		require.Len(t, retrieved, 0)
+	})
+
+	// Store some test records
+	records := []*models.AggregatorRecord{
+		createTestAggregatorRecord("req1-b100", 100, 0),
+		createTestAggregatorRecord("req2-b100", 100, 1),
+		createTestAggregatorRecord("req3-b100", 100, 2),
+		createTestAggregatorRecord("req1-b101", 101, 0),
+		createTestAggregatorRecord("req2-b101", 101, 1),
+		createTestAggregatorRecord("req1-b0", 0, 0),
+	}
+	err = storage.StoreBatch(ctx, records)
+	require.NoError(t, err, "StoreBatch should not return an error")
+
+	largeBlockNumberRecord := createTestAggregatorRecord("req1-large", 99999999999999999, 0)
+	err = storage.Store(ctx, largeBlockNumberRecord)
+	require.NoError(t, err, "Store should not return an error for large block number")
+
+	t.Run("should return records for a specific block number", func(t *testing.T) {
+		blockNum := api.NewBigInt(big.NewInt(100))
+		retrieved, err := storage.GetByBlockNumber(ctx, blockNum)
+		require.NoError(t, err)
+		require.NotNil(t, retrieved)
+		require.Len(t, retrieved, 3)
+
+		// Check request IDs to be sure
+		requestIDs := make(map[api.RequestID]bool)
+		for _, r := range retrieved {
+			requestIDs[r.RequestID] = true
+		}
+		require.True(t, requestIDs["req1-b100"])
+		require.True(t, requestIDs["req2-b100"])
+		require.True(t, requestIDs["req3-b100"])
+	})
+
+	t.Run("should return empty slice for non-existent block number", func(t *testing.T) {
+		blockNum := api.NewBigInt(big.NewInt(999))
+		retrieved, err := storage.GetByBlockNumber(ctx, blockNum)
+		require.NoError(t, err)
+		require.Len(t, retrieved, 0)
+	})
+
+	t.Run("should handle zero block number", func(t *testing.T) {
+		blockNum := api.NewBigInt(big.NewInt(0))
+		retrieved, err := storage.GetByBlockNumber(ctx, blockNum)
+		require.NoError(t, err)
+		require.NotNil(t, retrieved)
+		require.Len(t, retrieved, 1)
+		require.Equal(t, api.RequestID("req1-b0"), retrieved[0].RequestID)
+	})
 }

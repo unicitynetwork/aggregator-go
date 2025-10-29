@@ -750,15 +750,20 @@ func TestBlockRecordsStorage_Store_BSON(t *testing.T) {
 		}
 
 		originalRecords := createTestBlockRecords(blockNumber, requestIDs)
+		originalBSON, err := originalRecords.ToBSON()
+		require.NoError(t, err)
 
 		// Marshal to BSON
-		bsonData, err := bson.Marshal(originalRecords)
+		bsonData, err := bson.Marshal(originalBSON)
 		require.NoError(t, err, "Should be able to marshal BlockRecords to BSON")
 
 		// Unmarshal from BSON
-		var unmarshaledRecords models.BlockRecords
-		err = bson.Unmarshal(bsonData, &unmarshaledRecords)
+		var unmarshaledRecordsBSON models.BlockRecordsBSON
+		err = bson.Unmarshal(bsonData, &unmarshaledRecordsBSON)
 		require.NoError(t, err, "Should be able to unmarshal BlockRecords from BSON")
+
+		unmarshaledRecords, err := unmarshaledRecordsBSON.FromBSON()
+		require.NoError(t, err)
 
 		// Verify the data matches
 		assert.Equal(t, originalRecords.BlockNumber.String(), unmarshaledRecords.BlockNumber.String())
@@ -778,15 +783,19 @@ func TestBlockRecordsStorage_Store_BSON(t *testing.T) {
 		requestIDs := []api.RequestID{}
 
 		originalRecords := createTestBlockRecords(blockNumber, requestIDs)
+		originalBSON, err := originalRecords.ToBSON()
+		require.NoError(t, err)
 
 		// Marshal to BSON
-		bsonData, err := bson.Marshal(originalRecords)
+		bsonData, err := bson.Marshal(originalBSON)
 		require.NoError(t, err, "Should be able to marshal BlockRecords with empty requestIDs to BSON")
 
 		// Unmarshal from BSON
-		var unmarshaledRecords models.BlockRecords
-		err = bson.Unmarshal(bsonData, &unmarshaledRecords)
+		var unmarshaledRecordsBSON models.BlockRecordsBSON
+		err = bson.Unmarshal(bsonData, &unmarshaledRecordsBSON)
 		require.NoError(t, err, "Should be able to unmarshal BlockRecords with empty requestIDs from BSON")
+		unmarshaledRecords, err := unmarshaledRecordsBSON.FromBSON()
+		require.NoError(t, err)
 
 		// Verify the data matches
 		assert.Equal(t, originalRecords.BlockNumber.String(), unmarshaledRecords.BlockNumber.String())
@@ -796,7 +805,7 @@ func TestBlockRecordsStorage_Store_BSON(t *testing.T) {
 
 	t.Run("should marshal and unmarshal large block numbers", func(t *testing.T) {
 		// Create test data with large block number
-		largeNumber, ok := new(big.Int).SetString("999999999999999999999999999999999999999999", 10)
+		largeNumber, ok := new(big.Int).SetString("999999999999999999999999999999", 10)
 		require.True(t, ok, "Should be able to create large big.Int")
 
 		blockNumber := api.NewBigInt(largeNumber)
@@ -805,15 +814,19 @@ func TestBlockRecordsStorage_Store_BSON(t *testing.T) {
 		}
 
 		originalRecords := createTestBlockRecords(blockNumber, requestIDs)
+		originalBSON, err := originalRecords.ToBSON()
+		require.NoError(t, err)
 
 		// Marshal to BSON
-		bsonData, err := bson.Marshal(originalRecords)
+		bsonData, err := bson.Marshal(originalBSON)
 		require.NoError(t, err, "Should be able to marshal BlockRecords with large block number to BSON")
 
 		// Unmarshal from BSON
-		var unmarshaledRecords models.BlockRecords
-		err = bson.Unmarshal(bsonData, &unmarshaledRecords)
+		var unmarshaledRecordsBSON models.BlockRecordsBSON
+		err = bson.Unmarshal(bsonData, &unmarshaledRecordsBSON)
 		require.NoError(t, err, "Should be able to unmarshal BlockRecords with large block number from BSON")
+		unmarshaledRecords, err := unmarshaledRecordsBSON.FromBSON()
+		require.NoError(t, err)
 
 		// Verify the data matches
 		assert.Equal(t, originalRecords.BlockNumber.String(), unmarshaledRecords.BlockNumber.String())
@@ -842,6 +855,8 @@ func TestBlockRecordsStorage_Store_Comprehensive(t *testing.T) {
 
 		// Create BlockRecords
 		originalRecords := createTestBlockRecords(blockNumber, requestIDs)
+		originalRecordsBSON, err := originalRecords.ToBSON()
+		require.NoError(t, err)
 
 		// Verify structure is correct
 		assert.NotNil(t, originalRecords)
@@ -850,12 +865,14 @@ func TestBlockRecordsStorage_Store_Comprehensive(t *testing.T) {
 		assert.NotNil(t, originalRecords.CreatedAt)
 
 		// Test BSON round-trip
-		bsonData, err := bson.Marshal(originalRecords)
+		bsonData, err := bson.Marshal(originalRecordsBSON)
 		require.NoError(t, err, "Should marshal BlockRecords to BSON")
 
-		var unmarshaledRecords models.BlockRecords
-		err = bson.Unmarshal(bsonData, &unmarshaledRecords)
+		var unmarshaledRecordsBSON models.BlockRecordsBSON
+		err = bson.Unmarshal(bsonData, &unmarshaledRecordsBSON)
 		require.NoError(t, err, "Should unmarshal BlockRecords from BSON")
+		unmarshaledRecords, err := unmarshaledRecordsBSON.FromBSON()
+		require.NoError(t, err)
 
 		// Verify all data is preserved through BSON round-trip
 		assert.Equal(t, originalRecords.BlockNumber.String(), unmarshaledRecords.BlockNumber.String())
@@ -913,7 +930,7 @@ func TestBlockRecordsStorage_Store_Comprehensive(t *testing.T) {
 			{
 				name: "large block number",
 				blockNumber: func() *api.BigInt {
-					large, _ := new(big.Int).SetString("999999999999999999999999999999999999999999", 10)
+					large, _ := new(big.Int).SetString("999999999999999999999999999999999", 10)
 					return api.NewBigInt(large)
 				}(),
 				requestIDs: []api.RequestID{"ffff000000000000000000000000000000000000000000000000000000000000"},
@@ -923,14 +940,18 @@ func TestBlockRecordsStorage_Store_Comprehensive(t *testing.T) {
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				records := createTestBlockRecords(tc.blockNumber, tc.requestIDs)
+				recordsBSON, err := records.ToBSON()
+				require.NoError(t, err)
 
 				// Test BSON serialization
-				bsonData, err := bson.Marshal(records)
+				bsonData, err := bson.Marshal(recordsBSON)
 				require.NoError(t, err, "Should marshal edge case to BSON")
 
-				var unmarshaled models.BlockRecords
-				err = bson.Unmarshal(bsonData, &unmarshaled)
+				var unmarshaledBSON models.BlockRecordsBSON
+				err = bson.Unmarshal(bsonData, &unmarshaledBSON)
 				require.NoError(t, err, "Should unmarshal edge case from BSON")
+				unmarshaled, err := unmarshaledBSON.FromBSON()
+				require.NoError(t, err)
 
 				// Verify data integrity
 				assert.Equal(t, records.BlockNumber.String(), unmarshaled.BlockNumber.String())

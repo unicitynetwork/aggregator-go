@@ -10,9 +10,48 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
+
+// Service defines the common interface that all service implementations must satisfy
+type Service interface {
+	// JSON-RPC methods
+	SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error)
+	GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error)
+	GetNoDeletionProof(ctx context.Context) (*api.GetNoDeletionProofResponse, error)
+	GetBlockHeight(ctx context.Context) (*api.GetBlockHeightResponse, error)
+	GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error)
+	GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error)
+	GetHealthStatus(ctx context.Context) (*api.HealthStatus, error)
+
+	// Parent mode specific methods
+	SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) (*api.SubmitShardRootResponse, error)
+	GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.GetShardProofResponse, error)
+}
+
+// NewService creates the appropriate service based on sharding mode
+func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, roundManager round.Manager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) (Service, error) {
+	switch cfg.Sharding.Mode {
+	case config.ShardingModeStandalone:
+		rm, ok := roundManager.(*round.RoundManager)
+		if !ok {
+			return nil, fmt.Errorf("invalid round manager type for standalone mode")
+		}
+		return NewAggregatorService(cfg, logger, rm, commitmentQueue, storage, leaderSelector), nil
+	case config.ShardingModeParent:
+		prm, ok := roundManager.(*round.ParentRoundManager)
+		if !ok {
+			return nil, fmt.Errorf("invalid round manager type for parent mode")
+		}
+		return NewParentAggregatorService(cfg, logger, prm, storage, leaderSelector), nil
+	case config.ShardingModeChild:
+		return NewAggregatorService(cfg, logger, roundManager, commitmentQueue, storage, leaderSelector), nil
+	default:
+		return nil, fmt.Errorf("unsupported sharding mode: %s", cfg.Sharding.Mode)
+	}
+}
 
 // AggregatorService implements the business logic for the aggregator
 type AggregatorService struct {
@@ -20,7 +59,7 @@ type AggregatorService struct {
 	logger              *logger.Logger
 	commitmentQueue     interfaces.CommitmentQueue
 	storage             interfaces.Storage
-	roundManager        *round.RoundManager
+	roundManager        round.Manager
 	leaderSelector      LeaderSelector
 	commitmentValidator *signing.CommitmentValidator
 }
@@ -30,20 +69,6 @@ type LeaderSelector interface {
 }
 
 // Conversion functions between API and internal model types
-
-func modelToAPIBigInt(modelBigInt *api.BigInt) *api.BigInt {
-	if modelBigInt == nil {
-		return nil
-	}
-	return &api.BigInt{Int: modelBigInt.Int}
-}
-
-func apiToModelBigInt(apiBigInt *api.BigInt) *api.BigInt {
-	if apiBigInt == nil {
-		return nil
-	}
-	return &api.BigInt{Int: apiBigInt.Int}
-}
 
 func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.AggregatorRecord {
 	return &api.AggregatorRecord{
@@ -56,8 +81,8 @@ func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.Aggre
 			StateHash: api.StateHash(modelRecord.Authenticator.StateHash.String()),
 		},
 		AggregateRequestCount: modelRecord.AggregateRequestCount,
-		BlockNumber:           modelToAPIBigInt(modelRecord.BlockNumber),
-		LeafIndex:             modelToAPIBigInt(modelRecord.LeafIndex),
+		BlockNumber:           modelRecord.BlockNumber,
+		LeafIndex:             modelRecord.LeafIndex,
 		CreatedAt:             modelRecord.CreatedAt,
 		FinalizedAt:           modelRecord.FinalizedAt,
 	}
@@ -65,15 +90,17 @@ func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.Aggre
 
 func modelToAPIBlock(modelBlock *models.Block) *api.Block {
 	return &api.Block{
-		Index:               modelToAPIBigInt(modelBlock.Index),
-		ChainID:             modelBlock.ChainID,
-		Version:             modelBlock.Version,
-		ForkID:              modelBlock.ForkID,
-		RootHash:            modelBlock.RootHash,
-		PreviousBlockHash:   modelBlock.PreviousBlockHash,
-		NoDeletionProofHash: modelBlock.NoDeletionProofHash,
-		CreatedAt:           modelBlock.CreatedAt,
-		UnicityCertificate:  modelBlock.UnicityCertificate,
+		Index:                modelBlock.Index,
+		ChainID:              modelBlock.ChainID,
+		ShardID:              modelBlock.ShardID,
+		Version:              modelBlock.Version,
+		ForkID:               modelBlock.ForkID,
+		RootHash:             modelBlock.RootHash,
+		PreviousBlockHash:    modelBlock.PreviousBlockHash,
+		NoDeletionProofHash:  modelBlock.NoDeletionProofHash,
+		CreatedAt:            modelBlock.CreatedAt,
+		UnicityCertificate:   modelBlock.UnicityCertificate,
+		ParentMerkleTreePath: modelBlock.ParentMerkleTreePath,
 	}
 }
 
@@ -82,12 +109,13 @@ func modelToAPIHealthStatus(modelHealth *models.HealthStatus) *api.HealthStatus 
 		Status:   modelHealth.Status,
 		Role:     modelHealth.Role,
 		ServerID: modelHealth.ServerID,
+		Sharding: modelHealth.Sharding,
 		Details:  modelHealth.Details,
 	}
 }
 
 // NewAggregatorService creates a new aggregator service
-func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManager *round.RoundManager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) *AggregatorService {
+func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManager round.Manager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) *AggregatorService {
 	return &AggregatorService{
 		config:              cfg,
 		logger:              logger,
@@ -95,7 +123,7 @@ func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManage
 		storage:             storage,
 		roundManager:        roundManager,
 		leaderSelector:      leaderSelector,
-		commitmentValidator: signing.NewCommitmentValidator(),
+		commitmentValidator: signing.NewCommitmentValidator(cfg.Sharding),
 	}
 }
 
@@ -186,17 +214,19 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 
 // GetInclusionProof retrieves inclusion proof for a commitment
 func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error) {
-	// First check if commitment exists in aggregator records (finalized)
-	record, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, req.RequestID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get aggregator record: %w", err)
+	// verify that the request ID matches the shard ID of this aggregator
+	if err := as.commitmentValidator.ValidateShardID(req.RequestID); err != nil {
+		return nil, fmt.Errorf("request ID validation failed: %w", err)
 	}
 
 	path, err := req.RequestID.GetPath()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
 	}
-	merkleTreePath := as.roundManager.GetSMT().GetPath(path)
+	merkleTreePath, err := as.roundManager.GetSMT().GetPath(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get inclusion proof for request ID %s: %w", req.RequestID, err)
+	}
 
 	// Find the latest block that matches the current SMT root hash
 	rootHash, err := api.NewHexBytesFromString(merkleTreePath.Root)
@@ -211,6 +241,19 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		return nil, fmt.Errorf("no block found with root hash %s", rootHash)
 	}
 
+	// Join parent and child SMT paths if sharding mode is enabled
+	if as.config.Sharding.Mode == config.ShardingModeChild {
+		merkleTreePath, err = smt.JoinPaths(merkleTreePath, block.ParentMerkleTreePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to join parent and child aggregator paths: %w", err)
+		}
+	}
+
+	// First check if commitment exists in aggregator records (finalized)
+	record, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, req.RequestID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get aggregator record: %w", err)
+	}
 	if record == nil {
 		// Non-inclusion proof
 		return &api.GetInclusionProofResponse{
@@ -222,17 +265,9 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 			},
 		}, nil
 	}
-
-	authenticator := &api.Authenticator{
-		Algorithm: record.Authenticator.Algorithm,
-		PublicKey: record.Authenticator.PublicKey,
-		Signature: record.Authenticator.Signature,
-		StateHash: record.Authenticator.StateHash,
-	}
-
 	return &api.GetInclusionProofResponse{
 		InclusionProof: &api.InclusionProof{
-			Authenticator:      authenticator,
+			Authenticator:      record.Authenticator.ToAPI(),
 			MerkleTreePath:     merkleTreePath,
 			TransactionHash:    &record.TransactionHash,
 			UnicityCertificate: block.UnicityCertificate,
@@ -259,7 +294,7 @@ func (as *AggregatorService) GetBlockHeight(ctx context.Context) (*api.GetBlockH
 	}
 
 	return &api.GetBlockHeightResponse{
-		BlockNumber: modelToAPIBigInt(latestBlockNumber),
+		BlockNumber: latestBlockNumber,
 	}, nil
 }
 
@@ -317,7 +352,7 @@ func (as *AggregatorService) GetBlock(ctx context.Context, req *api.GetBlockRequ
 
 // GetBlockCommitments retrieves all commitments in a block
 func (as *AggregatorService) GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error) {
-	records, err := as.storage.AggregatorRecordStorage().GetByBlockNumber(ctx, apiToModelBigInt(req.BlockNumber))
+	records, err := as.storage.AggregatorRecordStorage().GetByBlockNumber(ctx, req.BlockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block commitments: %w", err)
 	}
@@ -354,7 +389,12 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 		role = "standalone"
 	}
 
-	status := models.NewHealthStatus(role, as.config.HA.ServerID)
+	sharding := api.Sharding{
+		Mode:       as.config.Sharding.Mode.String(),
+		ShardIDLen: as.config.Sharding.ShardIDLength,
+		ShardID:    as.config.Sharding.Child.ShardID,
+	}
+	status := models.NewHealthStatus(role, as.config.HA.ServerID, sharding)
 
 	// Add database connectivity check
 	if err := as.storage.Ping(ctx); err != nil {
@@ -388,4 +428,14 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 	}
 
 	return modelToAPIHealthStatus(status), nil
+}
+
+// SubmitShardRoot - not supported in standalone mode
+func (as *AggregatorService) SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) (*api.SubmitShardRootResponse, error) {
+	return nil, fmt.Errorf("submit_shard_root is not supported in standalone mode")
+}
+
+// GetShardProof - not supported in standalone mode
+func (as *AggregatorService) GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.GetShardProofResponse, error) {
+	return nil, fmt.Errorf("get_shard_proof is not supported in standalone mode")
 }

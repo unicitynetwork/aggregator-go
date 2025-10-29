@@ -18,14 +18,16 @@ type blockSyncer struct {
 	logger       *logger.Logger
 	storage      interfaces.Storage
 	smt          *smt.ThreadSafeSMT
+	shardID      api.ShardID
 	stateTracker *state.Tracker
 }
 
-func newBlockSyncer(logger *logger.Logger, storage interfaces.Storage, smt *smt.ThreadSafeSMT, stateTracker *state.Tracker) *blockSyncer {
+func newBlockSyncer(logger *logger.Logger, storage interfaces.Storage, smt *smt.ThreadSafeSMT, shardID api.ShardID, stateTracker *state.Tracker) *blockSyncer {
 	return &blockSyncer{
 		logger:       logger,
 		storage:      storage,
 		smt:          smt,
+		shardID:      shardID,
 		stateTracker: stateTracker,
 	}
 }

@@ -7,14 +7,12 @@ import (
 	"fmt"
 	"strconv"
 	"time"
-
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/bsontype"
 )
 
 // Basic types for API
 type StateHash = ImprintHexString
 type TransactionHash = ImprintHexString
+type ShardID = int
 
 // Authenticator represents the authentication data for a commitment
 type Authenticator struct {
@@ -94,33 +92,6 @@ func (t *Timestamp) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalBSONValue implements bson.ValueMarshaler
-func (t *Timestamp) MarshalBSONValue() (bsontype.Type, []byte, error) {
-	if t == nil {
-		return bson.TypeNull, nil, nil
-	}
-	// Use Unix timestamp in milliseconds as int64 for BSON
-	millis := t.Time.UnixMilli()
-	return bson.MarshalValue(millis)
-}
-
-// UnmarshalBSONValue implements bson.ValueUnmarshaler
-func (t *Timestamp) UnmarshalBSONValue(bsonType bsontype.Type, data []byte) error {
-	if bsonType == bson.TypeNull {
-		t.Time = time.Time{}
-		return nil
-	}
-
-	var millis int64
-	err := bson.UnmarshalValue(bsonType, data, &millis)
-	if err != nil {
-		return err
-	}
-
-	t.Time = time.UnixMilli(millis)
-	return nil
-}
-
 // AggregatorRecord represents a finalized commitment with proof data
 type AggregatorRecord struct {
 	RequestID             RequestID       `json:"requestId"`
@@ -149,28 +120,32 @@ func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *BigInt)
 
 // Block represents a blockchain block
 type Block struct {
-	Index               *BigInt    `json:"index"`
-	ChainID             string     `json:"chainId"`
-	Version             string     `json:"version"`
-	ForkID              string     `json:"forkId"`
-	RootHash            HexBytes   `json:"rootHash"`
-	PreviousBlockHash   HexBytes   `json:"previousBlockHash"`
-	NoDeletionProofHash HexBytes   `json:"noDeletionProofHash"`
-	CreatedAt           *Timestamp `json:"createdAt"`
-	UnicityCertificate  HexBytes   `json:"unicityCertificate"`
+	Index                *BigInt         `json:"index"`
+	ChainID              string          `json:"chainId"`
+	ShardID              ShardID         `json:"shardId"`
+	Version              string          `json:"version"`
+	ForkID               string          `json:"forkId"`
+	RootHash             HexBytes        `json:"rootHash"`
+	PreviousBlockHash    HexBytes        `json:"previousBlockHash"`
+	NoDeletionProofHash  HexBytes        `json:"noDeletionProofHash"`
+	CreatedAt            *Timestamp      `json:"createdAt"`
+	UnicityCertificate   HexBytes        `json:"unicityCertificate"`
+	ParentMerkleTreePath *MerkleTreePath `json:"parentMerkleTreePath,omitempty"` // child mode only
 }
 
 // NewBlock creates a new block
-func NewBlock(index *BigInt, chainID, version, forkID string, rootHash, previousBlockHash, unicityCertificate HexBytes) *Block {
+func NewBlock(index *BigInt, chainID string, shardID ShardID, version, forkID string, rootHash, previousBlockHash, uc HexBytes, parentMerkleTreePath *MerkleTreePath) *Block {
 	return &Block{
-		Index:              index,
-		ChainID:            chainID,
-		Version:            version,
-		ForkID:             forkID,
-		RootHash:           rootHash,
-		PreviousBlockHash:  previousBlockHash,
-		CreatedAt:          Now(),
-		UnicityCertificate: unicityCertificate,
+		Index:                index,
+		ChainID:              chainID,
+		ShardID:              shardID,
+		Version:              version,
+		ForkID:               forkID,
+		RootHash:             rootHash,
+		PreviousBlockHash:    previousBlockHash,
+		CreatedAt:            Now(),
+		UnicityCertificate:   uc,
+		ParentMerkleTreePath: parentMerkleTreePath,
 	}
 }
 
@@ -255,6 +230,11 @@ type InclusionProof struct {
 	UnicityCertificate HexBytes         `json:"unicityCertificate"`
 }
 
+type RootShardInclusionProof struct {
+	MerkleTreePath     *MerkleTreePath `json:"merkleTreePath"`
+	UnicityCertificate HexBytes        `json:"unicityCertificate"`
+}
+
 // GetNoDeletionProofResponse represents the get_no_deletion_proof JSON-RPC response
 type GetNoDeletionProofResponse struct {
 	NoDeletionProof *NoDeletionProof `json:"noDeletionProof"`
@@ -286,11 +266,43 @@ type GetBlockCommitmentsResponse struct {
 	Commitments []*AggregatorRecord `json:"commitments"`
 }
 
+// Status constants for SubmitShardRootResponse
+const (
+	ShardRootStatusSuccess         = "SUCCESS"
+	ShardRootStatusInvalidShardID  = "INVALID_SHARD_ID"
+	ShardRootStatusInvalidRootHash = "INVALID_ROOT_HASH"
+	ShardRootStatusInternalError   = "INTERNAL_ERROR"
+	ShardRootStatusNotLeader       = "NOT_LEADER"
+)
+
+// SubmitShardRootRequest represents the submit_shard_root JSON-RPC request
+type SubmitShardRootRequest struct {
+	ShardID  ShardID  `json:"shardId"`
+	RootHash HexBytes `json:"rootHash"` // Raw root hash from child SMT
+}
+
+// SubmitShardRootResponse represents the submit_shard_root JSON-RPC response
+type SubmitShardRootResponse struct {
+	Status string `json:"status"` // "SUCCESS", "INVALID_SHARD_ID", "INVALID_ROOT_HASH", etc.
+}
+
+// GetShardProofRequest represents the get_shard_proof JSON-RPC request
+type GetShardProofRequest struct {
+	ShardID ShardID `json:"shardId"`
+}
+
+// GetShardProofResponse represents the get_shard_proof JSON-RPC response
+type GetShardProofResponse struct {
+	MerkleTreePath     *MerkleTreePath `json:"merkleTreePath"`     // Proof path for the shard
+	UnicityCertificate HexBytes        `json:"unicityCertificate"` // Unicity Certificate from the finalized block
+}
+
 // HealthStatus represents the health status of the service
 type HealthStatus struct {
 	Status   string            `json:"status"`
 	Role     string            `json:"role"`
 	ServerID string            `json:"serverId"`
+	Sharding Sharding          `json:"sharding"`
 	Details  map[string]string `json:"details,omitempty"`
 }
 
@@ -310,4 +322,15 @@ func (h *HealthStatus) AddDetail(key, value string) {
 		h.Details = make(map[string]string)
 	}
 	h.Details[key] = value
+}
+
+func (r *RootShardInclusionProof) IsValid(shardRootHash string) bool {
+	return r.MerkleTreePath != nil && len(r.UnicityCertificate) > 0 &&
+		len(r.MerkleTreePath.Steps) > 0 && r.MerkleTreePath.Steps[0].Data != nil && *r.MerkleTreePath.Steps[0].Data == shardRootHash
+}
+
+type Sharding struct {
+	Mode       string `json:"mode"`
+	ShardIDLen int    `json:"shardIdLen"`
+	ShardID    int    `json:"shardId"`
 }

@@ -33,6 +33,10 @@ type Service interface {
 	GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error)
 	GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error)
 	GetHealthStatus(ctx context.Context) (*api.HealthStatus, error)
+
+	// Parent mode specific methods (will return errors in standalone mode)
+	SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) (*api.SubmitShardRootResponse, error)
+	GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.GetShardProofResponse, error)
 }
 
 // NewServer creates a new gateway server
@@ -117,9 +121,18 @@ func (s *Server) setupJSONRPCHandlers() {
 	s.rpcServer.AddMiddleware(jsonrpc.LoggingMiddleware(s.logger))
 	s.rpcServer.AddMiddleware(jsonrpc.TimeoutMiddleware(30 * time.Second))
 
-	// Register handlers
-	s.rpcServer.RegisterMethod("submit_commitment", s.handleSubmitCommitment)
-	s.rpcServer.RegisterMethod("get_inclusion_proof", s.handleGetInclusionProof)
+	// Register handlers based on mode
+	if s.config.Sharding.Mode.IsParent() {
+		// Parent mode handlers
+		s.rpcServer.RegisterMethod("submit_shard_root", s.handleSubmitShardRoot)
+		s.rpcServer.RegisterMethod("get_shard_proof", s.handleGetShardProof)
+	} else {
+		// Standalone mode handlers (default)
+		s.rpcServer.RegisterMethod("submit_commitment", s.handleSubmitCommitment)
+		s.rpcServer.RegisterMethod("get_inclusion_proof", s.handleGetInclusionProof)
+	}
+
+	// Common handlers for all modes
 	s.rpcServer.RegisterMethod("get_no_deletion_proof", s.handleGetNoDeletionProof)
 	s.rpcServer.RegisterMethod("get_block_height", s.handleGetBlockHeight)
 	s.rpcServer.RegisterMethod("get_block", s.handleGetBlock)

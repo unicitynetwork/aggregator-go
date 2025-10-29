@@ -99,6 +99,14 @@ The service will start on `http://localhost:3000` by default.
 
 The service is configured via environment variables:
 
+### Chain Configuration
+
+| Variable        | Description     | Default   |
+|-----------------|-----------------|-----------|
+| `CHAIN_ID`      | Chain ID        | `unicity` |
+| `CHAIN_VERSION` | Chain version   | `1.0`     |
+| `CHAIN_FORK_ID` | Chain's Fork ID | `mainnet` |
+
 ### Server Configuration
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -220,6 +228,7 @@ Submit a state transition request to the aggregation layer with cryptographic va
 - `REQUEST_ID_MISMATCH` - RequestID doesn't match SHA256(publicKey || stateHash)
 - `INVALID_STATE_HASH_FORMAT` - StateHash not in proper DataHash imprint format
 - `INVALID_TRANSACTION_HASH_FORMAT` - TransactionHash not in proper DataHash imprint format
+- `INVALID_SHARD` - The commitment was sent to the wrong shard
 - `UNSUPPORTED_ALGORITHM` - Algorithm other than secp256k1
 
 #### `get_inclusion_proof`
@@ -550,6 +559,92 @@ The service implements a MongoDB-based leader election system:
 - **`leader`** - Actively creating blocks and managing consensus
 - **`follower`** - Processing API requests, monitoring for leadership
 - **`standalone`** - Single server mode (HA disabled)
+
+## Sharding
+
+To support horizontal scaling, the aggregators can be run in a sharded configuration consisting of one parent aggregator 
+and multiple child aggregators. In this mode, the global Sparse Merkle Tree (SMT) is split across the child nodes, and 
+agents must submit their commitments to the correct child node.
+
+For a more detailed technical explanation of the sharded SMT structure, please refer to the official specification:
+[https://github.com/unicitynetwork/specs/blob/main/smt.md](https://github.com/unicitynetwork/specs/blob/main/smt.md)
+
+### Commitment Routing
+
+The commitments are assigned to a shard based on the least significant bits of their commitment identifier. The number of 
+bits used to determine the shard is defined by the `SHARD_ID_LENGTH` configuration.
+
+For example `SHARD_ID_LENGTH: 1` means that the rightmost `1` bits of commitment identifier determines the correct 
+shard. In this case there would be 2 shards e.g. commitments ending with bit `0` would go to `shard-1`, and 
+commitments ending with bit `1` would go to the `shard-2`.
+
+In sharded setup only the parent aggregator talks to the BFT node.
+
+### Shard ID Encoding
+
+The `shardID` is a unique identifier for each shard that includes a `1` as its most significant bit (MSB). This prefix 
+bit ensures that the leading zeros are preserved for bit manipulations.
+
+Examples
+- For `SHARD_ID_LENGTH: 1` the valid `shardID`s are `0b10` (2) and `0b11` (3), for a total of two shards.
+- For `SHARD_ID_LENGTH: 2` the valid `shardID`s are `0b100` (4), `0b101` (5), `0b110` (6) and `0b111` (7), for a total of four shards.
+
+A child aggregator validates incoming commitments to ensure they belong to its shard. If a commitment is sent to the 
+wrong shard, the aggregator will reject it.
+
+### Example Sharded Setup
+
+The following diagram illustrates a sharded setup with one parent and two child aggregators for `SHARD_ID_LENGTH: 1`.
+
+```text
+          +--------------------+
+          | Parent Aggregator  |
+          | (2-leaf SMT)       |
+          +--------------------+
+           /                  \
+          /                    \
++----------------+     +----------------+
+| Child Agg. #1  |     | Child Agg. #2  |
+| ShardID = 0b10 |     | ShardID = 0b11 |
+| (handles *...0)|     | (handles *...1)|
++----------------+     +----------------+
+        ^                      ^
+        |                      |
++----------------+     +----------------+
+| Agent sends    |     | Agent sends    |
+| commitment     |     | commitment     |
+| ID = ...xxx0   |     | ID = ...xxx1   |
++----------------+     +----------------+
+```
+
+### Configuration
+
+The sharded setup is configured via environment variables, as seen in `sharding-compose.yml`.
+
+A **parent** aggregator is configured with:
+```yaml
+environment:
+  SHARDING_MODE: "parent"
+  SHARD_ID_LENGTH: 1
+```
+
+A **child** aggregator is configured with its unique `shardID` and the address of the parent, for example:
+
+Shard-1:
+```yaml
+environment:
+  SHARDING_MODE: "child"
+  SHARDING_CHILD_SHARD_ID: 2 # (binary 0b10)
+  SHARDING_CHILD_PARENT_RPC_ADDR: http://aggregator-root:3000
+```
+
+Shard-2:
+```yaml
+environment:
+  SHARDING_MODE: "child"
+  SHARDING_CHILD_SHARD_ID: 3 # (binary 0b11)
+  SHARDING_CHILD_PARENT_RPC_ADDR: http://aggregator-root:3000
+```
 
 ## Error Handling
 
