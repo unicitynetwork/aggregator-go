@@ -109,6 +109,7 @@ func modelToAPIHealthStatus(modelHealth *models.HealthStatus) *api.HealthStatus 
 		Status:   modelHealth.Status,
 		Role:     modelHealth.Role,
 		ServerID: modelHealth.ServerID,
+		Sharding: modelHealth.Sharding,
 		Details:  modelHealth.Details,
 	}
 }
@@ -388,7 +389,12 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 		role = "standalone"
 	}
 
-	status := models.NewHealthStatus(role, as.config.HA.ServerID)
+	sharding := api.Sharding{
+		Mode:       as.config.Sharding.Mode.String(),
+		ShardIDLen: as.config.Sharding.ShardIDLength,
+		ShardID:    as.config.Sharding.Child.ShardID,
+	}
+	status := models.NewHealthStatus(role, as.config.HA.ServerID, sharding)
 
 	// Add database connectivity check
 	if err := as.storage.Ping(ctx); err != nil {

@@ -302,6 +302,7 @@ type HealthStatus struct {
 	Status   string            `json:"status"`
 	Role     string            `json:"role"`
 	ServerID string            `json:"serverId"`
+	Sharding Sharding          `json:"sharding"`
 	Details  map[string]string `json:"details,omitempty"`
 }
 
@@ -326,4 +327,10 @@ func (h *HealthStatus) AddDetail(key, value string) {
 func (r *RootShardInclusionProof) IsValid(shardRootHash string) bool {
 	return r.MerkleTreePath != nil && len(r.UnicityCertificate) > 0 &&
 		len(r.MerkleTreePath.Steps) > 0 && r.MerkleTreePath.Steps[0].Data != nil && *r.MerkleTreePath.Steps[0].Data == shardRootHash
+}
+
+type Sharding struct {
+	Mode       string `json:"mode"`
+	ShardIDLen int    `json:"shardIdLen"`
+	ShardID    int    `json:"shardId"`
 }

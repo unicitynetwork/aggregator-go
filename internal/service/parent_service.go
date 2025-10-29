@@ -254,7 +254,11 @@ func (pas *ParentAggregatorService) GetHealthStatus(ctx context.Context) (*api.H
 		role = "parent-standalone"
 	}
 
-	status := models.NewHealthStatus(role, pas.config.HA.ServerID)
+	sharding := api.Sharding{
+		Mode:       pas.config.Sharding.Mode.String(),
+		ShardIDLen: pas.config.Sharding.ShardIDLength,
+	}
+	status := models.NewHealthStatus(role, pas.config.HA.ServerID, sharding)
 
 	// Add database connectivity check
 	if err := pas.storage.Ping(ctx); err != nil {
