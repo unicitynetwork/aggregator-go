@@ -82,21 +82,10 @@ type GetInclusionProofResponse struct {
 }
 
 type InclusionProof struct {
-	Authenticator      *api.Authenticator `json:"authenticator"`
-	MerkleTreePath     *MerkleTreePath    `json:"merkleTreePath"`
-	TransactionHash    string             `json:"transactionHash"`
-	UnicityCertificate string             `json:"unicityCertificate"`
-}
-
-type MerkleTreePath struct {
-	Root  string           `json:"root"`
-	Steps []MerkleTreeStep `json:"steps"`
-}
-
-type MerkleTreeStep struct {
-	Branch  []string `json:"branch"`
-	Path    string   `json:"path"`
-	Sibling []string `json:"sibling"`
+	Authenticator      *api.Authenticator  `json:"authenticator"`
+	MerkleTreePath     *api.MerkleTreePath `json:"merkleTreePath"`
+	TransactionHash    string              `json:"transactionHash"`
+	UnicityCertificate string              `json:"unicityCertificate"`
 }
 
 // Test configuration
@@ -496,20 +485,6 @@ func proofVerificationWorker(ctx context.Context, client *JSONRPCClient, metrics
 
 					// Verify the proof
 					if proofResp.InclusionProof.MerkleTreePath != nil {
-						// Convert to API MerkleTreePath for verification
-						apiPath := &api.MerkleTreePath{
-							Root:  proofResp.InclusionProof.MerkleTreePath.Root,
-							Steps: make([]api.MerkleTreeStep, len(proofResp.InclusionProof.MerkleTreePath.Steps)),
-						}
-
-						for i, step := range proofResp.InclusionProof.MerkleTreePath.Steps {
-							apiPath.Steps[i] = api.MerkleTreeStep{
-								Branch:  step.Branch,
-								Path:    step.Path,
-								Sibling: step.Sibling,
-							}
-						}
-
 						// Use GetPath() method to properly convert RequestID to big.Int
 						requestIDPath, err := api.RequestID(reqID).GetPath()
 						if err != nil {
@@ -518,7 +493,7 @@ func proofVerificationWorker(ctx context.Context, client *JSONRPCClient, metrics
 						}
 
 						// Verify the merkle path
-						result, err := apiPath.Verify(requestIDPath)
+						result, err := proofResp.InclusionProof.MerkleTreePath.Verify(requestIDPath)
 						if err != nil {
 							atomic.AddInt64(&metrics.proofVerifyFailed, 1)
 							fmt.Printf("\n[ERROR] Proof verification error for %s: %v\n", reqID, err)
