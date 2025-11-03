@@ -37,7 +37,7 @@ func TestBlockSync(t *testing.T) {
 	require.NoError(t, err)
 
 	// create block syncer
-	smtInstance := smt.NewSparseMerkleTree(api.SHA256)
+	smtInstance := smt.NewSparseMerkleTree(api.SHA256, 16+256)
 	threadSafeSMT := smt.NewThreadSafeSMT(smtInstance)
 	stateTracker := state.NewSyncStateTracker()
 	syncer := newBlockSyncer(testLogger, storage, threadSafeSMT, stateTracker)
@@ -90,7 +90,7 @@ func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage) ap
 	require.NoError(t, err)
 
 	// compute rootHash
-	tmpSMT := smt.NewSparseMerkleTree(api.SHA256)
+	tmpSMT := smt.NewSparseMerkleTree(api.SHA256, 16+256)
 	require.NoError(t, tmpSMT.AddLeaves(leaves))
 	rootHash := api.NewHexBytes(tmpSMT.GetRootHash())
 
