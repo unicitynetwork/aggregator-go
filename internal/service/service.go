@@ -186,17 +186,19 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 
 // GetInclusionProof retrieves inclusion proof for a commitment
 func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error) {
-	// First check if commitment exists in aggregator records (finalized)
-	record, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, req.RequestID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get aggregator record: %w", err)
-	}
-
 	path, err := req.RequestID.GetPath()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
 	}
 	merkleTreePath := as.roundManager.GetSMT().GetPath(path)
+	if merkleTreePath == nil {
+		return nil, fmt.Errorf("failed to build merkle path for request ID %s", req.RequestID)
+	}
+
+	verificationResult, err := merkleTreePath.Verify(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify merkle path for request ID %s: %w", req.RequestID, err)
+	}
 
 	// Find the latest block that matches the current SMT root hash
 	rootHash, err := api.NewHexBytesFromString(merkleTreePath.Root)
@@ -211,7 +213,7 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		return nil, fmt.Errorf("no block found with root hash %s", rootHash)
 	}
 
-	if record == nil {
+	if !verificationResult.PathIncluded {
 		// Non-inclusion proof
 		return &api.GetInclusionProofResponse{
 			InclusionProof: &api.InclusionProof{
@@ -221,6 +223,14 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 				UnicityCertificate: block.UnicityCertificate,
 			},
 		}, nil
+	}
+
+	record, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, req.RequestID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get aggregator record: %w", err)
+	}
+	if record == nil {
+		return nil, fmt.Errorf("aggregator record for %s not found despite merkle inclusion", req.RequestID)
 	}
 
 	authenticator := &api.Authenticator{

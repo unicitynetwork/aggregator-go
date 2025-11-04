@@ -85,7 +85,6 @@ type RoundManager struct {
 	// Round management
 	currentRound *Round
 	roundMutex   sync.RWMutex
-	roundTimer   *time.Timer
 	wg           sync.WaitGroup
 
 	// Round duration (configurable, default 1 second)
@@ -189,13 +188,6 @@ func (rm *RoundManager) Stop(ctx context.Context) {
 		rm.logger.WithContext(ctx).Error("Failed to deactivate Round Manager", "error", err.Error())
 	}
 
-	// Stop current round timer
-	rm.roundMutex.Lock()
-	if rm.roundTimer != nil {
-		rm.roundTimer.Stop()
-	}
-	rm.roundMutex.Unlock()
-
 	// Wait for goroutines to finish
 	rm.wg.Wait()
 
@@ -285,7 +277,6 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
 	rm.logger.WithContext(ctx).Info("StartNewRound called", "roundNumber", roundNumber.String())
 	rm.roundMutex.Lock()
-	defer rm.roundMutex.Unlock()
 
 	// Log previous round state if exists
 	if rm.currentRound != nil {
@@ -305,12 +296,6 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 		}
 	}
 
-	// Stop any existing timer
-	if rm.roundTimer != nil {
-		rm.logger.WithContext(ctx).Debug("Stopping existing round timer")
-		rm.roundTimer.Stop()
-	}
-
 	rm.currentRound = &Round{
 		Number:      roundNumber,
 		StartTime:   time.Now(),
@@ -318,23 +303,19 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 		Commitments: make([]*models.Commitment, 0),
 		Snapshot:    rm.smt.CreateSnapshot(), // Create snapshot for this round
 	}
+	rm.roundMutex.Unlock()
 
-	// Start round timer
-	rm.roundTimer = time.AfterFunc(rm.roundDuration, func() {
-		rm.logger.WithContext(ctx).Info("Round timer fired",
-			"roundNumber", roundNumber.String(),
-			"elapsed", rm.roundDuration.String())
+	rm.logger.WithContext(ctx).Info("Started new round",
+		"roundNumber", roundNumber.String(),
+		"duration", rm.roundDuration.String())
+
+	rm.wg.Go(func() {
 		if err := rm.processCurrentRound(ctx); err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to process round",
 				"roundNumber", roundNumber.String(),
 				"error", err.Error())
 		}
 	})
-
-	rm.logger.WithContext(ctx).Info("Started new round",
-		"roundNumber", roundNumber.String(),
-		"duration", rm.roundDuration.String(),
-		"timerSet", rm.roundTimer != nil)
 
 	return nil
 }
@@ -376,7 +357,7 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	rm.currentRound.Commitments = make([]*models.Commitment, 0, 10000) // Larger pre-allocation for high throughput
 
 	// Calculate adaptive processing deadline based on historical data
-	processingDuration := time.Duration(float64(rm.roundDuration) * rm.processingRatio)
+	processingDuration := 200 * time.Millisecond //TEMPORARY SET TO 200ms FOR TESTING
 	rm.logger.WithContext(ctx).Debug("Using adaptive processing deadline",
 		"roundDuration", rm.roundDuration,
 		"processingRatio", rm.processingRatio,
@@ -716,7 +697,7 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 
 	rm.logger.Info("Found SMT nodes in storage, starting restoration", "totalNodes", totalCount)
 
-	const chunkSize = 1000
+	const chunkSize = 10000
 	offset := 0
 	restoredCount := 0
 
