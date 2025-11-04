@@ -1,6 +1,5 @@
 services:
-  x-bft:
-    &bft-base
+  x-bft: &bft-base
     platform: linux/amd64
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
     # https://github.com/unicitynetwork/bft-core/pkgs/container/bft-core
@@ -12,7 +11,7 @@ services:
       - ./data/genesis-root:/genesis/root
       - ./data/genesis:/genesis
     healthcheck:
-      test: [ "CMD", "nc", "-zv", "bft-root", "8000" ]
+      test: ["CMD", "nc", "-zv", "bft-root", "8000"]
       interval: 5s
     networks:
       - default
@@ -87,6 +86,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: aggregator-redis
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
     restart: unless-stopped
     ports:
       - "6379:6379"
@@ -175,7 +175,7 @@ services:
 
       # Processing Configuration
       BATCH_LIMIT: "1000"
-      MAX_COMMITMENTS_PER_ROUND: "10000"  # Stop waiting once 10k commitments collected
+      MAX_COMMITMENTS_PER_ROUND: "10000" # Stop waiting once 10k commitments collected
 
       # BFT Configuration
       # Enable BFT support and specify configuration file paths
@@ -202,7 +202,7 @@ services:
           echo "Error: trust-base.json not found at /app/bft-config/trust-base.json"
           exit 1
         fi
-        
+
         # Start the aggregator application
         exec /app/aggregator
 
@@ -214,7 +214,7 @@ services:
       mongodb:
         condition: service_healthy
     healthcheck:
-      test: [ "CMD", "nc", "-zv", "aggregator", "3000" ]
+      test: ["CMD", "nc", "-zv", "aggregator", "3000"]
       interval: 30s
       timeout: 10s
       retries: 3

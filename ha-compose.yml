@@ -85,9 +85,8 @@ services:
   redis:
     image: redis:7-alpine
     container_name: aggregator-redis
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     networks:
       - default
     volumes:
@@ -108,7 +107,7 @@ services:
       - default
     restart: unless-stopped
     volumes:
-      - ./data/mongo-data/mongo1:/data/db
+      - ./data/mongodb_data/mongo1:/data/db
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 1s
@@ -124,7 +123,7 @@ services:
       - default
     restart: unless-stopped
     volumes:
-      - ./data/mongo-data/mongo2:/data/db
+      - ./data/mongodb_data/mongo2:/data/db
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 1s
@@ -140,7 +139,7 @@ services:
       - default
     restart: unless-stopped
     volumes:
-      - ./data/mongo-data/mongo3:/data/db
+      - ./data/mongodb_data/mongo3:/data/db
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 1s
@@ -150,6 +149,7 @@ services:
   mongo-setup:
     image: mongo:7.0
     container_name: mongo-setup
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
     networks:
       - default
     depends_on:
@@ -172,10 +172,11 @@ services:
   haproxy:
     image: haproxy:2.8-alpine
     container_name: haproxy
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
     restart: unless-stopped
     ports:
       - "3000:3000"
-      - "8404:8404"  # HAProxy stats page
+      - "8404:8404" # HAProxy stats page
     networks:
       - default
     volumes:
@@ -186,16 +187,26 @@ services:
       aggregator-2:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "nc", "-zv", "localhost", "3000"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://127.0.0.1:8404/stats",
+        ]
       interval: 10s
       timeout: 5s
       retries: 3
+      start_period: 10s
 
   aggregator-1: &aggregator-base
     build:
       context: .
       dockerfile: Dockerfile
     container_name: aggregator-1
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
     restart: unless-stopped
     ports:
       - "3001:3001"
@@ -280,7 +291,7 @@ services:
       mongo-setup:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "nc", "-zv", "aggregator-1", "3001"]
+      test: ["CMD-SHELL", "nc -z -w2 127.0.0.1 $${PORT} || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -293,7 +304,7 @@ services:
       <<: *environment-base
       PORT: "3002"
     healthcheck:
-      test: ["CMD", "nc", "-zv", "aggregator-2", "3002"]
+      test: ["CMD-SHELL", "nc -z -w2 127.0.0.1 $${PORT} || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

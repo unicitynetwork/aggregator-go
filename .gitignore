@@ -6,3 +6,7 @@ aggregator.log
 /performance-test
 bft-config
 /data/
+
+# Environment files with secrets
+.env
+proxy/.env
