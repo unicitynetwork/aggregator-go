@@ -85,21 +85,21 @@ func TestChildSMTGetRoot(t *testing.T) {
 
 	// Left child of the "Four Leaves, Sharded" example from the spec
 	t.Run("LeftOfFourLeaves", func(t *testing.T) {
-		smt := NewChildSparseMerkleTree(api.SHA256, 4, 0b100)
-		smt.AddLeaf(big.NewInt(0b10000), []byte{0x61})
-		smt.AddLeaf(big.NewInt(0b11100), []byte{0x62})
+		smt := NewChildSparseMerkleTree(api.SHA256, 4, 0b110)
+		smt.AddLeaf(big.NewInt(0b10010), []byte{0x61})
+		smt.AddLeaf(big.NewInt(0b11010), []byte{0x62})
 
-		expected := "0000a602dc13e4932c8d58196cdd34b44c44ff457323e7dcec9e5ea05d789bd28936"
+		expected := "000010c1dc89e30d51613f2c1a182d16f87fe6709b9735db612adaadaa91955bdaf0"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
 	// Right child of the "Four Leaves, Sharded" example from the spec
 	t.Run("RightOfFourLeaves", func(t *testing.T) {
-		smt := NewChildSparseMerkleTree(api.SHA256, 4, 0b111)
-		smt.AddLeaf(big.NewInt(0b10011), []byte{0x63})
-		smt.AddLeaf(big.NewInt(0b11111), []byte{0x64})
+		smt := NewChildSparseMerkleTree(api.SHA256, 4, 0b101)
+		smt.AddLeaf(big.NewInt(0b10101), []byte{0x63})
+		smt.AddLeaf(big.NewInt(0b11101), []byte{0x64})
 
-		expected := "0000d1d4fd1c4b4e332427d726c39a2cea17ed4c59bff0458232ccb36199bb8849af"
+		expected := "0000981d2f4e01189506c5a36430e7774e3f9498c1c4cc27801d8e6400d4965a8860"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 }
@@ -119,13 +119,13 @@ func TestParentSMTGetRoot(t *testing.T) {
 
 	// Parent of the "Four Leaves, Sharded" example from the spec
 	t.Run("FourLeaves", func(t *testing.T) {
-		left, _ := hex.DecodeString("a602dc13e4932c8d58196cdd34b44c44ff457323e7dcec9e5ea05d789bd28936")
-		right, _ := hex.DecodeString("d1d4fd1c4b4e332427d726c39a2cea17ed4c59bff0458232ccb36199bb8849af")
+		left, _ := hex.DecodeString("10c1dc89e30d51613f2c1a182d16f87fe6709b9735db612adaadaa91955bdaf0")
+		right, _ := hex.DecodeString("981d2f4e01189506c5a36430e7774e3f9498c1c4cc27801d8e6400d4965a8860")
 		smt := NewParentSparseMerkleTree(api.SHA256, 2)
-		smt.AddLeaf(big.NewInt(0b100), left)
-		smt.AddLeaf(big.NewInt(0b111), right)
+		smt.AddLeaf(big.NewInt(0b110), left)
+		smt.AddLeaf(big.NewInt(0b101), right)
 
-		expected := "0000ee27435446dd026d9f6baca2033ebffe2d29d8948eb81bf9250f7512323c6cbc"
+		expected := "0000eb1a95574056c988f441a50bd18d0555f038276aecf3d155eb9e008a72afcb45"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 }
@@ -1341,57 +1341,57 @@ func TestJoinPaths(t *testing.T) {
 
 	// "Four Leaves, Sharded" example from the spec
 	t.Run("FourLeaves", func(t *testing.T) {
-		left := NewChildSparseMerkleTree(api.SHA256, 4, 0b100)
-		left.AddLeaf(big.NewInt(0b10000), []byte{0x61})
-		left.AddLeaf(big.NewInt(0b11100), []byte{0x62})
+		left := NewChildSparseMerkleTree(api.SHA256, 4, 0b110)
+		left.AddLeaf(big.NewInt(0b10010), []byte{0x61})
+		left.AddLeaf(big.NewInt(0b11010), []byte{0x62})
 
-		right := NewChildSparseMerkleTree(api.SHA256, 4, 0b111)
-		right.AddLeaf(big.NewInt(0b10011), []byte{0x63})
-		right.AddLeaf(big.NewInt(0b11111), []byte{0x64})
+		right := NewChildSparseMerkleTree(api.SHA256, 4, 0b101)
+		right.AddLeaf(big.NewInt(0b10101), []byte{0x63})
+		right.AddLeaf(big.NewInt(0b11101), []byte{0x64})
 
 		parent := NewParentSparseMerkleTree(api.SHA256, 2)
-		parent.AddLeaf(big.NewInt(0b100), left.GetRootHash()[2:])
-		parent.AddLeaf(big.NewInt(0b111), right.GetRootHash()[2:])
+		parent.AddLeaf(big.NewInt(0b110), left.GetRootHash()[2:])
+		parent.AddLeaf(big.NewInt(0b101), right.GetRootHash()[2:])
 
-		child1, _ := left.GetPath(big.NewInt(0b10000))
-		parent1, _ := parent.GetPath(big.NewInt(0b100))
+		child1, _ := left.GetPath(big.NewInt(0b10010))
+		parent1, _ := parent.GetPath(big.NewInt(0b110))
 		path1, err := JoinPaths(child1, parent1)
 		assert.Nil(t, err)
 		assert.NotNil(t, path1)
-		res1, err := path1.Verify(big.NewInt(0b10000))
+		res1, err := path1.Verify(big.NewInt(0b10010))
 		assert.Nil(t, err)
 		assert.NotNil(t, res1)
 		assert.True(t, res1.PathValid)
 		assert.True(t, res1.PathIncluded)
 
-		child2, _ := left.GetPath(big.NewInt(0b11100))
-		parent2, _ := parent.GetPath(big.NewInt(0b100))
+		child2, _ := left.GetPath(big.NewInt(0b11010))
+		parent2, _ := parent.GetPath(big.NewInt(0b110))
 		path2, err := JoinPaths(child2, parent2)
 		assert.Nil(t, err)
 		assert.NotNil(t, path2)
-		res2, err := path2.Verify(big.NewInt(0b11100))
+		res2, err := path2.Verify(big.NewInt(0b11010))
 		assert.Nil(t, err)
 		assert.NotNil(t, res2)
 		assert.True(t, res2.PathValid)
 		assert.True(t, res2.PathIncluded)
 
-		child3, _ := right.GetPath(big.NewInt(0b10011))
-		parent3, _ := parent.GetPath(big.NewInt(0b111))
+		child3, _ := right.GetPath(big.NewInt(0b10101))
+		parent3, _ := parent.GetPath(big.NewInt(0b101))
 		path3, err := JoinPaths(child3, parent3)
 		assert.Nil(t, err)
 		assert.NotNil(t, path3)
-		res3, err := path3.Verify(big.NewInt(0b10011))
+		res3, err := path3.Verify(big.NewInt(0b10101))
 		assert.Nil(t, err)
 		assert.NotNil(t, res3)
 		assert.True(t, res3.PathValid)
 		assert.True(t, res3.PathIncluded)
 
-		child4, _ := right.GetPath(big.NewInt(0b11111))
-		parent4, _ := parent.GetPath(big.NewInt(0b111))
+		child4, _ := right.GetPath(big.NewInt(0b11101))
+		parent4, _ := parent.GetPath(big.NewInt(0b101))
 		path4, err := JoinPaths(child4, parent4)
 		assert.Nil(t, err)
 		assert.NotNil(t, path4)
-		res4, err := path4.Verify(big.NewInt(0b11111))
+		res4, err := path4.Verify(big.NewInt(0b11101))
 		assert.Nil(t, err)
 		assert.NotNil(t, res4)
 		assert.True(t, res4.PathValid)
