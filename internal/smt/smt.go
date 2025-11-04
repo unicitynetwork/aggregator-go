@@ -85,8 +85,8 @@ func NewParentSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int) *Spar
 	// better to ensure all the leaves exist; otherwise the hash values
 	// of siblings of the missing nodes would not match the structure of
 	// the tree and the corresponding inclusion proofs would fail to verify
-	tree.root.Left = populate(2, keyLength)
-	tree.root.Right = populate(3, keyLength)
+	tree.root.Left = populate(0b10, keyLength)
+	tree.root.Right = populate(0b11, keyLength)
 
 	return tree
 }
@@ -95,8 +95,8 @@ func populate(path, levels int) branch {
 	if levels == 1 {
 		return newChildLeafBranch(big.NewInt(int64(path)), nil)
 	}
-	left := populate(2, levels-1)
-	right := populate(3, levels-1)
+	left := populate(0b10, levels-1)
+	right := populate(0b11, levels-1)
 	return newNodeBranch(big.NewInt(int64(path)), left, right)
 }
 
