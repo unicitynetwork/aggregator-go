@@ -210,6 +210,25 @@ type BFTConfig struct {
 	BootstrapAddresses         []string `mapstructure:"bootstrap_addresses"`
 	BootstrapConnectRetry      int      `mapstructure:"bootstrap_connect_retry"`
 	BootstrapConnectRetryDelay int      `mapstructure:"bootstrap_connect_retry_delay"`
+
+	// HeartbeatInterval how often to perform the inactivity check.
+	HeartbeatInterval time.Duration `mapstructure:"heartbeat_interval"`
+	// InactivityTimeout duration of inactivity after which a new handshake must be sent.
+	InactivityTimeout time.Duration `mapstructure:"inactivity_timeout"`
+}
+
+func (c *BFTConfig) Validate() error {
+	if c.Enabled {
+		if len(c.BootstrapAddresses) == 0 {
+			return errors.New("BFT_BOOTSTRAP_ADDRESSES must be specified when BFT is enabled")
+		}
+		for _, addr := range c.BootstrapAddresses {
+			if _, err := peer.AddrInfoFromString(addr); err != nil {
+				return fmt.Errorf("invalid bootstrap address: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 // Load loads configuration from environment variables with defaults
@@ -298,9 +317,11 @@ func Load() (*Config, error) {
 		Enabled:                    getEnvBoolOrDefault("BFT_ENABLED", true),
 		Address:                    getEnvOrDefault("BFT_ADDRESS", "/ip4/0.0.0.0/tcp/9000"),
 		AnnounceAddresses:          strings.Split(getEnvOrDefault("BFT_ANNOUNCE_ADDRESSES", ""), ","),
-		BootstrapAddresses:         strings.Split(getEnvOrDefault("BFT_BOOTSTRAP_ADDRESSES", "/ip4/127.0.0.1/tcp/26662/p2p/16Uiu2HAm6eQMr2sQVbcWZsPPbpc2Su7AnnMVGHpC23PUzGTAATnp"), ","),
+		BootstrapAddresses:         strings.Split(getEnvOrDefault("BFT_BOOTSTRAP_ADDRESSES", ""), ","),
 		BootstrapConnectRetry:      getEnvIntOrDefault("BFT_BOOTSTRAP_CONNECT_RETRY", 3),
 		BootstrapConnectRetryDelay: getEnvIntOrDefault("BFT_BOOTSTRAP_CONNECT_RETRY_DELAY", 5),
+		HeartbeatInterval:          getEnvDurationOrDefault("BFT_HEARTBEAT_INTERVAL", "1s"),
+		InactivityTimeout:          getEnvDurationOrDefault("BFT_INACTIVITY_TIMEOUT", "5s"),
 	}
 	if config.BFT.Enabled {
 		if err := loadConf(getEnvOrDefault("BFT_KEY_CONF_FILE", "bft-config/keys.json"), &config.BFT.KeyConf); err != nil {
@@ -369,6 +390,10 @@ func (c *Config) Validate() error {
 
 	if err := c.Sharding.Validate(); err != nil {
 		return fmt.Errorf("invalid sharding configuration: %w", err)
+	}
+
+	if err := c.BFT.Validate(); err != nil {
+		return err
 	}
 
 	return nil

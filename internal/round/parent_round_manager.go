@@ -76,7 +76,7 @@ func NewParentRoundManager(ctx context.Context, cfg *config.Config, logger *logg
 	// Create BFT client (same logic as regular RoundManager)
 	if cfg.BFT.Enabled {
 		var err error
-		prm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, prm, logger)
+		prm.bftClient, err = bft.NewBFTClient(&cfg.BFT, prm, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create BFT client: %w", err)
 		}

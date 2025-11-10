@@ -149,7 +149,7 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 	if cfg.Sharding.Mode == config.ShardingModeStandalone {
 		if cfg.BFT.Enabled {
 			var err error
-			rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, logger)
+			rm.bftClient, err = bft.NewBFTClient(&cfg.BFT, rm, logger)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create BFT client: %w", err)
 			}
@@ -851,7 +851,7 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 	return nil
 }
 
-func (rm *RoundManager) Deactivate(ctx context.Context) error {
+func (rm *RoundManager) Deactivate(_ context.Context) error {
 	rm.stopCommitmentPrefetcher()
 	if rm.bftClient != nil {
 		rm.bftClient.Stop()

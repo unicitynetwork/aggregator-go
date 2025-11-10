@@ -9,8 +9,10 @@ import (
 	"math/big"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/network/protocol/handshake"
@@ -57,6 +59,9 @@ type (
 		ucProcessingMutex sync.Mutex
 
 		msgLoopCancelFn context.CancelFunc
+
+		// timestamp when last UC was received
+		lastCertResponseTime atomic.Int64
 	}
 
 	BFTClient interface {
@@ -73,7 +78,7 @@ type (
 	status int
 )
 
-func NewBFTClient(ctx context.Context, conf *config.BFTConfig, roundManager RoundManager, logger *logger.Logger) (*BFTClientImpl, error) {
+func NewBFTClient(conf *config.BFTConfig, roundManager RoundManager, logger *logger.Logger) (*BFTClientImpl, error) {
 	logger.Info("Creating BFT Client")
 	bftClient := &BFTClientImpl{
 		logger:       logger,
@@ -83,6 +88,7 @@ func NewBFTClient(ctx context.Context, conf *config.BFTConfig, roundManager Roun
 		conf:         conf,
 	}
 	bftClient.status.Store(idle)
+	bftClient.lastCertResponseTime.Store(time.Now().UnixMilli())
 	return bftClient, nil
 }
 
@@ -142,13 +148,15 @@ func (c *BFTClientImpl) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to bootstrap peer: %w", err)
 	}
 
-	if err := c.sendHandshake(ctx); err != nil {
-		return fmt.Errorf("failed to send handshake: %w", err)
-	}
-
 	msgLoopCtx, cancelFn := context.WithCancel(ctx)
 	c.msgLoopCancelFn = cancelFn
-	go c.loop(msgLoopCtx)
+	go func() {
+		if err := c.loop(msgLoopCtx); err != nil {
+			c.logger.Error("BFT event loop thread exited with error", "error", err.Error())
+		} else {
+			c.logger.Info("BFT event loop thread finished")
+		}
+	}()
 
 	return nil
 }
@@ -195,6 +203,13 @@ func (c *BFTClientImpl) sendHandshake(ctx context.Context) error {
 }
 
 func (c *BFTClientImpl) loop(ctx context.Context) error {
+	if err := c.sendHandshake(ctx); err != nil {
+		return fmt.Errorf("failed to send initial handshake: %w", err)
+	}
+
+	heartbeat := time.NewTicker(c.conf.HeartbeatInterval)
+	defer heartbeat.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -205,6 +220,15 @@ func (c *BFTClientImpl) loop(ctx context.Context) error {
 			}
 			c.logger.WithContext(ctx).Debug("received message", "type", fmt.Sprintf("%T", m))
 			c.handleMessage(ctx, m)
+		case <-heartbeat.C:
+			lastCertMillis := c.lastCertResponseTime.Load()
+			lastCertTime := time.UnixMilli(lastCertMillis)
+			if time.Since(lastCertTime) > c.conf.InactivityTimeout {
+				c.logger.Warn("BFT client inactivity timeout exceeded, sending new handshake")
+				if err := c.sendHandshake(ctx); err != nil {
+					c.logger.Error("failed to send handshake on inactivity timeout", "error", err.Error())
+				}
+			}
 		}
 	}
 }
@@ -213,13 +237,17 @@ func (c *BFTClientImpl) handleMessage(ctx context.Context, msg any) {
 	switch mt := msg.(type) {
 	case *certification.CertificationResponse:
 		c.logger.WithContext(ctx).Info("received CertificationResponse")
-		c.handleCertificationResponse(ctx, mt)
+		if err := c.handleCertificationResponse(ctx, mt); err != nil {
+			c.logger.WithContext(ctx).Error("error processing CertificationResponse message", "error", err.Error())
+		}
 	default:
 		c.logger.WithContext(ctx).Info("received unknown message")
 	}
 }
 
 func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *certification.CertificationResponse) error {
+	c.lastCertResponseTime.Store(time.Now().UnixMilli())
+
 	if err := cr.IsValid(); err != nil {
 		return fmt.Errorf("invalid CertificationResponse: %w", err)
 	}
