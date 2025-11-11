@@ -2,41 +2,35 @@ package models
 
 import (
 	"fmt"
-	"strconv"
 	"time"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // AggregatorRecord represents a finalized commitment with proof data
 type AggregatorRecord struct {
-	RequestID             api.RequestID       `json:"requestId" bson:"requestId"`
-	TransactionHash       api.TransactionHash `json:"transactionHash" bson:"transactionHash"`
-	Authenticator         Authenticator       `json:"authenticator" bson:"authenticator"`
-	AggregateRequestCount uint64              `json:"aggregateRequestCount" bson:"aggregateRequestCount"`
-	BlockNumber           *api.BigInt         `json:"blockNumber" bson:"blockNumber"`
-	LeafIndex             *api.BigInt         `json:"leafIndex" bson:"leafIndex"`
-	CreatedAt             *api.Timestamp      `json:"createdAt" bson:"createdAt"`
-	FinalizedAt           *api.Timestamp      `json:"finalizedAt" bson:"finalizedAt"`
+	RequestID             api.RequestID       `json:"requestId"`
+	TransactionHash       api.TransactionHash `json:"transactionHash"`
+	Authenticator         Authenticator       `json:"authenticator"`
+	AggregateRequestCount uint64              `json:"aggregateRequestCount"`
+	BlockNumber           *api.BigInt         `json:"blockNumber"`
+	LeafIndex             *api.BigInt         `json:"leafIndex"`
+	CreatedAt             *api.Timestamp      `json:"createdAt"`
+	FinalizedAt           *api.Timestamp      `json:"finalizedAt"`
 }
 
 // AggregatorRecordBSON represents the BSON version of AggregatorRecord for MongoDB storage
 type AggregatorRecordBSON struct {
-	RequestID             string            `bson:"requestId"`
-	TransactionHash       string            `bson:"transactionHash"`
-	Authenticator         AuthenticatorBSON `bson:"authenticator"`
-	AggregateRequestCount uint64            `bson:"aggregateRequestCount"`
-	BlockNumber           string            `bson:"blockNumber"`
-	LeafIndex             string            `bson:"leafIndex"`
-	CreatedAt             string            `bson:"createdAt"`
-	FinalizedAt           string            `bson:"finalizedAt"`
-}
-
-type AuthenticatorBSON struct {
-	Algorithm string `bson:"algorithm"`
-	PublicKey string `bson:"publicKey"`
-	Signature string `bson:"signature"`
-	StateHash string `bson:"stateHash"`
+	RequestID             string               `bson:"requestId"`
+	TransactionHash       string               `bson:"transactionHash"`
+	Authenticator         AuthenticatorBSON    `bson:"authenticator"`
+	AggregateRequestCount uint64               `bson:"aggregateRequestCount"`
+	BlockNumber           primitive.Decimal128 `bson:"blockNumber"`
+	LeafIndex             primitive.Decimal128 `bson:"leafIndex"`
+	CreatedAt             time.Time            `bson:"createdAt"`
+	FinalizedAt           time.Time            `bson:"finalizedAt"`
 }
 
 // NewAggregatorRecord creates a new aggregator record from a commitment
@@ -54,72 +48,38 @@ func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *api.Big
 }
 
 // ToBSON converts AggregatorRecord to AggregatorRecordBSON for MongoDB storage
-func (ar *AggregatorRecord) ToBSON() *AggregatorRecordBSON {
-	return &AggregatorRecordBSON{
-		RequestID:       string(ar.RequestID),
-		TransactionHash: string(ar.TransactionHash),
-		Authenticator: AuthenticatorBSON{
-			Algorithm: ar.Authenticator.Algorithm,
-			PublicKey: ar.Authenticator.PublicKey.String(),
-			Signature: ar.Authenticator.Signature.String(),
-			StateHash: ar.Authenticator.StateHash.String(),
-		},
-		AggregateRequestCount: ar.AggregateRequestCount,
-		BlockNumber:           ar.BlockNumber.String(),
-		LeafIndex:             ar.LeafIndex.String(),
-		CreatedAt:             strconv.FormatInt(ar.CreatedAt.UnixMilli(), 10),
-		FinalizedAt:           strconv.FormatInt(ar.FinalizedAt.UnixMilli(), 10),
+func (ar *AggregatorRecord) ToBSON() (*AggregatorRecordBSON, error) {
+	blockNumber, err := primitive.ParseDecimal128(ar.BlockNumber.String())
+	if err != nil {
+		return nil, fmt.Errorf("error converting block number to decimal-128: %w", err)
 	}
+	leafIndex, err := primitive.ParseDecimal128(ar.LeafIndex.String())
+	if err != nil {
+		return nil, fmt.Errorf("error converting leaf index to decimal-128: %w", err)
+	}
+	return &AggregatorRecordBSON{
+		RequestID:             ar.RequestID.String(),
+		TransactionHash:       ar.TransactionHash.String(),
+		Authenticator:         ar.Authenticator.ToBSON(),
+		AggregateRequestCount: ar.AggregateRequestCount,
+		BlockNumber:           blockNumber,
+		LeafIndex:             leafIndex,
+		CreatedAt:             ar.CreatedAt.Time,
+		FinalizedAt:           ar.FinalizedAt.Time,
+	}, nil
 }
 
 // FromBSON converts AggregatorRecordBSON back to AggregatorRecord
 func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
-	//requestID, err := NewRequestID(arb.RequestID)
-	//if err != nil {
-	//	return nil, fmt.Errorf("failed to parse requestID: %w", err)
-	//}
-	//
-	//transactionHash, err := NewTransactionHash(arb.TransactionHash)
-	//if err != nil {
-	//	return nil, fmt.Errorf("failed to parse transactionHash: %w", err)
-	//}
-	//
-	blockNumber, err := api.NewBigIntFromString(arb.BlockNumber)
+	blockNumber, err := api.NewBigIntFromString(arb.BlockNumber.String())
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse blockNumber: %w", err)
 	}
 
-	leafIndex, err := api.NewBigIntFromString(arb.LeafIndex)
+	leafIndex, err := api.NewBigIntFromString(arb.LeafIndex.String())
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse leafIndex: %w", err)
 	}
-
-	publicKey, err := api.NewHexBytesFromString(arb.Authenticator.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse publicKey: %w", err)
-	}
-
-	signature, err := api.NewHexBytesFromString(arb.Authenticator.Signature)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse signature: %w", err)
-	}
-
-	//stateHash, err := NewHexBytesFromString(arb.Authenticator.StateHash)
-	//if err != nil {
-	//	return nil, fmt.Errorf("failed to parse stateHash: %w", err)
-	//}
-
-	createdAtMillis, err := strconv.ParseInt(arb.CreatedAt, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse createdAt: %w", err)
-	}
-	createdAt := &api.Timestamp{Time: time.UnixMilli(createdAtMillis)}
-
-	finalizedAtMillis, err := strconv.ParseInt(arb.FinalizedAt, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse finalizedAt: %w", err)
-	}
-	finalizedAt := &api.Timestamp{Time: time.UnixMilli(finalizedAtMillis)}
 
 	// Default AggregateRequestCount to 1 if not present (backward compatibility)
 	aggregateRequestCount := arb.AggregateRequestCount
@@ -127,19 +87,19 @@ func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
 		aggregateRequestCount = 1
 	}
 
+	authenticatorBSON, err := arb.Authenticator.FromBSON()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse authenticator: %w", err)
+	}
+
 	return &AggregatorRecord{
-		RequestID:       api.RequestID(arb.RequestID),
-		TransactionHash: api.TransactionHash(arb.TransactionHash),
-		Authenticator: Authenticator{
-			Algorithm: arb.Authenticator.Algorithm,
-			PublicKey: publicKey,
-			Signature: signature,
-			StateHash: api.StateHash(arb.Authenticator.StateHash),
-		},
+		RequestID:             api.RequestID(arb.RequestID),
+		TransactionHash:       api.TransactionHash(arb.TransactionHash),
+		Authenticator:         *authenticatorBSON,
 		AggregateRequestCount: aggregateRequestCount,
 		BlockNumber:           blockNumber,
 		LeafIndex:             leafIndex,
-		CreatedAt:             createdAt,
-		FinalizedAt:           finalizedAt,
+		CreatedAt:             api.NewTimestamp(arb.CreatedAt),
+		FinalizedAt:           api.NewTimestamp(arb.FinalizedAt),
 	}, nil
 }

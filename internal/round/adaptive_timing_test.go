@@ -15,7 +15,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
-	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -36,7 +36,7 @@ func TestAdaptiveProcessingRatio(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create round manager
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker())
 	require.NoError(t, err)
 
 	// Test initial values
@@ -131,7 +131,7 @@ func TestAdaptiveDeadlineCalculation(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker())
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -198,7 +198,7 @@ func TestSMTUpdateTimeTracking(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker())
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -227,8 +227,8 @@ func TestSMTUpdateTimeTracking(t *testing.T) {
 				TransactionHash: api.ImprintHexString("0000" + hex.EncodeToString(txHashBytes)),
 				Authenticator: models.Authenticator{
 					Algorithm: "secp256k1",
-					PublicKey: api.HexBytes(append([]byte{0x02}, make([]byte, 32)...)),
-					Signature: api.HexBytes(make([]byte, 65)),
+					PublicKey: append([]byte{0x02}, make([]byte, 32)...),
+					Signature: make([]byte, 65),
 					StateHash: api.ImprintHexString("0000" + hex.EncodeToString(make([]byte, 32))),
 				},
 			}
@@ -261,7 +261,7 @@ func TestStreamingMetrics(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker())
 	require.NoError(t, err)
 
 	// Set some test values
@@ -314,7 +314,7 @@ func TestAdaptiveTimingIntegration(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, nil, nil, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker())
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -355,11 +355,4 @@ func TestAdaptiveTimingIntegration(t *testing.T) {
 			assert.LessOrEqual(t, rm.processingRatio, 0.95, "Processing ratio should not exceed 0.95")
 		})
 	}
-}
-
-// createMockStorage creates a mock storage for testing
-func createMockStorage(t *testing.T) interfaces.Storage {
-	// This is a simplified mock - in production you'd use a proper mock
-	// For now, we'll return nil which is fine since BFT is disabled
-	return nil
 }

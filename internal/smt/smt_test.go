@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 
 	"github.com/stretchr/testify/require"
@@ -15,12 +16,14 @@ import (
 
 // TestSMTGetRoot test basic SMT root hash computation
 func TestSMTGetRoot(t *testing.T) {
+	// "Singleton" example from the spec
 	t.Run("EmptyTree", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
 		expected := "00001e54402898172f2948615fb17627733abbd120a85381c624ad060d28321be672"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
+	// "Left Child Only" example from the spec
 	t.Run("LeftLeaf", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
 		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
@@ -29,6 +32,7 @@ func TestSMTGetRoot(t *testing.T) {
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
+	// "Right Child Only" example from the spec
 	t.Run("RightLeaf", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
 		smt.AddLeaf(big.NewInt(0b111), []byte{0x62})
@@ -37,6 +41,7 @@ func TestSMTGetRoot(t *testing.T) {
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
+	// "Two Leaves" example from the spec
 	t.Run("TwoLeaves", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
 		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
@@ -46,6 +51,7 @@ func TestSMTGetRoot(t *testing.T) {
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
+	// "Four Leaves" example from the spec
 	t.Run("FourLeaves", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 3)
 		smt.AddLeaf(big.NewInt(0b1000), []byte{0x61})
@@ -54,6 +60,72 @@ func TestSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b1111), []byte{0x64})
 
 		expected := "000095005e568fdac5cc01a3a091c70ce89ab2da98c36b254dd2ddf29bd568c377ab"
+		require.Equal(t, expected, smt.GetRootHashHex())
+	})
+}
+
+func TestChildSMTGetRoot(t *testing.T) {
+	// Left child of the "Two Leaves, Sharded" example from the spec
+	t.Run("LeftOfTwoLeaves", func(t *testing.T) {
+		smt := NewChildSparseMerkleTree(api.SHA256, 2, 0b10)
+		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
+
+		expected := "0000256aedd9f31e69a4b0803616beab77234bae5dff519a10e519a0753be49f0534"
+		require.Equal(t, expected, smt.GetRootHashHex())
+	})
+
+	// Right child of the "Two Leaves, Sharded" example from the spec
+	t.Run("RightOfTwoLeaves", func(t *testing.T) {
+		smt := NewChildSparseMerkleTree(api.SHA256, 2, 0b11)
+		smt.AddLeaf(big.NewInt(0b111), []byte{0x62})
+
+		expected := "0000e777763b4ce391c2f8acdf480dd64758bc8063a3aa5f62670a499a61d3bc7b9a"
+		require.Equal(t, expected, smt.GetRootHashHex())
+	})
+
+	// Left child of the "Four Leaves, Sharded" example from the spec
+	t.Run("LeftOfFourLeaves", func(t *testing.T) {
+		smt := NewChildSparseMerkleTree(api.SHA256, 4, 0b110)
+		smt.AddLeaf(big.NewInt(0b10010), []byte{0x61})
+		smt.AddLeaf(big.NewInt(0b11010), []byte{0x62})
+
+		expected := "000010c1dc89e30d51613f2c1a182d16f87fe6709b9735db612adaadaa91955bdaf0"
+		require.Equal(t, expected, smt.GetRootHashHex())
+	})
+
+	// Right child of the "Four Leaves, Sharded" example from the spec
+	t.Run("RightOfFourLeaves", func(t *testing.T) {
+		smt := NewChildSparseMerkleTree(api.SHA256, 4, 0b101)
+		smt.AddLeaf(big.NewInt(0b10101), []byte{0x63})
+		smt.AddLeaf(big.NewInt(0b11101), []byte{0x64})
+
+		expected := "0000981d2f4e01189506c5a36430e7774e3f9498c1c4cc27801d8e6400d4965a8860"
+		require.Equal(t, expected, smt.GetRootHashHex())
+	})
+}
+
+func TestParentSMTGetRoot(t *testing.T) {
+	// Parent of the "Two Leaves, Sharded" example from the spec
+	t.Run("TwoLeaves", func(t *testing.T) {
+		left, _ := hex.DecodeString("256aedd9f31e69a4b0803616beab77234bae5dff519a10e519a0753be49f0534")
+		right, _ := hex.DecodeString("e777763b4ce391c2f8acdf480dd64758bc8063a3aa5f62670a499a61d3bc7b9a")
+		smt := NewParentSparseMerkleTree(api.SHA256, 1)
+		smt.AddLeaf(big.NewInt(0b10), left)
+		smt.AddLeaf(big.NewInt(0b11), right)
+
+		expected := "0000413b961d0069adfea0b4e122cf6dbf98e0a01ef7fd573d68c084ddfa03e4f9d6"
+		require.Equal(t, expected, smt.GetRootHashHex())
+	})
+
+	// Parent of the "Four Leaves, Sharded" example from the spec
+	t.Run("FourLeaves", func(t *testing.T) {
+		left, _ := hex.DecodeString("10c1dc89e30d51613f2c1a182d16f87fe6709b9735db612adaadaa91955bdaf0")
+		right, _ := hex.DecodeString("981d2f4e01189506c5a36430e7774e3f9498c1c4cc27801d8e6400d4965a8860")
+		smt := NewParentSparseMerkleTree(api.SHA256, 2)
+		smt.AddLeaf(big.NewInt(0b110), left)
+		smt.AddLeaf(big.NewInt(0b101), right)
+
+		expected := "0000eb1a95574056c988f441a50bd18d0555f038276aecf3d155eb9e008a72afcb45"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 }
@@ -184,18 +256,16 @@ func TestSMTCommonPath(t *testing.T) {
 	testCases := []struct {
 		path1   *big.Int
 		path2   *big.Int
-		expLen  uint
 		expPath *big.Int
 	}{
-		{big.NewInt(0b11), big.NewInt(0b111101111), 1, big.NewInt(0b11)},
-		{big.NewInt(0b111101111), big.NewInt(0b11), 1, big.NewInt(0b11)},
-		{big.NewInt(0b110010000), big.NewInt(0b100010000), 7, big.NewInt(0b10010000)},
+		{big.NewInt(0b11), big.NewInt(0b111101111), big.NewInt(0b11)},
+		{big.NewInt(0b111101111), big.NewInt(0b11), big.NewInt(0b11)},
+		{big.NewInt(0b110010000), big.NewInt(0b100010000), big.NewInt(0b10010000)},
 	}
 
 	for i, tc := range testCases {
 		result := calculateCommonPath(tc.path1, tc.path2)
-		assert.Equal(t, tc.expLen, result.length, "Test %d: length mismatch", i)
-		assert.Equal(t, tc.expPath, result.path, "Test %d: path mismatch", i)
+		assert.Equal(t, tc.expPath, result, "Test %d: path mismatch", i)
 	}
 }
 
@@ -417,7 +487,8 @@ func TestSMTGetPath(t *testing.T) {
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Test getting path for an existing leaf
-		merklePath := smt.GetPath(path)
+		merklePath, err := smt.GetPath(path)
+		require.NoError(t, err)
 		require.NotNil(t, merklePath, "GetPath should return a path")
 		require.Equal(t, smt.GetRootHashHex(), merklePath.Root, "Root hash should match expected value")
 		require.NotNil(t, merklePath.Steps, "Steps should not be nil")
@@ -443,7 +514,8 @@ func TestSMTGetPath(t *testing.T) {
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Test getting path for an existing leaf
-		path := smt.GetPath(big.NewInt(0b10))
+		path, err := smt.GetPath(big.NewInt(0b10))
+		require.NoError(t, err)
 		require.NotNil(t, path, "GetPath should return a path")
 		require.NotEmpty(t, path.Root, "Root hash should not be empty")
 		require.NotNil(t, path.Steps, "Steps should not be nil")
@@ -463,7 +535,8 @@ func TestSMTGetPath(t *testing.T) {
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Test getting path for a non-existent leaf
-		path := smt.GetPath(big.NewInt(0b11))
+		path, err := smt.GetPath(big.NewInt(0b11))
+		require.NoError(t, err)
 		require.NotNil(t, path, "GetPath should return a path even for non-existent leaves")
 		require.NotEmpty(t, path.Root, "Root hash should not be empty")
 		require.NotNil(t, path.Steps, "Steps should not be nil")
@@ -482,7 +555,8 @@ func TestSMTGetPath(t *testing.T) {
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Test path structure
-		path := smt.GetPath(big.NewInt(0b10))
+		path, err := smt.GetPath(big.NewInt(0b10))
+		require.NoError(t, err)
 		require.NotNil(t, path, "GetPath should return a path")
 
 		// Verify step structure
@@ -498,7 +572,8 @@ func TestSMTGetPath(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 1)
 
 		// Test getting path from empty tree
-		path := smt.GetPath(big.NewInt(0b10))
+		path, err := smt.GetPath(big.NewInt(0b10))
+		require.NoError(t, err)
 		require.NotNil(t, path, "GetPath should return a path even for empty tree")
 		require.NotEmpty(t, path.Root, "Root hash should not be empty even for empty tree")
 		require.NotNil(t, path.Steps, "Steps should not be nil")
@@ -519,7 +594,8 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Get path for the leaf
-		path := smt.GetPath(leafPath)
+		path, err := smt.GetPath(leafPath)
+		require.NoError(t, err)
 		require.NotNil(t, path, "GetPath should return a path")
 		require.Equal(t, smt.GetRootHashHex(), path.Root, "Path root should match tree root")
 
@@ -545,13 +621,15 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		require.NoError(t, err, "AddLeaf 2 failed")
 
 		// Get path for first leaf
-		merkPath1 := smt.GetPath(path1)
+		merkPath1, err := smt.GetPath(path1)
+		require.NoError(t, err)
 		require.NotNil(t, merkPath1, "GetPath should return a path")
 		require.Equal(t, smt.GetRootHashHex(), merkPath1.Root, "Path root should match tree root")
 		require.NotEmpty(t, merkPath1.Steps, "Should have steps")
 
 		// Get path for second leaf
-		merkPath2 := smt.GetPath(path2)
+		merkPath2, err := smt.GetPath(path2)
+		require.NoError(t, err)
 		require.NotNil(t, merkPath2, "GetPath should return a path")
 		require.Equal(t, smt.GetRootHashHex(), merkPath2.Root, "Path root should match tree root")
 		require.NotEmpty(t, merkPath2.Steps, "Should have steps")
@@ -585,8 +663,8 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 
 		// Try to get path for non-existent leaf
 		nonExistentPath := big.NewInt(0b111)
-		merkPath := smt.GetPath(nonExistentPath)
-
+		merkPath, err := smt.GetPath(nonExistentPath)
+		require.NoError(t, err)
 		require.NotNil(t, merkPath, "GetPath should return a path even for non-existent paths")
 		require.Equal(t, smt.GetRootHashHex(), merkPath.Root, "Path root should match tree root")
 		require.NotEmpty(t, merkPath.Steps, "Should have steps even for non-existent path")
@@ -624,7 +702,8 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		rootHash := smt.GetRootHashHex()
 
 		for i, path := range testPaths {
-			merkPath := smt.GetPath(path)
+			merkPath, err := smt.GetPath(path)
+			require.NoError(t, err)
 			require.NotNil(t, merkPath, "GetPath should return a path for leaf %d", i)
 			require.Equal(t, rootHash, merkPath.Root, "All paths should have same root")
 			require.NotEmpty(t, merkPath.Steps, "Path should have steps for leaf %d", i)
@@ -652,14 +731,15 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
 
 		// Get path from empty tree
-		path := smt.GetPath(big.NewInt(0b101))
+		path, err := smt.GetPath(big.NewInt(0b101))
+		require.NoError(t, err)
 		require.NotNil(t, path, "GetPath should return a path even for empty tree")
 		require.NotEmpty(t, path.Root, "Root should not be empty even for empty tree")
 		require.NotNil(t, path.Steps, "Steps should not be nil")
 		require.Len(t, path.Steps, 2, "Should have two steps")
 
 		step0 := path.Steps[0]
-		require.Equal(t, "0", step0.Path, "Input step path")
+		require.Equal(t, "1", step0.Path, "Input step path")
 		require.Nil(t, step0.Data, "Empty tree step should have no data")
 
 		step1 := path.Steps[1]
@@ -690,7 +770,8 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 
 		// Get paths and validate structure
 		for _, leaf := range testLeaves {
-			merkPath := smt.GetPath(leaf.path)
+			merkPath, err := smt.GetPath(leaf.path)
+			require.NoError(t, err)
 			require.NotNil(t, merkPath, "GetPath should return a path")
 
 			// Validate path structure for verification compatibility
@@ -727,10 +808,10 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		require.NoError(t, err, "AddLeaf failed")
 
 		// Get paths multiple times and verify consistency
-		merkPath1a := smt.GetPath(path1)
-		merkPath1b := smt.GetPath(path1)
-		merkPath2a := smt.GetPath(path2)
-		merkPath2b := smt.GetPath(path2)
+		merkPath1a, _ := smt.GetPath(path1)
+		merkPath1b, _ := smt.GetPath(path1)
+		merkPath2a, _ := smt.GetPath(path2)
+		merkPath2b, _ := smt.GetPath(path2)
 
 		// Same path should return identical results
 		require.Equal(t, merkPath1a.Root, merkPath1b.Root, "Same path should have same root")
@@ -777,7 +858,8 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 				require.NoError(t, err, "AddLeaf failed for %s", tc.name)
 
 				// Get path
-				merkPath := smt.GetPath(path)
+				merkPath, err := smt.GetPath(path)
+				require.NoError(t, err)
 				require.NotNil(t, merkPath, "GetPath should return a path for %s", tc.name)
 
 				// Verify the path representation in steps
@@ -1219,4 +1301,177 @@ func TestSMTAddingLeafAboveNode(t *testing.T) {
 		{Path: big.NewInt(2), Value: []byte("node_above_leaf_1")},
 	}
 	require.Error(t, smt2.AddLeaves(leaves2), "SMT should not allow adding leaves above existing nodes, even in a batch")
+}
+
+func TestJoinPaths(t *testing.T) {
+	// "Two Leaves, Sharded" example from the spec
+	t.Run("TwoLeaves", func(t *testing.T) {
+		left := NewChildSparseMerkleTree(api.SHA256, 2, 0b10)
+		left.AddLeaf(big.NewInt(0b100), []byte{0x61})
+
+		right := NewChildSparseMerkleTree(api.SHA256, 2, 0b11)
+		right.AddLeaf(big.NewInt(0b111), []byte{0x62})
+
+		parent := NewParentSparseMerkleTree(api.SHA256, 1)
+		parent.AddLeaf(big.NewInt(0b10), left.GetRootHash()[2:])
+		parent.AddLeaf(big.NewInt(0b11), right.GetRootHash()[2:])
+
+		leftChild, _ := left.GetPath(big.NewInt(0b100))
+		leftParent, _ := parent.GetPath(big.NewInt(0b10))
+		leftPath, err := JoinPaths(leftChild, leftParent)
+		assert.Nil(t, err)
+		assert.NotNil(t, leftPath)
+		leftRes, err := leftPath.Verify(big.NewInt(0b100))
+		assert.Nil(t, err)
+		assert.NotNil(t, leftRes)
+		assert.True(t, leftRes.PathValid)
+		assert.True(t, leftRes.PathIncluded)
+
+		rightChild, _ := right.GetPath(big.NewInt(0b111))
+		rightParent, _ := parent.GetPath(big.NewInt(0b11))
+		rightPath, err := JoinPaths(rightChild, rightParent)
+		assert.Nil(t, err)
+		assert.NotNil(t, rightPath)
+		rightRes, err := rightPath.Verify(big.NewInt(0b111))
+		assert.Nil(t, err)
+		assert.NotNil(t, rightRes)
+		assert.True(t, rightRes.PathValid)
+		assert.True(t, rightRes.PathIncluded)
+	})
+
+	// "Four Leaves, Sharded" example from the spec
+	t.Run("FourLeaves", func(t *testing.T) {
+		left := NewChildSparseMerkleTree(api.SHA256, 4, 0b110)
+		left.AddLeaf(big.NewInt(0b10010), []byte{0x61})
+		left.AddLeaf(big.NewInt(0b11010), []byte{0x62})
+
+		right := NewChildSparseMerkleTree(api.SHA256, 4, 0b101)
+		right.AddLeaf(big.NewInt(0b10101), []byte{0x63})
+		right.AddLeaf(big.NewInt(0b11101), []byte{0x64})
+
+		parent := NewParentSparseMerkleTree(api.SHA256, 2)
+		parent.AddLeaf(big.NewInt(0b110), left.GetRootHash()[2:])
+		parent.AddLeaf(big.NewInt(0b101), right.GetRootHash()[2:])
+
+		child1, _ := left.GetPath(big.NewInt(0b10010))
+		parent1, _ := parent.GetPath(big.NewInt(0b110))
+		path1, err := JoinPaths(child1, parent1)
+		assert.Nil(t, err)
+		assert.NotNil(t, path1)
+		res1, err := path1.Verify(big.NewInt(0b10010))
+		assert.Nil(t, err)
+		assert.NotNil(t, res1)
+		assert.True(t, res1.PathValid)
+		assert.True(t, res1.PathIncluded)
+
+		child2, _ := left.GetPath(big.NewInt(0b11010))
+		parent2, _ := parent.GetPath(big.NewInt(0b110))
+		path2, err := JoinPaths(child2, parent2)
+		assert.Nil(t, err)
+		assert.NotNil(t, path2)
+		res2, err := path2.Verify(big.NewInt(0b11010))
+		assert.Nil(t, err)
+		assert.NotNil(t, res2)
+		assert.True(t, res2.PathValid)
+		assert.True(t, res2.PathIncluded)
+
+		child3, _ := right.GetPath(big.NewInt(0b10101))
+		parent3, _ := parent.GetPath(big.NewInt(0b101))
+		path3, err := JoinPaths(child3, parent3)
+		assert.Nil(t, err)
+		assert.NotNil(t, path3)
+		res3, err := path3.Verify(big.NewInt(0b10101))
+		assert.Nil(t, err)
+		assert.NotNil(t, res3)
+		assert.True(t, res3.PathValid)
+		assert.True(t, res3.PathIncluded)
+
+		child4, _ := right.GetPath(big.NewInt(0b11101))
+		parent4, _ := parent.GetPath(big.NewInt(0b101))
+		path4, err := JoinPaths(child4, parent4)
+		assert.Nil(t, err)
+		assert.NotNil(t, path4)
+		res4, err := path4.Verify(big.NewInt(0b11101))
+		assert.Nil(t, err)
+		assert.NotNil(t, res4)
+		assert.True(t, res4.PathValid)
+		assert.True(t, res4.PathIncluded)
+	})
+
+	t.Run("NilInputDoesNotPanic", func(t *testing.T) {
+		dummy := &api.MerkleTreePath{Root: "0000"}
+
+		joinedPath, err := JoinPaths(nil, dummy)
+		assert.ErrorContains(t, err, "nil child path")
+		assert.Nil(t, joinedPath)
+
+		joinedPath, err = JoinPaths(dummy, nil)
+		assert.ErrorContains(t, err, "nil parent path")
+		assert.Nil(t, joinedPath)
+	})
+
+	t.Run("NilRootDoesNotPanic", func(t *testing.T) {
+		dummyNil := &api.MerkleTreePath{}
+		dummyShort := &api.MerkleTreePath{Root: ""}
+		dummyOK := &api.MerkleTreePath{Root: "0000"}
+
+		joinedPath, err := JoinPaths(dummyNil, dummyOK)
+		assert.ErrorContains(t, err, "invalid child root hash format")
+		assert.Nil(t, joinedPath)
+
+		joinedPath, err = JoinPaths(dummyShort, dummyOK)
+		assert.ErrorContains(t, err, "invalid child root hash format")
+		assert.Nil(t, joinedPath)
+
+		joinedPath, err = JoinPaths(dummyOK, dummyNil)
+		assert.ErrorContains(t, err, "invalid parent root hash format")
+		assert.Nil(t, joinedPath)
+
+		joinedPath, err = JoinPaths(dummyOK, dummyShort)
+		assert.ErrorContains(t, err, "invalid parent root hash format")
+		assert.Nil(t, joinedPath)
+	})
+
+	t.Run("HashFunctionMismatch", func(t *testing.T) {
+		child := &api.MerkleTreePath{Root: "0000"}
+		parent := &api.MerkleTreePath{Root: "0001"}
+
+		joinedPath, err := JoinPaths(child, parent)
+		assert.ErrorContains(t, err, "child hash algorithm does not match parent")
+		assert.Nil(t, joinedPath)
+	})
+
+	t.Run("HashValueMismatch", func(t *testing.T) {
+		smt := NewSparseMerkleTree(api.SHA256, 1)
+		smt.AddLeaf(big.NewInt(0b10), []byte{0})
+		path, _ := smt.GetPath(big.NewInt(0b10))
+
+		joinedPath, err := JoinPaths(path, path)
+		assert.ErrorContains(t, err, "child root hash does not match parent input hash")
+		assert.Nil(t, joinedPath)
+	})
+}
+
+// TestParentSMTSnapshotUpdateLeaf tests that parent SMT snapshots can update pre-populated leaves
+func TestParentSMTSnapshotUpdateLeaf(t *testing.T) {
+	// Create parent SMT with ShardIDLength=1 (creates pre-populated leaves at paths 2 and 3)
+	parentSMT := NewParentSparseMerkleTree(api.SHA256, 1)
+
+	// Create snapshot for copy-on-write semantics
+	snapshot := parentSMT.CreateSnapshot()
+
+	// Update a pre-populated leaf (shard ID 2)
+	path := big.NewInt(2)
+	value := []byte{0x01, 0x02, 0x03}
+
+	err := snapshot.AddLeaf(path, value)
+	if err != nil {
+		t.Fatalf("Failed to update leaf in parent SMT snapshot: %v", err)
+	}
+
+	// Verify the update worked by checking root hash changed
+	rootHash := snapshot.GetRootHash()
+	if len(rootHash) == 0 {
+		t.Fatal("Expected non-empty root hash after updating leaf")
+	}
 }

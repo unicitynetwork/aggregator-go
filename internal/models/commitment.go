@@ -3,6 +3,7 @@ package models
 import (
 	"crypto/sha256"
 	"fmt"
+	"time"
 
 	"github.com/fxamacker/cbor/v2"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -22,12 +23,15 @@ type Commitment struct {
 	StreamID              string              `json:"-" bson:"-"` // Redis stream ID used for stream acknowledgements
 }
 
-// Authenticator represents the authentication data for a commitment
-type Authenticator struct {
-	Algorithm string        `json:"algorithm" bson:"algorithm"`
-	PublicKey api.HexBytes  `json:"publicKey" bson:"publicKey"`
-	Signature api.HexBytes  `json:"signature" bson:"signature"`
-	StateHash api.StateHash `json:"stateHash" bson:"stateHash"`
+// CommitmentBSON represents the BSON version of Commitment for MongoDB storage
+type CommitmentBSON struct {
+	ID                    primitive.ObjectID `bson:"_id,omitempty"`
+	RequestID             string             `bson:"requestId"`
+	TransactionHash       string             `bson:"transactionHash"`
+	Authenticator         AuthenticatorBSON  `bson:"authenticator"`
+	AggregateRequestCount uint64             `bson:"aggregateRequestCount"`
+	CreatedAt             time.Time          `bson:"createdAt"`
+	ProcessedAt           *time.Time         `bson:"processedAt,omitempty"`
 }
 
 // NewCommitment creates a new commitment
@@ -50,6 +54,44 @@ func NewCommitmentWithAggregate(requestID api.RequestID, transactionHash api.Tra
 		AggregateRequestCount: aggregateCount,
 		CreatedAt:             api.Now(),
 	}
+}
+
+// ToBSON converts Commitment to CommitmentBSON for MongoDB storage
+func (c *Commitment) ToBSON() *CommitmentBSON {
+	var processedAt *time.Time
+	if c.ProcessedAt != nil {
+		processedAt = &c.ProcessedAt.Time
+	}
+	return &CommitmentBSON{
+		ID:                    c.ID,
+		RequestID:             c.RequestID.String(),
+		TransactionHash:       c.TransactionHash.String(),
+		Authenticator:         c.Authenticator.ToBSON(),
+		AggregateRequestCount: c.AggregateRequestCount,
+		CreatedAt:             c.CreatedAt.Time,
+		ProcessedAt:           processedAt,
+	}
+}
+
+// FromBSON converts CommitmentBSON back to Commitment
+func (cb *CommitmentBSON) FromBSON() (*Commitment, error) {
+	var processedAt *api.Timestamp
+	if cb.ProcessedAt != nil {
+		processedAt = api.NewTimestamp(*cb.ProcessedAt)
+	}
+	authenticator, err := cb.Authenticator.FromBSON()
+	if err != nil {
+		return nil, err
+	}
+	return &Commitment{
+		ID:                    cb.ID,
+		RequestID:             api.RequestID(cb.RequestID),
+		TransactionHash:       api.TransactionHash(cb.TransactionHash),
+		Authenticator:         *authenticator,
+		AggregateRequestCount: cb.AggregateRequestCount,
+		CreatedAt:             api.NewTimestamp(cb.CreatedAt),
+		ProcessedAt:           processedAt,
+	}, nil
 }
 
 // CreateLeafValue creates the value to store in the SMT leaf for a commitment

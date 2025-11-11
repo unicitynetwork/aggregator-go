@@ -27,7 +27,9 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
+	"github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	mongodbStorage "github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
@@ -120,7 +122,8 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	commitmentQueue := mongoStorage.CommitmentQueue()
 
 	// Initialize round manager
-	roundManager, err := round.NewRoundManager(ctx, cfg, log, commitmentQueue, mongoStorage, state.NewSyncStateTracker())
+	rootAggregatorClient := sharding.NewRootAggregatorClientStub()
+	roundManager, err := round.NewRoundManager(ctx, cfg, log, smt.NewSparseMerkleTree(api.SHA256, 16+256), commitmentQueue, mongoStorage, rootAggregatorClient, state.NewSyncStateTracker())
 	require.NoError(t, err)
 
 	// Start the round manager (restores SMT)

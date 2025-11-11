@@ -10,6 +10,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 type (
@@ -34,7 +35,7 @@ type (
 	HAManager struct {
 		logger         *logger.Logger
 		leaderSelector LeaderSelector
-		blockSyncer    *blockSyncer
+		blockSyncer    *blockSyncer // Optional: nil when block syncing is disabled
 		activatable    Activatable
 		syncInterval   time.Duration
 
@@ -48,13 +49,20 @@ func NewHAManager(logger *logger.Logger,
 	leaderSelector LeaderSelector,
 	storage interfaces.Storage,
 	smt *smt.ThreadSafeSMT,
+	shardID api.ShardID,
 	stateTracker *state.Tracker,
 	syncInterval time.Duration,
+	disableBlockSync bool, // Set true for parent mode where block syncing is not needed
 ) *HAManager {
+	var syncer *blockSyncer
+	if !disableBlockSync {
+		syncer = newBlockSyncer(logger, storage, smt, shardID, stateTracker)
+	}
+
 	return &HAManager{
 		logger:         logger,
 		leaderSelector: leaderSelector,
-		blockSyncer:    newBlockSyncer(logger, storage, smt, stateTracker),
+		blockSyncer:    syncer,
 		activatable:    activatable,
 		syncInterval:   syncInterval,
 	}
@@ -109,10 +117,17 @@ func (ham *HAManager) onTick(ctx context.Context, wasLeader bool) (bool, error) 
 		ham.logger.WithContext(ctx).Debug("leader is already being synced")
 		return isLeader, nil
 	}
-	if err := ham.blockSyncer.syncToLatestBlock(ctx); err != nil {
-		// Log the error but continue, as we might still need to handle a leadership change.
-		ham.logger.Error("failed to sync smt to latest block", "error", err)
+
+	// Only sync blocks if blockSyncer is enabled (regular aggregator mode)
+	if ham.blockSyncer != nil {
+		if err := ham.blockSyncer.syncToLatestBlock(ctx); err != nil {
+			// Log the error but continue, as we might still need to handle a leadership change.
+			ham.logger.Error("failed to sync smt to latest block", "error", err)
+		}
+	} else {
+		ham.logger.WithContext(ctx).Debug("block syncing disabled (parent mode), skipping SMT sync")
 	}
+
 	if !wasLeader && isLeader {
 		ham.logger.Info("Transitioning to LEADER")
 		if err := ham.activatable.Activate(ctx); err != nil {

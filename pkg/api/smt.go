@@ -42,7 +42,7 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 	}
 
 	// The "running totals" as we go through the hashing steps
-	currentPath := big.NewInt(1)
+	var currentPath *big.Int
 	var currentData *[]byte
 
 	for i, step := range m.Steps {
@@ -61,7 +61,7 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 		}
 
 		if i == 0 {
-			if stepPath.Sign() > 0 {
+			if stepPath.BitLen() >= 2 {
 				// First step, normal case: data is the value in the leaf, apply the leaf hashing rule
 				hasher.Reset().AddData(CborArray(2))
 				hasher.AddCborBytes(BigintEncode(stepPath))
@@ -73,8 +73,10 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 				currentData = &hasher.GetHash().RawHash
 			} else {
 				// First step, special case: data is the "our branch" hash value for the next step
+				// Note that in this case stepPath is a "naked" direction bit
 				currentData = stepData
 			}
+			currentPath = stepPath
 		} else {
 			// All subsequent steps: apply the non-leaf hashing rule
 			var left, right *[]byte
@@ -101,19 +103,21 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 				hasher.AddCborBytes(*right)
 			}
 			currentData = &hasher.GetHash().RawHash
-		}
 
-		if stepPath.Sign() > 0 {
+			// Initialization for when currentPath is a "naked" direction bit
+			if currentPath.BitLen() < 2 {
+				currentPath = big.NewInt(1)
+			}
 			// Append step path bits to current path
 			pathLen := stepPath.BitLen() - 1
-			stepPath.SetBit(stepPath, pathLen, 0)
+			mask := new(big.Int).SetBit(stepPath, pathLen, 0)
 			currentPath.Lsh(currentPath, uint(pathLen))
-			currentPath.Or(currentPath, stepPath)
+			currentPath.Or(currentPath, mask)
 		}
 	}
 
 	pathValid := currentData != nil && m.Root == NewDataHash(hasher.algorithm, *currentData).ToHex()
-	pathIncluded := requestId.Cmp(currentPath) == 0
+	pathIncluded := currentPath != nil && requestId.Cmp(currentPath) == 0
 
 	return &PathVerificationResult{
 		PathValid:    pathValid,

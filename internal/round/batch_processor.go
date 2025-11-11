@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
@@ -103,30 +104,107 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		return fmt.Errorf("failed to parse root hash %s: %w", rootHash, err)
 	}
 
-	block := models.NewBlock(
-		blockNumber,
-		"unicity",
-		"1.0",
-		"mainnet",
-		rootHashBytes,
-		parentHash,
-	)
-
-	rm.logger.WithContext(ctx).Info("Sending certification request to BFT client",
-		"blockNumber", blockNumber.String(),
-		"bftClientType", fmt.Sprintf("%T", rm.bftClient))
-
-	if err := rm.bftClient.CertificationRequest(ctx, block); err != nil {
-		rm.logger.WithContext(ctx).Error("Failed to send certification request",
+	switch rm.config.Sharding.Mode {
+	case config.ShardingModeStandalone:
+		block := models.NewBlock(
+			blockNumber,
+			rm.config.Chain.ID,
+			0,
+			rm.config.Chain.Version,
+			rm.config.Chain.ForkID,
+			rootHashBytes,
+			parentHash,
+			nil,
+			nil,
+		)
+		rm.logger.WithContext(ctx).Info("Sending certification request to BFT client",
 			"blockNumber", blockNumber.String(),
-			"error", err.Error())
-		return fmt.Errorf("failed to send certification request: %w", err)
+			"bftClientType", fmt.Sprintf("%T", rm.bftClient))
+		if err := rm.bftClient.CertificationRequest(ctx, block); err != nil {
+			rm.logger.WithContext(ctx).Error("Failed to send certification request",
+				"blockNumber", blockNumber.String(),
+				"error", err.Error())
+			return fmt.Errorf("failed to send certification request: %w", err)
+		}
+		rm.logger.WithContext(ctx).Info("Certification request sent successfully",
+			"blockNumber", blockNumber.String())
+		return nil
+	case config.ShardingModeChild:
+		rm.logger.WithContext(ctx).Info("Submitting root hash to parent shard", "rootHash", rootHash)
+
+		// Strip algorithm prefix (first 2 bytes) before sending to parent
+		// Parent SMT stores raw 32-byte hashes, not the full 34-byte format with algorithm ID
+		// This is required for JoinPaths to work correctly when combining child and parent proofs
+		if len(rootHashBytes) < 2 {
+			return fmt.Errorf("root hash too short: expected at least 2 bytes for algorithm prefix, got %d", len(rootHashBytes))
+		}
+		rootHashRaw := rootHashBytes[2:] // Remove algorithm identifier
+		if len(rootHashRaw) != 32 {
+			return fmt.Errorf("child root hash has invalid length after stripping prefix: expected 32 bytes, got %d", len(rootHashRaw))
+		}
+
+		request := &api.SubmitShardRootRequest{
+			ShardID:  rm.config.Sharding.Child.ShardID,
+			RootHash: rootHashRaw,
+		}
+		if err := rm.rootClient.SubmitShardRoot(ctx, request); err != nil {
+			return fmt.Errorf("failed to submit root hash to parent shard: %w", err)
+		}
+		rm.logger.Info("Root hash submitted to parent, polling for inclusion proof...", "rootHash", rootHashRaw.String())
+		proof, err := rm.pollInclusionProof(ctx, rootHashRaw.String())
+		if err != nil {
+			return fmt.Errorf("failed to poll for parent shard inclusion proof: %w", err)
+		}
+		block := models.NewBlock(
+			blockNumber,
+			rm.config.Chain.ID,
+			request.ShardID,
+			rm.config.Chain.Version,
+			rm.config.Chain.ForkID,
+			rootHashBytes,
+			parentHash,
+			proof.UnicityCertificate,
+			proof.MerkleTreePath,
+		)
+		if err := rm.FinalizeBlock(ctx, block); err != nil {
+			return fmt.Errorf("failed to finalize block: %w", err)
+		}
+		nextRoundNumber := big.NewInt(0).Add(blockNumber.Int, big.NewInt(1))
+		if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); err != nil {
+			rm.logger.WithContext(ctx).Error("Failed to start new round after finalization.", "error", err.Error())
+		}
+		rm.logger.WithContext(ctx).Info("Block finalized and new round started", "blockNumber", blockNumber.String())
+		return nil
+	default:
+		return fmt.Errorf("invalid sharding mode: %s", rm.config.Sharding.Mode)
 	}
+}
 
-	rm.logger.WithContext(ctx).Info("Certification request sent successfully",
-		"blockNumber", blockNumber.String())
+func (rm *RoundManager) pollInclusionProof(ctx context.Context, rootHash string) (*api.RootShardInclusionProof, error) {
+	pollingCtx, cancel := context.WithTimeout(ctx, rm.config.Sharding.Child.ParentPollTimeout)
+	defer cancel()
 
-	return nil
+	ticker := time.NewTicker(rm.config.Sharding.Child.ParentPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-pollingCtx.Done():
+			return nil, fmt.Errorf("timed out waiting for parent shard inclusion proof %s", rootHash)
+		case <-ticker.C:
+			request := &api.GetShardProofRequest{ShardID: rm.config.Sharding.Child.ShardID}
+			proof, err := rm.rootClient.GetShardProof(pollingCtx, request)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch parent shard inclusion proof: %w", err)
+			}
+			if proof == nil || !proof.IsValid(rootHash) {
+				rm.logger.WithContext(ctx).Debug("Parent shard inclusion proof not found, retrying...")
+				continue
+			}
+			rm.logger.WithContext(ctx).Info("Successfully received shard proof from parent")
+			return proof, nil
+		}
+	}
 }
 
 // FinalizeBlock creates and persists a new block with the given data

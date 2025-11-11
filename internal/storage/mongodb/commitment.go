@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -31,7 +32,7 @@ func NewCommitmentStorage(db *mongo.Database) *CommitmentStorage {
 
 // Store stores a new commitment
 func (cs *CommitmentStorage) Store(ctx context.Context, commitment *models.Commitment) error {
-	_, err := cs.collection.InsertOne(ctx, commitment)
+	_, err := cs.collection.InsertOne(ctx, commitment.ToBSON())
 	if err != nil {
 		return fmt.Errorf("failed to store commitment: %w", err)
 	}
@@ -40,19 +41,25 @@ func (cs *CommitmentStorage) Store(ctx context.Context, commitment *models.Commi
 
 // GetByRequestID retrieves a commitment by request ID
 func (cs *CommitmentStorage) GetByRequestID(ctx context.Context, requestID api.RequestID) (*models.Commitment, error) {
-	var commitment models.Commitment
-	err := cs.collection.FindOne(ctx, bson.M{"requestId": requestID}).Decode(&commitment)
+	var commitmentBSON models.CommitmentBSON
+	err := cs.collection.FindOne(ctx, bson.M{"requestId": requestID}).Decode(&commitmentBSON)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get commitment by request ID: %w", err)
 	}
+
+	commitment, err := commitmentBSON.FromBSON()
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert commitment from BSON: %w", err)
+	}
+
 	// Handle backward compatibility: default to 1 if AggregateRequestCount is 0
 	if commitment.AggregateRequestCount == 0 {
 		commitment.AggregateRequestCount = 1
 	}
-	return &commitment, nil
+	return commitment, nil
 }
 
 // GetUnprocessedBatch retrieves a batch of unprocessed commitments
@@ -87,15 +94,20 @@ func (cs *CommitmentStorage) GetUnprocessedBatchWithCursor(ctx context.Context, 
 	var newCursor string
 
 	for cursor.Next(ctx) {
-		var commitment models.Commitment
-		if err := cursor.Decode(&commitment); err != nil {
+		var commitmentBSON models.CommitmentBSON
+		if err := cursor.Decode(&commitmentBSON); err != nil {
 			return nil, "", fmt.Errorf("failed to decode commitment: %w", err)
 		}
+		commitment, err := commitmentBSON.FromBSON()
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to convert commitment from BSON: %w", err)
+		}
+
 		// Handle backward compatibility: default to 1 if AggregateRequestCount is 0
 		if commitment.AggregateRequestCount == 0 {
 			commitment.AggregateRequestCount = 1
 		}
-		commitments = append(commitments, &commitment)
+		commitments = append(commitments, commitment)
 		// Update cursor to the last fetched ID
 		if commitment.ID != primitive.NilObjectID {
 			newCursor = commitment.ID.Hex()
@@ -121,7 +133,7 @@ func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interf
 	}
 
 	filter := bson.M{"requestId": bson.M{"$in": requestIDs}}
-	update := bson.M{"$set": bson.M{"processedAt": api.Now()}}
+	update := bson.M{"$set": bson.M{"processedAt": time.Now()}}
 
 	_, err := cs.collection.UpdateMany(ctx, filter, update)
 	if err != nil {
