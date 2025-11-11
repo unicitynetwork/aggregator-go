@@ -88,6 +88,9 @@ services:
   # Shard 1 MongoDB Replica Set
   mongodb-shard1-1: &mongo-base
     image: mongo:7.0
+    container_name: mongodb-shard1-1
+    volumes:
+      - ./data/mongodb_shard1_data_1:/data/db
     command: ["--replSet", "rs1", "--bind_ip_all", "--noauth"]
     networks:
       - default
@@ -292,7 +295,9 @@ services:
       - bft-aggregator-genesis-gen
 
   # Aggregator Root Cluster
-  # currently only 1 instance as the child must send only to the parent which is not implemented currently
+  # currently only 1 parent aggregator instance because if the parent aggregators are in HA setup then the child
+  # aggregators must send to the LEADER of parent aggregators which is currently not implemented
+  # (currently parent url is "hardcoded" in config).
   aggregator-root-1:
     <<: *aggregator-base
     container_name: aggregator-root-1
