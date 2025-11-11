@@ -20,6 +20,7 @@ type Commitment struct {
 	AggregateRequestCount uint64              `json:"aggregateRequestCount" bson:"aggregateRequestCount"`
 	CreatedAt             *api.Timestamp      `json:"createdAt" bson:"createdAt"`
 	ProcessedAt           *api.Timestamp      `json:"processedAt,omitempty" bson:"processedAt,omitempty"`
+	StreamID              string              `json:"-" bson:"-"` // Redis stream ID used for stream acknowledgements
 }
 
 // CommitmentBSON represents the BSON version of Commitment for MongoDB storage

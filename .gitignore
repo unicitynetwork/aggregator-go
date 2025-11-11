@@ -7,3 +7,7 @@ aggregator.log
 bft-config
 /data/
 .cache/
+
+# Environment files with secrets
+.env
+proxy/.env

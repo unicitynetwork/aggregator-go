@@ -409,6 +409,7 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 	if err != nil {
 		status.AddDetail("commitment_queue", "unknown")
 		status.AddDetail("commitment_queue_status", "error")
+		as.logger.WithContext(ctx).Error("Commitment queue health check failed", "error", err.Error())
 	} else {
 		status.AddDetail("commitment_queue", strconv.FormatInt(unprocessedCount, 10))
 

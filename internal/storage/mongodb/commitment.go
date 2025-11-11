@@ -12,6 +12,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -121,9 +122,14 @@ func (cs *CommitmentStorage) GetUnprocessedBatchWithCursor(ctx context.Context, 
 }
 
 // MarkProcessed marks commitments as processed
-func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, requestIDs []api.RequestID) error {
-	if len(requestIDs) == 0 {
+func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interfaces.CommitmentAck) error {
+	if len(entries) == 0 {
 		return nil
+	}
+
+	requestIDs := make([]api.RequestID, len(entries))
+	for i, entry := range entries {
+		requestIDs[i] = entry.RequestID
 	}
 
 	filter := bson.M{"requestId": bson.M{"$in": requestIDs}}

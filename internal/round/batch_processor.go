@@ -10,6 +10,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -218,6 +219,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	var processingTime time.Duration
 	var markProcessedStart, storeBlockStart, persistDataStart, commitSnapshotStart time.Time
 	var markProcessedTime, storeBlockTime, persistDataTime, commitSnapshotTime time.Duration
+	commitmentCount := 0
 
 	// Get timing metrics from the round if available
 	rm.roundMutex.Lock()
@@ -230,38 +232,43 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	// CRITICAL: Store all commitment data BEFORE storing the block to prevent race conditions
 	// where API returns partial block data
 
-	// First, collect all request IDs that will be in this block
+	// First, collect all request IDs and stream metadata that will be in this block
 	rm.roundMutex.Lock()
 	requestIds := make([]api.RequestID, 0)
+	ackEntries := make([]interfaces.CommitmentAck, 0)
+	pendingRecordCount := 0
+	roundNumber := block.Index.String()
+
 	if rm.currentRound != nil {
-		requestIds = make([]api.RequestID, 0, len(rm.currentRound.Commitments))
-		for _, commitment := range rm.currentRound.Commitments {
-			requestIds = append(requestIds, commitment.RequestID)
+		if rm.currentRound.Number != nil {
+			roundNumber = rm.currentRound.Number.String()
+		}
+		commitmentCount = len(rm.currentRound.Commitments)
+		pendingRecordCount = len(rm.currentRound.PendingRecords)
+
+		requestIds = make([]api.RequestID, commitmentCount)
+		ackEntries = make([]interfaces.CommitmentAck, commitmentCount)
+
+		for i, commitment := range rm.currentRound.Commitments {
+			requestIds[i] = commitment.RequestID
+			ackEntries[i] = interfaces.CommitmentAck{RequestID: commitment.RequestID, StreamID: commitment.StreamID}
 		}
 	}
 	rm.roundMutex.Unlock()
 
-	rm.roundMutex.Lock()
-	if rm.currentRound != nil && len(rm.currentRound.Commitments) > 0 {
+	if commitmentCount > 0 {
 		rm.logger.WithContext(ctx).Debug("Preparing commitment data before block storage",
-			"roundNumber", rm.currentRound.Number.String(),
-			"commitmentCount", len(rm.currentRound.Commitments),
-			"recordCount", len(rm.currentRound.PendingRecords))
-
-		// Extract data we need
-		requestIDs := make([]api.RequestID, len(rm.currentRound.Commitments))
-		for i, commitment := range rm.currentRound.Commitments {
-			requestIDs[i] = commitment.RequestID
-		}
-		rm.roundMutex.Unlock()
+			"roundNumber", roundNumber,
+			"commitmentCount", commitmentCount,
+			"recordCount", pendingRecordCount)
 
 		// Note: Aggregator records are now stored during processBatch, not here
 		rm.logger.WithContext(ctx).Debug("Aggregator records already stored during batch processing",
-			"commitmentCount", len(requestIDs))
+			"commitmentCount", commitmentCount)
 
-		// Mark commitments as processed BEFORE storing the block
 		markProcessedStart = time.Now()
-		if err := rm.commitmentQueue.MarkProcessed(ctx, requestIDs); err != nil {
+
+		if err := rm.commitmentQueue.MarkProcessed(ctx, ackEntries); err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to mark commitments as processed",
 				"error", err.Error(),
 				"blockNumber", block.Index.String())
@@ -270,11 +277,8 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		markProcessedTime = time.Since(markProcessedStart)
 
 		rm.logger.WithContext(ctx).Info("Successfully prepared commitment data",
-			"count", len(requestIDs),
+			"count", commitmentCount,
 			"blockNumber", block.Index.String())
-
-	} else {
-		rm.roundMutex.Unlock()
 	}
 
 	// Store the block first - before committing the snapshot
@@ -394,7 +398,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 
 	// Get commitment count for performance summary
 	rm.roundMutex.RLock()
-	commitmentCount := 0
+	commitmentCount = 0
 	if rm.currentRound != nil {
 		commitmentCount = len(rm.currentRound.Commitments)
 	}

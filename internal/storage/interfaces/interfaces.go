@@ -25,7 +25,7 @@ type CommitmentQueue interface {
 	StreamCommitments(ctx context.Context, commitmentChan chan<- *models.Commitment) error
 
 	// MarkProcessed marks commitments as processed
-	MarkProcessed(ctx context.Context, requestIDs []api.RequestID) error
+	MarkProcessed(ctx context.Context, entries []CommitmentAck) error
 
 	// Delete removes processed commitments
 	Delete(ctx context.Context, requestIDs []api.RequestID) error
@@ -39,6 +39,12 @@ type CommitmentQueue interface {
 	// Lifecycle methods
 	Initialize(ctx context.Context) error
 	Close(ctx context.Context) error
+}
+
+// CommitmentAck represents the metadata required to acknowledge a commitment.
+type CommitmentAck struct {
+	RequestID api.RequestID
+	StreamID  string
 }
 
 // AggregatorRecordStorage handles finalized aggregator records
