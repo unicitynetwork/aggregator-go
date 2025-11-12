@@ -45,8 +45,8 @@ const (
 )
 
 // setupTestDB creates a test database connection using Testcontainers
-func setupTestDB(t *testing.T) (*mongo.Database, func()) {
-	ctx := context.Background()
+func setupTestDB(t *testing.T) *mongo.Database {
+	ctx := t.Context()
 
 	// Create MongoDB container
 	mongoContainer, err := mongodb.Run(ctx, "mongo:7.0")
@@ -97,8 +97,9 @@ func setupTestDB(t *testing.T) (*mongo.Database, func()) {
 			t.Logf("Failed to terminate MongoDB container: %v", err)
 		}
 	}
+	t.Cleanup(cleanup)
 
-	return db, cleanup
+	return db
 }
 
 // createTestBlockRecords creates a test BlockRecords instance
@@ -111,9 +112,7 @@ func createTestBlockRecords(blockNumber *api.BigInt, requestIDs []api.RequestID)
 }
 
 func TestBlockRecordsStorage_Store(t *testing.T) {
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
-
+	db := setupTestDB(t)
 	storage := NewBlockRecordsStorage(db)
 	ctx := context.Background()
 
@@ -362,9 +361,7 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 }
 
 func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
-
+	db := setupTestDB(t)
 	storage := NewBlockRecordsStorage(db)
 	ctx := context.Background()
 
@@ -458,8 +455,7 @@ func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
 }
 
 func TestBlockRecordsStorage_GetNextBlock(t *testing.T) {
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
+	db := setupTestDB(t)
 
 	storage := NewBlockRecordsStorage(db)
 	ctx := context.Background()
@@ -568,8 +564,7 @@ func TestBlockRecordsStorage_GetNextBlock(t *testing.T) {
 }
 
 func TestBlockRecordsStorage_Store_Integration(t *testing.T) {
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
+	db := setupTestDB(t)
 
 	storage := NewBlockRecordsStorage(db)
 	ctx := context.Background()

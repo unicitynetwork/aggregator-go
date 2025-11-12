@@ -25,6 +25,7 @@ type Storage struct {
 	smtStorage              *SmtStorage
 	blockRecordsStorage     *BlockRecordsStorage
 	leadershipStorage       *LeadershipStorage
+	trustBaseStorage        *TrustBaseStorage
 }
 
 // NewStorage creates a new MongoDB storage instance
@@ -69,6 +70,7 @@ func NewStorage(config config.Config) (*Storage, error) {
 	storage.smtStorage = NewSmtStorage(database)
 	storage.blockRecordsStorage = NewBlockRecordsStorage(database)
 	storage.leadershipStorage = NewLeadershipStorage(database, config.HA.LockTTLSeconds)
+	storage.trustBaseStorage = NewTrustBaseStorage(database)
 
 	// Create indexes
 	if err := storage.createIndexes(context.Background()); err != nil {
@@ -110,6 +112,11 @@ func (s *Storage) BlockRecordsStorage() interfaces.BlockRecordsStorage {
 // LeadershipStorage returns the leadership storage implementation
 func (s *Storage) LeadershipStorage() interfaces.LeadershipStorage {
 	return s.leadershipStorage
+}
+
+// TrustBaseStorage returns the trust base storage implementation
+func (s *Storage) TrustBaseStorage() interfaces.TrustBaseStorage {
+	return s.trustBaseStorage
 }
 
 // Ping verifies the database connection
@@ -179,6 +186,10 @@ func (s *Storage) createIndexes(ctx context.Context) error {
 
 	if err := s.leadershipStorage.CreateIndexes(ctx); err != nil {
 		return fmt.Errorf("failed to create leadership indexes: %w", err)
+	}
+
+	if err := s.trustBaseStorage.CreateIndexes(ctx); err != nil {
+		return fmt.Errorf("failed to create trust base indexes: %w", err)
 	}
 
 	return nil

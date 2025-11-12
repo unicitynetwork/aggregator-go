@@ -147,7 +147,6 @@ type BlockRecordsStorage interface {
 	GetLatestBlock(ctx context.Context) (*models.BlockRecords, error)
 }
 
-
 // LeadershipStorage handles high availability leadership state
 type LeadershipStorage interface {
 	// TryAcquireLock attempts to acquire the leadership lock,
@@ -166,6 +165,9 @@ type LeadershipStorage interface {
 	IsLeader(ctx context.Context, lockID string, serverID string) (bool, error)
 }
 
+type TrustBaseStorage interface {
+}
+
 // Storage handles persistent data storage
 type Storage interface {
 	AggregatorRecordStorage() AggregatorRecordStorage
@@ -173,6 +175,7 @@ type Storage interface {
 	SmtStorage() SmtStorage
 	BlockRecordsStorage() BlockRecordsStorage
 	LeadershipStorage() LeadershipStorage
+	TrustBaseStorage() TrustBaseStorage
 
 	Initialize(ctx context.Context) error
 	Ping(ctx context.Context) error
