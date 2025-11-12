@@ -284,7 +284,7 @@ services:
       - "3002:3000"
     environment:
       <<: *environment-base
-      MONGODB_URI: "mongodb://mongodb-shard1-1:27017,mongodb-shard1-2:27017,mongodb-shard1-3:2017/aggregator?replicaSet=rs1"
+      MONGODB_URI: "mongodb://mongodb-shard1-1:27017,mongodb-shard1-2:27017,mongodb-shard1-3:27017/aggregator?replicaSet=rs1"
     depends_on:
       - mongo-setup-shard1
       - bft-aggregator-genesis-gen
@@ -328,7 +328,7 @@ services:
       - "3009:3000"
     environment:
       <<: *environment-base
-      MONGODB_URI: "mongodb://mongodb-root-1:27017,mongodb-root-2:27017/aggregator?replicaSet=rs-root"
+      MONGODB_URI: "mongodb://mongodb-root-1:27017,mongodb-root-2:27017,mongodb-root-3:27017/aggregator?replicaSet=rs-root"
       SHARDING_MODE: "parent"
       BFT_ENABLED: "true"
     depends_on:
