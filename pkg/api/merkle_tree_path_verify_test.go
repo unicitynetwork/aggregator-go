@@ -312,6 +312,30 @@ func TestMerkleTreePathVerifyEdgeCases(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, result.PathValid, "Empty steps should not be valid")
 	})
+
+	t.Run("InvalidPath", func(t *testing.T) {
+		path1 := &api.MerkleTreePath{
+			Root: "00000000",
+			Steps: []api.MerkleTreeStep{
+				{Path: "0", Data: nil}, // path 0 is OK here
+				{Path: "2", Data: nil}, // but would be invalid here
+			},
+		}
+
+		_, err1 := path1.Verify(big.NewInt(1))
+		require.NoError(t, err1)
+
+		path2 := &api.MerkleTreePath{
+			Root: "00000000",
+			Steps: []api.MerkleTreeStep{
+				{Path: "0", Data: nil}, // path 0 is OK here
+				{Path: "0", Data: nil}, // but invalid here
+			},
+		}
+
+		_, err2 := path2.Verify(big.NewInt(1))
+		require.ErrorContains(t, err2, "invalid path")
+	})
 }
 
 // TestMerkleTreePathVerifyDuplicates tests handling of duplicate leaves

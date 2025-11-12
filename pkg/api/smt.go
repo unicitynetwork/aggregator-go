@@ -110,6 +110,9 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 			}
 			// Append step path bits to current path
 			pathLen := stepPath.BitLen() - 1
+			if pathLen < 0 {
+				return nil, fmt.Errorf("invalid path '%s' on step %d", step.Path, i+1)
+			}
 			mask := new(big.Int).SetBit(stepPath, pathLen, 0)
 			currentPath.Lsh(currentPath, uint(pathLen))
 			currentPath.Or(currentPath, mask)
