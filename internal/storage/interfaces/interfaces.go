@@ -3,6 +3,8 @@ package interfaces
 import (
 	"context"
 
+	"github.com/unicitynetwork/bft-go-base/types"
+
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -166,6 +168,10 @@ type LeadershipStorage interface {
 }
 
 type TrustBaseStorage interface {
+	Store(ctx context.Context, trustBase types.RootTrustBase) error
+	GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error)
+	GetByRound(ctx context.Context, round uint64) (types.RootTrustBase, error)
+	GetAll(ctx context.Context) ([]types.RootTrustBase, error)
 }
 
 // Storage handles persistent data storage
