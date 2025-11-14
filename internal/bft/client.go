@@ -3,6 +3,7 @@ package bft
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -11,12 +12,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/libp2p/go-libp2p/core/peer"
-
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/network/protocol/handshake"
-	"github.com/unicitynetwork/bft-go-base/crypto"
+	cryptobft "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
@@ -40,12 +39,11 @@ type (
 		shardID     types.ShardID
 		logger      *logger.Logger
 
-		// mutex for peer, network, signer, rootNodes
-		mu        sync.Mutex
-		peer      *network.Peer
-		network   *BftNetwork
-		rootNodes peer.IDSlice
-		signer    crypto.Signer
+		// mutex for peer, network, signer TODO: there are readers without mutex
+		mu      sync.Mutex
+		peer    *network.Peer
+		network *BftNetwork
+		signer  cryptobft.Signer
 
 		// Latest UC this node has seen. Can be ahead of the committed UC during recovery.
 		luc           atomic.Pointer[types.UnicityCertificate]
@@ -62,6 +60,8 @@ type (
 
 		// timestamp when last UC was received
 		lastCertResponseTime atomic.Int64
+
+		trustBaseStore TrustBaseStore
 	}
 
 	BFTClient interface {
@@ -75,19 +75,25 @@ type (
 		StartNewRound(ctx context.Context, roundNumber *api.BigInt) error
 	}
 
+	TrustBaseStore interface {
+		GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error)
+	}
+
 	status int
 )
 
-func NewBFTClient(conf *config.BFTConfig, roundManager RoundManager, logger *logger.Logger) (*BFTClientImpl, error) {
+func NewBFTClient(conf *config.BFTConfig, roundManager RoundManager, trustBaseStore TrustBaseStore, luc *types.UnicityCertificate, logger *logger.Logger) (*BFTClientImpl, error) {
 	logger.Info("Creating BFT Client")
 	bftClient := &BFTClientImpl{
-		logger:       logger,
-		partitionID:  conf.ShardConf.PartitionID,
-		shardID:      conf.ShardConf.ShardID,
-		roundManager: roundManager,
-		conf:         conf,
+		logger:         logger,
+		partitionID:    conf.ShardConf.PartitionID,
+		shardID:        conf.ShardConf.ShardID,
+		roundManager:   roundManager,
+		trustBaseStore: trustBaseStore,
+		conf:           conf,
 	}
 	bftClient.status.Store(idle)
+	bftClient.luc.Store(luc)
 	bftClient.lastCertResponseTime.Store(time.Now().UnixMilli())
 	return bftClient, nil
 }
@@ -125,10 +131,6 @@ func (c *BFTClientImpl) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	rootNodes, err := c.conf.GetRootNodes()
-	if err != nil {
-		return fmt.Errorf("failed to get root nodes: %w", err)
-	}
 	signer, err := c.conf.KeyConf.Signer()
 	if err != nil {
 		return fmt.Errorf("failed to create signer: %w", err)
@@ -142,7 +144,6 @@ func (c *BFTClientImpl) Start(ctx context.Context) error {
 	c.peer = self
 	c.network = networkP2P
 	c.signer = signer
-	c.rootNodes = rootNodes
 
 	if err := c.peer.BootstrapConnect(ctx, c.logger.Logger); err != nil {
 		return fmt.Errorf("failed to bootstrap peer: %w", err)
@@ -178,16 +179,21 @@ func (c *BFTClientImpl) Stop() {
 		c.peer = nil
 		c.network = nil
 		c.signer = nil
-		c.rootNodes = nil
 	}
 }
 
 func (c *BFTClientImpl) sendHandshake(ctx context.Context) error {
 	c.logger.WithContext(ctx).Debug("sending handshake to root chain")
-	// select some random root nodes
-	rootIDs, err := randomNodeSelector(c.rootNodes, defaultHandshakeNodes)
+
+	// load trust base
+	rootEpoch := c.luc.Load().GetRootEpoch()
+	tb, err := c.trustBaseStore.GetByEpoch(ctx, rootEpoch)
 	if err != nil {
-		// error should only happen in case the root nodes are not initialized
+		return fmt.Errorf("failed to load trust base for epoch %d: %w", rootEpoch, err)
+	}
+	// select some random root nodes
+	rootIDs, err := randomNodeSelector(tb, defaultHandshakeNodes)
+	if err != nil {
 		return fmt.Errorf("failed to select root nodes for handshake: %w", err)
 	}
 	if err = c.network.Send(ctx,
@@ -251,6 +257,16 @@ func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *cer
 	if err := cr.IsValid(); err != nil {
 		return fmt.Errorf("invalid CertificationResponse: %w", err)
 	}
+
+	// verify UC
+	tb, err := c.trustBaseStore.GetByEpoch(ctx, cr.UC.GetRootEpoch())
+	if err != nil {
+		return fmt.Errorf("trust base not found for epoch %d: %w", cr.UC.GetRootEpoch(), err)
+	}
+	if err := cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, nil); err != nil {
+		return fmt.Errorf("failed to verify UC: %w", err)
+	}
+
 	c.logger.WithContext(ctx).Info(fmt.Sprintf("handleCertificationResponse: UC round %d, next round %d, next leader %s",
 		cr.UC.GetRoundNumber(), cr.Technical.Round, cr.Technical.Leader))
 
@@ -500,7 +516,12 @@ func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 	}
 	c.logger.WithContext(ctx).Info(fmt.Sprintf("Round %d sending block certification request to root chain, IR hash %X",
 		req.InputRecord.RoundNumber, req.InputRecord.Hash))
-	rootIDs, err := rootNodesSelector(luc, c.rootNodes, defaultNofRootNodes)
+
+	tb, err := c.trustBaseStore.GetByEpoch(ctx, luc.GetRootEpoch())
+	if err != nil {
+		return fmt.Errorf("failed to get trust base for root epoch %d: %w", luc.GetRootEpoch(), err)
+	}
+	rootIDs, err := rootNodesSelector(luc, tb, defaultNofRootNodes)
 	if err != nil {
 		return fmt.Errorf("selecting root nodes: %w", err)
 	}

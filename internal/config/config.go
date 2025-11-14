@@ -200,10 +200,11 @@ func (c ChildConfig) Validate() error {
 }
 
 type BFTConfig struct {
-	Enabled   bool                              `mapstructure:"enabled"`
-	KeyConf   *partition.KeyConf                `mapstructure:"key_conf"`
-	ShardConf *types.PartitionDescriptionRecord `mapstructure:"shard_conf"`
-	TrustBase types.RootTrustBase               `mapstructure:"trust_base"`
+	Enabled    bool                              `mapstructure:"enabled"`
+	KeyConf    *partition.KeyConf                `mapstructure:"key_conf"`
+	ShardConf  *types.PartitionDescriptionRecord `mapstructure:"shard_conf"`
+	TrustBases []types.RootTrustBase             `mapstructure:"trust_bases"`
+
 	// Peer configuration
 	Address                    string   `mapstructure:"address"`
 	AnnounceAddresses          []string `mapstructure:"announce_addresses"`
@@ -330,11 +331,15 @@ func Load() (*Config, error) {
 		if err := loadConf(getEnvOrDefault("BFT_SHARD_CONF_FILE", "bft-config/shard-conf-7_0.json"), &config.BFT.ShardConf); err != nil {
 			return nil, fmt.Errorf("failed to load shard configuration: %w", err)
 		}
-		trustBaseV1 := types.RootTrustBaseV1{}
-		if err := loadConf(getEnvOrDefault("BFT_TRUST_BASE_FILE", "bft-config/trust-base.json"), &trustBaseV1); err != nil {
-			return nil, fmt.Errorf("failed to load trust base configuration: %w", err)
+		trustBaseFiles := strings.Split(getEnvOrDefault("BFT_TRUST_BASE_FILES", "bft-config/trust-base.json"), ",")
+		config.BFT.TrustBases = make([]types.RootTrustBase, 0, len(trustBaseFiles))
+		for _, file := range trustBaseFiles {
+			trustBaseV1 := types.RootTrustBaseV1{}
+			if err := loadConf(file, &trustBaseV1); err != nil {
+				return nil, fmt.Errorf("failed to load trust base configuration from %s: %w", file, err)
+			}
+			config.BFT.TrustBases = append(config.BFT.TrustBases, &trustBaseV1)
 		}
-		config.BFT.TrustBase = &trustBaseV1
 	}
 
 	if err := config.Validate(); err != nil {
@@ -473,17 +478,4 @@ func (c *BFTConfig) PeerConf() (*network.PeerConfiguration, error) {
 	}
 
 	return network.NewPeerConfiguration(c.Address, c.AnnounceAddresses, authKeyPair, bootNodes, bootstrapConnectRetry)
-}
-
-func (c *BFTConfig) GetRootNodes() (peer.IDSlice, error) {
-	nodes := c.TrustBase.GetRootNodes()
-	idSlice := make(peer.IDSlice, len(nodes))
-	for i, node := range nodes {
-		id, err := peer.Decode(node.NodeID)
-		if err != nil {
-			return nil, fmt.Errorf("invalid root node id in trust base: %w", err)
-		}
-		idSlice[i] = id
-	}
-	return idSlice, nil
 }

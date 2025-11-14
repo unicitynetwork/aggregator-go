@@ -174,7 +174,7 @@ The service is configured via environment variables:
 | `BFT_INACTIVITY_TIMEOUT`            | Duration of inactivity before the BFT client sends a new handshake.                 | `5s`                             |
 | `BFT_KEY_CONF_FILE`                 | Path to the BFT key configuration file.                                             | `bft-config/keys.json`           |
 | `BFT_SHARD_CONF_FILE`               | Path to the aggregator shard configuration file.                                    | `bft-config/shard-conf-7_0.json` |
-| `BFT_TRUST_BASE_FILE`               | Path to the trust base file.                                                        | `bft-config/trust-base.json`     |
+| `BFT_TRUST_BASE_FILES`              | Comma-separated list of paths to trust base files.                                  | `bft-config/trust-base.json`     |
 
 ## API Endpoints
 
