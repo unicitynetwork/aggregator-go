@@ -38,6 +38,15 @@ func (s *TrustBaseStorage) Store(ctx context.Context, trustBase types.RootTrustB
 		return fmt.Errorf("trust base version mismatch: got %d expected %d", version, mappedVersion)
 	}
 
+	// check if a trust base for this epoch already exists
+	existing, err := s.GetByEpoch(ctx, epoch)
+	if err != nil && !errors.Is(err, ErrTrustBaseNotFound) {
+		return fmt.Errorf("failed to check for existing trust base: %w", err)
+	}
+	if existing != nil {
+		return ErrTrustBaseAlreadyExists
+	}
+
 	// verify trust base extends previous trust base
 	var previousTrustBaseV1 *types.RootTrustBaseV1
 	if epoch > 0 {
@@ -51,22 +60,12 @@ func (s *TrustBaseStorage) Store(ctx context.Context, trustBase types.RootTrustB
 			return fmt.Errorf("failed to cast previous trust base to version 1 for epoch %d", epoch)
 		}
 	}
-
 	trustBaseV1, ok := trustBase.(*types.RootTrustBaseV1)
 	if !ok {
 		return fmt.Errorf("failed to cast provided trust base to version 1 for epoch %d", epoch)
 	}
 	if err := trustBaseV1.Verify(previousTrustBaseV1); err != nil {
 		return fmt.Errorf("failed to verify trust base: %w", err)
-	}
-
-	// check if a trust base for this epoch already exists
-	existing, err := s.GetByEpoch(ctx, epoch)
-	if err != nil && !errors.Is(err, ErrTrustBaseNotFound) {
-		return fmt.Errorf("failed to check for existing trust base: %w", err)
-	}
-	if existing != nil {
-		return ErrTrustBaseAlreadyExists
 	}
 
 	_, err = s.collection.InsertOne(ctx, trustBase)

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/unicitynetwork/bft-go-base/types"
+
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -270,4 +272,9 @@ func (pas *ParentAggregatorService) GetHealthStatus(ctx context.Context) (*api.H
 	}
 
 	return modelToAPIHealthStatus(status), nil
+}
+
+// PutTrustBase stores the trust base to trust base store.
+func (pas *ParentAggregatorService) PutTrustBase(ctx context.Context, req *types.RootTrustBaseV1) error {
+	return pas.storage.TrustBaseStorage().Store(ctx, req)
 }

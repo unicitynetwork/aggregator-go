@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/unicitynetwork/bft-go-base/types"
+
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -25,6 +27,7 @@ type Service interface {
 	GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error)
 	GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error)
 	GetHealthStatus(ctx context.Context) (*api.HealthStatus, error)
+	PutTrustBase(ctx context.Context, req *types.RootTrustBaseV1) error
 
 	// Parent mode specific methods
 	SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) (*api.SubmitShardRootResponse, error)
@@ -438,4 +441,9 @@ func (as *AggregatorService) SubmitShardRoot(ctx context.Context, req *api.Submi
 // GetShardProof - not supported in standalone mode
 func (as *AggregatorService) GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.GetShardProofResponse, error) {
 	return nil, fmt.Errorf("get_shard_proof is not supported in standalone mode")
+}
+
+// PutTrustBase stores the trust base to trust base store.
+func (as *AggregatorService) PutTrustBase(ctx context.Context, req *types.RootTrustBaseV1) error {
+	return as.storage.TrustBaseStorage().Store(ctx, req)
 }

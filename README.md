@@ -436,6 +436,24 @@ Returns the health status and role of the service.
 }
 ```
 
+#### `PUT /api/v1/trustbases`
+Adds trust base to the trust base store. The request body must be a valid trust base in json format.
+
+Example curl request
+```curl -X PUT -H 'Content-Type: application/json' -d @./test-nodes/trust-base-1.json http://localhost:3000/api/v1/trustbases```
+
+**If trust base was stored successfully then status 200 with empty response body is returned:**
+```json
+{}
+```
+
+**If trust base is invalid error then status 400 with error cause is returned:**
+```json
+{
+  "error":"failed to store trust base: trust base already exists"
+}
+```
+
 #### `GET /docs`
 Returns **executable** interactive HTML API documentation page with live testing capabilities (if `ENABLE_DOCS=true`).
 
