@@ -561,8 +561,12 @@ github.com/ugorji/go/codec v1.2.12 h1:9LC83zGrHhuUA9l16C9AHXAqEV/2wBQ4nkvumAE65E
 github.com/ugorji/go/codec v1.2.12/go.mod h1:UNopzCgEMSXjBc6AOMqYvWC1ktqTAfzJZUZgYf6w6lg=
 github.com/unicitynetwork/bft-core v1.0.2-0.20250618101015-e1316ad51f4e h1:C8emZcWmMPG9uEfLW3Jk1jt7IcDdGo6g7KMxer7w1Aw=
 github.com/unicitynetwork/bft-core v1.0.2-0.20250618101015-e1316ad51f4e/go.mod h1:oHcvP+Jp8N4SzedwzxWfq7SfOAzgV0si6WsQBNYVQIo=
+github.com/unicitynetwork/bft-core v1.0.2-0.20251117135107-30bf0922e7b5 h1:ETh4wgrUQS9ovykL8hyxSHvUVP6FM6lkvF4mRsibnzY=
+github.com/unicitynetwork/bft-core v1.0.2-0.20251117135107-30bf0922e7b5/go.mod h1:D3hKpz+0CLYP74BQAZ0mD7N8fRmOvRnz7+XAb/Cbk74=
 github.com/unicitynetwork/bft-go-base v1.0.2 h1:Z5stN59ZP3psY5RDH4VFDyg5HXDsePv27uqvP56mNGw=
 github.com/unicitynetwork/bft-go-base v1.0.2/go.mod h1:hBnOG52VRy/vpgIBUulTgk7PBTwODZ2xkVjCEu5yRcQ=
+github.com/unicitynetwork/bft-go-base v1.0.3-0.20251112203336-a097536b79b7 h1:1x5l+w/gW0b9obdAY/nynCfiu7zDDbvQusWRly7nXs8=
+github.com/unicitynetwork/bft-go-base v1.0.3-0.20251112203336-a097536b79b7/go.mod h1:hBnOG52VRy/vpgIBUulTgk7PBTwODZ2xkVjCEu5yRcQ=
 github.com/urfave/cli v1.22.2/go.mod h1:Gos4lmkARVdJ6EkW0WaNv/tZAAMe9V7XWyB60NtXRu0=
 github.com/urfave/cli v1.22.10/go.mod h1:Gos4lmkARVdJ6EkW0WaNv/tZAAMe9V7XWyB60NtXRu0=
 github.com/viant/assertly v0.4.8/go.mod h1:aGifi++jvCrUaklKEKT0BU95igDNaqkvz+49uaYMPRU=
