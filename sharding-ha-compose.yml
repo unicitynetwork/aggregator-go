@@ -85,6 +85,7 @@ services:
   mongodb-shard1-1: &mongo-base
     image: mongo:7.0
     container_name: mongodb-shard1-1
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
     volumes:
       - ./data/mongodb_shard1_data_1:/data/db
     command: ["--replSet", "rs1", "--bind_ip_all", "--noauth"]
