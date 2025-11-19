@@ -213,6 +213,52 @@ services:
       timeout: 3s
       retries: 5
 
+  # HAProxy load balancer for Shard 1
+  haproxy-shard1:
+    image: haproxy:2.8-alpine
+    container_name: haproxy-shard1
+    restart: unless-stopped
+    ports:
+      - "3001:3000"  # External port 3001 maps to internal HAProxy port 3000
+    networks:
+      - default
+    volumes:
+      - ./scripts/sharding/haproxy-shard1.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      aggregator-shard1-1:
+        condition: service_healthy
+      aggregator-shard1-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8404/stats"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # HAProxy load balancer for Shard 2
+  haproxy-shard2:
+    image: haproxy:2.8-alpine
+    container_name: haproxy-shard2
+    restart: unless-stopped
+    ports:
+      - "3002:3000"  # External port 3002 maps to internal HAProxy port 3000
+    networks:
+      - default
+    volumes:
+      - ./scripts/sharding/haproxy-shard2.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      aggregator-shard2-1:
+        condition: service_healthy
+      aggregator-shard2-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8404/stats"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   # Aggregator Shard 1 Cluster
   aggregator-shard1-1: &aggregator-base
     build:
@@ -220,8 +266,6 @@ services:
       dockerfile: Dockerfile
     container_name: aggregator-shard1-1
     restart: unless-stopped
-    ports:
-      - "3001:3000"
     networks:
       - default
     volumes:
@@ -295,21 +339,18 @@ services:
   aggregator-shard1-2:
     <<: *aggregator-base
     container_name: aggregator-shard1-2
-    ports:
-      - "3002:3000"
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard1-1:27017,mongodb-shard1-2:27017,mongodb-shard1-3:27017/aggregator?replicaSet=rs1"
     depends_on:
       - mongo-setup-shard1
       - bft-aggregator-genesis-gen
+      - redis
 
   # Aggregator Shard 2 Cluster
   aggregator-shard2-1:
     <<: *aggregator-base
     container_name: aggregator-shard2-1
-    ports:
-      - "3003:3000"
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard2-1:27017,mongodb-shard2-2:27017,mongodb-shard2-3:27017/aggregator?replicaSet=rs2"
@@ -322,8 +363,6 @@ services:
   aggregator-shard2-2:
     <<: *aggregator-base
     container_name: aggregator-shard2-2
-    ports:
-      - "3004:3000"
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard2-1:27017,mongodb-shard2-2:27017,mongodb-shard2-3:27017/aggregator?replicaSet=rs2"
