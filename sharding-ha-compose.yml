@@ -352,9 +352,10 @@ services:
         exec /app/aggregator
     healthcheck:
       test: ["CMD-SHELL", "nc -z -w2 127.0.0.1 $${PORT} || exit 1"]
-      interval: 30s
-      timeout: 10s
+      interval: 10s
+      timeout: 5s
       retries: 3
+      start_period: 30s
   aggregator-shard1-2:
     <<: *aggregator-base
     container_name: aggregator-shard1-2
