@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 	cryptobft "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
 func TestTrustBaseStorage_Store(t *testing.T) {
@@ -52,17 +54,6 @@ func TestTrustBaseStorage_Store(t *testing.T) {
 		require.Equal(t, trustBaseEpoch1, storedEpoch1)
 	})
 
-	t.Run("should fail to store a trust base if previous one does not exist", func(t *testing.T) {
-		// empty state
-		ctx := t.Context()
-		require.NoError(t, storage.collection.Drop(ctx))
-		require.NoError(t, storage.CreateIndexes(ctx))
-
-		// try to store epoch 1 without epoch 0
-		err = storage.Store(ctx, trustBaseEpoch1)
-		require.ErrorContains(t, err, "previous trust base not found for epoch 0")
-	})
-
 	t.Run("should fail to store a duplicate trust base", func(t *testing.T) {
 		// store trust base epoch 0
 		ctx := t.Context()
@@ -72,26 +63,7 @@ func TestTrustBaseStorage_Store(t *testing.T) {
 
 		// try to store it again
 		err = storage.Store(ctx, trustBaseEpoch0)
-		require.ErrorIs(t, err, ErrTrustBaseAlreadyExists)
-	})
-
-	t.Run("should fail to store if verification fails", func(t *testing.T) {
-		// store trust base epoch 0
-		ctx := t.Context()
-		require.NoError(t, storage.collection.Drop(ctx))
-		require.NoError(t, storage.CreateIndexes(ctx))
-		require.NoError(t, storage.Store(ctx, trustBaseEpoch0))
-
-		// create an invalid trust base for epoch 1
-		invalidTrustBaseEpoch1, err := types.NewTrustBase(types.NetworkLocal, epoch1Nodes,
-			types.WithEpoch(1),
-			types.WithEpochStart(1000),
-			types.WithPreviousTrustBaseHash([]byte("invalid previous root")),
-		)
-		require.NoError(t, err)
-
-		err = storage.Store(ctx, invalidTrustBaseEpoch1)
-		require.ErrorContains(t, err, "previous trust base hash does not match")
+		require.ErrorIs(t, err, interfaces.ErrTrustBaseAlreadyExists)
 	})
 }
 
@@ -153,7 +125,7 @@ func TestTrustBaseStorage_GetByEpoch(t *testing.T) {
 
 		// try to retrieve a non-existent trust base
 		retrievedTrustBase, err := storage.GetByEpoch(ctx, 1)
-		require.ErrorIs(t, err, ErrTrustBaseNotFound)
+		require.ErrorIs(t, err, interfaces.ErrTrustBaseNotFound)
 		require.Nil(t, retrievedTrustBase)
 	})
 }
@@ -208,7 +180,7 @@ func TestTrustBaseStorage_GetByRound(t *testing.T) {
 
 		// empty collection
 		_, err := storage.GetByRound(ctx, uint64(100))
-		require.ErrorIs(t, err, ErrTrustBaseNotFound)
+		require.ErrorIs(t, err, interfaces.ErrTrustBaseNotFound)
 
 		// create trust base with non-zero epoch start
 		trustBase, err := types.NewTrustBase(types.NetworkLocal, nodes,
@@ -220,7 +192,7 @@ func TestTrustBaseStorage_GetByRound(t *testing.T) {
 
 		// verify round before first epoch start returns error
 		_, err = storage.GetByRound(ctx, uint64(99))
-		require.ErrorIs(t, err, ErrTrustBaseNotFound)
+		require.ErrorIs(t, err, interfaces.ErrTrustBaseNotFound)
 	})
 }
 

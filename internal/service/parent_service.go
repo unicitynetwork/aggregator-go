@@ -23,6 +23,7 @@ type ParentAggregatorService struct {
 	storage            interfaces.Storage
 	parentRoundManager *round.ParentRoundManager
 	leaderSelector     LeaderSelector
+	trustBaseValidator *TrustBaseValidator
 }
 
 func (pas *ParentAggregatorService) isLeader(ctx context.Context) (bool, error) {
@@ -40,13 +41,20 @@ func (pas *ParentAggregatorService) isLeader(ctx context.Context) (bool, error) 
 }
 
 // NewParentAggregatorService creates a new parent aggregator service
-func NewParentAggregatorService(cfg *config.Config, logger *logger.Logger, parentRoundManager *round.ParentRoundManager, storage interfaces.Storage, leaderSelector LeaderSelector) *ParentAggregatorService {
+func NewParentAggregatorService(
+	cfg *config.Config,
+	logger *logger.Logger,
+	parentRoundManager *round.ParentRoundManager,
+	storage interfaces.Storage,
+	leaderSelector LeaderSelector,
+) *ParentAggregatorService {
 	return &ParentAggregatorService{
 		config:             cfg,
 		logger:             logger,
 		storage:            storage,
 		parentRoundManager: parentRoundManager,
 		leaderSelector:     leaderSelector,
+		trustBaseValidator: NewTrustBaseValidator(storage.TrustBaseStorage()),
 	}
 }
 
@@ -274,7 +282,10 @@ func (pas *ParentAggregatorService) GetHealthStatus(ctx context.Context) (*api.H
 	return modelToAPIHealthStatus(status), nil
 }
 
-// PutTrustBase stores the trust base to trust base store.
-func (pas *ParentAggregatorService) PutTrustBase(ctx context.Context, req *types.RootTrustBaseV1) error {
-	return pas.storage.TrustBaseStorage().Store(ctx, req)
+// PutTrustBase verifies and stores the trust base.
+func (pas *ParentAggregatorService) PutTrustBase(ctx context.Context, trustBase *types.RootTrustBaseV1) error {
+	if err := pas.trustBaseValidator.Verify(ctx, trustBase); err != nil {
+		return fmt.Errorf("failed to verify trust base: %w", err)
+	}
+	return pas.storage.TrustBaseStorage().Store(ctx, trustBase)
 }

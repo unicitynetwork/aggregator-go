@@ -19,7 +19,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/service"
 	"github.com/unicitynetwork/aggregator-go/internal/storage"
-	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
 // gracefulExit flushes async logger and exits with the given code
@@ -101,7 +101,7 @@ func main() {
 	// Store trust bases from config files
 	for _, tb := range cfg.BFT.TrustBases {
 		if err := storageInstance.TrustBaseStorage().Store(ctx, tb); err != nil {
-			if errors.Is(err, mongodb.ErrTrustBaseAlreadyExists) {
+			if errors.Is(err, interfaces.ErrTrustBaseAlreadyExists) {
 				log.WithComponent("main").Warn(fmt.Sprintf("Trust base already exists, not overwriting it"), "epoch", tb.GetEpoch())
 			} else {
 				log.WithComponent("main").Error("Failed to store trust base", "epoch", tb.GetEpoch(), "error", err.Error())

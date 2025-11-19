@@ -10,14 +10,11 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
 const trustBaseCollection = "trust_bases"
-
-var (
-	ErrTrustBaseNotFound      = errors.New("trust base not found")
-	ErrTrustBaseAlreadyExists = errors.New("trust base already exists")
-)
 
 type TrustBaseStorage struct {
 	collection *mongo.Collection
@@ -31,46 +28,11 @@ func NewTrustBaseStorage(db *mongo.Database) *TrustBaseStorage {
 
 // Store verifies and stores a RootTrustBase.
 func (s *TrustBaseStorage) Store(ctx context.Context, trustBase types.RootTrustBase) error {
-	epoch := trustBase.GetEpoch()
-	version := uint64(trustBase.GetVersion())
-	mappedVersion := s.GetVersion(epoch)
-	if version != mappedVersion {
-		return fmt.Errorf("trust base version mismatch: got %d expected %d", version, mappedVersion)
-	}
-
-	// check if a trust base for this epoch already exists
-	existing, err := s.GetByEpoch(ctx, epoch)
-	if err != nil && !errors.Is(err, ErrTrustBaseNotFound) {
-		return fmt.Errorf("failed to check for existing trust base: %w", err)
-	}
-	if existing != nil {
-		return ErrTrustBaseAlreadyExists
-	}
-
-	// verify trust base extends previous trust base
-	var previousTrustBaseV1 *types.RootTrustBaseV1
-	if epoch > 0 {
-		previousTrustBase, err := s.GetByEpoch(ctx, epoch-1)
-		if err != nil {
-			return fmt.Errorf("previous trust base not found for epoch %d: %w", epoch-1, err)
+	if _, err := s.collection.InsertOne(ctx, trustBase); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return fmt.Errorf("trust base already exist for epoch %d: %w", trustBase.GetEpoch(), interfaces.ErrTrustBaseAlreadyExists)
 		}
-		var ok bool
-		previousTrustBaseV1, ok = previousTrustBase.(*types.RootTrustBaseV1)
-		if !ok {
-			return fmt.Errorf("failed to cast previous trust base to version 1 for epoch %d", epoch)
-		}
-	}
-	trustBaseV1, ok := trustBase.(*types.RootTrustBaseV1)
-	if !ok {
-		return fmt.Errorf("failed to cast provided trust base to version 1 for epoch %d", epoch)
-	}
-	if err := trustBaseV1.Verify(previousTrustBaseV1); err != nil {
-		return fmt.Errorf("failed to verify trust base: %w", err)
-	}
-
-	_, err = s.collection.InsertOne(ctx, trustBase)
-	if err != nil {
-		return fmt.Errorf("failed to store trust base for epoch %d: %w", epoch, err)
+		return fmt.Errorf("failed to store trust base: %w", err)
 	}
 	return nil
 }
@@ -85,7 +47,7 @@ func (s *TrustBaseStorage) GetByEpoch(ctx context.Context, epoch uint64) (types.
 	filter := bson.M{"epoch": epoch}
 	if err := s.collection.FindOne(ctx, filter).Decode(&trustBase); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, ErrTrustBaseNotFound
+			return nil, interfaces.ErrTrustBaseNotFound
 		}
 		return nil, fmt.Errorf("failed to get trust base by epoch %d: %w", epoch, err)
 	}
@@ -101,7 +63,7 @@ func (s *TrustBaseStorage) GetByRound(ctx context.Context, round uint64) (types.
 
 	if err := s.collection.FindOne(ctx, filter, opts).Decode(&trustBase); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, ErrTrustBaseNotFound
+			return nil, interfaces.ErrTrustBaseNotFound
 		}
 		return nil, fmt.Errorf("failed to get trust base by round %d: %w", round, err)
 	}

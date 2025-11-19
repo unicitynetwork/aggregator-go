@@ -2,6 +2,7 @@ package interfaces
 
 import (
 	"context"
+	"errors"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -166,6 +167,9 @@ type LeadershipStorage interface {
 	// IsLeader checks if the given server is the current leader.
 	IsLeader(ctx context.Context, lockID string, serverID string) (bool, error)
 }
+
+var ErrTrustBaseNotFound = errors.New("trust base not found")
+var ErrTrustBaseAlreadyExists = errors.New("trust base already exists")
 
 type TrustBaseStorage interface {
 	Store(ctx context.Context, trustBase types.RootTrustBase) error

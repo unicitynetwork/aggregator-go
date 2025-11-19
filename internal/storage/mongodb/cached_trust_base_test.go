@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
 func TestCachedTrustBaseStorage(t *testing.T) {
@@ -35,10 +37,10 @@ func TestCachedTrustBaseStorage(t *testing.T) {
 		require.NoError(t, cachedStorage.UpdateCache(ctx))
 
 		_, err := cachedStorage.GetByEpoch(ctx, 0)
-		require.ErrorIs(t, err, ErrTrustBaseNotFound)
+		require.ErrorIs(t, err, interfaces.ErrTrustBaseNotFound)
 
 		_, err = cachedStorage.GetByRound(ctx, 0)
-		require.ErrorIs(t, err, ErrTrustBaseNotFound)
+		require.ErrorIs(t, err, interfaces.ErrTrustBaseNotFound)
 
 		all, err := cachedStorage.GetAll(ctx)
 		require.NoError(t, err)

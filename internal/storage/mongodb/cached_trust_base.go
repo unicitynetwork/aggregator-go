@@ -7,6 +7,8 @@ import (
 	"sync"
 
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
 // CachedTrustBaseStorage is a cached decorator of TrustBaseStorage.
@@ -42,7 +44,7 @@ func (s *CachedTrustBaseStorage) GetByEpoch(_ context.Context, epoch uint64) (ty
 	if epoch < uint64(len(s.sortedTrustBases)) {
 		return s.sortedTrustBases[epoch], nil
 	}
-	return nil, ErrTrustBaseNotFound
+	return nil, interfaces.ErrTrustBaseNotFound
 }
 
 // GetByRound retrieves a trust base by epoch start round.
@@ -88,5 +90,5 @@ func (s *CachedTrustBaseStorage) getByEpochStartRound(epochStart uint64) (types.
 			return s.sortedTrustBases[i], nil
 		}
 	}
-	return nil, ErrTrustBaseNotFound
+	return nil, interfaces.ErrTrustBaseNotFound
 }

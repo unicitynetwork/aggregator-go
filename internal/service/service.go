@@ -65,6 +65,7 @@ type AggregatorService struct {
 	roundManager        round.Manager
 	leaderSelector      LeaderSelector
 	commitmentValidator *signing.CommitmentValidator
+	trustBaseValidator  *TrustBaseValidator
 }
 
 type LeaderSelector interface {
@@ -118,7 +119,13 @@ func modelToAPIHealthStatus(modelHealth *models.HealthStatus) *api.HealthStatus 
 }
 
 // NewAggregatorService creates a new aggregator service
-func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManager round.Manager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) *AggregatorService {
+func NewAggregatorService(cfg *config.Config,
+	logger *logger.Logger,
+	roundManager round.Manager,
+	commitmentQueue interfaces.CommitmentQueue,
+	storage interfaces.Storage,
+	leaderSelector LeaderSelector,
+) *AggregatorService {
 	return &AggregatorService{
 		config:              cfg,
 		logger:              logger,
@@ -127,6 +134,7 @@ func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManage
 		roundManager:        roundManager,
 		leaderSelector:      leaderSelector,
 		commitmentValidator: signing.NewCommitmentValidator(cfg.Sharding),
+		trustBaseValidator:  NewTrustBaseValidator(storage.TrustBaseStorage()),
 	}
 }
 
@@ -443,7 +451,10 @@ func (as *AggregatorService) GetShardProof(ctx context.Context, req *api.GetShar
 	return nil, fmt.Errorf("get_shard_proof is not supported in standalone mode")
 }
 
-// PutTrustBase stores the trust base to trust base store.
-func (as *AggregatorService) PutTrustBase(ctx context.Context, req *types.RootTrustBaseV1) error {
-	return as.storage.TrustBaseStorage().Store(ctx, req)
+// PutTrustBase verifies and stores the trust base.
+func (as *AggregatorService) PutTrustBase(ctx context.Context, trustBase *types.RootTrustBaseV1) error {
+	if err := as.trustBaseValidator.Verify(ctx, trustBase); err != nil {
+		return fmt.Errorf("failed to verify trust base: %w", err)
+	}
+	return as.storage.TrustBaseStorage().Store(ctx, trustBase)
 }

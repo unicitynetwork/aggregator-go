@@ -261,7 +261,7 @@ func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *cer
 	// verify UC
 	tb, err := c.trustBaseStore.GetByEpoch(ctx, cr.UC.GetRootEpoch())
 	if err != nil {
-		return fmt.Errorf("trust base not found for epoch %d: %w", cr.UC.GetRootEpoch(), err)
+		return fmt.Errorf("failed to load trust base for epoch %d: %w", cr.UC.GetRootEpoch(), err)
 	}
 	if err := cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, nil); err != nil {
 		return fmt.Errorf("failed to verify UC: %w", err)
@@ -519,7 +519,7 @@ func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 
 	tb, err := c.trustBaseStore.GetByEpoch(ctx, luc.GetRootEpoch())
 	if err != nil {
-		return fmt.Errorf("failed to get trust base for root epoch %d: %w", luc.GetRootEpoch(), err)
+		return fmt.Errorf("failed to load trust base for epoch %d: %w", luc.GetRootEpoch(), err)
 	}
 	rootIDs, err := rootNodesSelector(luc, tb, defaultNofRootNodes)
 	if err != nil {
