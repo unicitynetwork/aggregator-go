@@ -227,10 +227,8 @@ services:
     volumes:
       - ./scripts/sharding/haproxy-shard1.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:
-      aggregator-shard1-1:
-        condition: service_healthy
-      aggregator-shard1-2:
-        condition: service_healthy
+      - aggregator-shard1-1
+      - aggregator-shard1-2
     healthcheck:
       test:
         [
@@ -258,10 +256,8 @@ services:
     volumes:
       - ./scripts/sharding/haproxy-shard2.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:
-      aggregator-shard2-1:
-        condition: service_healthy
-      aggregator-shard2-2:
-        condition: service_healthy
+      - aggregator-shard2-1
+      - aggregator-shard2-2
     healthcheck:
       test:
         [
