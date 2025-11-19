@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -230,7 +231,7 @@ func validateInclusionProof(t *testing.T, proof *api.InclusionProof, requestID a
 	assert.NotNil(t, proof.MerkleTreePath, "Should have merkle tree path")
 
 	// Validate unicity certificate field
-	if proof.UnicityCertificate != nil && len(proof.UnicityCertificate) > 0 {
+	if len(proof.UnicityCertificate) > 0 {
 		assert.NotEmpty(t, proof.UnicityCertificate, "Unicity certificate should not be empty")
 		// Verify it's valid hex-encoded data
 		_, err := hex.DecodeString(string(proof.UnicityCertificate))
@@ -312,6 +313,68 @@ func (suite *AggregatorTestSuite) TestInclusionProofMissingRecord() {
 	// Verify that UnicityCertificate is included in non-inclusion proof
 	suite.NotNil(inclusionProof.InclusionProof.UnicityCertificate, "Non-inclusion proof should include UnicityCertificate")
 	suite.NotEmpty(inclusionProof.InclusionProof.UnicityCertificate, "UnicityCertificate should not be empty")
+}
+
+func TestGetInclusionProofShardMismatch(t *testing.T) {
+	shardingCfg := config.ShardingConfig{
+		Mode: config.ShardingModeChild,
+		Child: config.ChildConfig{
+			ShardID: 4,
+		},
+	}
+	tree := smt.NewChildSparseMerkleTree(api.SHA256, 16+256, shardingCfg.Child.ShardID)
+	service := newAggregatorServiceForTest(t, shardingCfg, tree)
+
+	invalidShardID := api.RequestID(strings.Repeat("00", 33) + "01")
+	_, err := service.GetInclusionProof(context.Background(), &api.GetInclusionProofRequest{RequestID: invalidShardID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "request ID validation failed")
+}
+
+func TestGetInclusionProofInvalidRequestFormat(t *testing.T) {
+	shardingCfg := config.ShardingConfig{
+		Mode: config.ShardingModeChild,
+		Child: config.ChildConfig{
+			ShardID: 4,
+		},
+	}
+	tree := smt.NewChildSparseMerkleTree(api.SHA256, 16+256, shardingCfg.Child.ShardID)
+	service := newAggregatorServiceForTest(t, shardingCfg, tree)
+
+	_, err := service.GetInclusionProof(context.Background(), &api.GetInclusionProofRequest{RequestID: api.RequestID("zz")})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "request ID validation failed")
+}
+
+func TestGetInclusionProofSMTUnavailable(t *testing.T) {
+	shardingCfg := config.ShardingConfig{
+		Mode: config.ShardingModeChild,
+		Child: config.ChildConfig{
+			ShardID: 4,
+		},
+	}
+	service := newAggregatorServiceForTest(t, shardingCfg, nil)
+
+	validID := api.RequestID(strings.Repeat("00", 34))
+	_, err := service.GetInclusionProof(context.Background(), &api.GetInclusionProofRequest{RequestID: validID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "merkle tree not initialized")
+}
+
+func TestInclusionProofInvalidPathLength(t *testing.T) {
+	shardingCfg := config.ShardingConfig{
+		Mode: config.ShardingModeStandalone,
+	}
+	tree := smt.NewSparseMerkleTree(api.SHA256, 16+256)
+	service := newAggregatorServiceForTest(t, shardingCfg, tree)
+
+	validID := createTestCommitments(t, 1)[0].RequestID.String()
+	require.Greater(t, len(validID), 2)
+	badID := api.RequestID(validID[2:])
+
+	_, err := service.GetInclusionProof(context.Background(), &api.GetInclusionProofRequest{RequestID: badID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path length")
 }
 
 // TestInclusionProof tests the complete inclusion proof workflow
@@ -432,4 +495,34 @@ func createTestCommitments(t *testing.T, count int) []*api.SubmitCommitmentReque
 	}
 
 	return commitments
+}
+
+type stubRoundManager struct {
+	smt *smt.ThreadSafeSMT
+}
+
+func (s *stubRoundManager) Start(context.Context) error    { return nil }
+func (s *stubRoundManager) Stop(context.Context) error     { return nil }
+func (s *stubRoundManager) Activate(context.Context) error { return nil }
+func (s *stubRoundManager) Deactivate(context.Context) error {
+	return nil
+}
+func (s *stubRoundManager) GetSMT() *smt.ThreadSafeSMT { return s.smt }
+
+func newAggregatorServiceForTest(t *testing.T, shardingCfg config.ShardingConfig, baseTree *smt.SparseMerkleTree) *AggregatorService {
+	t.Helper()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	var tsmt *smt.ThreadSafeSMT
+	if baseTree != nil {
+		tsmt = smt.NewThreadSafeSMT(baseTree)
+	}
+
+	return &AggregatorService{
+		config:              &config.Config{Sharding: shardingCfg},
+		logger:              log,
+		roundManager:        &stubRoundManager{smt: tsmt},
+		commitmentValidator: signing.NewCommitmentValidator(shardingCfg),
+	}
 }

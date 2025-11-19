@@ -3,6 +3,7 @@ package jsonrpc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -215,7 +216,22 @@ func TimeoutMiddleware(timeout time.Duration) MiddlewareFunc {
 		done := make(chan *Response, 1)
 
 		go func() {
-			done <- next(ctx, req)
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("panic in JSON-RPC handler: %v\n", r)
+					errResp := NewErrorResponse(NewError(InternalErrorCode, "Internal server error", nil), req.ID)
+					select {
+					case done <- errResp:
+					default:
+					}
+				}
+			}()
+
+			resp := next(ctx, req)
+			select {
+			case done <- resp:
+			default:
+			}
 		}()
 
 		select {

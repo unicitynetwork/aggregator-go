@@ -223,7 +223,16 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 	if err != nil {
 		return nil, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
 	}
-	merkleTreePath, err := as.roundManager.GetSMT().GetPath(path)
+
+	smtInstance := as.roundManager.GetSMT()
+	if smtInstance == nil {
+		return nil, fmt.Errorf("merkle tree not initialized")
+	}
+	if keyLen := smtInstance.GetKeyLength(); keyLen > 0 && path.BitLen()-1 != keyLen {
+		return nil, fmt.Errorf("request path length %d does not match SMT key length %d", path.BitLen()-1, keyLen)
+	}
+
+	merkleTreePath, err := smtInstance.GetPath(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get inclusion proof for request ID %s: %w", req.RequestID, err)
 	}
