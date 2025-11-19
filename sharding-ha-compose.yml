@@ -203,6 +203,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: redis
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
     restart: unless-stopped
     volumes:
       - ./data/redis_data:/data
