@@ -88,6 +88,9 @@ services:
   # Shard 1 MongoDB Replica Set
   mongodb-shard1-1: &mongo-base
     image: mongo:7.0
+    container_name: mongodb-shard1-1
+    volumes:
+      - ./data/mongodb_shard1_data_1:/data/db
     command: ["--replSet", "rs1", "--bind_ip_all", "--noauth"]
     networks:
       - default
@@ -102,6 +105,11 @@ services:
     container_name: mongodb-shard1-2
     volumes:
       - ./data/mongodb_shard1_data_2:/data/db
+  mongodb-shard1-3:
+    <<: *mongo-base
+    container_name: mongodb-shard1-3
+    volumes:
+      - ./data/mongodb_shard1_data_3:/data/db
   mongo-setup-shard1:
     image: mongo:7.0
     networks:
@@ -111,12 +119,14 @@ services:
         condition: service_healthy
       mongodb-shard1-2:
         condition: service_healthy
+      mongodb-shard1-3:
+        condition: service_healthy
     entrypoint:
       - mongosh
       - "--host"
       - "mongodb-shard1-1:27017"
       - "--eval"
-      - "try { rs.initiate({_id: 'rs1', members: [{_id: 0, host: 'mongodb-shard1-1:27017'}, {_id: 1, host: 'mongodb-shard1-2:27017'}]}) } catch(e) { print('Replica set already initialized or error:', e.message) }"
+      - "try { rs.initiate({_id: 'rs1', members: [{_id: 0, host: 'mongodb-shard1-1:27017'}, {_id: 1, host: 'mongodb-shard1-2:27017'}, {_id: 2, host: 'mongodb-shard1-3:27017'}]}) } catch(e) { print('Replica set already initialized or error:', e.message) }"
 
   # Shard 2 MongoDB Replica Set
   mongodb-shard2-1:
@@ -131,6 +141,12 @@ services:
     container_name: mongodb-shard2-2
     volumes:
       - ./data/mongodb_shard2_data_2:/data/db
+  mongodb-shard2-3:
+    <<: *mongo-base
+    command: ["--replSet", "rs2", "--bind_ip_all", "--noauth"]
+    container_name: mongodb-shard2-3
+    volumes:
+      - ./data/mongodb_shard2_data_3:/data/db
   mongo-setup-shard2:
     image: mongo:7.0
     networks:
@@ -140,12 +156,14 @@ services:
         condition: service_healthy
       mongodb-shard2-2:
         condition: service_healthy
+      mongodb-shard2-3:
+        condition: service_healthy
     entrypoint:
       - mongosh
       - "--host"
       - "mongodb-shard2-1:27017"
       - "--eval"
-      - "try { rs.initiate({_id: 'rs2', members: [{_id: 0, host: 'mongodb-shard2-1:27017'}, {_id: 1, host: 'mongodb-shard2-2:27017'}]}) } catch(e) { print('Replica set already initialized or error:', e.message) }"
+      - "try { rs.initiate({_id: 'rs2', members: [{_id: 0, host: 'mongodb-shard2-1:27017'}, {_id: 1, host: 'mongodb-shard2-2:27017'}, {_id: 2, host: 'mongodb-shard2-3:27017'}]}) } catch(e) { print('Replica set already initialized or error:', e.message) }"
 
   # Root MongoDB Replica Set
   mongodb-root-1:
@@ -160,6 +178,12 @@ services:
     container_name: mongodb-root-2
     volumes:
       - ./data/mongodb_root_data_2:/data/db
+  mongodb-root-3:
+    <<: *mongo-base
+    command: ["--replSet", "rs-root", "--bind_ip_all", "--noauth"]
+    container_name: mongodb-root-3
+    volumes:
+      - ./data/mongodb_root_data_3:/data/db
   mongo-setup-root:
     image: mongo:7.0
     networks:
@@ -169,12 +193,14 @@ services:
         condition: service_healthy
       mongodb-root-2:
         condition: service_healthy
+      mongodb-root-3:
+        condition: service_healthy
     entrypoint:
       - mongosh
       - "--host"
       - "mongodb-root-1:27017"
       - "--eval"
-      - "try { rs.initiate({_id: 'rs-root', members: [{_id: 0, host: 'mongodb-root-1:27017'}, {_id: 1, host: 'mongodb-root-2:27017'}]}) } catch(e) { print('Replica set already initialized or error:', e.message) }"
+      - "try { rs.initiate({_id: 'rs-root', members: [{_id: 0, host: 'mongodb-root-1:27017'}, {_id: 1, host: 'mongodb-root-2:27017'}, {_id: 2, host: 'mongodb-root-3:27017'}]}) } catch(e) { print('Replica set already initialized or error:', e.message) }"
 
   # Aggregator Shard 1 Cluster
   aggregator-shard1-1: &aggregator-base
@@ -190,7 +216,7 @@ services:
     volumes:
       - ./data/genesis:/app/bft-config
     environment: &environment-base
-      MONGODB_URI: "mongodb://mongodb-shard1-1:27017,mongodb-shard1-2:27017/aggregator?replicaSet=rs1"
+      MONGODB_URI: "mongodb://mongodb-shard1-1:27017,mongodb-shard1-2:27017,mongodb-shard1-3:27017/aggregator?replicaSet=rs1"
       PORT: "3000"
       HOST: "0.0.0.0"
       CONCURRENCY_LIMIT: "1000"
@@ -258,7 +284,7 @@ services:
       - "3002:3000"
     environment:
       <<: *environment-base
-      MONGODB_URI: "mongodb://mongodb-shard1-1:27017,mongodb-shard1-2:27017/aggregator?replicaSet=rs1"
+      MONGODB_URI: "mongodb://mongodb-shard1-1:27017,mongodb-shard1-2:27017,mongodb-shard1-3:27017/aggregator?replicaSet=rs1"
     depends_on:
       - mongo-setup-shard1
       - bft-aggregator-genesis-gen
@@ -292,7 +318,9 @@ services:
       - bft-aggregator-genesis-gen
 
   # Aggregator Root Cluster
-  # currently only 1 instance as the child must send only to the parent which is not implemented currently
+  # currently only 1 parent aggregator instance because if the parent aggregators are in HA setup then the child
+  # aggregators must send to the LEADER of parent aggregators which is currently not implemented
+  # (currently parent url is "hardcoded" in config).
   aggregator-root-1:
     <<: *aggregator-base
     container_name: aggregator-root-1
@@ -300,7 +328,7 @@ services:
       - "3009:3000"
     environment:
       <<: *environment-base
-      MONGODB_URI: "mongodb://mongodb-root-1:27017,mongodb-root-2:27017/aggregator?replicaSet=rs-root"
+      MONGODB_URI: "mongodb://mongodb-root-1:27017,mongodb-root-2:27017,mongodb-root-3:27017/aggregator?replicaSet=rs-root"
       SHARDING_MODE: "parent"
       BFT_ENABLED: "true"
     depends_on:
