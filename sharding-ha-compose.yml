@@ -1,6 +1,5 @@
 services:
-  x-bft:
-    &bft-base
+  x-bft: &bft-base
     platform: linux/amd64
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
     image: ghcr.io/unicitynetwork/bft-core:49d48f8fd3686aff1066d98eff2512e5fc71713c
@@ -10,7 +9,7 @@ services:
       - ./data/genesis-root:/genesis/root
       - ./data/genesis:/genesis
     healthcheck:
-      test: [ "CMD", "nc", "-zv", "bft-root", "8000" ]
+      test: ["CMD", "nc", "-zv", "bft-root", "8000"]
       interval: 5s
     networks:
       - default
@@ -81,9 +80,6 @@ services:
         echo Uploading aggregator configuration &&
         curl -X PUT -H 'Content-Type: application/json' -d @/genesis/shard-conf-7_0.json http://bft-root:8002/api/v1/configurations
       "
-
-
-
 
   # Shard 1 MongoDB Replica Set
   mongodb-shard1-1: &mongo-base
@@ -202,6 +198,21 @@ services:
       - "--eval"
       - "try { rs.initiate({_id: 'rs-root', members: [{_id: 0, host: 'mongodb-root-1:27017'}, {_id: 1, host: 'mongodb-root-2:27017'}, {_id: 2, host: 'mongodb-root-3:27017'}]}) } catch(e) { print('Replica set already initialized or error:', e.message) }"
 
+  # Redis service for caching
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    volumes:
+      - ./data/redis_data:/data
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   # Aggregator Shard 1 Cluster
   aggregator-shard1-1: &aggregator-base
     build:
@@ -215,6 +226,10 @@ services:
       - default
     volumes:
       - ./data/genesis:/app/bft-config
+    depends_on:
+      - mongo-setup-shard1
+      - bft-aggregator-genesis-gen
+      - redis
     environment: &environment-base
       MONGODB_URI: "mongodb://mongodb-shard1-1:27017,mongodb-shard1-2:27017,mongodb-shard1-3:27017/aggregator?replicaSet=rs1"
       PORT: "3000"
@@ -273,7 +288,7 @@ services:
         fi
         exec /app/aggregator
     healthcheck:
-      test: [ "CMD", "nc", "-zv", "localhost", "3000" ]
+      test: ["CMD", "nc", "-zv", "localhost", "3000"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -297,12 +312,13 @@ services:
       - "3003:3000"
     environment:
       <<: *environment-base
-      MONGODB_URI: "mongodb://mongodb-shard2-1:27017,mongodb-shard2-2:27017/aggregator?replicaSet=rs2"
+      MONGODB_URI: "mongodb://mongodb-shard2-1:27017,mongodb-shard2-2:27017,mongodb-shard2-3:27017/aggregator?replicaSet=rs2"
       SHARDING_MODE: "child"
       SHARDING_CHILD_SHARD_ID: 2 # 0b10
     depends_on:
       - mongo-setup-shard2
       - bft-aggregator-genesis-gen
+      - redis
   aggregator-shard2-2:
     <<: *aggregator-base
     container_name: aggregator-shard2-2
@@ -310,12 +326,13 @@ services:
       - "3004:3000"
     environment:
       <<: *environment-base
-      MONGODB_URI: "mongodb://mongodb-shard2-1:27017,mongodb-shard2-2:27017/aggregator?replicaSet=rs2"
+      MONGODB_URI: "mongodb://mongodb-shard2-1:27017,mongodb-shard2-2:27017,mongodb-shard2-3:27017/aggregator?replicaSet=rs2"
       SHARDING_MODE: "child"
       SHARDING_CHILD_SHARD_ID: 2 # 0b10
     depends_on:
       - mongo-setup-shard2
       - bft-aggregator-genesis-gen
+      - redis
 
   # Aggregator Root Cluster
   # currently only 1 parent aggregator instance because if the parent aggregators are in HA setup then the child
@@ -334,6 +351,7 @@ services:
     depends_on:
       - mongo-setup-root
       - bft-aggregator-genesis-gen
+      - redis
 
 networks:
   default:
