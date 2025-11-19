@@ -329,6 +329,19 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 			rm.logger.WithContext(ctx).Error("Failed to process round",
 				"roundNumber", roundNumber.String(),
 				"error", err.Error())
+
+			// If we're a child aggregator and processing failed, start the next round to avoid getting stuck
+			if rm.config.Sharding.Mode.IsChild() {
+				nextRoundNumber := big.NewInt(0).Add(roundNumber.Int, big.NewInt(1))
+				rm.logger.WithContext(ctx).Info("Attempting to start new round after processing failure.",
+					"failedRound", roundNumber.String(),
+					"nextRound", nextRoundNumber.String())
+				if startErr := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); startErr != nil {
+					rm.logger.WithContext(ctx).Error("Failed to start new round after processing error",
+						"nextRound", nextRoundNumber.String(),
+						"error", startErr)
+				}
+			}
 		}
 	})
 
