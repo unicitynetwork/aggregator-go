@@ -70,8 +70,14 @@ func createRedisCommitmentQueue(cfg *config.Config, log *logger.Logger) (interfa
 		serverID = "aggregator-server"
 	}
 
+	// Get stream name (defaults to "commitments" if not set)
+	streamName := cfg.Storage.RedisStreamName
+	if streamName == "" {
+		streamName = "commitments"
+	}
+
 	// Create commitment storage
-	commitmentStorage := redis.NewCommitmentStorage(redisClient, serverID, batchConfig, log)
+	commitmentStorage := redis.NewCommitmentStorage(redisClient, streamName, serverID, batchConfig, log)
 
 	return commitmentStorage, nil
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -8,9 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
+	"math"
+	"math/big"
 	"os"
-	"strconv"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,261 +24,117 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-// JSON-RPC types
-type JSONRPCRequest struct {
-	JSONRPC string      `json:"jsonrpc"`
-	Method  string      `json:"method"`
-	Params  interface{} `json:"params"`
-	ID      int         `json:"id"`
-}
-
-type JSONRPCResponse struct {
-	JSONRPC string        `json:"jsonrpc"`
-	Result  interface{}   `json:"result,omitempty"`
-	Error   *JSONRPCError `json:"error,omitempty"`
-	ID      int           `json:"id"`
-}
-
-type JSONRPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-	Data    string `json:"data,omitempty"`
-}
-
-type GetBlockCommitmentsRequest struct {
-	BlockNumber string `json:"blockNumber"`
-}
-
-type GetBlockCommitmentsResponse struct {
-	Commitments []AggregatorRecord `json:"commitments"`
-}
-
-type AggregatorRecord struct {
-	RequestID   string `json:"requestId"`
-	BlockNumber string `json:"blockNumber"`
-}
-
-type GetBlockHeightResponse struct {
-	BlockNumber string `json:"blockNumber"`
-}
-
-type GetBlockRequest struct {
-	BlockNumber interface{} `json:"blockNumber"` // Can be number, string, or "latest"
-}
-
-type GetBlockResponse struct {
-	Block BlockInfo `json:"block"`
-}
-
-type BlockInfo struct {
-	Index     string `json:"index"`
-	CreatedAt string `json:"createdAt"` // Unix timestamp in milliseconds as string
-}
-
-type GetInclusionProofRequest struct {
-	RequestID string `json:"requestId"`
-}
-
-type GetInclusionProofResponse struct {
-	InclusionProof *InclusionProof `json:"inclusionProof"`
-}
-
-type InclusionProof struct {
-	Authenticator      *api.Authenticator  `json:"authenticator"`
-	MerkleTreePath     *api.MerkleTreePath `json:"merkleTreePath"`
-	TransactionHash    string              `json:"transactionHash"`
-	UnicityCertificate string              `json:"unicityCertificate"`
-}
-
-// Test configuration
 const (
 	defaultAggregatorURL = "http://localhost:3000"
-	testDuration         = 10 * time.Second
-	workerCount          = 10   // Number of concurrent workers
-	requestsPerSec       = 1000 // Target requests per second
+	testDuration         = 30 * time.Second
+	workerCount          = 20
+	httpClientPoolSize   = 12
+	requestsPerSec       = 1000
+	aggregatorLogPath    = "logs/aggregator.log"
+	proofMaxRetries      = 10
+	proofRetryDelay      = 1000 * time.Millisecond
+	proofInitialDelay    = 3500 * time.Millisecond
 )
 
-// BlockCommitmentInfo stores block number, commitment count, and timestamp
-type BlockCommitmentInfo struct {
-	BlockNumber     int64
-	CommitmentCount int
-	Timestamp       time.Time
+// Optional shard targets (leave empty for single-aggregator mode)
+var shardTargets = []shardTarget{
+	{name: "shard-3", url: "http://localhost:3001", shardMask: 3},
+	{name: "shard-2", url: "http://localhost:3002", shardMask: 2},
 }
 
-// Metrics
-type Metrics struct {
-	totalRequests         int64
-	successfulRequests    int64
-	failedRequests        int64
-	requestIdExistsErr    int64
-	startTime             time.Time
-	blockCommitmentCounts []int
-	blockCommitmentInfo   []BlockCommitmentInfo // Track block numbers with counts
-	totalBlockCommitments int64                 // Track total commitments processed in blocks
-	startingBlockNumber   int64                 // Store starting block number
-	submittedRequestIDs   sync.Map              // Thread-safe map to track which request IDs we submitted
-	mutex                 sync.RWMutex          // For protecting blockCommitmentCounts slice
-
-	// Proof verification metrics
-	proofAttempts       int64           // Total attempts to get proof
-	proofSuccess        int64           // Successfully retrieved proofs
-	proofFailed         int64           // Failed to get proof (after retries)
-	proofVerified       int64           // Successfully verified proofs
-	proofVerifyFailed   int64           // Failed proof verification
-	proofLatencies      []time.Duration // Track latencies for successful proofs
-	proofLatenciesMutex sync.RWMutex    // Protect latencies slice
+func normalizeRequestID(id string) string {
+	return strings.ToLower(id)
 }
 
-func (m *Metrics) addBlockCommitmentCount(blockNumber int64, count int, timestamp time.Time) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	// Track all blocks including empty ones to show the real pattern
-	m.blockCommitmentCounts = append(m.blockCommitmentCounts, count)
-	m.blockCommitmentInfo = append(m.blockCommitmentInfo, BlockCommitmentInfo{
-		BlockNumber:     blockNumber,
-		CommitmentCount: count,
-		Timestamp:       timestamp,
-	})
-	atomic.AddInt64(&m.totalBlockCommitments, int64(count))
-}
-
-func (m *Metrics) getAverageCommitments() float64 {
-	m.mutex.RLock()
-	defer m.mutex.RUnlock()
-
-	if len(m.blockCommitmentCounts) == 0 {
-		return 0
-	}
-
-	// Calculate average across ALL blocks, not just a sample
-	total := 0
-	count := 0
-	for i := 0; i < len(m.blockCommitmentCounts); i++ {
-		if m.blockCommitmentCounts[i] > 0 {
-			total += m.blockCommitmentCounts[i]
-			count++
+func buildShardClients(aggregatorURL, authHeader string, metrics *Metrics) []*ShardClient {
+	if len(shardTargets) == 0 {
+		return []*ShardClient{
+			{
+				name:   "default",
+				url:    aggregatorURL,
+				client: NewJSONRPCClient(aggregatorURL, authHeader, metrics),
+			},
 		}
 	}
 
-	if count == 0 {
-		return 0
+	clients := make([]*ShardClient, 0, len(shardTargets))
+	for i, target := range shardTargets {
+		trimmed := strings.TrimSpace(target.url)
+		if trimmed == "" {
+			continue
+		}
+		name := target.name
+		if name == "" {
+			name = fmt.Sprintf("shard-%d", i)
+		}
+		clients = append(clients, &ShardClient{
+			name:      name,
+			url:       trimmed,
+			shardMask: target.shardMask,
+			client:    NewJSONRPCClient(trimmed, authHeader, metrics),
+		})
 	}
 
-	return float64(total) / float64(count)
-}
-
-func (m *Metrics) addProofLatency(latency time.Duration) {
-	m.proofLatenciesMutex.Lock()
-	defer m.proofLatenciesMutex.Unlock()
-	m.proofLatencies = append(m.proofLatencies, latency)
-}
-
-func (m *Metrics) getAverageProofLatency() time.Duration {
-	m.proofLatenciesMutex.RLock()
-	defer m.proofLatenciesMutex.RUnlock()
-
-	if len(m.proofLatencies) == 0 {
-		return 0
-	}
-
-	var total time.Duration
-	for _, latency := range m.proofLatencies {
-		total += latency
-	}
-	return total / time.Duration(len(m.proofLatencies))
-}
-
-// HTTP client for JSON-RPC calls
-type JSONRPCClient struct {
-	httpClient *http.Client
-	url        string
-	authHeader string
-	requestID  int64
-}
-
-func NewJSONRPCClient(url string, authHeader string) *JSONRPCClient {
-	// Configure transport with higher connection limits
-	transport := &http.Transport{
-		MaxIdleConns:        1000,
-		MaxIdleConnsPerHost: 1000,
-		MaxConnsPerHost:     1000,
-		IdleConnTimeout:     90 * time.Second,
-	}
-
-	return &JSONRPCClient{
-		httpClient: &http.Client{
-			Timeout:   30 * time.Second,
-			Transport: transport,
-		},
-		url:        url,
-		authHeader: authHeader,
-	}
-}
-
-func (c *JSONRPCClient) call(method string, params interface{}) (*JSONRPCResponse, error) {
-	id := atomic.AddInt64(&c.requestID, 1)
-
-	request := JSONRPCRequest{
-		JSONRPC: "2.0",
-		Method:  method,
-		Params:  params,
-		ID:      int(id),
-	}
-
-	reqBody, err := json.Marshal(request)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", c.url, bytes.NewBuffer(reqBody))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// Add auth header if provided
-	if c.authHeader != "" {
-		req.Header.Set("Authorization", c.authHeader)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var response JSONRPCResponse
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &response, nil
-}
-
-// Helper function to get block timestamp
-func getBlockTimestamp(client *JSONRPCClient, blockNumber int64) time.Time {
-	blockReq := GetBlockRequest{
-		BlockNumber: fmt.Sprintf("%d", blockNumber),
-	}
-	blockResp, blockErr := client.call("get_block", blockReq)
-	if blockErr == nil && blockResp.Error == nil {
-		var blockInfo GetBlockResponse
-		blockInfoBytes, _ := json.Marshal(blockResp.Result)
-		if err := json.Unmarshal(blockInfoBytes, &blockInfo); err == nil {
-			// Parse timestamp (milliseconds as string)
-			if millis, err := strconv.ParseInt(blockInfo.Block.CreatedAt, 10, 64); err == nil {
-				return time.UnixMilli(millis)
-			}
+	if len(clients) == 0 {
+		return []*ShardClient{
+			{
+				name:   "default",
+				url:    aggregatorURL,
+				client: NewJSONRPCClient(aggregatorURL, authHeader, metrics),
+			},
 		}
 	}
-	return time.Now() // Fallback
+
+	return clients
 }
 
-// Generate random hex string
-func generateRandomHex(length int) string {
-	bytes := make([]byte, length/2)
-	rand.Read(bytes)
-	return hex.EncodeToString(bytes)
+func selectShardIndex(requestID api.RequestID, shardClients []*ShardClient) int {
+	shardCount := len(shardClients)
+	if shardCount <= 1 {
+		return 0
+	}
+
+	reqHex := requestID.String()
+	for idx, sc := range shardClients {
+		if sc == nil || sc.shardMask <= 0 {
+			continue
+		}
+		match, err := matchesShardMask(reqHex, sc.shardMask)
+		if err == nil && match {
+			return idx
+		}
+	}
+
+	imprint, err := requestID.Imprint()
+	if err != nil || len(imprint) == 0 {
+		return 0
+	}
+	return int(imprint[len(imprint)-1]) % shardCount
+}
+
+func matchesShardMask(requestIDHex string, shardMask int) (bool, error) {
+	if shardMask <= 0 {
+		return false, nil
+	}
+
+	bytes, err := hex.DecodeString(requestIDHex)
+	if err != nil {
+		return false, fmt.Errorf("failed to decode request ID: %w", err)
+	}
+
+	requestBig := new(big.Int).SetBytes(bytes)
+	maskBig := new(big.Int).SetInt64(int64(shardMask))
+
+	msbPos := maskBig.BitLen() - 1
+	if msbPos < 0 {
+		return false, fmt.Errorf("invalid shard mask: %d", shardMask)
+	}
+
+	compareMask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), uint(msbPos)), big.NewInt(1))
+	expected := new(big.Int).And(maskBig, compareMask)
+	requestLowBits := new(big.Int).And(requestBig, compareMask)
+
+	return requestLowBits.Cmp(expected) == 0, nil
 }
 
 // Generate a cryptographically valid commitment request
@@ -334,8 +192,16 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 }
 
 // Worker function that continuously submits commitments
-func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metrics, proofQueue chan string) {
-	ticker := time.NewTicker(time.Second / time.Duration(requestsPerSec/workerCount))
+func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics *Metrics, proofQueue chan proofJob, commitmentPool []*api.SubmitCommitmentRequest, poolIndex *atomic.Int64, counters *RequestRateCounters) {
+	requestsPerWorker := float64(requestsPerSec) / float64(workerCount)
+	if requestsPerWorker <= 0 {
+		requestsPerWorker = 1
+	}
+	interval := time.Duration(float64(time.Second) / requestsPerWorker)
+	if interval <= 0 {
+		interval = time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -343,25 +209,44 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Generate and submit commitment asynchronously
+			// Get pre-generated commitment from pool (round-robin)
 			go func() {
-				req := generateCommitmentRequest()
+				idx := poolIndex.Add(1) % int64(len(commitmentPool))
+				req := commitmentPool[idx]
+
+				shardIdx := selectShardIndex(req.RequestID, shardClients)
+				client := shardClients[shardIdx].client
+
+				if counters != nil {
+					counters.IncSubmitStarted()
+				}
 
 				atomic.AddInt64(&metrics.totalRequests, 1)
+				if sm := metrics.shard(shardIdx); sm != nil {
+					sm.totalRequests.Add(1)
+				}
 
 				resp, err := client.call("submit_commitment", req)
+				if counters != nil {
+					counters.IncSubmitCompleted()
+				}
 				if err != nil {
 					atomic.AddInt64(&metrics.failedRequests, 1)
-					// Don't print network errors - too noisy
 					return
 				}
 
 				if resp.Error != nil {
 					atomic.AddInt64(&metrics.failedRequests, 1)
+					if sm := metrics.shard(shardIdx); sm != nil {
+						sm.failedRequests.Add(1)
+					}
 					if resp.Error.Message == "REQUEST_ID_EXISTS" {
 						atomic.AddInt64(&metrics.requestIdExistsErr, 1)
-						// Track this ID - it exists so it will be in blocks!
-						metrics.submittedRequestIDs.Store(string(req.RequestID), true)
+						if sm := metrics.shard(shardIdx); sm != nil {
+							sm.requestIdExistsErr.Add(1)
+						}
+						requestIDStr := normalizeRequestID(string(req.RequestID))
+						metrics.submittedRequestIDs.Store(requestIDStr, true)
 					}
 					return
 				}
@@ -374,34 +259,34 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 					return
 				}
 
-				if submitResp.Status == "SUCCESS" {
+				switch submitResp.Status {
+				case "SUCCESS", "REQUEST_ID_EXISTS":
+					if submitResp.Status == "REQUEST_ID_EXISTS" {
+						atomic.AddInt64(&metrics.requestIdExistsErr, 1)
+						if sm := metrics.shard(shardIdx); sm != nil {
+							sm.requestIdExistsErr.Add(1)
+						}
+					}
 					atomic.AddInt64(&metrics.successfulRequests, 1)
-					// Track this request ID as submitted by us (normalized to lowercase)
-					requestIDStr := strings.ToLower(string(req.RequestID))
+					if sm := metrics.shard(shardIdx); sm != nil {
+						sm.successfulRequests.Add(1)
+					}
+					requestIDStr := normalizeRequestID(string(req.RequestID))
 					metrics.submittedRequestIDs.Store(requestIDStr, true)
 
-					// Queue for proof verification
-					select {
-					case proofQueue <- requestIDStr:
-					default:
-						// Queue full, skip proof verification for this one
+					if proofQueue != nil {
+						metrics.recordSubmissionTimestamp(requestIDStr)
+						select {
+						case proofQueue <- proofJob{shardIdx: shardIdx, requestID: requestIDStr}:
+						default:
+							// Queue full, skip proof verification for this one
+						}
 					}
-				} else if submitResp.Status == "REQUEST_ID_EXISTS" {
-					atomic.AddInt64(&metrics.requestIdExistsErr, 1)
-					atomic.AddInt64(&metrics.successfulRequests, 1) // Count as successful - it will be in blocks!
-					// Also track this ID - it exists so it will be in blocks! (normalized to lowercase)
-					requestIDStr := strings.ToLower(string(req.RequestID))
-					metrics.submittedRequestIDs.Store(requestIDStr, true)
-
-					// Queue for proof verification
-					select {
-					case proofQueue <- requestIDStr:
-					default:
-						// Queue full, skip proof verification for this one
-					}
-				} else {
+				default:
 					atomic.AddInt64(&metrics.failedRequests, 1)
-					// Log unexpected status
+					if sm := metrics.shard(shardIdx); sm != nil {
+						sm.failedRequests.Add(1)
+					}
 					if submitResp.Status != "" {
 						fmt.Printf("Unexpected status '%s' for request %s\n", submitResp.Status, req.RequestID)
 					}
@@ -411,125 +296,488 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 	}
 }
 
-// Worker function that continuously verifies inclusion proofs
-//
-// Note: Inclusion proofs require two stages to be complete:
-// 1. Commitment must be in a block and aggregator record must be stored
-// 2. SMT snapshot must be committed to the main tree
-//
-// There's a small window between these stages where:
-// - get_inclusion_proof returns an inclusion proof (has Authenticator)
-// - But verification fails with PathIncluded=false (commitment not in main tree yet)
-//
-// The retry logic handles this by waiting for the snapshot to be committed.
-// Typical latency: 1-5 seconds from submission to verified proof.
-func proofVerificationWorker(ctx context.Context, client *JSONRPCClient, metrics *Metrics, proofQueue chan string) {
+// Worker function that continuously verifies inclusion proofs in a sharded setup.
+func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, metrics *Metrics, proofQueue chan proofJob, cancelTest context.CancelFunc, counters *RequestRateCounters) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case requestID := <-proofQueue:
-			go func(reqID string) {
-				// Try to get and verify the proof with retries
-				// Proof won't be available immediately - it's only available after commitment is in a block
-				maxRetries := 30 // 30 retries * 500ms = 15 seconds max wait
-				retryDelay := 500 * time.Millisecond
+		case job := <-proofQueue:
+			go func(reqID string, shardIdx int) {
+				time.Sleep(proofInitialDelay)
 				startTime := time.Now()
+				normalizedID := normalizeRequestID(reqID)
+				client := shardClients[shardIdx].client
 
-				for attempt := 0; attempt < maxRetries; attempt++ {
+				for attempt := 0; attempt < proofMaxRetries; attempt++ {
 					atomic.AddInt64(&metrics.proofAttempts, 1)
-
-					proofReq := GetInclusionProofRequest{
-						RequestID: reqID,
+					if sm := metrics.shard(shardIdx); sm != nil {
+						sm.proofAttempts.Add(1)
+					}
+					if attempt > 0 {
+						atomic.AddInt64(&metrics.proofRetries, 1)
+						if sm := metrics.shard(shardIdx); sm != nil {
+							sm.proofRetries.Add(1)
+						}
+						if counters != nil {
+							counters.IncProofRetries()
+						}
 					}
 
+					proofReq := GetInclusionProofRequest{RequestID: reqID}
+
+					atomic.AddInt64(&metrics.proofActiveRequests, 1)
+					if counters != nil {
+						counters.IncProofStarted()
+					}
+					requestStart := time.Now()
 					resp, err := client.call("get_inclusion_proof", proofReq)
+					if counters != nil {
+						counters.IncProofCompleted()
+					}
+					requestDuration := time.Since(requestStart)
+					atomic.AddInt64(&metrics.proofActiveRequests, -1)
+
 					if err != nil {
-						// Network error, retry
-						time.Sleep(retryDelay)
+						if attempt >= 3 {
+							metrics.recordError(fmt.Sprintf("Network error getting proof after %d attempts: %v", attempt+1, err))
+							atomic.AddInt64(&metrics.proofFailed, 1)
+							if sm := metrics.shard(shardIdx); sm != nil {
+								sm.proofFailed.Add(1)
+							}
+							return
+						}
+						time.Sleep(proofRetryDelay)
 						continue
 					}
 
 					if resp.Error != nil {
-						// Proof not available yet, retry
-						time.Sleep(retryDelay)
+						if attempt >= proofMaxRetries-1 {
+							metrics.recordError(fmt.Sprintf("API error getting proof (code %d): %s", resp.Error.Code, resp.Error.Message))
+							atomic.AddInt64(&metrics.proofFailed, 1)
+							if sm := metrics.shard(shardIdx); sm != nil {
+								sm.proofFailed.Add(1)
+							}
+							return
+						}
+						time.Sleep(proofRetryDelay)
 						continue
 					}
 
-					// Parse response
 					var proofResp GetInclusionProofResponse
 					respBytes, _ := json.Marshal(resp.Result)
 					if err := json.Unmarshal(respBytes, &proofResp); err != nil {
+						metrics.recordError(fmt.Sprintf("Failed to parse proof response: %v", err))
 						atomic.AddInt64(&metrics.proofFailed, 1)
+						if sm := metrics.shard(shardIdx); sm != nil {
+							sm.proofFailed.Add(1)
+						}
 						return
 					}
 
-					if proofResp.InclusionProof == nil {
-						// Proof not available yet, retry
-						time.Sleep(retryDelay)
+					if proofResp.InclusionProof == nil || proofResp.InclusionProof.TransactionHash == "" || proofResp.InclusionProof.Authenticator == nil {
+						time.Sleep(proofRetryDelay)
 						continue
 					}
 
-					// Check if this is an inclusion proof (has TransactionHash and Authenticator)
-					// vs a non-inclusion proof (which doesn't have these fields)
-					if proofResp.InclusionProof.TransactionHash == "" || proofResp.InclusionProof.Authenticator == nil {
-						// This is a non-inclusion proof - commitment not in tree yet, retry
-						time.Sleep(retryDelay)
-						continue
-					}
-
-					// Successfully retrieved inclusion proof
-					latency := time.Since(startTime)
 					atomic.AddInt64(&metrics.proofSuccess, 1)
-					metrics.addProofLatency(latency)
+					if sm := metrics.shard(shardIdx); sm != nil {
+						sm.proofSuccess.Add(1)
+					}
+					metrics.recordProofSuccessAttempt(attempt)
+					metrics.addProofRequestDuration(requestDuration)
 
-					// Verify the proof
-					if proofResp.InclusionProof.MerkleTreePath != nil {
-						// Use GetPath() method to properly convert RequestID to big.Int
-						requestIDPath, err := api.RequestID(reqID).GetPath()
-						if err != nil {
-							atomic.AddInt64(&metrics.proofVerifyFailed, 1)
-							return
+					submittedAt, hasSubmission := metrics.getSubmissionTimestamp(normalizedID)
+					var totalLatency time.Duration
+					if hasSubmission {
+						totalLatency = time.Since(submittedAt)
+						metrics.clearSubmissionTimestamp(normalizedID)
+					} else {
+						totalLatency = time.Since(startTime) + proofInitialDelay
+					}
+					metrics.addProofLatency(totalLatency)
+
+					apiPath := &api.MerkleTreePath{
+						Root:  proofResp.InclusionProof.MerkleTreePath.Root,
+						Steps: make([]api.MerkleTreeStep, len(proofResp.InclusionProof.MerkleTreePath.Steps)),
+					}
+					for i, step := range proofResp.InclusionProof.MerkleTreePath.Steps {
+						apiPath.Steps[i] = api.MerkleTreeStep{
+							Path: step.Path,
+							Data: step.Data,
 						}
+					}
 
-						// Verify the merkle path
-						result, err := proofResp.InclusionProof.MerkleTreePath.Verify(requestIDPath)
-						if err != nil {
-							atomic.AddInt64(&metrics.proofVerifyFailed, 1)
-							fmt.Printf("\n[ERROR] Proof verification error for %s: %v\n", reqID, err)
-							return
+					requestIDPath, err := api.RequestID(reqID).GetPath()
+					if err != nil {
+						metrics.recordError(fmt.Sprintf("Failed to get path for request ID: %v", err))
+						atomic.AddInt64(&metrics.proofVerifyFailed, 1)
+						if sm := metrics.shard(shardIdx); sm != nil {
+							sm.proofVerifyFailed.Add(1)
 						}
+						return
+					}
 
-						if result.Result {
-							atomic.AddInt64(&metrics.proofVerified, 1)
-						} else {
-							// If PathValid is true but PathIncluded is false, this means:
-							// - The aggregator record exists (commitment is in a block)
-							// - But the SMT snapshot hasn't been committed to the main tree yet
-							// This is expected during the window between storing aggregator records
-							// and committing the snapshot. Retry to get an updated proof.
-							if result.PathValid && !result.PathIncluded && attempt < maxRetries-1 {
-								time.Sleep(retryDelay)
-								continue // Retry getting the proof
-							}
+					result, err := apiPath.Verify(requestIDPath)
+					if err != nil {
+						metrics.recordError(fmt.Sprintf("Proof verification error: %v", err))
+						atomic.AddInt64(&metrics.proofVerifyFailed, 1)
+						if sm := metrics.shard(shardIdx); sm != nil {
+							sm.proofVerifyFailed.Add(1)
+						}
+						return
+					}
 
-							// Final verification failure after all retries
-							atomic.AddInt64(&metrics.proofVerifyFailed, 1)
-							fmt.Printf("\n[ERROR] Proof verification failed for %s after %d attempts - PathValid: %v, PathIncluded: %v\n",
-								reqID, attempt+1, result.PathValid, result.PathIncluded)
+					if result.Result {
+						atomic.AddInt64(&metrics.proofVerified, 1)
+						if sm := metrics.shard(shardIdx); sm != nil {
+							sm.proofVerified.Add(1)
 						}
 					} else {
+						if !result.PathIncluded && attempt < proofMaxRetries-1 {
+							time.Sleep(proofRetryDelay)
+							continue
+						}
+						fmt.Printf("\n\n[FATAL ERROR] Proof verification failed for request %s after %d attempts\n", reqID, attempt+1)
+						fmt.Printf("PathValid: %v\n", result.PathValid)
+						fmt.Printf("PathIncluded: %v\n", result.PathIncluded)
+						fmt.Printf("Stopping test due to proof verification failure.\n\n")
 						atomic.AddInt64(&metrics.proofVerifyFailed, 1)
+						if sm := metrics.shard(shardIdx); sm != nil {
+							sm.proofVerifyFailed.Add(1)
+						}
+						cancelTest()
+						return
 					}
 
 					return
 				}
 
-				// Failed after all retries
+				metrics.recordError(fmt.Sprintf("Timeout getting proof after %d attempts", proofMaxRetries))
 				atomic.AddInt64(&metrics.proofFailed, 1)
-			}(requestID)
+				if sm := metrics.shard(shardIdx); sm != nil {
+					sm.proofFailed.Add(1)
+				}
+			}(job.requestID, job.shardIdx)
 		}
 	}
+}
+
+func logClientPerfRates(ctx context.Context, metrics *Metrics, counters *RequestRateCounters, totalPlanned int64, shardClients []*ShardClient) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	var prevSubmitStart, prevSubmitComplete, prevProofStart, prevProofComplete, prevProofRetries int64
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			submitStarted := counters.submitStarted.Load()
+			submitCompleted := counters.submitCompleted.Load()
+			proofStarted := counters.proofStarted.Load()
+			proofCompleted := counters.proofCompleted.Load()
+			proofRetries := counters.proofRetries.Load()
+			total := atomic.LoadInt64(&metrics.totalRequests)
+			successful := atomic.LoadInt64(&metrics.successfulRequests)
+			failed := atomic.LoadInt64(&metrics.failedRequests)
+			elapsed := time.Since(metrics.submissionStartTime)
+			if elapsed <= 0 {
+				elapsed = time.Second
+			}
+			overallRPS := float64(total) / math.Max(elapsed.Seconds(), 0.001)
+
+			submitStartRate := submitStarted - prevSubmitStart
+			submitCompleteRate := submitCompleted - prevSubmitComplete
+			proofStartRate := proofStarted - prevProofStart
+			proofCompleteRate := proofCompleted - prevProofComplete
+			proofRetryRate := proofRetries - prevProofRetries
+
+			prevSubmitStart = submitStarted
+			prevSubmitComplete = submitCompleted
+			prevProofStart = proofStarted
+			prevProofComplete = proofCompleted
+			prevProofRetries = proofRetries
+
+			progress := float64(successful)
+			if totalPlanned > 0 {
+				progress = progress / float64(totalPlanned) * 100
+			} else {
+				progress = 100
+			}
+			if progress > 100 {
+				progress = 100
+			}
+
+			timestamp := time.Now().Format(time.RFC3339)
+			successRate := float64(0)
+			if total > 0 {
+				successRate = float64(successful) / float64(total) * 100
+			}
+			verified := atomic.LoadInt64(&metrics.proofVerified)
+			lag := successful - verified
+			verificationPct := float64(0)
+			if successful > 0 {
+				verificationPct = float64(verified) / float64(successful) * 100
+			}
+			activeConns := metrics.currentActiveConnections()
+			totalConn := metrics.totalConnectionAttempts()
+			failedConn := metrics.totalFailedConnections()
+			fmt.Printf("%s submitted=%d/%d (%.1f%%) fail=%d progress=%.1f%% rps=%.1f submit_started=%d/s submit_completed=%d/s proof_started=%d/s proof_completed=%d/s proof_retries=%d/s verified=%d/%d (%.1f%%) proof_lag=%d conns_active=%d conns_total=%d conns_failed=%d\n",
+				timestamp, successful, total, successRate, failed, progress, overallRPS, submitStartRate, submitCompleteRate, proofStartRate, proofCompleteRate, proofRetryRate, verified, successful, verificationPct, lag, activeConns, totalConn, failedConn)
+
+			if len(shardClients) > 1 && len(metrics.shardMetrics) > 1 {
+				for idx, sc := range shardClients {
+					if sm := metrics.shard(idx); sm != nil {
+						shardTotal := sm.totalRequests.Load()
+						shardSuccess := sm.successfulRequests.Load()
+						shardFailed := sm.failedRequests.Load()
+						shardProofVerified := sm.proofVerified.Load()
+						shardProofSuccess := sm.proofSuccess.Load()
+						successPct := 0.0
+						if shardTotal > 0 {
+							successPct = float64(shardSuccess) / float64(shardTotal) * 100
+						}
+						proofPct := 0.0
+						if shardSuccess > 0 {
+							proofPct = float64(shardProofVerified) / float64(shardSuccess) * 100
+						}
+						fmt.Printf("  - %s submitted=%d/%d (%.1f%%) fail=%d proofs=%d/%d (%.1f%%)\n",
+							sc.name, shardSuccess, shardTotal, successPct, shardFailed, shardProofVerified, shardProofSuccess, proofPct)
+					}
+				}
+			}
+		}
+	}
+}
+
+func printShardFinalReport(metrics *Metrics, shardClients []*ShardClient) {
+	if len(shardClients) <= 1 || len(metrics.shardMetrics) <= 1 {
+		return
+	}
+
+	fmt.Printf("\nPer-shard submission stats:\n")
+	for idx, sc := range shardClients {
+		sm := metrics.shard(idx)
+		if sm == nil {
+			continue
+		}
+		total := sm.totalRequests.Load()
+		success := sm.successfulRequests.Load()
+		failed := sm.failedRequests.Load()
+		exists := sm.requestIdExistsErr.Load()
+		successPct := 0.0
+		if total > 0 {
+			successPct = float64(success) / float64(total) * 100
+		}
+		fmt.Printf("  - %s total=%d success=%d failed=%d request_id_exists=%d success_rate=%.2f%%\n",
+			sc.name, total, success, failed, exists, successPct)
+	}
+
+	fmt.Printf("\nPer-shard proof stats:\n")
+	for idx, sc := range shardClients {
+		sm := metrics.shard(idx)
+		if sm == nil {
+			continue
+		}
+		attempts := sm.proofAttempts.Load()
+		success := sm.proofSuccess.Load()
+		failed := sm.proofFailed.Load()
+		verified := sm.proofVerified.Load()
+		verifyFailed := sm.proofVerifyFailed.Load()
+		retries := sm.proofRetries.Load()
+		proofSuccessPct := 0.0
+		if attempts > 0 {
+			proofSuccessPct = float64(success) / float64(attempts) * 100
+		}
+		verificationPct := 0.0
+		submissions := sm.successfulRequests.Load()
+		if submissions > 0 {
+			verificationPct = float64(verified) / float64(submissions) * 100
+		}
+		fmt.Printf("  - %s attempts=%d success=%d failed=%d retries=%d verified=%d verify_failed=%d verification_rate=%.2f%% proof_success_rate=%.2f%%\n",
+			sc.name, attempts, success, failed, retries, verified, verifyFailed, verificationPct, proofSuccessPct)
+	}
+}
+
+func parseAggregatorRoundLogs(path string, start, end time.Time) ([]aggregatorRoundSummary, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	if end.Before(start) {
+		start, end = end, start
+	}
+
+	scanner := bufio.NewScanner(file)
+	buf := make([]byte, 0, 1024*1024)
+	scanner.Buffer(buf, 10*1024*1024)
+
+	var summaries []aggregatorRoundSummary
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+
+		var raw aggregatorLogRaw
+		if err := json.Unmarshal(line, &raw); err != nil {
+			continue
+		}
+		if raw.Msg != "PERF: Round completed" {
+			continue
+		}
+
+		timestamp, err := time.Parse(time.RFC3339Nano, raw.Time)
+		if err != nil {
+			continue
+		}
+		if timestamp.Before(start) || timestamp.After(end) {
+			continue
+		}
+
+		roundDur, err := time.ParseDuration(raw.RoundTime)
+		if err != nil {
+			continue
+		}
+		procDur, err := time.ParseDuration(raw.Processing)
+		if err != nil {
+			continue
+		}
+		bftDur, err := time.ParseDuration(raw.BftWait)
+		if err != nil {
+			continue
+		}
+		finalDur, err := time.ParseDuration(raw.Finalization)
+		if err != nil {
+			continue
+		}
+		medianDur, err := time.ParseDuration(raw.ProofReadyMedian)
+		if err != nil {
+			continue
+		}
+		p95Dur, err := time.ParseDuration(raw.ProofReadyP95)
+		if err != nil {
+			continue
+		}
+		p99Dur, err := time.ParseDuration(raw.ProofReadyP99)
+		if err != nil {
+			continue
+		}
+
+		summaries = append(summaries, aggregatorRoundSummary{
+			Timestamp:    timestamp,
+			Block:        raw.Block,
+			Commitments:  raw.Commitments,
+			RoundTime:    roundDur,
+			Processing:   procDur,
+			BftWait:      bftDur,
+			Finalization: finalDur,
+			ProofMedian:  medianDur,
+			ProofP95:     p95Dur,
+			ProofP99:     p99Dur,
+			RedisTotal:   raw.RedisTotal,
+			RedisPending: raw.RedisPending,
+		})
+	}
+
+	if err := scanner.Err(); err != nil {
+		return summaries, err
+	}
+
+	return summaries, nil
+}
+
+func reportAggregatorServerStats(start, end time.Time) {
+	summaries, err := parseAggregatorRoundLogs(aggregatorLogPath, start, end)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Printf("\nAggregator log file %s not found; skipping server stats.\n", aggregatorLogPath)
+		} else {
+			fmt.Printf("\nFailed to read aggregator logs (%s): %v\n", aggregatorLogPath, err)
+		}
+		return
+	}
+
+	if len(summaries) == 0 {
+		fmt.Printf("\nNo aggregator round logs found in %s between %s and %s.\n",
+			aggregatorLogPath,
+			start.Format(time.RFC3339),
+			end.Format(time.RFC3339))
+		return
+	}
+
+	usable := summaries
+	if len(summaries) > 2 {
+		usable = summaries[1 : len(summaries)-1]
+	}
+
+	var finalSum, roundSum time.Duration
+	var procSum, bftSum time.Duration
+	var proofMedSum, proofP95Sum, proofP99Sum time.Duration
+	totalCommitments := 0
+	for _, entry := range usable {
+		finalSum += entry.Finalization
+		roundSum += entry.RoundTime
+		procSum += entry.Processing
+		bftSum += entry.BftWait
+		proofMedSum += entry.ProofMedian
+		proofP95Sum += entry.ProofP95
+		proofP99Sum += entry.ProofP99
+		totalCommitments += entry.Commitments
+	}
+
+	count := len(usable)
+	if count == 0 {
+		fmt.Printf("\nNo aggregator rounds available after filtering; showing raw entries only.\n")
+		usable = summaries
+		count = len(usable)
+	}
+
+	avgFinal := time.Duration(0)
+	avgProcessing := time.Duration(0)
+	avgBft := time.Duration(0)
+	avgProofMedian := time.Duration(0)
+	avgProofP95 := time.Duration(0)
+	avgProofP99 := time.Duration(0)
+	avgCommit := 0.0
+	if count > 0 {
+		avgFinal = finalSum / time.Duration(count)
+		avgProcessing = procSum / time.Duration(count)
+		avgBft = bftSum / time.Duration(count)
+		avgProofMedian = proofMedSum / time.Duration(count)
+		avgProofP95 = proofP95Sum / time.Duration(count)
+		avgProofP99 = proofP99Sum / time.Duration(count)
+		avgCommit = float64(totalCommitments) / float64(count)
+	}
+
+	finalPct := 0.0
+	procPct := 0.0
+	bftPct := 0.0
+	if roundSum > 0 {
+		finalPct = float64(finalSum) / float64(roundSum) * 100
+		procPct = float64(procSum) / float64(roundSum) * 100
+		bftPct = float64(bftSum) / float64(roundSum) * 100
+	}
+
+	fmt.Printf("\nAGGREGATOR SERVER STATS (%d rounds, averages exclude first/last when possible)\n", len(summaries))
+	fmt.Printf("Average finalization time: %v (%.1f%% of round time)\n",
+		avgFinal.Truncate(time.Millisecond), finalPct)
+	fmt.Printf("Average commitments per round: %.0f\n", avgCommit)
+	fmt.Printf("Average processing time: %v (%.1f%% of round time)\n",
+		avgProcessing.Truncate(time.Millisecond), procPct)
+	fmt.Printf("Average BFT wait: %v (%.1f%% of round time)\n",
+		avgBft.Truncate(time.Millisecond), bftPct)
+	fmt.Printf("Average proof readiness: median %v, p95 %v, p99 %v\n",
+		avgProofMedian.Truncate(time.Millisecond),
+		avgProofP95.Truncate(time.Millisecond),
+		avgProofP99.Truncate(time.Millisecond))
+	fmt.Printf("Log window: %s to %s\n",
+		summaries[0].Timestamp.Format(time.RFC3339),
+		summaries[len(summaries)-1].Timestamp.Format(time.RFC3339))
 }
 
 func main() {
@@ -542,19 +790,38 @@ func main() {
 	authHeader := os.Getenv("AUTH_HEADER")
 
 	fmt.Printf("Starting aggregator performance test...\n")
-	fmt.Printf("Target: %s\n", aggregatorURL)
+	if len(shardTargets) == 0 {
+		fmt.Printf("Target: %s\n", aggregatorURL)
+	} else {
+		fmt.Printf("Targets (%d shards):\n", len(shardTargets))
+		for _, target := range shardTargets {
+			label := target.url
+			if target.name != "" {
+				label = fmt.Sprintf("%s (%s)", target.name, target.url)
+			}
+			if target.shardMask > 0 {
+				fmt.Printf("  - %s shardMask=%d\n", label, target.shardMask)
+			} else {
+				fmt.Printf("  - %s\n", label)
+			}
+		}
+	}
 	if authHeader != "" {
 		fmt.Printf("Authorization: [configured]\n")
 	}
 	fmt.Printf("Duration: %v\n", testDuration)
 	fmt.Printf("Workers: %d\n", workerCount)
+	fmt.Printf("HTTP client pool size: %d\n", httpClientPoolSize)
 	fmt.Printf("Target RPS: %d\n", requestsPerSec)
 	fmt.Printf("----------------------------------------\n")
+
+	testWindowStart := time.Now()
 
 	// Initialize metrics
 	metrics := &Metrics{
 		startTime: time.Now(),
 	}
+	rateCounters := &RequestRateCounters{}
 
 	// Create context with timeout for commitment submission
 	submitCtx, submitCancel := context.WithTimeout(context.Background(), testDuration)
@@ -565,106 +832,154 @@ func main() {
 	proofCtx, proofCancel := context.WithTimeout(context.Background(), proofTimeout)
 	defer proofCancel()
 
-	// Create JSON-RPC client
-	client := NewJSONRPCClient(aggregatorURL, authHeader)
+	shardClients := buildShardClients(aggregatorURL, authHeader, metrics)
+	metrics.initShardMetrics(len(shardClients))
 
-	// Test connectivity and get starting block number
-	fmt.Printf("Testing connectivity to %s...\n", aggregatorURL)
-	resp, err := client.call("get_block_height", nil)
-	if err != nil {
-		log.Fatalf("Failed to connect to aggregator: %v", err)
+	// Test connectivity and get starting block number for each shard
+	for _, sc := range shardClients {
+		fmt.Printf("Testing connectivity to %s...\n", sc.url)
+		resp, err := sc.client.call("get_block_height", nil)
+		if err != nil {
+			log.Fatalf("Failed to connect to aggregator at %s: %v", sc.url, err)
+		}
+
+		if resp.Error != nil {
+			log.Fatalf("Error getting block height from %s: %v", sc.url, resp.Error.Message)
+		}
+
+		var heightResp GetBlockHeightResponse
+		respBytes, _ := json.Marshal(resp.Result)
+		if err := json.Unmarshal(respBytes, &heightResp); err != nil {
+			log.Fatalf("Failed to parse block height from %s: %v", sc.url, err)
+		}
+
+		var startingBlockNumber int64
+		if _, err := fmt.Sscanf(heightResp.BlockNumber, "%d", &startingBlockNumber); err != nil {
+			log.Fatalf("Failed to parse starting block number from %s: %v", sc.url, err)
+		}
+		sc.startingBlock = startingBlockNumber
+
+		fmt.Printf("✓ Connected successfully to %s\n", sc.url)
+		fmt.Printf("✓ Starting block number for %s: %d\n", sc.url, startingBlockNumber)
 	}
-
-	if resp.Error != nil {
-		log.Fatalf("Error getting block height: %v", resp.Error.Message)
-	}
-
-	var heightResp GetBlockHeightResponse
-	respBytes, _ := json.Marshal(resp.Result)
-	if err := json.Unmarshal(respBytes, &heightResp); err != nil {
-		log.Fatalf("Failed to parse block height: %v", err)
-	}
-
-	// Parse starting block number
-	var startingBlockNumber int64
-	if _, err := fmt.Sscanf(heightResp.BlockNumber, "%d", &startingBlockNumber); err != nil {
-		log.Fatalf("Failed to parse starting block number: %v", err)
-	}
-
-	fmt.Printf("✓ Connected successfully\n")
-	fmt.Printf("✓ Starting block number: %d\n", startingBlockNumber)
-	metrics.startingBlockNumber = startingBlockNumber
 
 	// Create proof verification queue (buffered channel)
-	proofQueue := make(chan string, 10000)
+	proofQueue := make(chan proofJob, 10000)
 
+	// Pre-generate commitment pool to eliminate client-side crypto overhead
+	// Calculate pool size: total requests needed + 10% buffer
+	poolSize := int(float64(requestsPerSec) * testDuration.Seconds() * 1.1)
+	fmt.Printf("\nPre-generating %d commitments (%d RPS × %v + 10%% buffer)...\n", poolSize, requestsPerSec, testDuration)
+	commitmentPool := make([]*api.SubmitCommitmentRequest, poolSize)
+	workerCountPreGen := runtime.NumCPU()
+	if workerCountPreGen < 1 {
+		workerCountPreGen = 1
+	}
+	if workerCountPreGen > 32 {
+		workerCountPreGen = 32
+	}
+	jobs := make(chan int, workerCountPreGen*2)
+	var preGenWG sync.WaitGroup
+	for w := 0; w < workerCountPreGen; w++ {
+		preGenWG.Add(1)
+		go func() {
+			defer preGenWG.Done()
+			for idx := range jobs {
+				commitmentPool[idx] = generateCommitmentRequest()
+			}
+		}()
+	}
+	for i := 0; i < poolSize; i++ {
+		jobs <- i
+		if (i+1)%10000 == 0 {
+			fmt.Printf("  Generated %d/%d commitments...\n", i+1, poolSize)
+		}
+	}
+	close(jobs)
+	preGenWG.Wait()
+	fmt.Printf("✓ Pre-generated %d commitments\n\n", poolSize)
+
+	var poolIndex atomic.Int64
 	var wg sync.WaitGroup
+
+	// Record when submission actually starts
+	metrics.submissionStartTime = time.Now()
 
 	// Start commitment workers (use submitCtx - stops after testDuration)
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			commitmentWorker(submitCtx, client, metrics, proofQueue)
+			commitmentWorker(submitCtx, shardClients, metrics, proofQueue, commitmentPool, &poolIndex, rateCounters)
 		}()
 	}
 
 	// Start proof verification workers (use proofCtx - runs longer)
+	// Note: We don't close the proof queue manually; workers exit when proofCtx is cancelled
+	// after all proofs are verified or timeout is reached
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			proofVerificationWorker(proofCtx, client, metrics, proofQueue)
+			proofVerificationWorker(proofCtx, shardClients, metrics, proofQueue, proofCancel, rateCounters)
 		}()
 	}
 
-	// Progress reporting (only during submission phase)
+	perfLogCtx := proofCtx
+	plannedRequests := int64(float64(requestsPerSec) * testDuration.Seconds())
+	if plannedRequests <= 0 {
+		plannedRequests = int64(poolSize)
+	}
+	go logClientPerfRates(perfLogCtx, metrics, rateCounters, plannedRequests, shardClients)
+
+	// Monitor when submission phase completes
 	go func() {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-submitCtx.Done():
-				return
-			case <-ticker.C:
-				elapsed := time.Since(metrics.startTime)
-				total := atomic.LoadInt64(&metrics.totalRequests)
-				successful := atomic.LoadInt64(&metrics.successfulRequests)
-				failed := atomic.LoadInt64(&metrics.failedRequests)
-				exists := atomic.LoadInt64(&metrics.requestIdExistsErr)
-				proofSuccess := atomic.LoadInt64(&metrics.proofSuccess)
-				proofVerified := atomic.LoadInt64(&metrics.proofVerified)
-
-				rps := float64(total) / elapsed.Seconds()
-				fmt.Printf("[%v] Total: %d, Success: %d, Failed: %d, Exists: %d, RPS: %.1f, Proofs: %d (verified: %d)\n",
-					elapsed.Truncate(time.Second), total, successful, failed, exists, rps, proofSuccess, proofVerified)
-			}
-		}
+		<-submitCtx.Done()
+		metrics.submissionEndTime = time.Now()
 	}()
 
 	// Wait for all workers to complete (both submission and proof verification)
 	// Note: Proof workers continue running for up to 20 seconds after submissions stop
 	fmt.Printf("\n----------------------------------------\n")
-	fmt.Printf("Submission phase completed. Waiting for proof verification to complete...\n")
+	fmt.Printf("Commitment submissions complete; waiting for proof verification...\n")
 
-	// Monitor proof verification progress
+	// Monitor proof verification progress and cancel early when all proofs are verified
 	lastProofCount := int64(0)
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	go func() {
+		noProgressCount := 0
 		for {
 			select {
 			case <-proofCtx.Done():
 				return
 			case <-ticker.C:
 				currentProofs := atomic.LoadInt64(&metrics.proofVerified)
-				if currentProofs > lastProofCount {
-					successful := atomic.LoadInt64(&metrics.successfulRequests)
-					fmt.Printf("  Proofs verified: %d/%d\n", currentProofs, successful)
-					lastProofCount = currentProofs
+				proofFailed := atomic.LoadInt64(&metrics.proofFailed)
+				successful := atomic.LoadInt64(&metrics.successfulRequests)
+
+				// Check if all proofs are done (verified + failed = expected)
+				totalProcessed := currentProofs + proofFailed
+				if totalProcessed >= successful {
+					fmt.Printf("  All proofs processed (%d verified, %d failed). Finishing early...\n", currentProofs, proofFailed)
+					proofCancel() // Cancel early since we're done
+					return
 				}
+
+				// Also check if we haven't made progress in several seconds and queue is likely drained
+				if currentProofs > 0 && currentProofs == lastProofCount {
+					noProgressCount++
+					// If no progress for 5 seconds and we've verified most proofs, likely done
+					if noProgressCount >= 5 && totalProcessed >= successful*95/100 {
+						fmt.Printf("  No progress for 5s and %d%% complete. Finishing early...\n", totalProcessed*100/successful)
+						proofCancel()
+						return
+					}
+				} else {
+					noProgressCount = 0
+				}
+				lastProofCount = currentProofs
 			}
 		}
 	}()
@@ -673,534 +988,41 @@ func main() {
 
 	// Stop submission phase and get counts
 	fmt.Printf("\n----------------------------------------\n")
-	fmt.Printf("Submission completed. Now checking blocks for all commitments...\n")
-
 	successful := atomic.LoadInt64(&metrics.successfulRequests)
-	fmt.Printf("Total successful submissions: %d\n", successful)
-	fmt.Printf("Starting from block %d\n", startingBlockNumber+1)
-
-	// First, get the latest block number to know the range
-	waitClient := NewJSONRPCClient(aggregatorURL, authHeader)
-	var latestBlockNumber int64
-	blockHeightResp, blockHeightErr := waitClient.call("get_block_height", nil)
-	if blockHeightErr == nil && blockHeightResp.Error == nil {
-		var heightResult GetBlockHeightResponse
-		respBytes, _ := json.Marshal(blockHeightResp.Result)
-		if err := json.Unmarshal(respBytes, &heightResult); err == nil {
-			fmt.Sscanf(heightResult.BlockNumber, "%d", &latestBlockNumber)
-		}
-	}
-
-	fmt.Printf("Latest block: %d\n", latestBlockNumber)
-
-	// Check all blocks from start to latest-1 (since latest might not be fully persisted)
-	processedCount := int64(0)
-	currentCheckBlock := startingBlockNumber + 1
-	blocksWithOurCommitments := 0
-
-	// Only check blocks that are guaranteed to be fully persisted (N-1)
-	safeBlockNumber := latestBlockNumber - 1
-	if safeBlockNumber < currentCheckBlock {
-		fmt.Printf("\nWaiting for more blocks to be created...\n")
-		safeBlockNumber = currentCheckBlock
-	}
-
-	fmt.Printf("\nChecking blocks %d to %d (block %d exists, ensuring previous blocks are fully persisted)...\n",
-		currentCheckBlock, safeBlockNumber, latestBlockNumber)
-
-	for currentCheckBlock <= safeBlockNumber && processedCount < successful {
-		// Try to get commitments for this block
-		commitReq := GetBlockCommitmentsRequest{
-			BlockNumber: fmt.Sprintf("%d", currentCheckBlock),
-		}
-
-		commitResp, err := waitClient.call("get_block_commitments", commitReq)
-		if err != nil {
-			// Network error, skip this block
-			currentCheckBlock++
-			continue
-		}
-
-		if commitResp.Error != nil {
-			// Block doesn't exist (could be skipped round due to repeat UC)
-			currentCheckBlock++
-			continue
-		}
-
-		// Parse the response
-		var commitsResp GetBlockCommitmentsResponse
-		commitRespBytes, err := json.Marshal(commitResp.Result)
-		if err != nil {
-			currentCheckBlock++
-			continue
-		}
-		if err := json.Unmarshal(commitRespBytes, &commitsResp); err != nil {
-			currentCheckBlock++
-			continue
-		}
-
-		// Count only commitments that we submitted
-		ourCommitmentCount := 0
-		notOurs := 0
-		for _, commitment := range commitsResp.Commitments {
-			// Normalize the request ID to ensure consistent format
-			requestIDStr := strings.ToLower(commitment.RequestID)
-			if _, exists := metrics.submittedRequestIDs.Load(requestIDStr); exists {
-				ourCommitmentCount++
-				// Mark this ID as found
-				metrics.submittedRequestIDs.Store(requestIDStr, "found")
-			} else {
-				notOurs++
-			}
-		}
-
-		// Debug: if block has many commitments not from us, log it
-		if notOurs > 100 {
-			fmt.Printf("  [DEBUG] Block %d has %d commitments not from our test\n", currentCheckBlock, notOurs)
-		}
-
-		// Get block timestamp
-		blockTimestamp := getBlockTimestamp(waitClient, currentCheckBlock)
-
-		// Track block and update counts
-		metrics.addBlockCommitmentCount(currentCheckBlock, ourCommitmentCount, blockTimestamp)
-		processedCount += int64(ourCommitmentCount)
-
-		if ourCommitmentCount > 0 {
-			fmt.Printf("Block %d: %d our commitments (total in block: %d, running total: %d/%d)\n",
-				currentCheckBlock, ourCommitmentCount, len(commitsResp.Commitments), processedCount, successful)
-			blocksWithOurCommitments++
-		} else if len(commitsResp.Commitments) > 0 {
-			// Block has commitments but none are ours
-			fmt.Printf("Block %d: %d commitments from other sources\n", currentCheckBlock, len(commitsResp.Commitments))
-		}
-
-		currentCheckBlock++
-
-		// Brief pause to avoid hammering the API
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	// If we haven't found all commitments yet, keep checking for a bit more
-	if processedCount < successful {
-		fmt.Printf("\nContinuing to check for remaining %d commitments...\n", successful-processedCount)
-		fmt.Printf("Will check for up to 3 minutes for new blocks...\n")
-
-		// Continue checking for up to 3 minutes or until we find all commitments
-		timeoutTime := time.Now().Add(3 * time.Minute)
-		lastProgressTime := time.Now()
-		lastReportTime := time.Now()
-		blocksCheckedInWait := 0
-
-		// Track blocks that had commitments but none were ours (might need retry due to race condition)
-		type blockRetryInfo struct {
-			blockNumber      int64
-			totalCommitments int
-			lastChecked      time.Time
-			retryCount       int
-		}
-		blocksToRetry := make(map[int64]*blockRetryInfo)
-
-		// Helper function to check a block and handle retry logic
-		checkBlock := func(blockNum int64) bool {
-			commitReq := GetBlockCommitmentsRequest{
-				BlockNumber: fmt.Sprintf("%d", blockNum),
-			}
-
-			commitResp, err := waitClient.call("get_block_commitments", commitReq)
-			if err != nil {
-				fmt.Printf("Block %d: network error: %v\n", blockNum, err)
-				return false
-			}
-
-			if commitResp.Error != nil {
-				// Only log real errors, not "block doesn't exist yet"
-				if commitResp.Error.Code != -32602 {
-					fmt.Printf("Block %d: error %d: %s\n", blockNum, commitResp.Error.Code, commitResp.Error.Message)
-				}
-				return false
-			}
-
-			// Parse the response
-			var commitsResp GetBlockCommitmentsResponse
-			commitRespBytes, _ := json.Marshal(commitResp.Result)
-			if err := json.Unmarshal(commitRespBytes, &commitsResp); err != nil {
-				fmt.Printf("Block %d: failed to parse response: %v\n", blockNum, err)
-				return false
-			}
-
-			// Count only commitments that we submitted and haven't counted yet
-			ourCommitmentCount := 0
-			for _, commitment := range commitsResp.Commitments {
-				// Normalize the request ID to ensure consistent format
-				requestIDStr := strings.ToLower(commitment.RequestID)
-				if val, exists := metrics.submittedRequestIDs.Load(requestIDStr); exists && val != "found" {
-					ourCommitmentCount++
-					// Mark this ID as found
-					metrics.submittedRequestIDs.Store(requestIDStr, "found")
-				}
-			}
-
-			if ourCommitmentCount > 0 {
-				blockTimestamp := getBlockTimestamp(waitClient, blockNum)
-				metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount, blockTimestamp)
-				processedCount += int64(ourCommitmentCount)
-				fmt.Printf("Block %d: %d our commitments (total in block: %d, running total: %d/%d)\n",
-					blockNum, ourCommitmentCount, len(commitsResp.Commitments), processedCount, successful)
-				lastProgressTime = time.Now()
-				// Remove from retry list if it was there
-				delete(blocksToRetry, blockNum)
-				return true
-			} else if len(commitsResp.Commitments) > 0 {
-				// Block has commitments but none are ours - might be race condition
-				// Track for retry in case aggregator records are still being written
-				if _, exists := blocksToRetry[blockNum]; !exists {
-					blocksToRetry[blockNum] = &blockRetryInfo{
-						blockNumber:      blockNum,
-						totalCommitments: len(commitsResp.Commitments),
-						lastChecked:      time.Now(),
-						retryCount:       0,
-					}
-					fmt.Printf("Block %d: 0 our commitments yet (will retry, total: %d)\n",
-						blockNum, len(commitsResp.Commitments))
-				}
-			} else {
-				// Block exists but has 0 commitments total
-				// Don't print anything for empty blocks to reduce noise
-			}
-			return false
-		}
-
-		for processedCount < successful && time.Now().Before(timeoutTime) {
-			// Get current block height
-			heightResp, err := waitClient.call("get_block_height", nil)
-			if err != nil {
-				time.Sleep(500 * time.Millisecond)
-				continue
-			}
-
-			var heightResult GetBlockHeightResponse
-			heightRespBytes, _ := json.Marshal(heightResp.Result)
-			if err := json.Unmarshal(heightRespBytes, &heightResult); err != nil {
-				time.Sleep(500 * time.Millisecond)
-				continue
-			}
-
-			var latestBlock int64
-			if _, err := fmt.Sscanf(heightResult.BlockNumber, "%d", &latestBlock); err != nil {
-				time.Sleep(500 * time.Millisecond)
-				continue
-			}
-
-			// Check any new blocks that we haven't checked yet
-			// Only check blocks up to latestBlock-1 to ensure they're fully persisted
-			safeLatestBlock := latestBlock - 1
-			for currentCheckBlock <= safeLatestBlock && processedCount < successful {
-				if checkBlock(currentCheckBlock) {
-					blocksCheckedInWait++
-				}
-				currentCheckBlock++
-			}
-
-			// Retry blocks that had commitments but we didn't recognize them (race condition with aggregator record writes)
-			// Be more aggressive with retries to ensure we find all commitments
-			for blockNum, info := range blocksToRetry {
-				// Retry more frequently (every 500ms) and don't give up until we timeout
-				if time.Since(info.lastChecked) > 500*time.Millisecond {
-					// Retry this block
-					commitReq := GetBlockCommitmentsRequest{
-						BlockNumber: fmt.Sprintf("%d", blockNum),
-					}
-
-					if commitResp, err := waitClient.call("get_block_commitments", commitReq); err == nil && commitResp.Error == nil {
-						var commitsResp GetBlockCommitmentsResponse
-						commitRespBytes, _ := json.Marshal(commitResp.Result)
-						if err := json.Unmarshal(commitRespBytes, &commitsResp); err == nil {
-							ourCommitmentCount := 0
-							for _, commitment := range commitsResp.Commitments {
-								// Normalize the request ID to ensure consistent format
-								requestIDStr := strings.ToLower(commitment.RequestID)
-								if val, exists := metrics.submittedRequestIDs.Load(requestIDStr); exists && val != "found" {
-									ourCommitmentCount++
-									metrics.submittedRequestIDs.Store(requestIDStr, "found")
-								}
-							}
-
-							if ourCommitmentCount > 0 {
-								// Found some! Remove from retry list
-								blockTimestamp := getBlockTimestamp(waitClient, blockNum)
-								metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount, blockTimestamp)
-								processedCount += int64(ourCommitmentCount)
-								fmt.Printf("Block %d (retry #%d): FOUND %d our commitments! (running total: %d/%d)\n",
-									blockNum, info.retryCount+1, ourCommitmentCount, processedCount, successful)
-								delete(blocksToRetry, blockNum)
-								lastProgressTime = time.Now()
-							} else {
-								// Still none, update retry info
-								info.retryCount++
-								info.lastChecked = time.Now()
-
-								// Don't give up - keep retrying until timeout
-								// Only log every 10 retries to reduce noise
-								if info.retryCount%10 == 0 {
-									fmt.Printf("Block %d: retry #%d, still waiting for aggregator records (block has %d total commitments)\n",
-										blockNum, info.retryCount, info.totalCommitments)
-								}
-							}
-						}
-					}
-				}
-			}
-
-			// Update progress if we found any
-			if processedCount > 0 {
-				lastProgressTime = time.Now()
-			}
-
-			// Report status periodically
-			if time.Since(lastReportTime) > 5*time.Second {
-				retryCount := len(blocksToRetry)
-				if retryCount > 0 {
-					fmt.Printf("Still checking... waiting for block %d (latest: %d), found %d/%d commitments, %d blocks pending retry...\n",
-						currentCheckBlock, latestBlock, processedCount, successful, retryCount)
-				} else {
-					fmt.Printf("Still checking... waiting for block %d (latest: %d), found %d/%d commitments...\n",
-						currentCheckBlock, latestBlock, processedCount, successful)
-				}
-				lastReportTime = time.Now()
-			}
-
-			// If no progress for 90 seconds AND we have no blocks to retry, stop
-			if time.Since(lastProgressTime) > 90*time.Second && len(blocksToRetry) == 0 {
-				fmt.Printf("\nNo new commitments found for 90 seconds and no blocks pending retry (checked %d additional blocks), stopping...\n", blocksCheckedInWait)
-				break
-			}
-
-			// Keep trying if we still have blocks to retry (eventual consistency)
-			if len(blocksToRetry) > 0 && time.Since(lastProgressTime) > 120*time.Second {
-				fmt.Printf("\nNo progress for 120 seconds despite %d blocks still pending retry, stopping...\n", len(blocksToRetry))
-				break
-			}
-
-			// Brief pause before checking again for new blocks
-			time.Sleep(200 * time.Millisecond)
-		}
-
-		// Final aggressive retry pass for any remaining blocks
-		if len(blocksToRetry) > 0 && processedCount < successful {
-			fmt.Printf("\nPerforming final retry pass on %d blocks...\n", len(blocksToRetry))
-			finalRetryCount := 0
-			maxFinalRetries := 10
-
-			for finalRetryCount < maxFinalRetries && len(blocksToRetry) > 0 && processedCount < successful {
-				finalRetryCount++
-				foundInRound := 0
-
-				for blockNum := range blocksToRetry {
-					commitReq := GetBlockCommitmentsRequest{
-						BlockNumber: fmt.Sprintf("%d", blockNum),
-					}
-
-					if commitResp, err := waitClient.call("get_block_commitments", commitReq); err == nil && commitResp.Error == nil {
-						var commitsResp GetBlockCommitmentsResponse
-						commitRespBytes, _ := json.Marshal(commitResp.Result)
-						if err := json.Unmarshal(commitRespBytes, &commitsResp); err == nil {
-							ourCommitmentCount := 0
-							for _, commitment := range commitsResp.Commitments {
-								requestIDStr := strings.ToLower(commitment.RequestID)
-								if val, exists := metrics.submittedRequestIDs.Load(requestIDStr); exists && val != "found" {
-									ourCommitmentCount++
-									metrics.submittedRequestIDs.Store(requestIDStr, "found")
-								}
-							}
-
-							if ourCommitmentCount > 0 {
-								blockTimestamp := getBlockTimestamp(waitClient, blockNum)
-								metrics.addBlockCommitmentCount(blockNum, ourCommitmentCount, blockTimestamp)
-								processedCount += int64(ourCommitmentCount)
-								foundInRound += ourCommitmentCount
-								fmt.Printf("  Block %d (final retry): FOUND %d commitments! (running total: %d/%d)\n",
-									blockNum, ourCommitmentCount, processedCount, successful)
-								delete(blocksToRetry, blockNum)
-							}
-						}
-					}
-				}
-
-				if foundInRound > 0 {
-					fmt.Printf("Final retry round %d: found %d commitments\n", finalRetryCount, foundInRound)
-				}
-
-				// Brief pause before next retry
-				time.Sleep(1 * time.Second)
-			}
-
-			if len(blocksToRetry) > 0 {
-				fmt.Printf("Final retry pass complete, %d blocks still pending\n", len(blocksToRetry))
-			}
-		}
-	}
-
-	// Update the final count
-	atomic.StoreInt64(&metrics.totalBlockCommitments, processedCount)
-
-	// Debug: count tracked IDs and find missing ones
-	trackedCount := 0
-	foundCount := 0
-	var sampleMissingIDs []string
-
-	metrics.submittedRequestIDs.Range(func(key, value interface{}) bool {
-		trackedCount++
-		requestID := key.(string)
-		// Check if this ID was found in blocks
-		if value == "found" {
-			foundCount++
-		} else if len(sampleMissingIDs) < 5 {
-			// This is a missing ID
-			sampleMissingIDs = append(sampleMissingIDs, requestID)
-		}
-		return true
-	})
-
-	fmt.Printf("\nDebug: Tracked %d request IDs, found in blocks: %d, missing: %d\n", trackedCount, foundCount, trackedCount-foundCount)
-	if len(sampleMissingIDs) > 0 {
-		fmt.Printf("Sample missing IDs:\n")
-		for i, id := range sampleMissingIDs {
-			fmt.Printf("  %d. %s\n", i+1, id)
-		}
-	}
-
-	// Additional debug: check if we have the right block range
-	if len(metrics.blockCommitmentInfo) > 0 {
-		firstBlock := metrics.blockCommitmentInfo[0].BlockNumber
-		lastBlock := metrics.blockCommitmentInfo[len(metrics.blockCommitmentInfo)-1].BlockNumber
-		fmt.Printf("Checked blocks from %d to %d (total: %d blocks)\n", firstBlock, lastBlock, len(metrics.blockCommitmentInfo))
-	}
-
-	if processedCount < successful {
-		fmt.Printf("\nFinished checking. Found %d/%d commitments\n", processedCount, successful)
+	verified := atomic.LoadInt64(&metrics.proofVerified)
+	proofFailedCount := atomic.LoadInt64(&metrics.proofFailed)
+	if verified+proofFailedCount < successful {
+		fmt.Printf("Warning: proof verification ended early (%d verified, %d failed, %d expected)\n",
+			verified, proofFailedCount, successful)
+	} else if verified == successful {
+		fmt.Printf("All proofs verified successfully.\n")
 	} else {
-		fmt.Printf("\nAll %d commitments have been found in blocks!\n", successful)
+		fmt.Printf("Proof verification completed with failures (%d verified, %d failed).\n", verified, proofFailedCount)
 	}
+
 	// Final metrics
 	elapsed := time.Since(metrics.startTime)
+	submissionDuration := metrics.submissionEndTime.Sub(metrics.submissionStartTime)
 	total := atomic.LoadInt64(&metrics.totalRequests)
 	successful = atomic.LoadInt64(&metrics.successfulRequests)
 	failed := atomic.LoadInt64(&metrics.failedRequests)
 	exists := atomic.LoadInt64(&metrics.requestIdExistsErr)
-	processedInBlocks := atomic.LoadInt64(&metrics.totalBlockCommitments)
 
 	fmt.Printf("\n\n========================================\n")
 	fmt.Printf("PERFORMANCE TEST RESULTS\n")
 	fmt.Printf("========================================\n")
-	fmt.Printf("Duration: %v\n", elapsed.Truncate(time.Millisecond))
+	fmt.Printf("Total duration: %v\n", elapsed.Truncate(time.Millisecond))
+	fmt.Printf("Submission duration: %v\n", submissionDuration.Truncate(time.Millisecond))
 	fmt.Printf("Total requests: %d\n", total)
 	fmt.Printf("Successful requests: %d\n", successful)
 	fmt.Printf("Failed requests: %d\n", failed)
 	fmt.Printf("REQUEST_ID_EXISTS: %d\n", exists)
-	fmt.Printf("Average RPS: %.2f\n", float64(total)/elapsed.Seconds())
+	fmt.Printf("Average RPS: %.2f\n", float64(total)/submissionDuration.Seconds())
 	fmt.Printf("Success rate: %.2f%%\n", float64(successful)/float64(total)*100)
-
-	fmt.Printf("\nBLOCK PROCESSING:\n")
-	fmt.Printf("Total commitments in blocks: %d\n", processedInBlocks)
-	pendingCommitments := successful - processedInBlocks
-	fmt.Printf("Commitments pending: %d\n", pendingCommitments)
-
-	if pendingCommitments > 0 {
-		percentage := float64(pendingCommitments) / float64(successful) * 100
-		fmt.Printf("\n⚠️  WARNING: %d commitments (%.1f%%) not found in blocks!\n", pendingCommitments, percentage)
-		fmt.Printf("\nNote: Blocks may contain commitments from other sources (previous tests, etc.)\n")
-		fmt.Printf("The test correctly tracks only commitments submitted in this run.\n")
-		if percentage < 5.0 {
-			fmt.Printf("\nWith only %.1f%% missing, this is likely due to processing delays or queue limits.\n", percentage)
-		}
-	} else {
-		fmt.Printf("\n✅ SUCCESS: All %d commitments were found in blocks!\n", successful)
-	}
-
-	fmt.Printf("\nBLOCK THROUGHPUT:\n")
-	fmt.Printf("Total blocks checked: %d\n", len(metrics.blockCommitmentCounts))
-
-	// Count empty vs non-empty blocks
-	emptyBlocks := 0
-	nonEmptyBlocks := 0
-	for _, count := range metrics.blockCommitmentCounts {
-		if count == 0 {
-			emptyBlocks++
-		} else {
-			nonEmptyBlocks++
-		}
-	}
-
-	if nonEmptyBlocks > 0 {
-		fmt.Printf("Non-empty blocks: %d (average %.1f commitments/block)\n",
-			nonEmptyBlocks, float64(processedInBlocks)/float64(nonEmptyBlocks))
-	}
-	if emptyBlocks > 0 {
-		fmt.Printf("Empty blocks: %d\n", emptyBlocks)
-	}
-
-	// Calculate average block finalization time using actual timestamps
-	if len(metrics.blockCommitmentInfo) > 1 {
-		firstBlockInfo := metrics.blockCommitmentInfo[0]
-		lastBlockInfo := metrics.blockCommitmentInfo[len(metrics.blockCommitmentInfo)-1]
-
-		// Calculate actual time span from block timestamps
-		if !firstBlockInfo.Timestamp.IsZero() && !lastBlockInfo.Timestamp.IsZero() {
-			actualTimeSpan := lastBlockInfo.Timestamp.Sub(firstBlockInfo.Timestamp)
-			blockNumberSpan := lastBlockInfo.BlockNumber - firstBlockInfo.BlockNumber
-
-			if actualTimeSpan > 0 && blockNumberSpan > 0 {
-				// Average time per block
-				avgBlockTime := actualTimeSpan.Seconds() / float64(blockNumberSpan)
-
-				fmt.Printf("Block range: blocks %d to %d (%d blocks) over %.3f seconds (measured from timestamps)\n",
-					firstBlockInfo.BlockNumber, lastBlockInfo.BlockNumber, len(metrics.blockCommitmentInfo), actualTimeSpan.Seconds())
-				fmt.Printf("Average block finalization time: %.3f seconds/block\n", avgBlockTime)
-				fmt.Printf("Effective commitment throughput: %.1f commitments/sec\n",
-					float64(processedInBlocks)/actualTimeSpan.Seconds())
-			}
-		}
-	}
-
-	if len(metrics.blockCommitmentInfo) > 0 {
-		fmt.Printf("\nBlock details:\n")
-		if len(metrics.blockCommitmentInfo) <= 20 {
-			// Print all blocks if 20 or fewer
-			for _, info := range metrics.blockCommitmentInfo {
-				fmt.Printf("  Block %d: %d commitments\n", info.BlockNumber, info.CommitmentCount)
-			}
-		} else {
-			// Print first 10 and last 10 if more than 20
-			fmt.Printf("  First 10 blocks:\n")
-			for i := 0; i < 10; i++ {
-				info := metrics.blockCommitmentInfo[i]
-				fmt.Printf("    Block %d: %d commitments\n", info.BlockNumber, info.CommitmentCount)
-			}
-			fmt.Printf("  ...\n")
-			fmt.Printf("  Last 10 blocks:\n")
-			for i := len(metrics.blockCommitmentInfo) - 10; i < len(metrics.blockCommitmentInfo); i++ {
-				info := metrics.blockCommitmentInfo[i]
-				fmt.Printf("    Block %d: %d commitments\n", info.BlockNumber, info.CommitmentCount)
-			}
-		}
-
-		// Check for gaps in block numbers
-		var gaps []string
-		for i := 1; i < len(metrics.blockCommitmentInfo); i++ {
-			expected := metrics.blockCommitmentInfo[i-1].BlockNumber + 1
-			actual := metrics.blockCommitmentInfo[i].BlockNumber
-			if actual != expected {
-				gaps = append(gaps, fmt.Sprintf("Gap between blocks %d and %d (missing %d blocks)",
-					metrics.blockCommitmentInfo[i-1].BlockNumber, actual, actual-expected))
-			}
-		}
-		if len(gaps) > 0 {
-			fmt.Printf("\nBlock gaps detected (possibly due to repeat UCs):\n")
-			for _, gap := range gaps {
-				fmt.Printf("  %s\n", gap)
-			}
-		}
+	if failed > 0 {
+		failurePct := float64(failed) / math.Max(float64(total), 1)
+		fmt.Printf("⚠️  WARNING: %d submissions failed (%.2f%% of total).\n",
+			failed, failurePct*100)
 	}
 
 	// Proof verification metrics
@@ -1216,10 +1038,31 @@ func main() {
 	fmt.Printf("Proofs failed to retrieve: %d\n", proofFailed)
 	fmt.Printf("Proofs verified successfully: %d\n", proofVerified)
 	fmt.Printf("Proofs failed verification: %d\n", proofVerifyFailed)
+	if proofSuccess > 0 {
+		fmt.Printf("Proof retrieval attempt distribution:\n")
+		for attempt, count := range metrics.proofSuccessAttemptBuckets() {
+			fmt.Printf("  Attempt %d: %d\n", attempt+1, count)
+		}
+	}
 
 	if proofSuccess > 0 {
-		avgLatency := metrics.getAverageProofLatency()
-		fmt.Printf("Average proof retrieval latency: %v\n", avgLatency.Truncate(time.Millisecond))
+		medianLatency, p95Latency, p99Latency := metrics.getProofLatencyStats()
+		fmt.Printf("Proof retrieval latency (submission to proof): median %v, p95 %v, p99 %v\n",
+			medianLatency.Truncate(time.Millisecond),
+			p95Latency.Truncate(time.Millisecond),
+			p99Latency.Truncate(time.Millisecond))
+
+		// Display proof request duration statistics
+		avg, min, max, p50, p95, p99 := metrics.getProofRequestStats()
+		if avg > 0 {
+			fmt.Printf("\nProof Request Duration Statistics:\n")
+			fmt.Printf("  Average: %v\n", avg.Truncate(time.Microsecond))
+			fmt.Printf("  Median (p50): %v\n", p50.Truncate(time.Microsecond))
+			fmt.Printf("  p95: %v\n", p95.Truncate(time.Microsecond))
+			fmt.Printf("  p99: %v\n", p99.Truncate(time.Microsecond))
+			fmt.Printf("  Min: %v\n", min.Truncate(time.Microsecond))
+			fmt.Printf("  Max: %v\n\n", max.Truncate(time.Microsecond))
+		}
 	}
 
 	// Calculate verification rate based on successful submissions, not retrieved proofs
@@ -1237,4 +1080,11 @@ func main() {
 	}
 
 	fmt.Printf("========================================\n")
+
+	printShardFinalReport(metrics, shardClients)
+
+	// Print error summary
+	metrics.printErrorSummary()
+
+	reportAggregatorServerStats(testWindowStart, time.Now())
 }

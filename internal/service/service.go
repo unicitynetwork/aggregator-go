@@ -427,6 +427,17 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 		}
 	}
 
+	if as.config.Sharding.Mode == config.ShardingModeChild {
+		if err := as.roundManager.CheckParentHealth(ctx); err != nil {
+			status.Status = "degraded"
+			status.AddDetail("parent", "unreachable")
+			status.AddDetail("parent_error", err.Error())
+			as.logger.WithContext(ctx).Warn("Parent aggregator health check failed", "error", err.Error())
+		} else {
+			status.AddDetail("parent", "connected")
+		}
+	}
+
 	return modelToAPIHealthStatus(status), nil
 }
 

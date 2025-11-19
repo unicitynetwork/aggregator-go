@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/net/http2"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
@@ -79,6 +80,18 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 		WriteTimeout:   cfg.Server.WriteTimeout,
 		IdleTimeout:    cfg.Server.IdleTimeout,
 		MaxHeaderBytes: 1 << 20, // 1MB
+	}
+
+	if cfg.Server.EnableTLS {
+		gatewayLogger := logger.WithComponent("gateway")
+		h2Config := &http2.Server{
+			MaxConcurrentStreams: uint32(cfg.Server.HTTP2MaxConcurrentStreams),
+		}
+		if err := http2.ConfigureServer(server.httpServer, h2Config); err != nil {
+			gatewayLogger.Warn("Failed to configure HTTP/2 server", "error", err.Error())
+		} else {
+			gatewayLogger.Info("Configured HTTP/2 server", "maxConcurrentStreams", cfg.Server.HTTP2MaxConcurrentStreams)
+		}
 	}
 
 	return server

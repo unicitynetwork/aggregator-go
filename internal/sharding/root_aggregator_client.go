@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync/atomic"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -65,6 +66,27 @@ func (c *RootAggregatorClient) GetShardProof(ctx context.Context, req *api.GetSh
 		return nil, fmt.Errorf("failed to fetch shard proof: %w", err)
 	}
 	return response, nil
+}
+
+func (c *RootAggregatorClient) CheckHealth(ctx context.Context) error {
+	healthURL := strings.TrimRight(c.rpcURL, "/") + "/health"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create parent health request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to reach parent health endpoint: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("parent health returned %s: %s", resp.Status, string(body))
+	}
+
+	return nil
 }
 
 func doRpcRequest[T any](ctx context.Context, c *RootAggregatorClient, method string, params interface{}) (*T, error) {

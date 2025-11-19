@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/network"
@@ -441,7 +442,10 @@ func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 		return fmt.Errorf("failed to decode root hash: %w", err)
 	}
 
-	luc := c.luc.Load()
+	luc, err := c.waitForLatestUC(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to prepare certification request: %w", err)
+	}
 
 	var blockHash []byte
 	if !bytes.Equal(rootHashBytes, luc.InputRecord.Hash) {
@@ -484,6 +488,10 @@ func (c *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String(),
 		"lastRootRound", c.lastRootRound.Load())
+
+	if err := c.ensureInitialized(ctx); err != nil {
+		return err
+	}
 
 	// Always prefer the expected round number from root chain if available
 	expectedRound := c.nextExpectedRound.Load()
@@ -534,4 +542,30 @@ func (c *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.
 	c.logger.WithContext(ctx).Info("Certification request completed",
 		"blockNumber", block.Index.String())
 	return nil
+}
+
+func (c *BFTClientImpl) waitForLatestUC(ctx context.Context) (*types.UnicityCertificate, error) {
+	if luc := c.luc.Load(); luc != nil {
+		return luc, nil
+	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+			if luc := c.luc.Load(); luc != nil {
+				return luc, nil
+			}
+		}
+	}
+}
+
+func (c *BFTClientImpl) ensureInitialized(ctx context.Context) error {
+	if c.status.Load() == normal {
+		return nil
+	}
+	_, err := c.waitForLatestUC(ctx)
+	return err
 }

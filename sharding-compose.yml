@@ -125,6 +125,25 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  redis-shared:
+    image: redis:7-alpine
+    container_name: aggregator-redis-shared
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - default
+    volumes:
+      - ./data/redis_shared_data:/data
+    command: redis-server --appendonly yes --appendfsync everysec
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   mongodb-root:
     image: mongo:7.0
     container_name: aggregator-root-mongodb
@@ -158,11 +177,16 @@ services:
       - default
     volumes:
       - ./data/genesis:/app/bft-config
+      - ./certs:/app/certs:ro
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     environment: &environment-base
       # Server Configuration
       PORT: "3000"
       HOST: "0.0.0.0"
-      CONCURRENCY_LIMIT: "1000"
+      CONCURRENCY_LIMIT: "5000"
       ENABLE_DOCS: "true"
       ENABLE_CORS: "true"
 
@@ -185,6 +209,7 @@ services:
 
       # Processing Configuration
       BATCH_LIMIT: "1000"
+      COLLECT_PHASE_DURATION: "500ms"
 
       # BFT Configuration
       # Enable BFT support and specify configuration file paths
@@ -195,7 +220,7 @@ services:
       # BFT_BOOTSTRAP_ADDRESSES will be set dynamically by the entrypoint script
 
       # Redis Configuration
-      REDIS_HOST: "redis"
+      REDIS_HOST: "redis-shared"
       REDIS_PORT: "6379"
       REDIS_PASSWORD: ""
       REDIS_DB: "0"
@@ -203,7 +228,8 @@ services:
       REDIS_MIN_IDLE_CONNS: "10"
 
       # Storage Configuration
-      USE_REDIS_FOR_COMMITMENTS: "false"
+      USE_REDIS_FOR_COMMITMENTS: "true"
+      REDIS_STREAM_NAME: "commitments:shard:1"
       REDIS_FLUSH_INTERVAL: "50ms"
       REDIS_MAX_BATCH_SIZE: "2000"
 
@@ -241,6 +267,8 @@ services:
         condition: service_completed_successfully
       mongodb-shard1:
         condition: service_healthy
+      redis-shared:
+        condition: service_healthy
     healthcheck:
       test: [ "CMD", "nc", "-zv", "localhost", "3000" ]
       interval: 30s
@@ -255,10 +283,13 @@ services:
       <<: *environment-base
       MONGODB_URI: "mongodb://admin:password@mongodb-shard2:27017/aggregator?authSource=admin"
       SHARDING_CHILD_SHARD_ID: 2 # 0b10
+      REDIS_STREAM_NAME: "commitments:shard:2"
     depends_on:
       bft-aggregator-genesis-gen:
         condition: service_completed_successfully
       mongodb-shard2:
+        condition: service_healthy
+      redis-shared:
         condition: service_healthy
     healthcheck:
       test: [ "CMD", "nc", "-zv", "localhost", "3000" ]
@@ -274,6 +305,7 @@ services:
       <<: *environment-base
       MONGODB_URI: "mongodb://admin:password@mongodb-root:27017/aggregator?authSource=admin"
       SHARDING_MODE: "parent"
+      BFT_ENABLED: "true"
     depends_on:
       bft-aggregator-genesis-gen:
         condition: service_completed_successfully

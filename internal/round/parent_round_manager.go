@@ -48,7 +48,6 @@ type ParentRoundManager struct {
 	// Round management
 	currentRound  *ParentRound
 	roundMutex    sync.RWMutex
-	roundTimer    *time.Timer
 	stopChan      chan struct{}
 	wg            sync.WaitGroup
 	roundDuration time.Duration
@@ -127,6 +126,11 @@ func (prm *ParentRoundManager) Stop(ctx context.Context) error {
 	return nil
 }
 
+// CheckParentHealth implements the round.Manager interface for parent mode.
+func (prm *ParentRoundManager) CheckParentHealth(ctx context.Context) error {
+	return nil
+}
+
 // SubmitShardRoot accepts shard root updates during the current round
 func (prm *ParentRoundManager) SubmitShardRoot(ctx context.Context, update *models.ShardRootUpdate) error {
 	prm.roundMutex.Lock()
@@ -160,12 +164,6 @@ func (prm *ParentRoundManager) startNewRound(ctx context.Context, roundNumber *a
 		"roundNumber", roundNumber.String())
 
 	prm.roundMutex.Lock()
-	defer prm.roundMutex.Unlock()
-
-	// Stop existing timer if any
-	if prm.roundTimer != nil {
-		prm.roundTimer.Stop()
-	}
 
 	var shardUpdates map[int]*models.ShardRootUpdate
 	if prm.currentRound != nil {
@@ -182,22 +180,15 @@ func (prm *ParentRoundManager) startNewRound(ctx context.Context, roundNumber *a
 		ShardUpdates: shardUpdates,                   // Reuse the same map
 		Snapshot:     prm.parentSMT.CreateSnapshot(), // Create SMT snapshot for this round
 	}
-
-	// Set timer for round processing
-	prm.roundTimer = time.AfterFunc(prm.roundDuration, func() {
-		prm.logger.WithContext(ctx).Info("Parent round timer fired",
-			"roundNumber", roundNumber.String(),
-			"elapsed", prm.roundDuration.String())
-		if err := prm.processCurrentRound(ctx); err != nil {
-			prm.logger.WithContext(ctx).Error("Failed to process parent round",
-				"roundNumber", roundNumber.String(),
-				"error", err.Error())
-		}
-	})
+	prm.roundMutex.Unlock()
 
 	prm.logger.WithContext(ctx).Info("Parent round started",
 		"roundNumber", roundNumber.String(),
 		"duration", prm.roundDuration.String())
+
+	if err := prm.processCurrentRound(ctx); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -387,12 +378,7 @@ func (prm *ParentRoundManager) Deactivate(ctx context.Context) error {
 	// Stop BFT client
 	prm.bftClient.Stop()
 
-	// Stop current round timer
 	prm.roundMutex.Lock()
-	if prm.roundTimer != nil {
-		prm.roundTimer.Stop()
-		prm.roundTimer = nil
-	}
 	prm.currentRound = nil
 	prm.roundMutex.Unlock()
 
@@ -405,15 +391,21 @@ func (prm *ParentRoundManager) FinalizeBlock(ctx context.Context, block *models.
 	prm.logger.WithContext(ctx).Info("Finalizing parent block",
 		"blockNumber", block.Index.String())
 
+	finalizationStart := time.Now()
+
 	prm.roundMutex.RLock()
 	var processedShardUpdates map[int]*models.ShardRootUpdate
 	var snapshot *smt.ThreadSafeSmtSnapshot
+	var proposalTime time.Time
+	var processingTime time.Duration
 	if prm.currentRound != nil && prm.currentRound.ProcessedShardUpdates != nil {
 		processedShardUpdates = make(map[int]*models.ShardRootUpdate)
 		for shardKey, update := range prm.currentRound.ProcessedShardUpdates {
 			processedShardUpdates[shardKey] = update
 		}
 		snapshot = prm.currentRound.Snapshot
+		proposalTime = prm.currentRound.ProposalTime
+		processingTime = prm.currentRound.ProcessingTime
 	}
 	prm.roundMutex.RUnlock()
 
@@ -449,6 +441,29 @@ func (prm *ParentRoundManager) FinalizeBlock(ctx context.Context, block *models.
 		prm.logger.WithContext(ctx).Info("Successfully committed parent SMT snapshot to main tree",
 			"blockNumber", block.Index.String())
 	}
+
+	finalizationTime := time.Since(finalizationStart)
+	var bftWait time.Duration
+	if !proposalTime.IsZero() {
+		bftWait = finalizationStart.Sub(proposalTime)
+	}
+	totalRoundTime := processingTime + bftWait + finalizationTime
+	shortDur := func(d time.Duration) string {
+		if d <= 0 {
+			return "0s"
+		}
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+
+	logFields := []interface{}{
+		"block", block.Index.String(),
+		"shards", len(processedShardUpdates),
+		"roundTime", shortDur(totalRoundTime),
+		"processing", shortDur(processingTime),
+		"bftWait", shortDur(bftWait),
+		"finalization", shortDur(finalizationTime),
+	}
+	prm.logger.WithContext(ctx).Info("PERF: Parent round completed", logFields...)
 
 	prm.logger.WithContext(ctx).Info("Parent block finalized successfully",
 		"blockNumber", block.Index.String())

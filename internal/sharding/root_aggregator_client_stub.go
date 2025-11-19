@@ -52,6 +52,10 @@ func (m *RootAggregatorClientStub) GetShardProof(ctx context.Context, request *a
 	return nil, nil
 }
 
+func (m *RootAggregatorClientStub) CheckHealth(ctx context.Context) error {
+	return nil
+}
+
 func (m *RootAggregatorClientStub) SubmissionCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()

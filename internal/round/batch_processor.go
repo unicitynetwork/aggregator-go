@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"sort"
 	"sync"
 	"time"
 
@@ -147,14 +148,31 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			ShardID:  rm.config.Sharding.Child.ShardID,
 			RootHash: rootHashRaw,
 		}
-		if err := rm.rootClient.SubmitShardRoot(ctx, request); err != nil {
+		submitStart := time.Now()
+		if err := rm.submitShardRootWithRetry(ctx, request); err != nil {
 			return fmt.Errorf("failed to submit root hash to parent shard: %w", err)
 		}
-		rm.logger.Info("Root hash submitted to parent, polling for inclusion proof...", "rootHash", rootHashRaw.String())
+		submissionDuration := time.Since(submitStart)
+		rm.logger.WithContext(ctx).Info("Root hash submitted to parent, polling for inclusion proof...",
+			"rootHash", rootHashRaw.String(),
+			"submissionDuration", submissionDuration)
+
+		proofWaitStart := time.Now()
 		proof, err := rm.pollInclusionProof(ctx, rootHashRaw.String())
 		if err != nil {
 			return fmt.Errorf("failed to poll for parent shard inclusion proof: %w", err)
 		}
+		proofWait := time.Since(proofWaitStart)
+		rm.logger.WithContext(ctx).Info("Parent shard proof received",
+			"rootHash", rootHashRaw.String(),
+			"proofWait", proofWait,
+			"submissionToProof", submissionDuration+proofWait)
+		rm.roundMutex.Lock()
+		if rm.currentRound != nil {
+			rm.currentRound.SubmissionDuration = submissionDuration
+			rm.currentRound.ProofWaitDuration = proofWait
+		}
+		rm.roundMutex.Unlock()
 		block := models.NewBlock(
 			blockNumber,
 			rm.config.Chain.ID,
@@ -201,8 +219,39 @@ func (rm *RoundManager) pollInclusionProof(ctx context.Context, rootHash string)
 				rm.logger.WithContext(ctx).Debug("Parent shard inclusion proof not found, retrying...")
 				continue
 			}
-			rm.logger.WithContext(ctx).Info("Successfully received shard proof from parent")
 			return proof, nil
+		}
+	}
+}
+
+func (rm *RoundManager) submitShardRootWithRetry(ctx context.Context, req *api.SubmitShardRootRequest) error {
+	if rm.rootClient == nil {
+		return fmt.Errorf("root client not configured")
+	}
+
+	var attempt int
+	for {
+		attempt++
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		if err := rm.rootClient.SubmitShardRoot(ctx, req); err == nil {
+			if attempt > 1 {
+				rm.logger.WithContext(ctx).Info("Shard root submission succeeded after retries",
+					"attempt", attempt)
+			}
+			return nil
+		} else {
+			rm.logger.WithContext(ctx).Warn("Failed to submit shard root to parent, retrying...",
+				"attempt", attempt,
+				"error", err.Error())
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1 * time.Second):
 		}
 	}
 }
@@ -238,6 +287,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	ackEntries := make([]interfaces.CommitmentAck, 0)
 	pendingRecordCount := 0
 	roundNumber := block.Index.String()
+	var proofTimes []time.Duration
 
 	if rm.currentRound != nil {
 		if rm.currentRound.Number != nil {
@@ -249,37 +299,20 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		requestIds = make([]api.RequestID, commitmentCount)
 		ackEntries = make([]interfaces.CommitmentAck, commitmentCount)
 
+		now := time.Now()
 		for i, commitment := range rm.currentRound.Commitments {
 			requestIds[i] = commitment.RequestID
 			ackEntries[i] = interfaces.CommitmentAck{RequestID: commitment.RequestID, StreamID: commitment.StreamID}
+
+			if commitment.CreatedAt != nil {
+				proofReadyTime := now.Sub(commitment.CreatedAt.Time)
+				if proofReadyTime > 0 {
+					proofTimes = append(proofTimes, proofReadyTime)
+				}
+			}
 		}
 	}
 	rm.roundMutex.Unlock()
-
-	if commitmentCount > 0 {
-		rm.logger.WithContext(ctx).Debug("Preparing commitment data before block storage",
-			"roundNumber", roundNumber,
-			"commitmentCount", commitmentCount,
-			"recordCount", pendingRecordCount)
-
-		// Note: Aggregator records are now stored during processBatch, not here
-		rm.logger.WithContext(ctx).Debug("Aggregator records already stored during batch processing",
-			"commitmentCount", commitmentCount)
-
-		markProcessedStart = time.Now()
-
-		if err := rm.commitmentQueue.MarkProcessed(ctx, ackEntries); err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to mark commitments as processed",
-				"error", err.Error(),
-				"blockNumber", block.Index.String())
-			return fmt.Errorf("failed to mark commitments as processed: %w", err)
-		}
-		markProcessedTime = time.Since(markProcessedStart)
-
-		rm.logger.WithContext(ctx).Info("Successfully prepared commitment data",
-			"count", commitmentCount,
-			"blockNumber", block.Index.String())
-	}
 
 	// Store the block first - before committing the snapshot
 	rm.logger.WithContext(ctx).Debug("Storing block in database",
@@ -359,6 +392,28 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 			"blockNumber", block.Index.String())
 	}
 
+	// After all data is safely persisted and snapshot committed, mark commitments processed
+	if len(ackEntries) > 0 {
+		rm.logger.WithContext(ctx).Debug("Marking commitments as processed",
+			"roundNumber", roundNumber,
+			"commitmentCount", len(ackEntries),
+			"recordCount", pendingRecordCount)
+
+		markProcessedStart = time.Now()
+
+		if err := rm.commitmentQueue.MarkProcessed(ctx, ackEntries); err != nil {
+			rm.logger.WithContext(ctx).Error("Failed to mark commitments as processed",
+				"error", err.Error(),
+				"blockNumber", block.Index.String())
+			return fmt.Errorf("failed to mark commitments as processed: %w", err)
+		}
+		markProcessedTime = time.Since(markProcessedStart)
+
+		rm.logger.WithContext(ctx).Info("Successfully marked commitments as processed",
+			"count", len(ackEntries),
+			"blockNumber", block.Index.String())
+	}
+
 	// Update current round with finalized block
 	rm.roundMutex.Lock()
 	if rm.currentRound != nil {
@@ -374,48 +429,76 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 
 	// Calculate actual finalization metrics
 	actualFinalizationTime := time.Since(finalizationStartTime)
+	finalizationWorkDuration := markProcessedTime + storeBlockTime + persistDataTime + commitSnapshotTime
 	var totalRoundTime time.Duration
 	var bftWaitTime time.Duration
-
 	if !proposalTime.IsZero() {
-		// Calculate time from proposal to actual finalization
 		bftWaitTime = finalizationStartTime.Sub(proposalTime)
-
-		// Update the average finalization time with the actual measurement
 		rm.avgFinalizationTime = (rm.avgFinalizationTime*4 + actualFinalizationTime + bftWaitTime) / 5
-
-		// Calculate total round time (processing + waiting for UC + finalization)
 		totalRoundTime = processingTime + bftWaitTime + actualFinalizationTime
-
-		rm.logger.WithContext(ctx).Debug("Finalization timing metrics",
-			"blockNumber", block.Index.String(),
-			"processingTime", processingTime,
-			"proposalToUCTime", bftWaitTime,
-			"finalizationTime", actualFinalizationTime,
-			"totalRoundTime", totalRoundTime,
-			"avgFinalizationTime", rm.avgFinalizationTime)
 	}
 
 	// Get commitment count for performance summary
 	rm.roundMutex.RLock()
 	commitmentCount = 0
+	proofWaitDuration := time.Duration(0)
 	if rm.currentRound != nil {
 		commitmentCount = len(rm.currentRound.Commitments)
+		proofWaitDuration = rm.currentRound.ProofWaitDuration
 	}
 	rm.roundMutex.RUnlock()
 
-	// Log comprehensive performance summary
-	rm.logger.WithContext(ctx).Info("PERF: Round completed",
-		"blockNumber", block.Index.String(),
+	if totalRoundTime == 0 {
+		totalRoundTime = processingTime + actualFinalizationTime
+	}
+
+	shortDur := func(d time.Duration) string {
+		if d <= 0 {
+			return "0ms"
+		}
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+
+	logFields := []interface{}{
+		"block", block.Index.String(),
 		"commitments", commitmentCount,
-		"totalRoundTime", totalRoundTime.String(),
-		"processingTime", processingTime.String(),
-		"bftWaitTime", bftWaitTime.String(),
-		"finalizationTime", actualFinalizationTime.String(),
-		"markProcessedTime", markProcessedTime.String(),
-		"storeBlockTime", storeBlockTime.String(),
-		"persistDataTime", persistDataTime.String(),
-		"commitSnapshotTime", commitSnapshotTime.String())
+		"roundTime", shortDur(totalRoundTime),
+		"processing", shortDur(processingTime),
+		"bftWait", shortDur(bftWaitTime),
+		"finalization", shortDur(finalizationWorkDuration),
+	}
+
+	if len(proofTimes) > 0 {
+		sorted := make([]time.Duration, len(proofTimes))
+		copy(sorted, proofTimes)
+		sort.Slice(sorted, func(i, j int) bool {
+			return sorted[i] < sorted[j]
+		})
+		median := sorted[len(sorted)/2]
+		p95 := sorted[len(sorted)*95/100]
+		p99 := sorted[len(sorted)*99/100]
+
+		logFields = append(logFields,
+			"proofReadyMedian", shortDur(median),
+			"proofReadyP95", shortDur(p95),
+			"proofReadyP99", shortDur(p99),
+		)
+	}
+
+	redisTotal, _ := rm.commitmentQueue.Count(ctx)
+	redisPending, _ := rm.commitmentQueue.CountUnprocessed(ctx)
+
+	logFields = append(logFields,
+		"redisTotal", redisTotal,
+		"redisPending", redisPending,
+	)
+	if proofWaitDuration > 0 {
+		logFields = append(logFields,
+			"proofWait", shortDur(proofWaitDuration),
+		)
+	}
+
+	rm.logger.WithContext(ctx).Info("PERF: Round completed", logFields...)
 
 	rm.logger.WithContext(ctx).Info("Block finalized and stored successfully",
 		"blockNumber", block.Index.String(),

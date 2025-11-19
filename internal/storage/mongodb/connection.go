@@ -7,6 +7,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
+	"go.mongodb.org/mongo-driver/mongo/writeconcern"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
@@ -39,6 +40,9 @@ func NewStorage(config config.Config) (*Storage, error) {
 		SetMaxPoolSize(cfg.MaxPoolSize).
 		SetMinPoolSize(cfg.MinPoolSize).
 		SetMaxConnIdleTime(cfg.MaxConnIdleTime)
+
+	// Use write concern W1 (primary acknowledged) for lower latency
+	clientOpts.SetWriteConcern(writeconcern.W1())
 
 	// Connect to MongoDB
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ConnectTimeout)

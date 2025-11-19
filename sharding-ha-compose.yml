@@ -207,6 +207,7 @@ services:
       LOG_FORMAT: "json"
       LOG_ENABLE_JSON: "true"
       BATCH_LIMIT: "1000"
+      COLLECT_PHASE_DURATION: "500ms"
       BFT_ENABLED: "false"
       BFT_KEY_CONF_FILE: "/app/bft-config/aggregator/keys.json"
       BFT_SHARD_CONF_FILE: "/app/bft-config/shard-conf-7_0.json"
@@ -217,7 +218,7 @@ services:
       REDIS_DB: "0"
       REDIS_POOL_SIZE: "100"
       REDIS_MIN_IDLE_CONNS: "10"
-      USE_REDIS_FOR_COMMITMENTS: "false"
+      USE_REDIS_FOR_COMMITMENTS: "true"
       REDIS_FLUSH_INTERVAL: "50ms"
       REDIS_MAX_BATCH_SIZE: "2000"
 
