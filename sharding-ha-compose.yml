@@ -280,6 +280,8 @@ services:
       dockerfile: Dockerfile
       network: host
     container_name: aggregator-shard1-1
+    ports:
+      - "3011:3000"
     restart: unless-stopped
     networks:
       - default
@@ -355,6 +357,8 @@ services:
   aggregator-shard1-2:
     <<: *aggregator-base
     container_name: aggregator-shard1-2
+    ports:
+      - "3012:3000"
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard1-1:27017,mongodb-shard1-2:27017,mongodb-shard1-3:27017/aggregator?replicaSet=rs1"
@@ -367,6 +371,8 @@ services:
   aggregator-shard2-1:
     <<: *aggregator-base
     container_name: aggregator-shard2-1
+    ports:
+      - "3021:3000"
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard2-1:27017,mongodb-shard2-2:27017,mongodb-shard2-3:27017/aggregator?replicaSet=rs2"
@@ -379,6 +385,8 @@ services:
   aggregator-shard2-2:
     <<: *aggregator-base
     container_name: aggregator-shard2-2
+    ports:
+      - "3022:3000"
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard2-1:27017,mongodb-shard2-2:27017,mongodb-shard2-3:27017/aggregator?replicaSet=rs2"
