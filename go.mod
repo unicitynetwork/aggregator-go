@@ -12,8 +12,8 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.39.0
 	github.com/testcontainers/testcontainers-go/modules/mongodb v0.39.0
-	github.com/unicitynetwork/bft-core v1.0.2-0.20251117135107-30bf0922e7b5
-	github.com/unicitynetwork/bft-go-base v1.0.3-0.20251112203336-a097536b79b7
+	github.com/unicitynetwork/bft-core v1.0.2-0.20251121141728-104fea8574ca
+	github.com/unicitynetwork/bft-go-base v1.0.3-0.20251121103642-687b17251388
 	go.mongodb.org/mongo-driver v1.17.4
 	go.opentelemetry.io/otel/metric v1.38.0
 	go.opentelemetry.io/otel/trace v1.38.0

@@ -20,22 +20,36 @@ func TestTrustBaseValidator(t *testing.T) {
 
 	t.Run("should verify a valid trust base", func(t *testing.T) {
 		// Create trust base for epoch 0
-		nodes := newRootNodes(t, 3)
-		trustBaseEpoch0, err := types.NewTrustBase(types.NetworkLocal, nodes,
+		rootNodes, signers := newRootNodes(t, 3)
+		trustBaseEpoch0, err := types.NewTrustBase(types.NetworkLocal, rootNodes,
 			types.WithEpoch(0),
 		)
 		require.NoError(t, err)
+		for nodeID, signer := range signers {
+			require.NoError(t, trustBaseEpoch0.Sign(nodeID, signer))
+		}
 
 		trustBaseEpoch0Hash, err := trustBaseEpoch0.Hash(crypto.SHA256)
 		require.NoError(t, err)
 
 		// Create trust base for epoch 1 with reference to epoch 0
-		trustBaseEpoch1, err := types.NewTrustBase(types.NetworkLocal, nodes,
+		rootNodes1, signers1 := newRootNodes(t, 3)
+		trustBaseEpoch1, err := types.NewTrustBase(types.NetworkLocal, rootNodes1,
 			types.WithEpoch(1),
 			types.WithEpochStart(1000),
 			types.WithPreviousTrustBaseHash(trustBaseEpoch0Hash),
 		)
 		require.NoError(t, err)
+
+		// sign by current epoch validators
+		for nodeID, signer := range signers1 {
+			require.NoError(t, trustBaseEpoch1.Sign(nodeID, signer))
+		}
+
+		// sign by previous epoch validators
+		for nodeID, signer := range signers {
+			require.NoError(t, trustBaseEpoch1.SignPrevious(nodeID, signer))
+		}
 
 		// Mock storage to return the previous trust base
 		storage := &mockStorage{
@@ -43,21 +57,23 @@ func TestTrustBaseValidator(t *testing.T) {
 				if epoch == 0 {
 					return trustBaseEpoch0, nil
 				}
+				if epoch == 1 {
+					return trustBaseEpoch1, nil
+				}
 				return nil, interfaces.ErrTrustBaseNotFound
 			},
 		}
 
-		validator = NewTrustBaseValidator(storage)
-
 		// Verify should succeed
-		err = validator.Verify(t.Context(), trustBaseEpoch1)
-		require.NoError(t, err)
+		validator = NewTrustBaseValidator(storage)
+		require.NoError(t, validator.Verify(t.Context(), trustBaseEpoch0))
+		require.NoError(t, validator.Verify(t.Context(), trustBaseEpoch1))
 	})
 
 	t.Run("should fail to verify trust base if previous trust base does not exist", func(t *testing.T) {
 		// Create trust base for epoch 1 without previous trust base
-		nodes := newRootNodes(t, 3)
-		trustBaseEpoch1, err := types.NewTrustBase(types.NetworkLocal, nodes,
+		rootNodes, _ := newRootNodes(t, 3)
+		trustBaseEpoch1, err := types.NewTrustBase(types.NetworkLocal, rootNodes,
 			types.WithEpoch(1),
 			types.WithEpochStart(1000),
 		)
@@ -84,14 +100,14 @@ func TestTrustBaseValidator(t *testing.T) {
 
 	t.Run("should fail to verify trust base if hash does not match", func(t *testing.T) {
 		// Create trust base for epoch 0
-		nodes := newRootNodes(t, 3)
-		trustBaseEpoch0, err := types.NewTrustBase(types.NetworkLocal, nodes,
+		rootNodes, _ := newRootNodes(t, 3)
+		trustBaseEpoch0, err := types.NewTrustBase(types.NetworkLocal, rootNodes,
 			types.WithEpoch(0),
 		)
 		require.NoError(t, err)
 
 		// Create trust base for epoch 1 with incorrect previous hash
-		trustBaseEpoch1, err := types.NewTrustBase(types.NetworkLocal, nodes,
+		trustBaseEpoch1, err := types.NewTrustBase(types.NetworkLocal, rootNodes,
 			types.WithEpoch(1),
 			types.WithEpochStart(1000),
 			types.WithPreviousTrustBaseHash([]byte("invalid previous root")),
@@ -116,8 +132,9 @@ func TestTrustBaseValidator(t *testing.T) {
 	})
 }
 
-func newRootNodes(t *testing.T, n int) []*types.NodeInfo {
-	var nodes []*types.NodeInfo
+func newRootNodes(t *testing.T, n int) ([]*types.NodeInfo, map[string]cryptobft.Signer) {
+	nodes := make([]*types.NodeInfo, 0, n)
+	signers := make(map[string]cryptobft.Signer, n)
 	for range n {
 		signer, err := cryptobft.NewInMemorySecp256K1Signer()
 		require.NoError(t, err)
@@ -136,8 +153,9 @@ func newRootNodes(t *testing.T, n int) []*types.NodeInfo {
 			SigKey: pubKeyBytes,
 			Stake:  1,
 		})
+		signers[peerID.String()] = signer
 	}
-	return nodes
+	return nodes, signers
 }
 
 type mockStorage struct {
