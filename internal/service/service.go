@@ -18,12 +18,12 @@ import (
 // Service defines the common interface that all service implementations must satisfy
 type Service interface {
 	// JSON-RPC methods
-	SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error)
+	CertificationRequest(ctx context.Context, req *api.CertificationRequest) (*api.CertificationResponse, error)
 	GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error)
 	GetNoDeletionProof(ctx context.Context) (*api.GetNoDeletionProofResponse, error)
 	GetBlockHeight(ctx context.Context) (*api.GetBlockHeightResponse, error)
 	GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error)
-	GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error)
+	GetBlockRecords(ctx context.Context, req *api.GetBlockRecords) (*api.GetBlockRecordsResponse, error)
 	GetHealthStatus(ctx context.Context) (*api.HealthStatus, error)
 
 	// Parent mode specific methods
@@ -55,13 +55,13 @@ func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, 
 
 // AggregatorService implements the business logic for the aggregator
 type AggregatorService struct {
-	config              *config.Config
-	logger              *logger.Logger
-	commitmentQueue     interfaces.CommitmentQueue
-	storage             interfaces.Storage
-	roundManager        round.Manager
-	leaderSelector      LeaderSelector
-	commitmentValidator *signing.CommitmentValidator
+	config                        *config.Config
+	logger                        *logger.Logger
+	commitmentQueue               interfaces.CommitmentQueue
+	storage                       interfaces.Storage
+	roundManager                  round.Manager
+	leaderSelector                LeaderSelector
+	certificationRequestValidator *signing.CertificationRequestValidator
 }
 
 type LeaderSelector interface {
@@ -72,13 +72,12 @@ type LeaderSelector interface {
 
 func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.AggregatorRecord {
 	return &api.AggregatorRecord{
-		RequestID:       modelRecord.RequestID,
-		TransactionHash: modelRecord.TransactionHash,
-		Authenticator: api.Authenticator{
-			Algorithm: modelRecord.Authenticator.Algorithm,
-			PublicKey: modelRecord.Authenticator.PublicKey,
-			Signature: modelRecord.Authenticator.Signature,
-			StateHash: api.StateHash(modelRecord.Authenticator.StateHash.String()),
+		StateID: modelRecord.StateID,
+		CertificationData: api.CertificationData{
+			PublicKey:       modelRecord.CertificationData.PublicKey,
+			Signature:       modelRecord.CertificationData.Signature,
+			SourceStateHash: modelRecord.CertificationData.SourceStateHash,
+			TransactionHash: modelRecord.CertificationData.TransactionHash,
 		},
 		AggregateRequestCount: modelRecord.AggregateRequestCount,
 		BlockNumber:           modelRecord.BlockNumber,
@@ -117,73 +116,68 @@ func modelToAPIHealthStatus(modelHealth *models.HealthStatus) *api.HealthStatus 
 // NewAggregatorService creates a new aggregator service
 func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManager round.Manager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) *AggregatorService {
 	return &AggregatorService{
-		config:              cfg,
-		logger:              logger,
-		commitmentQueue:     commitmentQueue,
-		storage:             storage,
-		roundManager:        roundManager,
-		leaderSelector:      leaderSelector,
-		commitmentValidator: signing.NewCommitmentValidator(cfg.Sharding),
+		config:                        cfg,
+		logger:                        logger,
+		commitmentQueue:               commitmentQueue,
+		storage:                       storage,
+		roundManager:                  roundManager,
+		leaderSelector:                leaderSelector,
+		certificationRequestValidator: signing.NewCertificationRequestValidator(cfg.Sharding),
 	}
 }
 
-// SubmitCommitment handles commitment submission
-func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error) {
-	// Create commitment with aggregate count
+// CertificationRequest handles certification request submission
+func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.CertificationRequest) (*api.CertificationResponse, error) {
+	// Create certificationRequest with aggregate count
 	aggregateCount := req.AggregateRequestCount
 	if aggregateCount == 0 {
 		aggregateCount = 1 // Default to 1 if not specified
 	}
 
-	commitment := models.NewCommitmentWithAggregate(
-		req.RequestID,
-		req.TransactionHash,
-		models.Authenticator{
-			Algorithm: req.Authenticator.Algorithm,
-			PublicKey: req.Authenticator.PublicKey,
-			Signature: req.Authenticator.Signature,
-			StateHash: req.Authenticator.StateHash,
-		},
-		aggregateCount,
-	)
+	certificationRequest := models.NewCertificationRequestWithAggregate(req.StateID, models.CertificationData{
+		PublicKey:       req.CertificationData.PublicKey,
+		Signature:       req.CertificationData.Signature,
+		SourceStateHash: req.CertificationData.SourceStateHash,
+		TransactionHash: req.CertificationData.TransactionHash,
+	}, aggregateCount)
 
-	// Validate commitment signature and request ID
-	validationResult := as.commitmentValidator.ValidateCommitment(commitment)
+	// Validate certificationRequest signature and state ID
+	validationResult := as.certificationRequestValidator.Validate(certificationRequest)
 	if validationResult.Status != signing.ValidationStatusSuccess {
 		errorMsg := ""
 		if validationResult.Error != nil {
 			errorMsg = validationResult.Error.Error()
 		}
-		as.logger.WithContext(ctx).Warn("Commitment validation failed",
-			"requestId", req.RequestID,
+		as.logger.WithContext(ctx).Warn("CertificationData validation failed",
+			"stateId", req.StateID,
 			"validationStatus", validationResult.Status.String(),
 			"error", errorMsg)
 
-		return &api.SubmitCommitmentResponse{
+		return &api.CertificationResponse{
 			Status: validationResult.Status.String(),
 		}, nil
 	}
 
-	// Check if commitment already processed
-	existingRecord, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, req.RequestID)
+	// Check if certificationRequest already processed
+	existingRecord, err := as.storage.AggregatorRecordStorage().GetByStateID(ctx, req.StateID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check existing aggregator record: %w", err)
 	}
 
 	if existingRecord != nil {
-		return &api.SubmitCommitmentResponse{
-			Status: "REQUEST_ID_EXISTS",
+		return &api.CertificationResponse{
+			Status: "STATE_ID_EXISTS",
 		}, nil
 	}
 
-	// Store commitment
-	if err := as.commitmentQueue.Store(ctx, commitment); err != nil {
-		return nil, fmt.Errorf("failed to store commitment: %w", err)
+	// Store certificationRequest
+	if err := as.commitmentQueue.Store(ctx, certificationRequest); err != nil {
+		return nil, fmt.Errorf("failed to store certificationRequest: %w", err)
 	}
 
-	as.logger.WithContext(ctx).Info("Commitment submitted successfully", "requestId", req.RequestID)
+	as.logger.WithContext(ctx).Info("CertificationData submitted successfully", "stateId", req.StateID)
 
-	response := &api.SubmitCommitmentResponse{
+	response := &api.CertificationResponse{
 		Status: "SUCCESS",
 	}
 
@@ -191,20 +185,19 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 	if req.Receipt != nil && *req.Receipt {
 		// TODO: Implement receipt generation with actual signing
 		//receipt := api.NewReceipt(
-		//	commitment.,
+		//	certificationRequest.,
 		//	"secp256k1",
 		//	api.HexBytes("mock_public_key"),
 		//	api.HexBytes("mock_signature"),
 		//)
 		// Convert to API receipt
 		response.Receipt = &api.Receipt{
-			Algorithm: "secp256k1",
 			PublicKey: api.HexBytes("mock_public_key"),
 			Signature: api.HexBytes("mock_signature"),
 			Request: api.ReceiptRequest{
-				RequestID:       commitment.RequestID,
-				TransactionHash: commitment.TransactionHash,
-				StateHash:       commitment.Authenticator.StateHash,
+				StateID:         certificationRequest.StateID,
+				SourceStateHash: certificationRequest.CertificationData.SourceStateHash,
+				TransactionHash: certificationRequest.CertificationData.TransactionHash,
 			},
 		}
 	}
@@ -214,18 +207,18 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 
 // GetInclusionProof retrieves inclusion proof for a commitment
 func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error) {
-	// verify that the request ID matches the shard ID of this aggregator
-	if err := as.commitmentValidator.ValidateShardID(req.RequestID); err != nil {
-		return nil, fmt.Errorf("request ID validation failed: %w", err)
+	// verify that the state ID matches the shard ID of this aggregator
+	if err := as.certificationRequestValidator.ValidateShardID(req.StateID); err != nil {
+		return nil, fmt.Errorf("state ID validation failed: %w", err)
 	}
 
-	path, err := req.RequestID.GetPath()
+	path, err := req.StateID.GetPath()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
+		return nil, fmt.Errorf("failed to get path for state ID %s: %w", req.StateID, err)
 	}
 	merkleTreePath, err := as.roundManager.GetSMT().GetPath(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get inclusion proof for request ID %s: %w", req.RequestID, err)
+		return nil, fmt.Errorf("failed to get inclusion proof for state ID %s: %w", req.StateID, err)
 	}
 
 	// Find the latest block that matches the current SMT root hash
@@ -249,8 +242,8 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		}
 	}
 
-	// First check if commitment exists in aggregator records (finalized)
-	record, err := as.storage.AggregatorRecordStorage().GetByRequestID(ctx, req.RequestID)
+	// First check if certification request exists in aggregator records (finalized)
+	record, err := as.storage.AggregatorRecordStorage().GetByStateID(ctx, req.StateID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get aggregator record: %w", err)
 	}
@@ -258,18 +251,16 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 		// Non-inclusion proof
 		return &api.GetInclusionProofResponse{
 			InclusionProof: &api.InclusionProof{
-				Authenticator:      nil,
+				CertificationData:  nil,
 				MerkleTreePath:     merkleTreePath,
-				TransactionHash:    nil,
 				UnicityCertificate: block.UnicityCertificate,
 			},
 		}, nil
 	}
 	return &api.GetInclusionProofResponse{
 		InclusionProof: &api.InclusionProof{
-			Authenticator:      record.Authenticator.ToAPI(),
+			CertificationData:  record.CertificationData.ToAPI(),
 			MerkleTreePath:     merkleTreePath,
-			TransactionHash:    &record.TransactionHash,
 			UnicityCertificate: block.UnicityCertificate,
 		},
 	}, nil
@@ -339,19 +330,19 @@ func (as *AggregatorService) GetBlock(ctx context.Context, req *api.GetBlockRequ
 		return nil, fmt.Errorf("failed to get block commitments: %w", err)
 	}
 
-	var totalCommitments uint64
+	var totalCount uint64
 	for _, record := range records {
-		totalCommitments += record.AggregateRequestCount
+		totalCount += record.AggregateRequestCount
 	}
 
 	return &api.GetBlockResponse{
-		Block:            modelToAPIBlock(block),
-		TotalCommitments: totalCommitments,
+		Block:      modelToAPIBlock(block),
+		TotalCount: totalCount,
 	}, nil
 }
 
-// GetBlockCommitments retrieves all commitments in a block
-func (as *AggregatorService) GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error) {
+// GetBlockRecords retrieves all commitments in a block
+func (as *AggregatorService) GetBlockRecords(ctx context.Context, req *api.GetBlockRecords) (*api.GetBlockRecordsResponse, error) {
 	records, err := as.storage.AggregatorRecordStorage().GetByBlockNumber(ctx, req.BlockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block commitments: %w", err)
@@ -363,8 +354,8 @@ func (as *AggregatorService) GetBlockCommitments(ctx context.Context, req *api.G
 		apiRecords[i] = modelToAPIAggregatorRecord(record)
 	}
 
-	return &api.GetBlockCommitmentsResponse{
-		Commitments: apiRecords,
+	return &api.GetBlockRecordsResponse{
+		AggregatorRecords: apiRecords,
 	}, nil
 }
 
@@ -409,18 +400,18 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 	if err != nil {
 		status.AddDetail("commitment_queue", "unknown")
 		status.AddDetail("commitment_queue_status", "error")
-		as.logger.WithContext(ctx).Error("Commitment queue health check failed", "error", err.Error())
+		as.logger.WithContext(ctx).Error("CertificationData queue health check failed", "error", err.Error())
 	} else {
 		status.AddDetail("commitment_queue", strconv.FormatInt(unprocessedCount, 10))
 
 		// Add warning if unprocessed count is concerning
 		if unprocessedCount > 10000 {
 			status.AddDetail("commitment_queue_status", "critical")
-			as.logger.WithContext(ctx).Error("Critical: High unprocessed commitment count",
+			as.logger.WithContext(ctx).Error("Critical: High unprocessed certification request count",
 				"count", unprocessedCount)
 		} else if unprocessedCount > 5000 {
 			status.AddDetail("commitment_queue_status", "warning")
-			as.logger.WithContext(ctx).Warn("Warning: Elevated unprocessed commitment count",
+			as.logger.WithContext(ctx).Warn("Warning: Elevated unprocessed certification request count",
 				"count", unprocessedCount)
 		} else {
 			status.AddDetail("commitment_queue_status", "healthy")

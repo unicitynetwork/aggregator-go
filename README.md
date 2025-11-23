@@ -16,7 +16,7 @@ The Unicity Aggregator implements a decentralized Agent-Aggregator communication
 - ✅ **JSON-RPC 2.0 API** - Complete implementation of all aggregator methods
 - ✅ **MongoDB Integration** - Efficient storage with proper indexing
 - ✅ **High Availability** - Leader election and distributed processing
-- ✅ **Signature Validation** - Full secp256k1 cryptographic validation for commitments
+- ✅ **Signature Validation** - Full secp256k1 cryptographic validation for certification requests
 - ✅ **SMT Integration** - Sparse Merkle Tree for inclusion proofs with TypeScript compatibility
 - ✅ **Round Management** - Automated 1-second block creation with batch processing
 - ✅ **DataHash Support** - Proper algorithm imprint format for SHA256 hashes
@@ -157,7 +157,7 @@ The service is configured via environment variables:
 ### Processing Configuration
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `BATCH_LIMIT` | Maximum number of commitments to process per batch | `1000` |
+| `BATCH_LIMIT` | Maximum number of certification requests to process per batch | `1000` |
 | `ROUND_DURATION` | Duration between block creation rounds | `1s` |
 
 ## API Endpoints
@@ -166,22 +166,21 @@ The service is configured via environment variables:
 
 All JSON-RPC requests should be sent as POST to `/` with `Content-Type: application/json`.
 
-#### `submit_commitment`
+#### `certification_request`
 Submit a state transition request to the aggregation layer with cryptographic validation.
 
 **Request:**
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "submit_commitment",
+  "method": "certification_request",
   "params": {
-    "requestId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122",
-    "transactionHash": "0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297",
-    "authenticator": {
-      "algorithm": "secp256k1",
+    "stateId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122",
+    "certificationData": {
       "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
       "signature": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
-      "stateHash": "0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647"
+      "sourceStateHash": "0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647",
+      "transactionHash": "0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297"
     },
     "receipt": true
   },
@@ -190,12 +189,11 @@ Submit a state transition request to the aggregation layer with cryptographic va
 ```
 
 **Field Specifications:**
-- `requestId`: 68-character hex string with "0000" SHA256 algorithm prefix (derived from publicKey + stateHash)
-- `transactionHash`: 68-character hex string with "0000" SHA256 algorithm prefix (DataHash imprint)
-- `authenticator.algorithm`: Currently supports "secp256k1"
-- `authenticator.publicKey`: 66-character hex string (33-byte compressed secp256k1 public key)
-- `authenticator.signature`: 130-character hex string (65-byte secp256k1 signature: 64 bytes + 1 recovery byte)
-- `authenticator.stateHash`: 68-character hex string with "0000" SHA256 algorithm prefix (DataHash imprint)
+- `stateId`: 68-character hex string with "0000" SHA256 algorithm prefix (derived from publicKey + sourceStateHash)
+- `certificationData.publicKey`: 66-character hex string (33-byte compressed secp256k1 public key)
+- `certificationData.signature`: 130-character hex string (65-byte secp256k1 signature: 64 bytes + 1 recovery byte)
+- `certificationData.sourceStateHash`: 68-character hex string with "0000" SHA256 algorithm prefix (DataHash imprint)
+- `certificationData.transactionHash`: 68-character hex string with "0000" SHA256 algorithm prefix (DataHash imprint)
 
 **Response:**
 ```json
@@ -204,15 +202,14 @@ Submit a state transition request to the aggregation layer with cryptographic va
   "result": {
     "status": "SUCCESS",
     "receipt": {
-      "algorithm": "secp256k1",
       "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
       "signature": "...",
       "request": {
         "service": "aggregator",
-        "method": "submit_commitment",
-        "requestId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122",
-        "transactionHash": "0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297",
-        "stateHash": "0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647"
+        "method": "certification_request",
+        "stateId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122",
+        "sourceStateHash": "0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647",
+        "transactionHash": "0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297"
       }
     }
   },
@@ -225,11 +222,10 @@ Submit a state transition request to the aggregation layer with cryptographic va
 - `INVALID_PUBLIC_KEY_FORMAT` - Invalid secp256k1 public key
 - `INVALID_SIGNATURE_FORMAT` - Invalid signature format or length
 - `SIGNATURE_VERIFICATION_FAILED` - Signature doesn't match transaction hash and public key
-- `REQUEST_ID_MISMATCH` - RequestID doesn't match SHA256(publicKey || stateHash)
-- `INVALID_STATE_HASH_FORMAT` - StateHash not in proper DataHash imprint format
+- `STATE_ID_MISMATCH` - StateID doesn't match SHA256(CBOR[sourceStateHash, publicKey])
+- `INVALID_SOURCE_STATE_HASH_FORMAT` - SourceStateHash not in proper DataHash imprint format
 - `INVALID_TRANSACTION_HASH_FORMAT` - TransactionHash not in proper DataHash imprint format
-- `INVALID_SHARD` - The commitment was sent to the wrong shard
-- `UNSUPPORTED_ALGORITHM` - Algorithm other than secp256k1
+- `INVALID_SHARD` - The certification request was sent to the wrong shard
 
 #### `get_inclusion_proof`
 Retrieve the Sparse Merkle Tree inclusion proof for a specific state transition request.
@@ -240,7 +236,7 @@ Retrieve the Sparse Merkle Tree inclusion proof for a specific state transition 
   "jsonrpc": "2.0",
   "method": "get_inclusion_proof",
   "params": {
-    "requestId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122"
+    "stateId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122"
   },
   "id": 2
 }
@@ -251,11 +247,11 @@ Retrieve the Sparse Merkle Tree inclusion proof for a specific state transition 
 {
   "jsonrpc":"2.0",
   "result":{
-    "authenticator":{
-      "algorithm":"secp256k1",
+    "certificationData":{
       "publicKey":"027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
       "signature":"65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
-      "stateHash":"0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647"
+      "sourceStateHash":"0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647",
+      "transactionHash":"0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297"
     },
     "merkleTreePath":{
       "root":"0000342d44bb4f43b2de5661cf3690254b95b49e46820b90f13fbe2798f428459ba4",
@@ -266,8 +262,7 @@ Retrieve the Sparse Merkle Tree inclusion proof for a specific state transition 
           "sibling":null
         }
       ]
-    },
-    "transactionHash":"0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297"
+    }
   },
   "id":2
 }
@@ -333,14 +328,14 @@ Retrieve detailed information about a specific block.
 }
 ```
 
-#### `get_block_commitments`
-Retrieve all commitments included in a specific block.
+#### `get_block_records`
+Retrieve all certification requests included in a specific block.
 
 **Request:**
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "get_block_commitments",
+  "method": "get_block_records",
   "params": {
     "blockNumber": "123"
   },
@@ -353,15 +348,14 @@ Retrieve all commitments included in a specific block.
 {
   "jsonrpc": "2.0",
   "result": {
-    "commitments": [
+    "aggregatorRecords": [
       {
-        "requestId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122",
-        "transactionHash": "0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297",
-        "authenticator": {
-          "algorithm": "secp256k1",
+        "stateId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122",
+        "certificationData": {
           "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
           "signature": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
-          "stateHash": "0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647"
+          "sourceStateHash": "0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647",
+          "transactionHash": "0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297"
         },
         "blockNumber": "123",
         "leafIndex": "0",
@@ -500,10 +494,10 @@ aggregator-go/
 The service creates and manages the following MongoDB collections:
 
 - **`commitments`** - Temporary storage for pending commitments
-- **`aggregator_records`** - Finalized commitment records with proofs
+- **`aggregator_records`** - Finalized certification request records with proofs
 - **`blocks`** - Blockchain blocks with metadata
 - **`smt_nodes`** - Sparse Merkle Tree leaf nodes
-- **`block_records`** - Block number to request ID mappings
+- **`block_records`** - Block number to state ID mappings
 - **`leadership`** - High availability leader election state
 
 All collections include proper indexes for efficient querying.
@@ -523,9 +517,9 @@ make performance-test-auth URL=http://localhost:8080 AUTH='Bearer supersecret'
 **Performance Test Features:**
 - ✅ **Cryptographically Valid Data** - Real secp256k1 key pairs and signatures
 - ✅ **Proper DataHash Format** - Correct algorithm imprints with "0000" SHA256 prefix
-- ✅ **Deterministic RequestIDs** - Calculated as SHA256(publicKey || stateHash)
+- ✅ **Deterministic StateIDs** - Calculated as SHA256(publicKey || sourceStateHash)
 - ✅ **High Concurrency** - Configurable worker count and request rate
-- ✅ **Block Monitoring** - Tracks commitments per block and throughput
+- ✅ **Block Monitoring** - Tracks certification requests per block and throughput
 - ✅ **Real-time Metrics** - Success rate, failure rate, and RPS tracking
 
 **Sample Output:**
@@ -564,19 +558,19 @@ The service implements a MongoDB-based leader election system:
 
 To support horizontal scaling, the aggregators can be run in a sharded configuration consisting of one parent aggregator 
 and multiple child aggregators. In this mode, the global Sparse Merkle Tree (SMT) is split across the child nodes, and 
-agents must submit their commitments to the correct child node.
+agents must submit their certification requests to the correct child node.
 
 For a more detailed technical explanation of the sharded SMT structure, please refer to the official specification:
 [https://github.com/unicitynetwork/specs/blob/main/smt.md](https://github.com/unicitynetwork/specs/blob/main/smt.md)
 
-### Commitment Routing
+### Certification Request Routing
 
-The commitments are assigned to a shard based on the least significant bits of their commitment identifier. The number of 
-bits used to determine the shard is defined by the `SHARD_ID_LENGTH` configuration.
+The requests are assigned to a shard based on the least significant bits of their state identifier. 
+The number of bits used to determine the shard is defined by the `SHARD_ID_LENGTH` configuration.
 
-For example `SHARD_ID_LENGTH: 1` means that the rightmost `1` bits of commitment identifier determines the correct 
-shard. In this case there would be 2 shards e.g. commitments ending with bit `0` would go to `shard-1`, and 
-commitments ending with bit `1` would go to the `shard-2`.
+For example `SHARD_ID_LENGTH: 1` means that the rightmost `1` bits of state identifier determines 
+the correct shard. In this case there would be 2 shards e.g. certification requests ending with bit `0` would go to 
+`shard-1`, and certification requests ending with bit `1` would go to the `shard-2`.
 
 In sharded setup only the parent aggregator talks to the BFT node.
 
@@ -589,8 +583,8 @@ Examples
 - For `SHARD_ID_LENGTH: 1` the valid `shardID`s are `0b10` (2) and `0b11` (3), for a total of two shards.
 - For `SHARD_ID_LENGTH: 2` the valid `shardID`s are `0b100` (4), `0b101` (5), `0b110` (6) and `0b111` (7), for a total of four shards.
 
-A child aggregator validates incoming commitments to ensure they belong to its shard. If a commitment is sent to the 
-wrong shard, the aggregator will reject it.
+A child aggregator validates incoming certification requests to ensure they belong to its shard. If a certification 
+request is sent to a wrong shard, the aggregator will reject it.
 
 ### Example Sharded Setup
 
@@ -612,7 +606,7 @@ The following diagram illustrates a sharded setup with one parent and two child 
         |                      |
 +----------------+     +----------------+
 | Agent sends    |     | Agent sends    |
-| commitment     |     | commitment     |
+| certification request     |     | certification request     |
 | ID = ...xxx0   |     | ID = ...xxx1   |
 +----------------+     +----------------+
 ```
@@ -669,7 +663,7 @@ The service implements comprehensive JSON-RPC 2.0 error codes:
 
 - **Connection Pooling**: Configurable MongoDB connection pool
 - **Concurrency Limiting**: Prevents resource exhaustion
-- **Request Correlation**: Efficient logging with request IDs
+- **Request Correlation**: Efficient logging with state IDs
 - **Graceful Shutdown**: Proper cleanup on termination
 - **Batch Operations**: Efficient database operations (when available)
 - **Asynchronous Logging**: Non-blocking log writes with configurable buffer size (enabled by default)
@@ -684,7 +678,7 @@ The service implements complete secp256k1 signature validation:
 
 - **✅ Public Key Validation** - Compressed 33-byte secp256k1 public keys
 - **✅ Signature Verification** - 65-byte signatures (64 bytes + recovery byte)
-- **✅ RequestID Validation** - Deterministic calculation: SHA256(publicKey || stateHash)
+- **✅ StateID Validation** - Deterministic calculation: SHA256(publicKey || sourceStateHash)
 - **✅ DataHash Support** - Algorithm imprint format with "0000" SHA256 prefix
 - **✅ Transaction Signing** - Signatures verified against transaction hash data
 
@@ -697,7 +691,7 @@ The service implements complete secp256k1 signature validation:
 1. **Algorithm Check** - Verify "secp256k1" algorithm support
 2. **Public Key Format** - Validate compressed secp256k1 public key (33 bytes)
 3. **State Hash Format** - Validate DataHash imprint with "0000" SHA256 prefix
-4. **RequestID Verification** - Ensure RequestID = SHA256(publicKey || stateHash)
+4. **StateID Verification** - Ensure StateID = SHA256(publicKey || sourceStateHash)
 5. **Signature Format** - Validate 65-byte signature length
 6. **Transaction Hash Format** - Validate DataHash imprint format
 7. **Signature Verification** - Cryptographically verify signature against transaction hash
@@ -706,7 +700,7 @@ The service implements complete secp256k1 signature validation:
 
 ### Round Management
 - **1-second rounds** - Automated block creation every second
-- **Batch processing** - Multiple commitments per block
+- **Batch processing** - Multiple certification requests per block
 - **Leader-only block creation** - High availability with single leader
 - **Graceful shutdown** - Proper cleanup of pending rounds
 

@@ -62,9 +62,9 @@ func (brs *BlockRecordsStorage) GetByBlockNumber(ctx context.Context, blockNumbe
 	return blockRecords, nil
 }
 
-// GetByRequestID retrieves the block number for a request ID
-func (brs *BlockRecordsStorage) GetByRequestID(ctx context.Context, requestID api.RequestID) (*api.BigInt, error) {
-	filter := bson.M{"requestIds": requestID.String()}
+// GetByStateID retrieves the block number for a state ID
+func (brs *BlockRecordsStorage) GetByStateID(ctx context.Context, stateID api.StateID) (*api.BigInt, error) {
+	filter := bson.M{"stateIds": stateID.String()}
 	opts := options.FindOne().SetProjection(bson.M{"blockNumber": 1})
 
 	var result struct {
@@ -76,7 +76,7 @@ func (brs *BlockRecordsStorage) GetByRequestID(ctx context.Context, requestID ap
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("failed to get block number by request ID: %w", err)
+		return nil, fmt.Errorf("failed to get block number by state ID: %w", err)
 	}
 
 	blockNumber, err := api.NewBigIntFromString(result.BlockNumber.String())
@@ -150,7 +150,7 @@ func (brs *BlockRecordsStorage) CreateIndexes(ctx context.Context) error {
 			Options: options.Index().SetUnique(true),
 		},
 		{
-			Keys: bson.D{{Key: "requestIds", Value: 1}},
+			Keys: bson.D{{Key: "stateIds", Value: 1}},
 		},
 		{
 			Keys: bson.D{{Key: "createdAt", Value: -1}},

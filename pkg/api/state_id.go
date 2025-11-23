@@ -6,20 +6,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-type RequestID = ImprintHexString
+type StateID = ImprintHexString
 
 // ImprintHexString represents a hex string (4 chars (two bytes) algorithm + n-byte chars hash)
 type ImprintHexString string
 
-func (r RequestID) GetPath() (*big.Int, error) {
-	// Converts RequestID hex string to a big.Int for use as an SMT path.
+func (r StateID) GetPath() (*big.Int, error) {
+	// Converts StateID hex string to a big.Int for use as an SMT path.
 	// Prefixes with "0x01" to preserve leading zero bits in the original hex string,
 	// ensuring consistent path representation in the Sparse Merkle Tree.
 	path, ok := new(big.Int).SetString("0x01"+string(r), 0)
 	if !ok {
-		return nil, fmt.Errorf("failed to convert requestID %s to path", r)
+		return nil, fmt.Errorf("failed to convert stateID %s to path", r)
 	}
 	return path, nil
 }
@@ -92,29 +94,38 @@ func (r *ImprintHexString) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// CreateRequestID creates a RequestID from public key and state hash
-func CreateRequestID(publicKey []byte, stateHash ImprintHexString) (RequestID, error) {
-	stateHashBytes, err := stateHash.Imprint()
+// CreateStateID creates a StateID from source state hash and public key
+func CreateStateID(sourceStateHash SourceStateHash, publicKey HexBytes) (StateID, error) {
+	sourceStateHashImprint, err := sourceStateHash.Imprint()
 	if err != nil {
-		return "", fmt.Errorf("failed to convert state hash to bytes: %w", err)
+		return "", fmt.Errorf("failed to convert source state hash imprint to bytes: %w", err)
 	}
-	return CreateRequestIDFromBytes(publicKey, stateHashBytes)
+	return CreateStateIDFromImprint(sourceStateHashImprint, publicKey)
 }
 
-func CreateRequestIDFromBytes(publicKey []byte, stateHashBytes []byte) (RequestID, error) {
-	// Create the data to hash: publicKey + stateHash
-	data := make([]byte, 0, len(publicKey)+len(stateHashBytes))
-	data = append(data, publicKey...)
-	data = append(data, stateHashBytes...)
-
-	return NewImprintHexString(fmt.Sprintf("0000%x", sha256.Sum256(data)))
+// CreateStateIDFromImprint creates a StateID from source state hash imprint and public key bytes
+func CreateStateIDFromImprint(sourceStateHashImprint []byte, publicKey []byte) (StateID, error) {
+	hasher := StateIDHashData{
+		SourceStateHashImprint: sourceStateHashImprint,
+		PublicKey:              publicKey,
+	}
+	cborBytes, err := types.Cbor.Marshal(hasher)
+	if err != nil {
+		return "", fmt.Errorf("failed to cbor marshal state id bytes: %w", err)
+	}
+	return NewImprintHexString(fmt.Sprintf("0000%x", sha256.Sum256(cborBytes)))
 }
 
-func ValidateRequestID(requestID RequestID, publicKey []byte, stateHashBytes []byte) (bool, error) {
-	expectedRequestID, err := CreateRequestIDFromBytes(publicKey, stateHashBytes)
+func ValidateStateID(stateID StateID, sourceStateHashImprint []byte, publicKey []byte) (bool, error) {
+	expectedStateID, err := CreateStateIDFromImprint(sourceStateHashImprint, publicKey)
 	if err != nil {
 		return false, err
 	}
+	return stateID == expectedStateID, nil
+}
 
-	return requestID == expectedRequestID, nil
+type StateIDHashData struct {
+	_                      struct{} `cbor:",toarray"`
+	SourceStateHashImprint []byte
+	PublicKey              []byte
 }

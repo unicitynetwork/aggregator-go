@@ -16,7 +16,7 @@ import (
 
 // processMiniBatch processes a small batch of commitments into the SMT for efficiency
 // NOTE: The caller is expected to hold rm.roundMutex when calling this function
-func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.Commitment) error {
+func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.CertificationRequest) error {
 	if len(commitments) == 0 {
 		return nil
 	}
@@ -24,20 +24,20 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 	// Convert commitments to SMT leaves
 	leaves := make([]*smt.Leaf, 0, len(commitments))
 	for _, commitment := range commitments {
-		// Generate leaf path from requestID
-		path, err := commitment.RequestID.GetPath()
+		// Generate leaf path from stateID
+		path, err := commitment.StateID.GetPath()
 		if err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
-				"requestID", commitment.RequestID.String(),
+				"stateID", commitment.StateID.String(),
 				"error", err.Error())
 			continue
 		}
 
-		// Create leaf value (hash of commitment data)
+		// Create leaf value (hash of certification request data)
 		leafValue, err := commitment.CreateLeafValue()
 		if err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to create leaf value",
-				"requestID", commitment.RequestID.String(),
+				"stateID", commitment.StateID.String(),
 				"error", err.Error())
 			continue
 		}
@@ -229,13 +229,13 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	}
 	rm.roundMutex.Unlock()
 
-	// CRITICAL: Store all commitment data BEFORE storing the block to prevent race conditions
+	// CRITICAL: Store all certification request data BEFORE storing the block to prevent race conditions
 	// where API returns partial block data
 
-	// First, collect all request IDs and stream metadata that will be in this block
+	// First, collect all state IDs and stream metadata that will be in this block
 	rm.roundMutex.Lock()
-	requestIds := make([]api.RequestID, 0)
-	ackEntries := make([]interfaces.CommitmentAck, 0)
+	stateIds := make([]api.StateID, 0)
+	ackEntries := make([]interfaces.CertificationRequestAck, 0)
 	pendingRecordCount := 0
 	roundNumber := block.Index.String()
 
@@ -246,18 +246,18 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		commitmentCount = len(rm.currentRound.Commitments)
 		pendingRecordCount = len(rm.currentRound.PendingRecords)
 
-		requestIds = make([]api.RequestID, commitmentCount)
-		ackEntries = make([]interfaces.CommitmentAck, commitmentCount)
+		stateIds = make([]api.StateID, commitmentCount)
+		ackEntries = make([]interfaces.CertificationRequestAck, commitmentCount)
 
 		for i, commitment := range rm.currentRound.Commitments {
-			requestIds[i] = commitment.RequestID
-			ackEntries[i] = interfaces.CommitmentAck{RequestID: commitment.RequestID, StreamID: commitment.StreamID}
+			stateIds[i] = commitment.StateID
+			ackEntries[i] = interfaces.CertificationRequestAck{StateID: commitment.StateID, StreamID: commitment.StreamID}
 		}
 	}
 	rm.roundMutex.Unlock()
 
 	if commitmentCount > 0 {
-		rm.logger.WithContext(ctx).Debug("Preparing commitment data before block storage",
+		rm.logger.WithContext(ctx).Debug("Preparing certification request data before block storage",
 			"roundNumber", roundNumber,
 			"commitmentCount", commitmentCount,
 			"recordCount", pendingRecordCount)
@@ -276,7 +276,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		}
 		markProcessedTime = time.Since(markProcessedStart)
 
-		rm.logger.WithContext(ctx).Info("Successfully prepared commitment data",
+		rm.logger.WithContext(ctx).Info("Successfully prepared certification request data",
 			"count", commitmentCount,
 			"blockNumber", block.Index.String())
 	}
@@ -294,7 +294,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	}
 
 	// Store block records mapping
-	if err := rm.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds)); err != nil {
+	if err := rm.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, stateIds)); err != nil {
 		return fmt.Errorf("failed to store block record: %w", err)
 	}
 	storeBlockTime = time.Since(storeBlockStart)
@@ -302,7 +302,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	// Now that block is stored with unicity certificate, persist SMT nodes and aggregator records
 	rm.roundMutex.Lock()
 	var pendingLeaves []*smt.Leaf
-	var commitments []*models.Commitment
+	var commitments []*models.CertificationRequest
 	snapshot := rm.currentRound.Snapshot
 	if rm.currentRound != nil {
 		pendingLeaves = rm.currentRound.PendingLeaves
@@ -396,7 +396,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 			"avgFinalizationTime", rm.avgFinalizationTime)
 	}
 
-	// Get commitment count for performance summary
+	// Get certification request count for performance summary
 	rm.roundMutex.RLock()
 	commitmentCount = 0
 	if rm.currentRound != nil {
@@ -454,7 +454,7 @@ func (rm *RoundManager) persistSmtNodes(ctx context.Context, leaves []*smt.Leaf)
 }
 
 // persistAggregatorRecords generates aggregator records and stores them to database
-func (rm *RoundManager) persistAggregatorRecords(ctx context.Context, commitments []*models.Commitment, blockIndex *api.BigInt) error {
+func (rm *RoundManager) persistAggregatorRecords(ctx context.Context, commitments []*models.CertificationRequest, blockIndex *api.BigInt) error {
 	if len(commitments) == 0 {
 		return nil
 	}

@@ -27,7 +27,7 @@ type PathVerificationResult struct {
 	Result       bool
 }
 
-func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, error) {
+func (m *MerkleTreePath) Verify(stateID *big.Int) (*PathVerificationResult, error) {
 	// Extract the algorithm identifier from the root hash imprint
 	if len(m.Root) < 4 {
 		return nil, fmt.Errorf("invalid root hash format")
@@ -117,7 +117,7 @@ func (m *MerkleTreePath) Verify(requestId *big.Int) (*PathVerificationResult, er
 	}
 
 	pathValid := currentData != nil && m.Root == NewDataHash(hasher.algorithm, *currentData).ToHex()
-	pathIncluded := currentPath != nil && requestId.Cmp(currentPath) == 0
+	pathIncluded := currentPath != nil && stateID.Cmp(currentPath) == 0
 
 	return &PathVerificationResult{
 		PathValid:    pathValid,

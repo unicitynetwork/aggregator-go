@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
@@ -12,8 +13,8 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-// createTestCommitment creates a valid commitment for testing purposes
-func createTestCommitment() *models.Commitment {
+// createTestCommitment creates a valid certification request for testing purposes
+func createTestCommitment() *models.CertificationRequest {
 	// Generate a real secp256k1 key pair
 	privateKey, err := btcec.NewPrivateKey()
 	if err != nil {
@@ -24,51 +25,60 @@ func createTestCommitment() *models.Commitment {
 	// Generate random state data
 	stateData := make([]byte, 32)
 	rand.Read(stateData)
-	stateHashImprint := signing.CreateDataHashImprint(stateData)
-
-	// Create RequestID deterministically like the performance test
-	requestID, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
+	sourceStateHash := signing.CreateDataHashImprint(stateData)
+	sourceStateHashImprint, err := sourceStateHash.Imprint()
 	if err != nil {
-		panic(fmt.Sprintf("Failed to create request ID: %v", err))
+		panic(fmt.Sprintf("Failed to create source state imprint: %v", err))
+	}
+
+	// Create StateID deterministically like the performance test
+	stateID, err := api.CreateStateID(sourceStateHash, publicKeyBytes)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to create state ID: %v", err))
 	}
 
 	// Generate transaction data
 	transactionData := make([]byte, 32)
 	rand.Read(transactionData)
-	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
-
-	// Extract transaction hash bytes for signing
-	transactionHashBytes, err := transactionHashImprint.DataBytes()
+	transactionHash := signing.CreateDataHashImprint(transactionData)
+	transactionHashImprint, err := transactionHash.Imprint()
 	if err != nil {
 		panic(fmt.Sprintf("Failed to extract transaction hash: %v", err))
 	}
 
-	// Sign the transaction hash bytes
+	// Sign the transaction
 	signingService := signing.NewSigningService()
-	signatureBytes, err := signingService.SignHash(transactionHashBytes, privateKey.Serialize())
+	sigData := api.SigHashData{
+		SourceStateHashImprint: sourceStateHashImprint,
+		TransactionHashImprint: transactionHashImprint,
+	}
+	sigDataCBOR, err := types.Cbor.Marshal(sigData)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to encode signature data: %v", err))
+	}
+	signatureBytes, err := signingService.Sign(sigDataCBOR, privateKey.Serialize())
 	if err != nil {
 		panic(fmt.Sprintf("Failed to sign transaction: %v", err))
 	}
 
-	return &models.Commitment{
-		RequestID: api.RequestID(requestID),
-		Authenticator: models.Authenticator{
-			Algorithm: "secp256k1",
-			PublicKey: api.NewHexBytes(publicKeyBytes),
-			Signature: api.NewHexBytes(signatureBytes),
-			StateHash: api.StateHash(stateHashImprint),
+	return &models.CertificationRequest{
+		StateID: stateID,
+		CertificationData: models.CertificationData{
+			PublicKey:       api.NewHexBytes(publicKeyBytes),
+			Signature:       api.NewHexBytes(signatureBytes),
+			SourceStateHash: sourceStateHash,
+			TransactionHash: transactionHash,
 		},
-		TransactionHash:       api.TransactionHash(transactionHashImprint),
 		AggregateRequestCount: 1,
 	}
 }
 
-func toAckEntries(commitments []*models.Commitment) []interfaces.CommitmentAck {
-	acks := make([]interfaces.CommitmentAck, len(commitments))
+func toAckEntries(commitments []*models.CertificationRequest) []interfaces.CertificationRequestAck {
+	acks := make([]interfaces.CertificationRequestAck, len(commitments))
 	for i, commitment := range commitments {
-		acks[i] = interfaces.CommitmentAck{
-			RequestID: commitment.RequestID,
-			StreamID:  commitment.StreamID,
+		acks[i] = interfaces.CertificationRequestAck{
+			StateID:  commitment.StateID,
+			StreamID: commitment.StreamID,
 		}
 	}
 	return acks

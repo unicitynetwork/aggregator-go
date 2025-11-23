@@ -10,24 +10,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRequestID_CreateAndSerialize(t *testing.T) {
-
-	t.Run("should create RequestID with exact TypeScript compatibility", func(t *testing.T) {
+func TestStateID_CreateAndSerialize(t *testing.T) {
+	t.Run("should create StateID with exact TypeScript compatibility", func(t *testing.T) {
 		// Create 20-byte public key (all zeros)
 		publicKey := make([]byte, 20)
 
 		// Create 34-byte state hash (DataHash.fromImprint with all zeros)
-		stateHashBytes := make([]byte, 34)
-		stateHash, err := NewImprintHexString(fmt.Sprintf("%x", stateHashBytes))
+		sourceStateHashBytes := make([]byte, 34)
+		sourceStateHash, err := NewImprintHexString(fmt.Sprintf("%x", sourceStateHashBytes))
 		require.NoError(t, err)
 
-		// Create RequestID
-		requestID, err := CreateRequestID(publicKey, stateHash)
+		// Create StateID
+		stateID, err := CreateStateID(sourceStateHash, publicKey)
 		require.NoError(t, err)
 
 		// Test JSON serialization matches TypeScript
-		expectedJSON := "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"
-		jsonBytes, err := json.Marshal(requestID)
+		expectedJSON := "0000c2db43b488c83f1000ef6e6fb9d12fba5e1423cefd1909d5eb2018d3855a9323"
+		jsonBytes, err := json.Marshal(stateID)
 		require.NoError(t, err)
 
 		var jsonStr string
@@ -36,22 +35,22 @@ func TestRequestID_CreateAndSerialize(t *testing.T) {
 		assert.Equal(t, expectedJSON, jsonStr)
 
 		// Test that we can deserialize back
-		var deserializedRequestID RequestID
-		err = json.Unmarshal(jsonBytes, &deserializedRequestID)
+		var deserializedStateID StateID
+		err = json.Unmarshal(jsonBytes, &deserializedStateID)
 		require.NoError(t, err)
-		assert.Equal(t, requestID, deserializedRequestID)
+		assert.Equal(t, stateID, deserializedStateID)
 
 		// Test string representation
-		assert.Equal(t, expectedJSON, requestID.String())
-		assert.Len(t, requestID.String(), 68) // Must be 68 characters (4 algorithm + 64 hash)
+		assert.Equal(t, expectedJSON, stateID.String())
+		assert.Len(t, stateID.String(), 68) // Must be 68 characters (4 algorithm + 64 hash)
 	})
 
 	t.Run("should validate hex format", func(t *testing.T) {
 		// Valid 68-character hex string
 		validHex := "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"
-		requestID, err := NewImprintHexString(validHex)
+		stateID, err := NewImprintHexString(validHex)
 		require.NoError(t, err)
-		assert.Equal(t, validHex, requestID.String())
+		assert.Equal(t, validHex, stateID.String())
 
 		// Invalid length
 		_, err = NewImprintHexString("inv")
@@ -66,16 +65,16 @@ func TestRequestID_CreateAndSerialize(t *testing.T) {
 	})
 
 	t.Run("should convert to bytes correctly", func(t *testing.T) {
-		requestIDStr := "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"
-		requestID, err := NewImprintHexString(requestIDStr)
+		stateIDStr := "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"
+		stateID, err := NewImprintHexString(stateIDStr)
 		require.NoError(t, err)
 
-		bytes, err := requestID.Imprint()
+		bytes, err := stateID.Imprint()
 		require.NoError(t, err)
 		assert.Len(t, bytes, 34) // 68 hex chars = 34 bytes
 
 		// Convert back to hex and verify
 		hexStr := hex.EncodeToString(bytes)
-		assert.Equal(t, requestIDStr, hexStr)
+		assert.Equal(t, stateIDStr, hexStr)
 	})
 }

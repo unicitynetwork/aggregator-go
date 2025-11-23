@@ -55,17 +55,17 @@ func TestBlockSync(t *testing.T) {
 
 func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage) api.HexBytes {
 	blockNumber := api.NewBigInt(big.NewInt(1))
-	testCommitments := []*models.Commitment{
-		testutil.CreateTestCommitment(t, "request_1"),
-		testutil.CreateTestCommitment(t, "request_2"),
-		testutil.CreateTestCommitment(t, "request_3"),
+	requests := []*models.CertificationRequest{
+		testutil.CreateTestCertificationRequest(t, "request_1"),
+		testutil.CreateTestCertificationRequest(t, "request_2"),
+		testutil.CreateTestCertificationRequest(t, "request_3"),
 	}
 
 	// persist aggregator records
-	leaves := make([]*smt.Leaf, len(testCommitments))
-	records := make([]*models.AggregatorRecord, len(testCommitments))
-	for i, c := range testCommitments {
-		path, err := c.RequestID.GetPath()
+	leaves := make([]*smt.Leaf, len(requests))
+	records := make([]*models.AggregatorRecord, len(requests))
+	for i, c := range requests {
+		path, err := c.StateID.GetPath()
 		require.NoError(t, err)
 
 		val, err := c.CreateLeafValue()
@@ -98,12 +98,12 @@ func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage) ap
 	err = storage.BlockStorage().Store(ctx, block)
 	require.NoError(t, err)
 
-	// persist block records (mapping request IDs)
-	reqIDs := make([]api.RequestID, len(testCommitments))
-	for i, c := range testCommitments {
-		reqIDs[i] = c.RequestID
+	// persist block records (mapping state IDs)
+	stateIDs := make([]api.StateID, len(requests))
+	for i, c := range requests {
+		stateIDs[i] = c.StateID
 	}
-	blockRecords := models.NewBlockRecords(blockNumber, reqIDs)
+	blockRecords := models.NewBlockRecords(blockNumber, stateIDs)
 	err = storage.BlockRecordsStorage().Store(ctx, blockRecords)
 	require.NoError(t, err)
 

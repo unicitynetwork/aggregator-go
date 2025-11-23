@@ -10,26 +10,26 @@ import (
 
 // JSON-RPC method handlers
 
-// handleSubmitCommitment handles the submit_commitment method
-func (s *Server) handleSubmitCommitment(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
-	var req api.SubmitCommitmentRequest
+// handleCertificationRequest handles the certification_request method
+func (s *Server) handleCertificationRequest(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
+	var req api.CertificationRequest
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
 	}
 
 	// Validate required fields
-	if req.RequestID == "" {
-		return nil, jsonrpc.NewValidationError("requestId is required")
+	if req.StateID == "" {
+		return nil, jsonrpc.NewValidationError("stateId is required")
 	}
-	if req.TransactionHash == "" {
+	if req.CertificationData.TransactionHash == "" {
 		return nil, jsonrpc.NewValidationError("transactionHash is required")
 	}
 
 	// Call service
-	response, err := s.service.SubmitCommitment(ctx, &req)
+	response, err := s.service.CertificationRequest(ctx, &req)
 	if err != nil {
-		s.logger.WithContext(ctx).Error("Failed to submit commitment", "error", err.Error())
-		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to submit commitment", err.Error())
+		s.logger.WithContext(ctx).Error("Failed to submit certification request", "error", err.Error())
+		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to submit certification request", err.Error())
 	}
 
 	return response, nil
@@ -43,8 +43,8 @@ func (s *Server) handleGetInclusionProof(ctx context.Context, params json.RawMes
 	}
 
 	// Validate required fields
-	if req.RequestID == "" {
-		return nil, jsonrpc.NewValidationError("requestId is required")
+	if req.StateID == "" {
+		return nil, jsonrpc.NewValidationError("stateId is required")
 	}
 
 	// Call service
@@ -98,9 +98,9 @@ func (s *Server) handleGetBlock(ctx context.Context, params json.RawMessage) (in
 	return response, nil
 }
 
-// handleGetBlockCommitments handles the get_block_commitments method
-func (s *Server) handleGetBlockCommitments(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
-	var req api.GetBlockCommitmentsRequest
+// handleGetBlockRecords handles the get_block_records method
+func (s *Server) handleGetBlockRecords(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
+	var req api.GetBlockRecords
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
 	}
@@ -111,10 +111,10 @@ func (s *Server) handleGetBlockCommitments(ctx context.Context, params json.RawM
 	}
 
 	// Call service
-	response, err := s.service.GetBlockCommitments(ctx, &req)
+	response, err := s.service.GetBlockRecords(ctx, &req)
 	if err != nil {
-		s.logger.WithContext(ctx).Error("Failed to get block commitments", "error", err.Error())
-		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to get block commitments", err.Error())
+		s.logger.WithContext(ctx).Error("Failed to get block records", "error", err.Error())
+		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to get block records", err.Error())
 	}
 
 	return response, nil

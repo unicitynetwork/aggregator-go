@@ -2,15 +2,13 @@ package signing
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
-)
 
-// Algorithm constants
-const (
-	AlgorithmSecp256k1 = "secp256k1"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // SigningService provides cryptographic signing and verification operations
@@ -28,7 +26,7 @@ func (s *SigningService) Sign(data []byte, privateKey []byte) ([]byte, error) {
 	return s.SignHash(hash[:], privateKey)
 }
 
-// convertBtcecToUnicity converts a signature from btcec's [V || R || S] format 
+// convertBtcecToUnicity converts a signature from btcec's [V || R || S] format
 // to Unicity's [R || S || V] format
 func convertBtcecToUnicity(compactSig []byte) []byte {
 	// For compressed keys, btcec's V is 31-34. We normalize it to 0 or 1.
@@ -60,6 +58,23 @@ func convertUnicityToBtcec(signature []byte) []byte {
 	return compactSig
 }
 
+// SignCertData signs the given certification request data and stores the signature to the Signature field.
+func (s *SigningService) SignCertData(certData *api.CertificationData, privateKey []byte) error {
+	if certData == nil {
+		return errors.New("certification data is nil")
+	}
+	sigBytes, err := certData.SigBytes()
+	if err != nil {
+		return fmt.Errorf("failed to generate signature bytes: %w", err)
+	}
+	sig, err := s.SignHash(sigBytes, privateKey)
+	if err != nil {
+		return fmt.Errorf("error generating signature: %w", err)
+	}
+	certData.Signature = sig
+	return nil
+}
+
 // SignHash signs the given hash with the private key and returns the signature
 func (s *SigningService) SignHash(dataHash []byte, privateKey []byte) ([]byte, error) {
 	if len(privateKey) != 32 {
@@ -69,7 +84,7 @@ func (s *SigningService) SignHash(dataHash []byte, privateKey []byte) ([]byte, e
 	// Create private key object
 	privKey, _ := btcec.PrivKeyFromBytes(privateKey)
 
-	// Sign the hash  
+	// Sign the hash
 	compactSig := ecdsa.SignCompact(privKey, dataHash, true) // true for compressed public key recovery
 
 	// Convert from btcec's [V || R || S] format to Unicity's [R || S || V] format

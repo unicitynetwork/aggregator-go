@@ -27,12 +27,12 @@ The service provides **executable** interactive API documentation accessible at 
 
 ### Core Methods
 
-1. **`submit_commitment`** - Submit state transition requests
+1. **`certification_request`** - Submit state transition requests
 2. **`get_inclusion_proof`** - Retrieve inclusion proofs for commitments
 3. **`get_no_deletion_proof`** - Get global no-deletion proofs
 4. **`get_block_height`** - Get current blockchain height
 5. **`get_block`** - Retrieve block information
-6. **`get_block_commitments`** - Get all commitments in a block
+6. **`get_block_records`** - Get all certification requests in a block
 
 ### Infrastructure Endpoints
 
@@ -101,20 +101,19 @@ The executable documentation at `/docs` provides multiple ways to test the API:
 ### Manual Testing
 
 ```bash
-# Test submit_commitment
+# Test certification_request
 curl -X POST http://localhost:3333/ \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
-    "method": "submit_commitment",
+    "method": "certification_request",
     "params": {
-      "requestId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122",
-      "transactionHash": "0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297",
-      "authenticator": {
-        "algorithm": "secp256k1",
+      "stateId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122",
+      "certificationData": {
         "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
         "signature": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
-        "stateHash": "0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647"
+        "sourceStateHash": "0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647",
+        "transactionHash": "0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297"
       },
       "receipt": true
     },

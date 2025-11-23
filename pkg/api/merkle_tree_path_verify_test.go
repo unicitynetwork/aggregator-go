@@ -142,7 +142,7 @@ func TestMerkleTreePathVerify(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, path)
 
-		// When we verify this path with requestId 999:
+		// When we verify this path with stateId 999:
 		// - PathIncluded should be false (999 is not in the tree)
 		// - PathValid should be true (the path is cryptographically valid)
 		result, err := path.Verify(big.NewInt(999))
@@ -165,12 +165,12 @@ func TestMerkleTreePathVerify(t *testing.T) {
 		path5, err := tree.GetPath(big.NewInt(0x1000 + 5))
 		require.NoError(t, err)
 
-		// Try to verify with wrong requestId
+		// Try to verify with wrong stateId
 		result, err := path5.Verify(big.NewInt(0x1000 + 15))
 		require.NoError(t, err)
-		// The verification checks if the path can be reconstructed to match the requestId
-		// Since we're using path for 5 with requestId 15, PathIncluded should be false
-		require.False(t, result.PathIncluded, "Path for 5 should not include requestId 15")
+		// The verification checks if the path can be reconstructed to match the stateId
+		// Since we're using path for 5 with stateId 15, PathIncluded should be false
+		require.False(t, result.PathIncluded, "Path for 5 should not include stateId 15")
 		// PathValid checks cryptographic validity which should still be true
 		require.True(t, result.PathValid, "Path should still be cryptographically valid")
 	})
@@ -211,20 +211,20 @@ func TestMerkleTreePathVerify(t *testing.T) {
 		}
 	})
 
-	t.Run("RealRequestIDs", func(t *testing.T) {
-		// Test with actual requestID format (34-byte with algorithm prefix)
+	t.Run("RealStateIDs", func(t *testing.T) {
+		// Test with actual stateID format (34-byte with algorithm prefix)
 		tree := smt.NewSparseMerkleTree(api.SHA256, 16+256)
 
-		// Create requestIDs with proper format
-		requestID1 := "00007d535ade796772c5088b095e79a18e282437ee8d8238f5aa9d9c61694948ba9e"
-		requestID2 := "00006478ca42f6949cfbd4b9e4a41b9a384ea78261c1776808da70cf21e98c345700"
+		// Create stateIDs with proper format
+		stateID1 := "00007d535ade796772c5088b095e79a18e282437ee8d8238f5aa9d9c61694948ba9e"
+		stateID2 := "00006478ca42f6949cfbd4b9e4a41b9a384ea78261c1776808da70cf21e98c345700"
 
-		req1, err := api.NewImprintHexString(requestID1)
+		req1, err := api.NewImprintHexString(stateID1)
 		require.NoError(t, err)
 		path1, err := req1.GetPath()
 		require.NoError(t, err)
 
-		req2, err := api.NewImprintHexString(requestID2)
+		req2, err := api.NewImprintHexString(stateID2)
 		require.NoError(t, err)
 		path2, err := req2.GetPath()
 		require.NoError(t, err)
@@ -243,14 +243,14 @@ func TestMerkleTreePathVerify(t *testing.T) {
 		result1, err := treePath1.Verify(path1)
 		require.NoError(t, err)
 		require.True(t, result1.PathIncluded && result1.PathValid,
-			"RequestID1 path should be valid")
+			"StateID1 path should be valid")
 
 		treePath2, err := tree.GetPath(path2)
 		require.NoError(t, err)
 		result2, err := treePath2.Verify(path2)
 		require.NoError(t, err)
 		require.True(t, result2.PathIncluded && result2.PathValid,
-			"RequestID2 path should be valid")
+			"StateID2 path should be valid")
 	})
 
 	t.Run("ConsistencyAfterMultipleAdds", func(t *testing.T) {

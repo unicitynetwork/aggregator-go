@@ -10,49 +10,9 @@ import (
 )
 
 // Basic types for API
-type StateHash = ImprintHexString
+type SourceStateHash = ImprintHexString
 type TransactionHash = ImprintHexString
 type ShardID = int
-
-// Authenticator represents the authentication data for a commitment
-type Authenticator struct {
-	Algorithm string    `json:"algorithm"` // Algorithm used for signing
-	PublicKey HexBytes  `json:"publicKey"`
-	Signature HexBytes  `json:"signature"`
-	StateHash StateHash `json:"stateHash"`
-}
-
-// Commitment represents a state transition request
-type Commitment struct {
-	RequestID             RequestID       `json:"requestId"`
-	TransactionHash       TransactionHash `json:"transactionHash"`
-	Authenticator         Authenticator   `json:"authenticator"`
-	AggregateRequestCount uint64          `json:"aggregateRequestCount,omitempty,string"`
-	CreatedAt             *Timestamp      `json:"createdAt"`
-	ProcessedAt           *Timestamp      `json:"processedAt,omitempty"`
-}
-
-// NewCommitment creates a new commitment
-func NewCommitment(requestID RequestID, transactionHash TransactionHash, authenticator Authenticator) *Commitment {
-	return &Commitment{
-		RequestID:             requestID,
-		TransactionHash:       transactionHash,
-		Authenticator:         authenticator,
-		AggregateRequestCount: 1, // Default to 1 for direct requests
-		CreatedAt:             Now(),
-	}
-}
-
-// NewCommitmentWithAggregate creates a new commitment with aggregate count
-func NewCommitmentWithAggregate(requestID RequestID, transactionHash TransactionHash, authenticator Authenticator, aggregateCount uint64) *Commitment {
-	return &Commitment{
-		RequestID:             requestID,
-		TransactionHash:       transactionHash,
-		Authenticator:         authenticator,
-		AggregateRequestCount: aggregateCount,
-		CreatedAt:             Now(),
-	}
-}
 
 // Timestamp wraps time.Time for consistent JSON serialization
 type Timestamp struct {
@@ -92,30 +52,15 @@ func (t *Timestamp) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// AggregatorRecord represents a finalized commitment with proof data
+// AggregatorRecord represents a finalized certification request with proof data
 type AggregatorRecord struct {
-	RequestID             RequestID       `json:"requestId"`
-	TransactionHash       TransactionHash `json:"transactionHash"`
-	Authenticator         Authenticator   `json:"authenticator"`
-	AggregateRequestCount uint64          `json:"aggregateRequestCount,omitempty,string"`
-	BlockNumber           *BigInt         `json:"blockNumber"`
-	LeafIndex             *BigInt         `json:"leafIndex"`
-	CreatedAt             *Timestamp      `json:"createdAt"`
-	FinalizedAt           *Timestamp      `json:"finalizedAt"`
-}
-
-// NewAggregatorRecord creates a new aggregator record from a commitment
-func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *BigInt) *AggregatorRecord {
-	return &AggregatorRecord{
-		RequestID:             commitment.RequestID,
-		TransactionHash:       commitment.TransactionHash,
-		Authenticator:         commitment.Authenticator,
-		AggregateRequestCount: commitment.AggregateRequestCount,
-		BlockNumber:           blockNumber,
-		LeafIndex:             leafIndex,
-		CreatedAt:             commitment.CreatedAt,
-		FinalizedAt:           Now(),
-	}
+	StateID               StateID           `json:"stateId"`
+	CertificationData     CertificationData `json:"certificationData"`
+	AggregateRequestCount uint64            `json:"aggregateRequestCount,omitempty,string"`
+	BlockNumber           *BigInt           `json:"blockNumber"`
+	LeafIndex             *BigInt           `json:"leafIndex"`
+	CreatedAt             *Timestamp        `json:"createdAt"`
+	FinalizedAt           *Timestamp        `json:"finalizedAt"`
 }
 
 // Block represents a blockchain block
@@ -133,22 +78,6 @@ type Block struct {
 	ParentMerkleTreePath *MerkleTreePath `json:"parentMerkleTreePath,omitempty"` // child mode only
 }
 
-// NewBlock creates a new block
-func NewBlock(index *BigInt, chainID string, shardID ShardID, version, forkID string, rootHash, previousBlockHash, uc HexBytes, parentMerkleTreePath *MerkleTreePath) *Block {
-	return &Block{
-		Index:                index,
-		ChainID:              chainID,
-		ShardID:              shardID,
-		Version:              version,
-		ForkID:               forkID,
-		RootHash:             rootHash,
-		PreviousBlockHash:    previousBlockHash,
-		CreatedAt:            Now(),
-		UnicityCertificate:   uc,
-		ParentMerkleTreePath: parentMerkleTreePath,
-	}
-}
-
 // NoDeletionProof represents a no-deletion proof
 type NoDeletionProof struct {
 	Proof     HexBytes   `json:"proof"`
@@ -163,9 +92,8 @@ func NewNoDeletionProof(proof HexBytes) *NoDeletionProof {
 	}
 }
 
-// Receipt represents a signed receipt for a commitment submission
+// Receipt represents a signed receipt for a certification request submission
 type Receipt struct {
-	Algorithm string         `json:"algorithm"`
 	PublicKey HexBytes       `json:"publicKey"`
 	Signature HexBytes       `json:"signature"`
 	Request   ReceiptRequest `json:"request"`
@@ -173,49 +101,16 @@ type Receipt struct {
 
 // ReceiptRequest represents the request data in a receipt
 type ReceiptRequest struct {
-	//Service         string          `json:"service"`
-	//Method          string          `json:"method"`
-	RequestID       RequestID       `json:"requestId"`
+	StateID         StateID         `json:"stateId"`
+	SourceStateHash SourceStateHash `json:"sourceStateHash"`
 	TransactionHash TransactionHash `json:"transactionHash"`
-	StateHash       StateHash       `json:"stateHash"`
-}
-
-// NewReceipt creates a new receipt for a commitment
-func NewReceipt(commitment *Commitment, algorithm string, publicKey, signature HexBytes) *Receipt {
-	return &Receipt{
-		Algorithm: algorithm,
-		PublicKey: publicKey,
-		Signature: signature,
-		Request: ReceiptRequest{
-			//Service:         "aggregator",
-			//Method:          "submit_commitment",
-			RequestID:       commitment.RequestID,
-			TransactionHash: commitment.TransactionHash,
-			StateHash:       commitment.Authenticator.StateHash,
-		},
-	}
 }
 
 // JSON-RPC Request and Response Types
 
-// SubmitCommitmentRequest represents the submit_commitment JSON-RPC request
-type SubmitCommitmentRequest struct {
-	RequestID             RequestID       `json:"requestId"`
-	TransactionHash       TransactionHash `json:"transactionHash"`
-	Authenticator         Authenticator   `json:"authenticator"`
-	Receipt               *bool           `json:"receipt,omitempty"`
-	AggregateRequestCount uint64          `json:"aggregateRequestCount,omitempty,string"`
-}
-
-// SubmitCommitmentResponse represents the submit_commitment JSON-RPC response
-type SubmitCommitmentResponse struct {
-	Status  string   `json:"status"`
-	Receipt *Receipt `json:"receipt,omitempty"`
-}
-
 // GetInclusionProofRequest represents the get_inclusion_proof JSON-RPC request
 type GetInclusionProofRequest struct {
-	RequestID RequestID `json:"requestId"`
+	StateID StateID `json:"stateId"`
 }
 
 // GetInclusionProofResponse represents the get_inclusion_proof JSON-RPC response
@@ -224,10 +119,9 @@ type GetInclusionProofResponse struct {
 }
 
 type InclusionProof struct {
-	Authenticator      *Authenticator   `json:"authenticator"`
-	MerkleTreePath     *MerkleTreePath  `json:"merkleTreePath"`
-	TransactionHash    *TransactionHash `json:"transactionHash"`
-	UnicityCertificate HexBytes         `json:"unicityCertificate"`
+	CertificationData  *CertificationData `json:"certificationData"`
+	MerkleTreePath     *MerkleTreePath    `json:"merkleTreePath"`
+	UnicityCertificate HexBytes           `json:"unicityCertificate"`
 }
 
 type RootShardInclusionProof struct {
@@ -252,27 +146,26 @@ type GetBlockRequest struct {
 
 // GetBlockResponse represents the get_block JSON-RPC response
 type GetBlockResponse struct {
-	Block            *Block `json:"block"`
-	TotalCommitments uint64 `json:"totalCommitments,string"`
+	Block      *Block `json:"block"`
+	TotalCount uint64 `json:"totalCount,string"`
 }
 
-// GetBlockCommitmentsRequest represents the get_block_commitments JSON-RPC request
-type GetBlockCommitmentsRequest struct {
+// GetBlockRecords represents the get_block_records JSON-RPC request
+type GetBlockRecords struct {
 	BlockNumber *BigInt `json:"blockNumber"`
 }
 
-// GetBlockCommitmentsResponse represents the get_block_commitments JSON-RPC response
-type GetBlockCommitmentsResponse struct {
-	Commitments []*AggregatorRecord `json:"commitments"`
+// GetBlockRecordsResponse represents the get_block_records JSON-RPC response
+type GetBlockRecordsResponse struct {
+	AggregatorRecords []*AggregatorRecord `json:"aggregatorRecords"`
 }
 
 // Status constants for SubmitShardRootResponse
 const (
-	ShardRootStatusSuccess         = "SUCCESS"
-	ShardRootStatusInvalidShardID  = "INVALID_SHARD_ID"
-	ShardRootStatusInvalidRootHash = "INVALID_ROOT_HASH"
-	ShardRootStatusInternalError   = "INTERNAL_ERROR"
-	ShardRootStatusNotLeader       = "NOT_LEADER"
+	ShardRootStatusSuccess        = "SUCCESS"
+	ShardRootStatusInvalidShardID = "INVALID_SHARD_ID"
+	ShardRootStatusInternalError  = "INTERNAL_ERROR"
+	ShardRootStatusNotLeader      = "NOT_LEADER"
 )
 
 // SubmitShardRootRequest represents the submit_shard_root JSON-RPC request
@@ -283,7 +176,7 @@ type SubmitShardRootRequest struct {
 
 // SubmitShardRootResponse represents the submit_shard_root JSON-RPC response
 type SubmitShardRootResponse struct {
-	Status string `json:"status"` // "SUCCESS", "INVALID_SHARD_ID", "INVALID_ROOT_HASH", etc.
+	Status string `json:"status"` // "SUCCESS", "INVALID_SHARD_ID", etc.
 }
 
 // GetShardProofRequest represents the get_shard_proof JSON-RPC request
@@ -333,4 +226,10 @@ type Sharding struct {
 	Mode       string `json:"mode"`
 	ShardIDLen int    `json:"shardIdLen"`
 	ShardID    int    `json:"shardId"`
+}
+
+type SigHashData struct {
+	_                      struct{} `cbor:",toarray"`
+	SourceStateHashImprint []byte
+	TransactionHashImprint []byte
 }

@@ -208,28 +208,27 @@ func TestSMTUpdateTimeTracking(t *testing.T) {
 		Number:      api.NewBigInt(big.NewInt(1)),
 		StartTime:   time.Now(),
 		State:       RoundStateProcessing,
-		Commitments: make([]*models.Commitment, 0),
+		Commitments: make([]*models.CertificationRequest, 0),
 		Snapshot:    rm.smt.CreateSnapshot(),
 	}
 
 	// Simulate processing mini-batches
 	for i := 0; i < 10; i++ {
-		commitments := make([]*models.Commitment, 100)
+		commitments := make([]*models.CertificationRequest, 100)
 		for j := 0; j < 100; j++ {
 			// Generate random IDs for testing
-			reqIDBytes := make([]byte, 32)
-			rand.Read(reqIDBytes)
+			stateIDBytes := make([]byte, 32)
+			rand.Read(stateIDBytes)
 			txHashBytes := make([]byte, 32)
 			rand.Read(txHashBytes)
 
-			commitments[j] = &models.Commitment{
-				RequestID:       api.ImprintHexString("0000" + hex.EncodeToString(reqIDBytes)),
-				TransactionHash: api.ImprintHexString("0000" + hex.EncodeToString(txHashBytes)),
-				Authenticator: models.Authenticator{
-					Algorithm: "secp256k1",
-					PublicKey: append([]byte{0x02}, make([]byte, 32)...),
-					Signature: make([]byte, 65),
-					StateHash: api.ImprintHexString("0000" + hex.EncodeToString(make([]byte, 32))),
+			commitments[j] = &models.CertificationRequest{
+				StateID: api.ImprintHexString("0000" + hex.EncodeToString(stateIDBytes)),
+				CertificationData: models.CertificationData{
+					PublicKey:       append([]byte{0x02}, make([]byte, 32)...),
+					Signature:       make([]byte, 65),
+					SourceStateHash: api.ImprintHexString("0000" + hex.EncodeToString(make([]byte, 32))),
+					TransactionHash: api.ImprintHexString("0000" + hex.EncodeToString(txHashBytes)),
 				},
 			}
 		}
