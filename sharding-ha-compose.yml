@@ -295,7 +295,7 @@ services:
       MONGODB_URI: "mongodb://mongodb-shard1-1:27017,mongodb-shard1-2:27017,mongodb-shard1-3:27017/aggregator?replicaSet=rs1"
       PORT: "3000"
       HOST: "0.0.0.0"
-      CONCURRENCY_LIMIT: "1000"
+      CONCURRENCY_LIMIT: "5000"
       ENABLE_DOCS: "true"
       ENABLE_CORS: "true"
       MONGODB_DATABASE: "aggregator"
@@ -321,6 +321,7 @@ services:
       REDIS_POOL_SIZE: "100"
       REDIS_MIN_IDLE_CONNS: "10"
       USE_REDIS_FOR_COMMITMENTS: "true"
+      REDIS_STREAM_NAME: "commitments:shard:1"
       REDIS_FLUSH_INTERVAL: "50ms"
       REDIS_MAX_BATCH_SIZE: "2000"
 
@@ -377,6 +378,7 @@ services:
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard2-1:27017,mongodb-shard2-2:27017,mongodb-shard2-3:27017/aggregator?replicaSet=rs2"
+      REDIS_STREAM_NAME: "commitments:shard:2"
       SHARDING_MODE: "child"
       SHARDING_CHILD_SHARD_ID: 2 # 0b10
     depends_on:
@@ -391,6 +393,7 @@ services:
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard2-1:27017,mongodb-shard2-2:27017,mongodb-shard2-3:27017/aggregator?replicaSet=rs2"
+      REDIS_STREAM_NAME: "commitments:shard:2"
       SHARDING_MODE: "child"
       SHARDING_CHILD_SHARD_ID: 2 # 0b10
     depends_on:
