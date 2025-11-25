@@ -33,7 +33,7 @@ func TestTrustBaseValidator(t *testing.T) {
 		require.NoError(t, err)
 
 		// Create trust base for epoch 1 with reference to epoch 0
-		rootNodes1, signers1 := newRootNodes(t, 3)
+		rootNodes1, _ := newRootNodes(t, 3)
 		trustBaseEpoch1, err := types.NewTrustBase(types.NetworkLocal, rootNodes1,
 			types.WithEpoch(1),
 			types.WithEpochStart(1000),
@@ -41,14 +41,9 @@ func TestTrustBaseValidator(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		// sign by current epoch validators
-		for nodeID, signer := range signers1 {
-			require.NoError(t, trustBaseEpoch1.Sign(nodeID, signer))
-		}
-
 		// sign by previous epoch validators
 		for nodeID, signer := range signers {
-			require.NoError(t, trustBaseEpoch1.SignPrevious(nodeID, signer))
+			require.NoError(t, trustBaseEpoch1.Sign(nodeID, signer))
 		}
 
 		// Mock storage to return the previous trust base
