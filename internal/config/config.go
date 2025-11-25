@@ -203,7 +203,7 @@ type BFTConfig struct {
 	Enabled    bool                              `mapstructure:"enabled"`
 	KeyConf    *partition.KeyConf                `mapstructure:"key_conf"`
 	ShardConf  *types.PartitionDescriptionRecord `mapstructure:"shard_conf"`
-	TrustBases []types.RootTrustBase             `mapstructure:"trust_bases"`
+	TrustBases []types.RootTrustBaseV1           `mapstructure:"trust_bases"`
 
 	// Peer configuration
 	Address                    string   `mapstructure:"address"`
@@ -332,13 +332,13 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("failed to load shard configuration: %w", err)
 		}
 		trustBaseFiles := strings.Split(getEnvOrDefault("BFT_TRUST_BASE_FILES", "bft-config/trust-base.json"), ",")
-		config.BFT.TrustBases = make([]types.RootTrustBase, 0, len(trustBaseFiles))
+		config.BFT.TrustBases = make([]types.RootTrustBaseV1, 0, len(trustBaseFiles))
 		for _, file := range trustBaseFiles {
 			trustBaseV1 := types.RootTrustBaseV1{}
 			if err := loadConf(file, &trustBaseV1); err != nil {
 				return nil, fmt.Errorf("failed to load trust base configuration from %s: %w", file, err)
 			}
-			config.BFT.TrustBases = append(config.BFT.TrustBases, &trustBaseV1)
+			config.BFT.TrustBases = append(config.BFT.TrustBases, trustBaseV1)
 		}
 	}
 

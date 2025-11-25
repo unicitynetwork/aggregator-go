@@ -99,8 +99,13 @@ func main() {
 	log.WithComponent("main").Info("Database connection established")
 
 	// Store trust bases from config files
+	trustBaseValidator := service.NewTrustBaseValidator(storageInstance.TrustBaseStorage())
 	for _, tb := range cfg.BFT.TrustBases {
-		if err := storageInstance.TrustBaseStorage().Store(ctx, tb); err != nil {
+		if err := trustBaseValidator.Verify(ctx, &tb); err != nil {
+			log.WithComponent("main").Error(fmt.Sprintf("Trust base verification failed"), "error", err.Error())
+			gracefulExit(asyncLogger, 1)
+		}
+		if err := storageInstance.TrustBaseStorage().Store(ctx, &tb); err != nil {
 			if errors.Is(err, interfaces.ErrTrustBaseAlreadyExists) {
 				log.WithComponent("main").Warn(fmt.Sprintf("Trust base already exists, not overwriting it"), "epoch", tb.GetEpoch())
 			} else {
