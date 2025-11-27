@@ -203,14 +203,7 @@ Submit a state transition request to the aggregation layer with cryptographic va
     "status": "SUCCESS",
     "receipt": {
       "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
-      "signature": "...",
-      "request": {
-        "service": "aggregator",
-        "method": "certification_request",
-        "stateId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122",
-        "sourceStateHash": "0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647",
-        "transactionHash": "0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297"
-      }
+      "signature": "..."
     }
   },
   "id": 1

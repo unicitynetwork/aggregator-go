@@ -94,16 +94,8 @@ func NewNoDeletionProof(proof HexBytes) *NoDeletionProof {
 
 // Receipt represents a signed receipt for a certification request submission
 type Receipt struct {
-	PublicKey HexBytes       `json:"publicKey"`
-	Signature HexBytes       `json:"signature"`
-	Request   ReceiptRequest `json:"request"`
-}
-
-// ReceiptRequest represents the request data in a receipt
-type ReceiptRequest struct {
-	StateID         StateID         `json:"stateId"`
-	SourceStateHash SourceStateHash `json:"sourceStateHash"`
-	TransactionHash TransactionHash `json:"transactionHash"`
+	PublicKey HexBytes `json:"publicKey"`
+	Signature HexBytes `json:"signature"`
 }
 
 // JSON-RPC Request and Response Types

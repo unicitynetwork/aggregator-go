@@ -194,11 +194,6 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 		response.Receipt = &api.Receipt{
 			PublicKey: api.HexBytes("mock_public_key"),
 			Signature: api.HexBytes("mock_signature"),
-			Request: api.ReceiptRequest{
-				StateID:         certificationRequest.StateID,
-				SourceStateHash: certificationRequest.CertificationData.SourceStateHash,
-				TransactionHash: certificationRequest.CertificationData.TransactionHash,
-			},
 		}
 	}
 

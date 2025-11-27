@@ -312,11 +312,6 @@ func TestCertificationResponse_SerializeAndValidate(t *testing.T) {
 		receipt := &Receipt{
 			PublicKey: NewHexBytes(publicKeyBytes),
 			Signature: NewHexBytes(signatureBytes),
-			Request: ReceiptRequest{
-				StateID:         "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40",
-				TransactionHash: "00010000000000000000000000000000000000000000000000000000000000000000",
-				SourceStateHash: ImprintHexString("00000000000000000000000000000000000000000000000000000000000000000000"),
-			},
 		}
 
 		response3 := &CertificationResponse{
@@ -443,11 +438,6 @@ func TestCertificationResponse_SerializeAndValidate(t *testing.T) {
 		receipt := &Receipt{
 			PublicKey: NewHexBytes([]byte{0x02, 0x79}), // shortened for test
 			Signature: NewHexBytes([]byte{0xa0, 0xb3}), // shortened for test
-			Request: ReceiptRequest{
-				StateID:         "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40",
-				TransactionHash: "00010000000000000000000000000000000000000000000000000000000000000000",
-				SourceStateHash: ImprintHexString("000000"), // shortened for test, minimum 3 bytes
-			},
 		}
 
 		response := &CertificationResponse{
@@ -468,7 +458,8 @@ func TestCertificationResponse_SerializeAndValidate(t *testing.T) {
 
 		receiptJSON, ok := actualJSON["receipt"].(map[string]interface{})
 		require.True(t, ok)
-		assert.NotNil(t, receiptJSON["request"])
+		assert.Equal(t, "0279", receiptJSON["publicKey"])
+		assert.Equal(t, "a0b3", receiptJSON["signature"])
 
 		// Test deserialization preserves all fields
 		var decodedResponse CertificationResponse
