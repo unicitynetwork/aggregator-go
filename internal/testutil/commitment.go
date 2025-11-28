@@ -57,9 +57,9 @@ func CreateTestCertificationRequest(t *testing.T, baseData string) *models.Certi
 
 	certData := models.CertificationData{
 		PublicKey:       publicKeyBytes,
-		Signature:       signatureBytes,
 		SourceStateHash: sourceStateHash,
 		TransactionHash: transactionHash,
+		Signature:       signatureBytes,
 	}
 	return models.NewCertificationRequest(stateID, certData)
 }

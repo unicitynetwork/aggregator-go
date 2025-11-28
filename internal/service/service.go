@@ -136,9 +136,9 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 
 	certificationRequest := models.NewCertificationRequestWithAggregate(req.StateID, models.CertificationData{
 		PublicKey:       req.CertificationData.PublicKey,
-		Signature:       req.CertificationData.Signature,
 		SourceStateHash: req.CertificationData.SourceStateHash,
 		TransactionHash: req.CertificationData.TransactionHash,
+		Signature:       req.CertificationData.Signature,
 	}, aggregateCount)
 
 	// Validate certificationRequest signature and state ID

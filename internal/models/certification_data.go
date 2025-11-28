@@ -10,33 +10,33 @@ import (
 type CertificationData struct {
 	_               struct{}            `cbor:",toarray"`
 	PublicKey       api.HexBytes        `json:"publicKey" bson:"publicKey"`
-	Signature       api.HexBytes        `json:"signature" bson:"signature"`
 	SourceStateHash api.SourceStateHash `json:"sourceStateHash" bson:"sourceStateHash"`
 	TransactionHash api.TransactionHash `json:"transactionHash" bson:"transactionHash"`
+	Signature       api.HexBytes        `json:"signature" bson:"signature"`
 }
 
 type CertificationDataBSON struct {
 	PublicKey       string `bson:"publicKey"`
-	Signature       string `bson:"signature"`
 	SourceStateHash string `bson:"sourceStateHash"`
 	TransactionHash string `bson:"transactionHash"`
+	Signature       string `bson:"signature"`
 }
 
 func (a *CertificationData) ToAPI() *api.CertificationData {
 	return &api.CertificationData{
 		PublicKey:       a.PublicKey,
-		Signature:       a.Signature,
 		SourceStateHash: a.SourceStateHash,
 		TransactionHash: a.TransactionHash,
+		Signature:       a.Signature,
 	}
 }
 
 func (a *CertificationData) ToBSON() CertificationDataBSON {
 	return CertificationDataBSON{
 		PublicKey:       a.PublicKey.String(),
-		Signature:       a.Signature.String(),
 		SourceStateHash: a.SourceStateHash.String(),
 		TransactionHash: a.TransactionHash.String(),
+		Signature:       a.Signature.String(),
 	}
 }
 
@@ -53,8 +53,8 @@ func (ab *CertificationDataBSON) FromBSON() (*CertificationData, error) {
 
 	return &CertificationData{
 		PublicKey:       publicKey,
-		Signature:       signature,
 		SourceStateHash: api.SourceStateHash(ab.SourceStateHash),
 		TransactionHash: api.TransactionHash(ab.TransactionHash),
+		Signature:       signature,
 	}, nil
 }

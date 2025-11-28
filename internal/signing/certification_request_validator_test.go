@@ -56,9 +56,9 @@ func TestValidator_Success(t *testing.T) {
 		StateID: stateID,
 		CertificationData: models.CertificationData{
 			PublicKey:       api.HexBytes(publicKeyBytes),
-			Signature:       api.HexBytes(signatureBytes),
 			SourceStateHash: stateHashImprint,
 			TransactionHash: transactionDataImprint,
+			Signature:       api.HexBytes(signatureBytes),
 		},
 	}
 
@@ -80,9 +80,9 @@ func TestValidator_InvalidPublicKeyFormat(t *testing.T) {
 		StateID: api.StateID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
 		CertificationData: models.CertificationData{
 			PublicKey:       api.HexBytes("invalid-hex-public-key"), // Invalid hex
-			Signature:       api.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
 			SourceStateHash: CreateDataHashImprint([]byte("test-state")),
 			TransactionHash: CreateDataHashImprint([]byte("hello")),
+			Signature:       api.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
 		},
 	}
 
@@ -105,9 +105,9 @@ func TestValidator_InvalidStateHashFormat(t *testing.T) {
 		StateID: api.StateID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
 		CertificationData: models.CertificationData{
 			PublicKey:       api.HexBytes(publicKeyBytes),
-			Signature:       api.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
 			SourceStateHash: api.ImprintHexString("invalid-hex-state-hash"), // Invalid hex
 			TransactionHash: CreateDataHashImprint([]byte("hello")),
+			Signature:       api.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
 		},
 	}
 
@@ -134,9 +134,9 @@ func TestValidator_StateIDMismatch(t *testing.T) {
 		StateID: wrongStateID,
 		CertificationData: models.CertificationData{
 			PublicKey:       api.HexBytes(publicKeyBytes),
-			Signature:       api.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
 			SourceStateHash: CreateDataHashImprint(stateHashBytes),
 			TransactionHash: CreateDataHashImprint([]byte("hello")),
+			Signature:       api.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
 		},
 	}
 
@@ -242,9 +242,9 @@ func TestValidator_InvalidSignatureFormat(t *testing.T) {
 		StateID: stateID,
 		CertificationData: models.CertificationData{
 			PublicKey:       api.HexBytes(publicKeyBytes),
-			Signature:       api.HexBytes(make([]byte, 32)), // Invalid length - should be 65 bytes
 			SourceStateHash: sourceStateHashImprint,
 			TransactionHash: CreateDataHashImprint([]byte("hello")),
+			Signature:       api.HexBytes(make([]byte, 32)), // Invalid length - should be 65 bytes
 		},
 	}
 
@@ -272,9 +272,9 @@ func TestValidator_InvalidTransactionHashFormat(t *testing.T) {
 		StateID: stateID,
 		CertificationData: models.CertificationData{
 			PublicKey:       api.HexBytes(publicKeyBytes),
-			Signature:       api.HexBytes(make([]byte, 65)), // Valid length signature
 			SourceStateHash: sourceStateHashImprint,
 			TransactionHash: api.TransactionHash("invalid-hex-transaction-hash-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"), // Invalid hex but 68 chars
+			Signature:       api.HexBytes(make([]byte, 65)),                                                         // Valid length signature
 		},
 	}
 
@@ -309,9 +309,9 @@ func TestValidator_SignatureVerificationFailed(t *testing.T) {
 		StateID: stateID,
 		CertificationData: models.CertificationData{
 			PublicKey:       api.HexBytes(publicKeyBytes),
-			Signature:       api.HexBytes(signatureBytes),
 			SourceStateHash: sourceStateHashImprint,
 			TransactionHash: CreateDataHashImprint(transactionData), // Different from signed data
+			Signature:       api.HexBytes(signatureBytes),
 		},
 	}
 
@@ -370,9 +370,9 @@ func TestValidator_RealSecp256k1Data(t *testing.T) {
 		StateID: stateID,
 		CertificationData: models.CertificationData{
 			PublicKey:       api.HexBytes(publicKeyBytes),
-			Signature:       api.HexBytes(signatureBytes),
 			SourceStateHash: sourceStateHashImprint,
 			TransactionHash: transactionHashImprint,
+			Signature:       api.HexBytes(signatureBytes),
 		},
 	}
 

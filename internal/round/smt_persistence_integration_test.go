@@ -393,9 +393,9 @@ func createTestCommitment(t *testing.T, baseData string) *models.CertificationRe
 
 	certData := models.CertificationData{
 		PublicKey:       publicKeyBytes,
-		Signature:       signatureBytes,
 		SourceStateHash: sourceStateHash,
 		TransactionHash: transactionHash,
+		Signature:       signatureBytes,
 	}
 	return models.NewCertificationRequest(stateID, certData)
 }

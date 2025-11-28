@@ -90,7 +90,7 @@ func (cb *CertificationRequestBSON) FromBSON() (*CertificationRequest, error) {
 }
 
 // CreateLeafValue creates the value to store in the SMT leaf for a certification request
-//  1. CBOR encode the CertificationData as an array [publicKey, signature, sourceStateHash, transactionHash]
+//  1. CBOR encode the CertificationData as an array [publicKey, sourceStateHash, transactionHash, signature]
 //  2. Hash the CBOR-encoded certification data using SHA256
 //  3. Return as DataHash imprint format (2-byte algorithm prefix + hash of cbor array)
 func (c *CertificationRequest) CreateLeafValue() ([]byte, error) {

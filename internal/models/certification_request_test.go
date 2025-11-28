@@ -17,9 +17,9 @@ func BenchmarkCreateLeafValue(b *testing.B) {
 
 	certData := CertificationData{
 		PublicKey:       api.NewHexBytes(publicKey),
-		Signature:       api.NewHexBytes(signature),
 		SourceStateHash: sourceStateHash,
 		TransactionHash: transactionHash,
+		Signature:       api.NewHexBytes(signature),
 	}
 	certificationRequest := NewCertificationRequest(stateID, certData)
 

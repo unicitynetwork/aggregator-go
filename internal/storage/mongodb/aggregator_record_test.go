@@ -70,9 +70,9 @@ func createTestAggregatorRecord(stateID string, blockNumber int64, leafIndex int
 
 	certData := models.CertificationData{
 		PublicKey:       api.HexBytes("test_public_key_1234567890abcdef"),
-		Signature:       api.HexBytes("test_signature_1234567890abcdef"),
 		SourceStateHash: sourceStateHash,
 		TransactionHash: transactionHash,
+		Signature:       api.HexBytes("test_signature_1234567890abcdef"),
 	}
 
 	commitment := models.NewCertificationRequest(api.StateID(stateID), certData)

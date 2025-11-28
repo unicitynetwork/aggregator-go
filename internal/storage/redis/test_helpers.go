@@ -65,9 +65,9 @@ func createTestCommitment() *models.CertificationRequest {
 		StateID: stateID,
 		CertificationData: models.CertificationData{
 			PublicKey:       api.NewHexBytes(publicKeyBytes),
-			Signature:       api.NewHexBytes(signatureBytes),
 			SourceStateHash: sourceStateHash,
 			TransactionHash: transactionHash,
+			Signature:       api.NewHexBytes(signatureBytes),
 		},
 		AggregateRequestCount: 1,
 	}
