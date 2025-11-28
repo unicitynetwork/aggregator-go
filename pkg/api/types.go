@@ -219,9 +219,3 @@ type Sharding struct {
 	ShardIDLen int    `json:"shardIdLen"`
 	ShardID    int    `json:"shardId"`
 }
-
-type SigHashData struct {
-	_                      struct{} `cbor:",toarray"`
-	SourceStateHashImprint []byte
-	TransactionHashImprint []byte
-}

@@ -3,12 +3,10 @@ package signing
 import (
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/stretchr/testify/require"
-	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -24,31 +22,26 @@ func TestValidator_Success(t *testing.T) {
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 
 	// Create test state hash
-	stateHashData := []byte("test-state-hash")
-	stateHashImprint := CreateDataHashImprint(stateHashData)
-	stateHashImprintBytes, err := stateHashImprint.Imprint()
+	sourceStateHashData := []byte("test-state-hash")
+	sourceStateHash := CreateDataHashImprint(sourceStateHashData)
+	sourceStateHashImprint, err := sourceStateHash.Imprint()
 	require.NoError(t, err)
 
 	// Create state ID using the full imprint bytes (same as what validator will use)
-	stateID, err := api.CreateStateIDFromImprint(stateHashImprintBytes, publicKeyBytes)
+	stateID, err := api.CreateStateIDFromImprint(sourceStateHashImprint, publicKeyBytes)
 	require.NoError(t, err, "Failed to create state ID")
 
 	// Create transaction data and sign it
 	transactionData := []byte("test-transaction-data")
-	transactionDataImprint := CreateDataHashImprint(transactionData)
-	transactionDataImprintBytes, err := transactionDataImprint.Imprint()
+	transactionDataHash := CreateDataHashImprint(transactionData)
+	transactionDataHashImprint, err := transactionDataHash.Imprint()
 	require.NoError(t, err)
 
 	// Sign the actual transaction hash bytes (what the validator expects)
 	signingService := NewSigningService()
-	sigData := api.SigHashData{
-		SourceStateHashImprint: stateHashImprintBytes,
-		TransactionHashImprint: transactionDataImprintBytes,
-	}
-	sigDataCBOR, err := types.Cbor.Marshal(sigData)
-	require.NoError(t, err, "Failed to sig bytes cbor")
+	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionDataHashImprint)
 
-	signatureBytes, err := signingService.Sign(sigDataCBOR, privateKey.Serialize())
+	signatureBytes, err := signingService.SignHash(sigDataHash.GetImprint(), privateKey.Serialize())
 	require.NoError(t, err, "Failed to sign transaction data")
 
 	// Create certification request with valid data
@@ -56,8 +49,8 @@ func TestValidator_Success(t *testing.T) {
 		StateID: stateID,
 		CertificationData: models.CertificationData{
 			PublicKey:       api.HexBytes(publicKeyBytes),
-			SourceStateHash: stateHashImprint,
-			TransactionHash: transactionDataImprint,
+			SourceStateHash: sourceStateHash,
+			TransactionHash: transactionDataHash,
 			Signature:       api.HexBytes(signatureBytes),
 		},
 	}
@@ -68,9 +61,8 @@ func TestValidator_Success(t *testing.T) {
 	require.Equal(t, ValidationStatusSuccess, result.Status, "Expected validation success, got status: %s, error: %v", result.Status.String(), result.Error)
 	require.NoError(t, result.Error, "Expected no error")
 
-	bytes, err := json.Marshal(commitment)
+	_, err = json.Marshal(commitment)
 	require.NoError(t, err, "Failed to marshal commitment")
-	fmt.Println(string(bytes))
 }
 
 func TestValidator_InvalidPublicKeyFormat(t *testing.T) {
@@ -353,14 +345,9 @@ func TestValidator_RealSecp256k1Data(t *testing.T) {
 
 	// Sign the actual transaction hash bytes (what the validator expects)
 	signingService := NewSigningService()
-	sigData := api.SigHashData{
-		SourceStateHashImprint: sourceStateHashImprintBytes,
-		TransactionHashImprint: transactionHashImprintBytes,
-	}
-	sigDataCBOR, err := types.Cbor.Marshal(sigData)
-	require.NoError(t, err)
+	sigDataHash := api.SigDataHash(sourceStateHashImprintBytes, transactionHashImprintBytes)
 
-	signatureBytes, err := signingService.Sign(sigDataCBOR, privateKeyBytes)
+	signatureBytes, err := signingService.SignHash(sigDataHash.GetImprint(), privateKeyBytes)
 	if err != nil {
 		t.Fatalf("Failed to sign transaction data: %v", err)
 	}

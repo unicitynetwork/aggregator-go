@@ -1,10 +1,7 @@
 package api
 
 import (
-	"crypto/sha256"
 	"fmt"
-
-	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 // CertificationRequest represents the certification_request JSON-RPC request,
@@ -49,8 +46,10 @@ type CertificationData struct {
 	Signature HexBytes `json:"signature"`
 }
 
-// SigBytes returns the signature data bytes for signature generation.
-func (c CertificationData) SigBytes() ([]byte, error) {
+// SigDataHash returns the data hash used for signature generation.
+// The hash is calculated as CBOR array of [sourceStateHashImprint, transactionHashImprint] and
+// the value returned is in DataHash imprint format (2-byte algorithm prefix + hash of cbor array).
+func (c CertificationData) SigDataHash() ([]byte, error) {
 	sourceStateHashImprint, err := c.SourceStateHash.Imprint()
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert source state hash to bytes: %w", err)
@@ -59,14 +58,39 @@ func (c CertificationData) SigBytes() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert transaction hash to bytes: %w", err)
 	}
-	sigData := SigHashData{
-		SourceStateHashImprint: sourceStateHashImprint,
-		TransactionHashImprint: transactionHashImprint,
-	}
-	sigDataCBOR, err := types.Cbor.Marshal(sigData)
+
+	return SigDataHash(sourceStateHashImprint, transactionHashImprint).GetImprint(), nil
+}
+
+func SigDataHash(sourceStateHashImprint []byte, transactionHashImprint []byte) *DataHash {
+	return NewDataHasher(SHA256).AddData(
+		CborArray(2)).
+		AddCborBytes(sourceStateHashImprint).
+		AddCborBytes(transactionHashImprint).
+		GetHash()
+}
+
+// Hash returns the data hash of certification data, used as a key in the state tree.
+// The hash is calculated as CBOR array of [PublicKey, SourceStateHashImprint, TransactionHashImprint, Signature] and
+// the value returned is in DataHash imprint format (2-byte algorithm prefix + hash of cbor array).
+func (c CertificationData) Hash() ([]byte, error) {
+	sourceStateHashImprint, err := c.SourceStateHash.Imprint()
 	if err != nil {
-		return nil, fmt.Errorf("error serializing signature data to cbor: %w", err)
+		return nil, fmt.Errorf("failed to convert source state hash to bytes: %w", err)
 	}
-	sigBytes := sha256.Sum256(sigDataCBOR)
-	return sigBytes[:], nil
+	transactionHashImprint, err := c.TransactionHash.Imprint()
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert transaction hash to bytes: %w", err)
+	}
+	return CertDataHash(c.PublicKey, sourceStateHashImprint, transactionHashImprint, c.Signature).GetImprint(), nil
+}
+
+func CertDataHash(publicKey, sourceStateHashImprint, transactionHashImprint, signature []byte) *DataHash {
+	return NewDataHasher(SHA256).AddData(
+		CborArray(4)).
+		AddCborBytes(publicKey).
+		AddCborBytes(sourceStateHashImprint).
+		AddCborBytes(transactionHashImprint).
+		AddCborBytes(signature).
+		GetHash()
 }

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/unicitynetwork/bft-go-base/types"
-
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -175,21 +173,11 @@ func (v *CertificationRequestValidator) Validate(commitment *models.Certificatio
 			Error:  fmt.Errorf("signature must be 65 bytes, got %d", len(signatureBytes)),
 		}
 	}
-	// The signature should be over the SHA256 of CBOR[sourceStateHash, transactionHash]
-	sigData := api.SigHashData{
-		SourceStateHashImprint: sourceStateHashImprint,
-		TransactionHashImprint: transactionHashImprint,
-	}
-	sigDataCBOR, err := types.Cbor.Marshal(sigData)
-	if err != nil {
-		return ValidationResult{
-			Status: ValidationStatusInvalidSignatureFormat,
-			Error:  fmt.Errorf("failed to serialize signature bytes: %w", err),
-		}
-	}
 
-	isValidSignature, err := v.signingService.VerifyWithPublicKey(
-		sigDataCBOR,
+	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionHashImprint)
+
+	isValidSignature, err := v.signingService.VerifyHashWithPublicKey(
+		sigDataHash.GetImprint(),
 		signatureBytes,
 		publicKeyBytes,
 	)

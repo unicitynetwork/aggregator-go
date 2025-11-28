@@ -68,7 +68,7 @@ func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage) ap
 		path, err := c.StateID.GetPath()
 		require.NoError(t, err)
 
-		val, err := c.CreateLeafValue()
+		val, err := c.CertificationData.ToAPI().Hash()
 		require.NoError(t, err)
 
 		leaves[i] = &smt.Leaf{Path: path, Value: val}

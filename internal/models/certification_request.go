@@ -1,11 +1,8 @@
 package models
 
 import (
-	"crypto/sha256"
-	"fmt"
 	"time"
 
-	"github.com/unicitynetwork/bft-go-base/types"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -87,19 +84,4 @@ func (cb *CertificationRequestBSON) FromBSON() (*CertificationRequest, error) {
 		CreatedAt:             api.NewTimestamp(cb.CreatedAt),
 		ProcessedAt:           processedAt,
 	}, nil
-}
-
-// CreateLeafValue creates the value to store in the SMT leaf for a certification request
-//  1. CBOR encode the CertificationData as an array [publicKey, sourceStateHash, transactionHash, signature]
-//  2. Hash the CBOR-encoded certification data using SHA256
-//  3. Return as DataHash imprint format (2-byte algorithm prefix + hash of cbor array)
-func (c *CertificationRequest) CreateLeafValue() ([]byte, error) {
-	cborData, err := types.Cbor.Marshal(c.CertificationData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to CBOR encode certification data: %w", err)
-	}
-	hash := sha256.Sum256(cborData)
-	out := make([]byte, 34)
-	copy(out[2:], hash[:])
-	return out, nil
 }

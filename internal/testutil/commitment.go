@@ -7,7 +7,6 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/stretchr/testify/require"
-	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
@@ -45,14 +44,9 @@ func CreateTestCertificationRequest(t *testing.T, baseData string) *models.Certi
 	require.NoError(t, err, "Failed to extract transaction hash")
 
 	signingService := signing.NewSigningService()
-	sigData := api.SigHashData{
-		SourceStateHashImprint: sourceStateHashImprint,
-		TransactionHashImprint: transactionHashImprint,
-	}
-	sigDataCBOR, err := types.Cbor.Marshal(sigData)
-	require.NoError(t, err, "Failed to serialize signature data")
+	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionHashImprint)
 
-	signatureBytes, err := signingService.Sign(sigDataCBOR, privateKey.Serialize())
+	signatureBytes, err := signingService.SignHash(sigDataHash.GetImprint(), privateKey.Serialize())
 	require.NoError(t, err, "Failed to sign transaction")
 
 	certData := models.CertificationData{

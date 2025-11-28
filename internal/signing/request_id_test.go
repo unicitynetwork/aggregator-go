@@ -1,12 +1,8 @@
 package signing
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"testing"
-
-	"github.com/stretchr/testify/require"
-	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -53,19 +49,8 @@ func TestStateIDGenerator_CreateStateIDCompatibility(t *testing.T) {
 	// Manually compute expected value using the same algorithm as TypeScript
 	publicKey := []byte{0x03, 0xd8, 0xe2, 0xb2, 0xff, 0x8a, 0xc4, 0xf0, 0x2b, 0x2b, 0x5c, 0x45, 0x12, 0xc5, 0xe4, 0xe6, 0xb1, 0xc7, 0xd2, 0xe3, 0xa8, 0xb9, 0xc1, 0xf8, 0xe9, 0xd1, 0xc2, 0xa3, 0xb4, 0xe5, 0xf6, 0xa7}
 	sourceStateHashBytes := []byte("test-state-hash")
-
-	// Calculate expected value manually
-	stateIDHashData := api.StateIDHashData{
-		SourceStateHashImprint: sourceStateHashBytes,
-		PublicKey:              publicKey,
-	}
-	stateIDHashDataBytes, err := types.Cbor.Marshal(stateIDHashData)
-	require.NoError(t, err)
-	stateIDHash := sha256.Sum256(stateIDHashDataBytes)
-
-	// Add algorithm prefix as per the StateID format
-	algorithmImprint := "0000" // SHA256 algorithm identifier (HashAlgorithm.SHA256 = 0)
-	expectedStateID := api.StateID(algorithmImprint + hex.EncodeToString(stateIDHash[:]))
+	stateIDDataHash := api.StateIDDataHash(sourceStateHashBytes, publicKey)
+	expectedStateID := api.StateID(stateIDDataHash.ToHex())
 
 	// Generate using our function
 	actualStateID, err := api.CreateStateIDFromImprint(sourceStateHashBytes, publicKey)

@@ -176,16 +176,15 @@ func GenerateDocsHTML() string {
                     <div class="params-section">
                         <h3>Request Parameters</h3>
                         <textarea id="certification_request_params">{
-  "stateId": "0000316f0853596601083c6d5695a417cb0539ed9692f3366d125aaacaa8b69cbe31",
+  "stateId": "0000fa05d9c86e7b6033e09fc96ad2aed56557b2e6c823d9ab64ddd7d62a9b1596be",
   "certificationData": {
-    "publicKey": "02b9f440bbaa0c9784c10c59c6e19b7296dee36a78a8cc5feb649e278178cd19ce",
-    "signature": "81e10fba935b6a48aee0712cf373ed1940c385e1b77c7ddfb71d7f0eb6449151071a07043e975174358ac2e7cb2d3a7f3dc2b7f5cbe70cf3964ad1fe0abcd2be01",
+    "publicKey": "02900819c504270706f478b32dfb7f9f0c92887a3a8eea3a4dbe831f2e2639fb96",
     "sourceStateHash": "0000fc30e421e001d3c6a846749847b6a8e514d8d90dead42d6f245f1a4d74a24085",
-    "transactionHash": "000050a6635ff03e99d297b0802a14f0723f5246c555740d683ab0466b079ee421a5"
-  },
-  "receipt": true
-}
-</textarea>
+    "transactionHash": "000050a6635ff03e99d297b0802a14f0723f5246c555740d683ab0466b079ee421a5",
+    "signature": "0f40d41a68dcd0a772fdc34101ca50ed6356b8ec38dbfcf11f2bae433575aca77e26fd22a5b4f94c8a2920cd387619fec177870fe74548d9c6f3965e8f6d344401"
+  }
+  "receipt": true,
+}</textarea>
                         <div class="button-group">
                             <button onclick="sendRequest('certification_request')">🚀 Send Request</button>
                             <button onclick="clearResponse('certification_request')">🗑️ Clear</button>

@@ -63,11 +63,11 @@ func (s *SigningService) SignCertData(certData *api.CertificationData, privateKe
 	if certData == nil {
 		return errors.New("certification data is nil")
 	}
-	sigBytes, err := certData.SigBytes()
+	sigDataHash, err := certData.SigDataHash()
 	if err != nil {
 		return fmt.Errorf("failed to generate signature bytes: %w", err)
 	}
-	sig, err := s.SignHash(sigBytes, privateKey)
+	sig, err := s.SignHash(sigDataHash, privateKey)
 	if err != nil {
 		return fmt.Errorf("error generating signature: %w", err)
 	}

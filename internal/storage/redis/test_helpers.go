@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
@@ -48,15 +47,9 @@ func createTestCommitment() *models.CertificationRequest {
 
 	// Sign the transaction
 	signingService := signing.NewSigningService()
-	sigData := api.SigHashData{
-		SourceStateHashImprint: sourceStateHashImprint,
-		TransactionHashImprint: transactionHashImprint,
-	}
-	sigDataCBOR, err := types.Cbor.Marshal(sigData)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to encode signature data: %v", err))
-	}
-	signatureBytes, err := signingService.Sign(sigDataCBOR, privateKey.Serialize())
+	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionHashImprint)
+
+	signatureBytes, err := signingService.SignHash(sigDataHash.GetImprint(), privateKey.Serialize())
 	if err != nil {
 		panic(fmt.Sprintf("Failed to sign transaction: %v", err))
 	}

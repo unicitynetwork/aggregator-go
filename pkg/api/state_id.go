@@ -1,13 +1,10 @@
 package api
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
-
-	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 type StateID = ImprintHexString
@@ -105,15 +102,16 @@ func CreateStateID(sourceStateHash SourceStateHash, publicKey HexBytes) (StateID
 
 // CreateStateIDFromImprint creates a StateID from source state hash imprint and public key bytes
 func CreateStateIDFromImprint(sourceStateHashImprint []byte, publicKey []byte) (StateID, error) {
-	hasher := StateIDHashData{
-		SourceStateHashImprint: sourceStateHashImprint,
-		PublicKey:              publicKey,
-	}
-	cborBytes, err := types.Cbor.Marshal(hasher)
-	if err != nil {
-		return "", fmt.Errorf("failed to cbor marshal state id bytes: %w", err)
-	}
-	return NewImprintHexString(fmt.Sprintf("0000%x", sha256.Sum256(cborBytes)))
+	dataHash := StateIDDataHash(sourceStateHashImprint, publicKey)
+	return NewImprintHexString(dataHash.ToHex())
+}
+
+func StateIDDataHash(sourceStateHashImprint []byte, publicKey []byte) *DataHash {
+	return NewDataHasher(SHA256).
+		AddData(CborArray(2)).
+		AddCborBytes(sourceStateHashImprint).
+		AddCborBytes(publicKey).
+		GetHash()
 }
 
 func ValidateStateID(stateID StateID, sourceStateHashImprint []byte, publicKey []byte) (bool, error) {
@@ -122,10 +120,4 @@ func ValidateStateID(stateID StateID, sourceStateHashImprint []byte, publicKey [
 		return false, err
 	}
 	return stateID == expectedStateID, nil
-}
-
-type StateIDHashData struct {
-	_                      struct{} `cbor:",toarray"`
-	SourceStateHashImprint []byte
-	PublicKey              []byte
 }

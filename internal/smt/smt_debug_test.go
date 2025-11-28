@@ -23,7 +23,7 @@ func TestAddLeaves_DebugInvalidPath(t *testing.T) {
 		require.NoError(t, err)
 
 		// Create leaf value (hash of certification request data)
-		leafValue, err := commitment.CreateLeafValue()
+		leafValue, err := commitment.CertificationData.ToAPI().Hash()
 		require.NoError(t, err)
 
 		err = tree.AddLeaves([]*Leaf{NewLeaf(path, leafValue)})
