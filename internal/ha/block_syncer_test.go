@@ -3,6 +3,7 @@ package ha
 import (
 	"context"
 	"math/big"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,7 +19,16 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-func TestBlockSync(t *testing.T) {
+type mockLeaderSelector struct {
+	isLeader atomic.Bool
+}
+
+func (m *mockLeaderSelector) IsLeader(_ context.Context) (bool, error) {
+	return m.isLeader.Load(), nil
+}
+
+func TestBlockSyncer(t *testing.T) {
+	ctx := t.Context()
 	storage := testutil.SetupTestStorage(t, config.Config{
 		Database: config.DatabaseConfig{
 			Database:               "test_block_sync",
@@ -31,30 +41,46 @@ func TestBlockSync(t *testing.T) {
 		},
 	})
 
-	ctx := context.Background()
+	cfg := &config.Config{
+		Processing: config.ProcessingConfig{RoundDuration: 100 * time.Millisecond},
+		HA:         config.HAConfig{Enabled: true},
+		BFT:        config.BFTConfig{Enabled: false},
+	}
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	// create block syncer
-	smtInstance := smt.NewSparseMerkleTree(api.SHA256, 16+256)
-	threadSafeSMT := smt.NewThreadSafeSMT(smtInstance)
+	// initialize block syncer with isLeader=false
+	mockLeader := &mockLeaderSelector{}
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
 	stateTracker := state.NewSyncStateTracker()
-	syncer := newBlockSyncer(testLogger, storage, threadSafeSMT, 0, stateTracker)
+	syncer := NewBlockSyncer(testLogger, mockLeader, storage, smtInstance, 0, cfg.Processing.RoundDuration, stateTracker)
 
 	// simulate leader creating a block
-	rootHash := createBlock(ctx, t, storage)
+	rootHash := createBlock(t, storage, 1)
 
-	// trigger the sync
-	err = syncer.syncToLatestBlock(ctx)
-	require.NoError(t, err)
+	// start the block syncer
+	syncer.Start(ctx)
+	defer syncer.Stop()
+
+	// wait for block syncer to start
+	time.Sleep(2 * cfg.Processing.RoundDuration)
 
 	// SMT root hash should match persisted block root hash after block sync
-	require.Equal(t, rootHash.String(), threadSafeSMT.GetRootHash())
+	require.Equal(t, rootHash.String(), smtInstance.GetRootHash())
 	require.Equal(t, big.NewInt(1), stateTracker.GetLastSyncedBlock())
+
+	// verify the blocks are not synced if node is leader
+	mockLeader.isLeader.Store(true)
+	createBlock(t, storage, 2)
+	time.Sleep(2 * cfg.Processing.RoundDuration)
+	require.Equal(t, rootHash.String(), smtInstance.GetRootHash())
+	require.Equal(t, big.NewInt(1), stateTracker.GetLastSyncedBlock())
+
 }
 
-func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage) api.HexBytes {
-	blockNumber := api.NewBigInt(big.NewInt(1))
+func createBlock(t *testing.T, storage *mongodb.Storage, blockNum int64) api.HexBytes {
+	ctx := t.Context()
+	blockNumber := api.NewBigInt(big.NewInt(blockNum))
 	testCommitments := []*models.Commitment{
 		testutil.CreateTestCommitment(t, "request_1"),
 		testutil.CreateTestCommitment(t, "request_2"),

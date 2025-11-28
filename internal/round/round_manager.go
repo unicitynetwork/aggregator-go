@@ -12,6 +12,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/bft"
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -70,10 +71,9 @@ type Round struct {
 //   - Start() and Stop(): These methods manage the overall lifecycle of the RoundManager instance.
 //     Start() is called once during application initialization to set up core components
 //     and restore state. Stop() is called once during application shutdown for graceful cleanup.
-//   - Activate() and Deactivate(): These methods are part of the ha.Activatable interface
-//     and manage the RoundManager's active participation in block creation based on
-//     High Availability (HA) leadership status. Activate() is called when the node
-//     becomes the leader, enabling active block processing. Deactivate() is called
+//   - Activate() and Deactivate(): these methods manage the RoundManager's active participation
+//     in block creation based on High Availability (HA) leadership status. Activate() is called
+//     when the node becomes the leader, enabling active block processing. Deactivate() is called
 //     when the node loses leadership, putting it into a passive state.
 //     A RoundManager can be Activated and Deactivated multiple times throughout its
 //     overall Start-Stop lifecycle as leadership changes.
@@ -86,6 +86,7 @@ type RoundManager struct {
 	rootClient      RootAggregatorClient
 	bftClient       bft.BFTClient
 	stateTracker    *state.Tracker
+	eventBus        *events.EventBus
 
 	// Round management
 	currentRound *Round
@@ -134,21 +135,23 @@ func NewRoundManager(
 	ctx context.Context,
 	cfg *config.Config,
 	logger *logger.Logger,
-	smtInstance *smt.SparseMerkleTree,
 	commitmentQueue interfaces.CommitmentQueue,
 	storage interfaces.Storage,
 	rootAggregatorClient RootAggregatorClient,
 	stateTracker *state.Tracker,
 	luc *types.UnicityCertificate,
+	eventBus *events.EventBus,
+	threadSafeSmt *smt.ThreadSafeSMT,
 ) (*RoundManager, error) {
 	rm := &RoundManager{
 		config:              cfg,
 		logger:              logger,
 		commitmentQueue:     commitmentQueue,
 		storage:             storage,
-		smt:                 smt.NewThreadSafeSMT(smtInstance),
+		smt:                 threadSafeSmt,
 		rootClient:          rootAggregatorClient,
 		stateTracker:        stateTracker,
+		eventBus:            eventBus,
 		roundDuration:       cfg.Processing.RoundDuration,         // Configurable round duration (default 1s)
 		commitmentStream:    make(chan *models.Commitment, 10000), // Reasonable buffer for streaming
 		avgProcessingRate:   1.0,                                  // Initial estimate: 1 commitment per ms
@@ -161,7 +164,7 @@ func NewRoundManager(
 	if cfg.Sharding.Mode == config.ShardingModeStandalone {
 		if cfg.BFT.Enabled {
 			var err error
-			rm.bftClient, err = bft.NewBFTClient(&cfg.BFT, rm, storage.TrustBaseStorage(), luc, logger)
+			rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, storage.TrustBaseStorage(), luc, logger, eventBus)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create BFT client: %w", err)
 			}
@@ -844,6 +847,7 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 }
 
 func (rm *RoundManager) Activate(ctx context.Context) error {
+	rm.logger.WithContext(ctx).Info("Activating round manager")
 	switch rm.config.Sharding.Mode {
 	case config.ShardingModeStandalone:
 		if err := rm.bftClient.Start(ctx); err != nil {
@@ -863,7 +867,8 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 	return nil
 }
 
-func (rm *RoundManager) Deactivate(_ context.Context) error {
+func (rm *RoundManager) Deactivate(ctx context.Context) error {
+	rm.logger.WithContext(ctx).Info("Deactivating round manager")
 	rm.stopCommitmentPrefetcher()
 	if rm.bftClient != nil {
 		rm.bftClient.Stop()

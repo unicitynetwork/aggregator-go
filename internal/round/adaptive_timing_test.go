@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -36,7 +37,7 @@ func TestAdaptiveProcessingRatio(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create round manager
-	rm, err := NewRoundManager(t.Context(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker(), nil)
+	rm, err := NewRoundManager(t.Context(), cfg, testLogger, nil, nil, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
 	require.NoError(t, err)
 
 	// Test initial values
@@ -131,7 +132,7 @@ func TestAdaptiveDeadlineCalculation(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(t.Context(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker(), nil)
+	rm, err := NewRoundManager(t.Context(), cfg, testLogger, nil, nil, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -185,6 +186,7 @@ func TestAdaptiveDeadlineCalculation(t *testing.T) {
 
 // TestSMTUpdateTimeTracking tests the tracking of SMT update times
 func TestSMTUpdateTimeTracking(t *testing.T) {
+	ctx := t.Context()
 	cfg := &config.Config{
 		BFT: config.BFTConfig{
 			Enabled: false,
@@ -198,10 +200,8 @@ func TestSMTUpdateTimeTracking(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker(), nil)
+	rm, err := NewRoundManager(t.Context(), cfg, testLogger, nil, nil, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
 	require.NoError(t, err)
-
-	ctx := context.Background()
 
 	// Create a test round
 	rm.currentRound = &Round{
@@ -261,7 +261,7 @@ func TestStreamingMetrics(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(t.Context(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker(), nil)
+	rm, err := NewRoundManager(t.Context(), cfg, testLogger, nil, nil, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
 	require.NoError(t, err)
 
 	// Set some test values
@@ -314,7 +314,7 @@ func TestAdaptiveTimingIntegration(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(t.Context(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker(), nil)
+	rm, err := NewRoundManager(t.Context(), cfg, testLogger, nil, nil, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
 	require.NoError(t, err)
 
 	ctx := context.Background()

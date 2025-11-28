@@ -15,12 +15,14 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
 	"github.com/unicitynetwork/aggregator-go/internal/ha"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/service"
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
@@ -179,7 +181,19 @@ func (suite *ShardingE2ETestSuite) startAggregatorInstance(name string, cfg *con
 
 	stateTracker := state.NewSyncStateTracker()
 
-	manager, err := round.NewManager(ctx, cfg, log, commitmentQueue, storageInstance, stateTracker, nil)
+	eventBus := events.NewEventBus(log)
+
+	// Create SMT instance based on sharding mode
+	var smtInstance *smt.SparseMerkleTree
+	switch cfg.Sharding.Mode {
+	case config.ShardingModeStandalone, config.ShardingModeChild:
+		smtInstance = smt.NewSparseMerkleTree(api.SHA256, 16+256)
+	case config.ShardingModeParent:
+		smtInstance = smt.NewParentSparseMerkleTree(api.SHA256, cfg.Sharding.ShardIDLength)
+	}
+	threadSafeSmt := smt.NewThreadSafeSMT(smtInstance)
+
+	manager, err := round.NewManager(ctx, cfg, log, commitmentQueue, storageInstance, stateTracker, nil, eventBus, threadSafeSmt)
 	suite.Require().NoError(err)
 
 	err = manager.Start(ctx)
@@ -187,18 +201,20 @@ func (suite *ShardingE2ETestSuite) startAggregatorInstance(name string, cfg *con
 
 	var leaderElection *ha.LeaderElection
 	var leaderSelector service.LeaderSelector
-	var haManager *ha.HAManager
+	var bs *ha.BlockSyncer
 
 	if cfg.HA.Enabled {
-		leaderElection = ha.NewLeaderElection(log, cfg.HA, storageInstance.LeadershipStorage())
+		leaderElection = ha.NewLeaderElection(log, cfg.HA, storageInstance.LeadershipStorage(), eventBus)
 		leaderElection.Start(ctx)
 		leaderSelector = leaderElection
 
 		time.Sleep(100 * time.Millisecond)
 
-		disableBlockSync := cfg.Sharding.Mode == config.ShardingModeParent
-		haManager = ha.NewHAManager(log, manager, leaderElection, storageInstance, manager.GetSMT(), cfg.Sharding.Child.ShardID, stateTracker, cfg.Processing.RoundDuration, disableBlockSync)
-		haManager.Start(ctx)
+		// do not start block syncer in parent mode
+		if cfg.Sharding.Mode != config.ShardingModeParent {
+			bs = ha.NewBlockSyncer(log, leaderElection, storageInstance, threadSafeSmt, cfg.Sharding.Child.ShardID, cfg.Processing.RoundDuration, stateTracker)
+			bs.Start(ctx)
+		}
 	} else {
 		leaderSelector = nil
 		err = manager.Activate(ctx)
@@ -232,8 +248,8 @@ func (suite *ShardingE2ETestSuite) startAggregatorInstance(name string, cfg *con
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			server.Stop(shutdownCtx)
-			if haManager != nil {
-				haManager.Stop()
+			if bs != nil {
+				bs.Stop()
 			}
 			if leaderElection != nil {
 				leaderElection.Stop(context.Background())

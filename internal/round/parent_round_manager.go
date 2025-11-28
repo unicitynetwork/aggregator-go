@@ -12,6 +12,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/bft"
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
@@ -46,6 +47,7 @@ type ParentRoundManager struct {
 	storage   interfaces.Storage
 	parentSMT *smt.ThreadSafeSMT
 	bftClient bft.BFTClient
+	eventBus  *events.EventBus
 
 	// Round management
 	currentRound  *ParentRound
@@ -61,24 +63,29 @@ type ParentRoundManager struct {
 }
 
 // NewParentRoundManager creates a new parent round manager
-func NewParentRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, storage interfaces.Storage, luc *types.UnicityCertificate) (*ParentRoundManager, error) {
-	// Initialize parent SMT in parent mode with support for mutable leaves
-	smtInstance := smt.NewParentSparseMerkleTree(api.SHA256, cfg.Sharding.ShardIDLength)
-	parentSMT := smt.NewThreadSafeSMT(smtInstance)
-
+func NewParentRoundManager(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *logger.Logger,
+	storage interfaces.Storage,
+	luc *types.UnicityCertificate,
+	eventBus *events.EventBus,
+	threadSafeSmt *smt.ThreadSafeSMT,
+) (*ParentRoundManager, error) {
 	prm := &ParentRoundManager{
 		config:        cfg,
 		logger:        logger,
 		storage:       storage,
-		parentSMT:     parentSMT,
+		parentSMT:     threadSafeSmt,
 		stopChan:      make(chan struct{}),
 		roundDuration: cfg.Processing.RoundDuration,
+		eventBus:      eventBus,
 	}
 
 	// Create BFT client (same logic as regular RoundManager)
 	if cfg.BFT.Enabled {
 		var err error
-		prm.bftClient, err = bft.NewBFTClient(&cfg.BFT, prm, storage.TrustBaseStorage(), luc, logger)
+		prm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, prm, storage.TrustBaseStorage(), luc, logger, eventBus)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create BFT client: %w", err)
 		}

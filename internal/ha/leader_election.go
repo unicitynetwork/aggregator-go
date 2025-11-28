@@ -4,14 +4,18 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
-// LeaderElection manages the HA leader election process
+// LeaderElection manages the HA leader election process.
+// It polls the db for leadership lock and publishes leadership
+// transition events on the provided EventBus.
 type LeaderElection struct {
 	log                     *logger.Logger
 	storage                 interfaces.LeadershipStorage
@@ -19,12 +23,15 @@ type LeaderElection struct {
 	serverID                string
 	heartbeatInterval       time.Duration
 	electionPollingInterval time.Duration
+	eventBus                *events.EventBus
 
 	wg     sync.WaitGroup     // election polling thread wg
 	cancel context.CancelFunc // election polling thread cancel signal
+
+	isLeader atomic.Bool // cached leader flag
 }
 
-func NewLeaderElection(log *logger.Logger, cfg config.HAConfig, storage interfaces.LeadershipStorage) *LeaderElection {
+func NewLeaderElection(log *logger.Logger, cfg config.HAConfig, storage interfaces.LeadershipStorage, eventBus *events.EventBus) *LeaderElection {
 	return &LeaderElection{
 		log:                     log,
 		storage:                 storage,
@@ -32,14 +39,15 @@ func NewLeaderElection(log *logger.Logger, cfg config.HAConfig, storage interfac
 		serverID:                cfg.ServerID,
 		heartbeatInterval:       cfg.LeaderHeartbeatInterval,
 		electionPollingInterval: cfg.LeaderElectionPollingInterval,
+		eventBus:                eventBus,
 	}
 }
 
-func (le *LeaderElection) IsLeader(ctx context.Context) (bool, error) {
-	return le.storage.IsLeader(ctx, le.lockID, le.serverID)
+func (le *LeaderElection) IsLeader(_ context.Context) (bool, error) {
+	return le.isLeader.Load(), nil
 }
 
-// Start stars the election polling
+// Start starts the election polling.
 func (le *LeaderElection) Start(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	le.cancel = cancel
@@ -105,11 +113,17 @@ func (le *LeaderElection) startElectionPolling(ctx context.Context) {
 				continue // keep trying to acquire the lock
 			}
 			if acquired {
-				le.log.WithComponent("leader-election").Info("Acquired leadership, starting heartbeat", "serverID", le.serverID)
+				le.log.WithComponent("leader-election").Info("Acquired leadership, publishing LeaderChangedEvent and starting heartbeat", "serverID", le.serverID)
+				le.isLeader.Store(true)
+				le.eventBus.Publish(events.TopicLeaderChanged, &events.LeaderChangedEvent{IsLeader: true})
+
 				if err := le.startHeartbeat(ctx); err != nil {
 					le.log.WithComponent("leader-election").Error("Error during heartbeat attempt", "error", err)
 				}
-				le.log.WithComponent("leader-election").Info("Lost leadership, returning to polling", "serverID", le.serverID)
+
+				le.log.WithComponent("leader-election").Info("Lost leadership, publishing LeaderChangedEvent and returning to polling", "serverID", le.serverID)
+				le.isLeader.Store(false)
+				le.eventBus.Publish(events.TopicLeaderChanged, &events.LeaderChangedEvent{IsLeader: false})
 			}
 		}
 	}
