@@ -96,7 +96,7 @@ func NewParentRoundManager(ctx context.Context, cfg *config.Config, logger *logg
 			}
 		}
 		nextBlockNumber.Add(lastBlockNumber.Int, big.NewInt(1))
-		prm.bftClient = bft.NewBFTClientStub(logger, prm, nextBlockNumber)
+		prm.bftClient = bft.NewBFTClientStub(logger, prm, nextBlockNumber, cfg.BFT.StubDelay)
 	}
 
 	return prm, nil
@@ -162,10 +162,19 @@ func (prm *ParentRoundManager) StartNewRound(ctx context.Context, roundNumber *a
 
 // startNewRound is the internal implementation
 func (prm *ParentRoundManager) startNewRound(ctx context.Context, roundNumber *api.BigInt) error {
+	prm.roundMutex.Lock()
+
+	// Check if this round or a later one is already in progress
+	if prm.currentRound != nil && prm.currentRound.Number.Cmp(roundNumber.Int) >= 0 {
+		prm.roundMutex.Unlock()
+		prm.logger.WithContext(ctx).Debug("Skipping duplicate round start",
+			"requestedRound", roundNumber.String(),
+			"currentRound", prm.currentRound.Number.String())
+		return nil
+	}
+
 	prm.logger.WithContext(ctx).Info("Starting new parent round",
 		"roundNumber", roundNumber.String())
-
-	prm.roundMutex.Lock()
 
 	var shardUpdates map[int]*models.ShardRootUpdate
 	if prm.currentRound != nil {
@@ -187,6 +196,13 @@ func (prm *ParentRoundManager) startNewRound(ctx context.Context, roundNumber *a
 	prm.logger.WithContext(ctx).Info("Parent round started",
 		"roundNumber", roundNumber.String(),
 		"duration", prm.roundDuration.String())
+
+	// Wait for round duration to collect shard updates
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(prm.roundDuration):
+	}
 
 	if err := prm.processCurrentRound(ctx); err != nil {
 		return err

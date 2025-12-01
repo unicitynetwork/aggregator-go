@@ -167,7 +167,7 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 				}
 			}
 			nextBlockNumber.Add(lastBlockNumber.Int, big.NewInt(1))
-			rm.bftClient = bft.NewBFTClientStub(logger, rm, nextBlockNumber)
+			rm.bftClient = bft.NewBFTClientStub(logger, rm, nextBlockNumber, cfg.BFT.StubDelay)
 		}
 	}
 	return rm, nil

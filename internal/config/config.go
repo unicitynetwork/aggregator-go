@@ -208,11 +208,12 @@ type BFTConfig struct {
 	ShardConf *types.PartitionDescriptionRecord `mapstructure:"shard_conf"`
 	TrustBase types.RootTrustBase               `mapstructure:"trust_base"`
 	// Peer configuration
-	Address                    string   `mapstructure:"address"`
-	AnnounceAddresses          []string `mapstructure:"announce_addresses"`
-	BootstrapAddresses         []string `mapstructure:"bootstrap_addresses"`
-	BootstrapConnectRetry      int      `mapstructure:"bootstrap_connect_retry"`
-	BootstrapConnectRetryDelay int      `mapstructure:"bootstrap_connect_retry_delay"`
+	Address                    string        `mapstructure:"address"`
+	AnnounceAddresses          []string      `mapstructure:"announce_addresses"`
+	BootstrapAddresses         []string      `mapstructure:"bootstrap_addresses"`
+	BootstrapConnectRetry      int           `mapstructure:"bootstrap_connect_retry"`
+	BootstrapConnectRetryDelay int           `mapstructure:"bootstrap_connect_retry_delay"`
+	StubDelay                  time.Duration `mapstructure:"stub_delay"` // Delay for BFT stub (testing only)
 }
 
 // Load loads configuration from environment variables with defaults
