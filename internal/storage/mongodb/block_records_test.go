@@ -102,10 +102,10 @@ func setupTestDB(t *testing.T) (*mongo.Database, func()) {
 }
 
 // createTestBlockRecords creates a test BlockRecords instance
-func createTestBlockRecords(blockNumber *api.BigInt, requestIDs []api.RequestID) *models.BlockRecords {
+func createTestBlockRecords(blockNumber *api.BigInt, stateIDs []api.StateID) *models.BlockRecords {
 	return &models.BlockRecords{
 		BlockNumber: blockNumber,
-		RequestIDs:  requestIDs,
+		StateIDs:    stateIDs,
 		CreatedAt:   api.Now(),
 	}
 }
@@ -120,12 +120,12 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 	t.Run("should store valid block records", func(t *testing.T) {
 		// Create test data
 		blockNumber := api.NewBigInt(big.NewInt(12345))
-		requestIDs := []api.RequestID{
-			api.RequestID("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
-			api.RequestID("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
+		stateIDs := []api.StateID{
+			api.StateID("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
+			api.StateID("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
 		}
 
-		records := createTestBlockRecords(blockNumber, requestIDs)
+		records := createTestBlockRecords(blockNumber, stateIDs)
 
 		// Store the records
 		err := storage.Store(ctx, records)
@@ -137,19 +137,19 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 
 		// Verify the stored data matches
 		assert.Equal(t, blockNumber.String(), storedRecord.BlockNumber.String())
-		assert.Equal(t, len(requestIDs), len(storedRecord.RequestIDs))
-		for i, requestID := range requestIDs {
-			assert.Equal(t, string(requestID), string(storedRecord.RequestIDs[i]))
+		assert.Equal(t, len(stateIDs), len(storedRecord.StateIDs))
+		for i, stateID := range stateIDs {
+			assert.Equal(t, string(stateID), string(storedRecord.StateIDs[i]))
 		}
 		assert.NotNil(t, storedRecord.CreatedAt)
 	})
 
-	t.Run("should store block records with empty request IDs", func(t *testing.T) {
-		// Create test data with empty request IDs
+	t.Run("should store block records with empty state IDs", func(t *testing.T) {
+		// Create test data with empty state IDs
 		blockNumber := api.NewBigInt(big.NewInt(54321))
-		requestIDs := []api.RequestID{}
+		stateIDs := []api.StateID{}
 
-		records := createTestBlockRecords(blockNumber, requestIDs)
+		records := createTestBlockRecords(blockNumber, stateIDs)
 
 		// Store the records
 		err := storage.Store(ctx, records)
@@ -161,7 +161,7 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 
 		// Verify the stored data
 		assert.Equal(t, blockNumber.String(), storedRecord.BlockNumber.String())
-		assert.Equal(t, 0, len(storedRecord.RequestIDs))
+		assert.Equal(t, 0, len(storedRecord.StateIDs))
 		assert.NotNil(t, storedRecord.CreatedAt)
 	})
 
@@ -171,11 +171,11 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 		require.True(t, ok, "Should be able to create large big.Int")
 
 		blockNumber := api.NewBigInt(largeNumber)
-		requestIDs := []api.RequestID{
-			api.RequestID("ffff123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde00"),
+		stateIDs := []api.StateID{
+			api.StateID("ffff123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde00"),
 		}
 
-		records := createTestBlockRecords(blockNumber, requestIDs)
+		records := createTestBlockRecords(blockNumber, stateIDs)
 
 		// Store the records
 		err := storage.Store(ctx, records)
@@ -187,42 +187,42 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 
 		// Verify the stored data
 		assert.Equal(t, 0, blockNumber.Cmp(storedRecord.BlockNumber.Int))
-		assert.Equal(t, len(requestIDs), len(storedRecord.RequestIDs))
-		assert.Equal(t, string(requestIDs[0]), string(storedRecord.RequestIDs[0]))
+		assert.Equal(t, len(stateIDs), len(storedRecord.StateIDs))
+		assert.Equal(t, string(stateIDs[0]), string(storedRecord.StateIDs[0]))
 	})
 
 	t.Run("should store multiple block records", func(t *testing.T) {
 		// Create multiple test records
 		testCases := []struct {
 			blockNumber *api.BigInt
-			requestIDs  []api.RequestID
+			stateIDs    []api.StateID
 		}{
 			{
 				blockNumber: api.NewBigInt(big.NewInt(1001)),
-				requestIDs: []api.RequestID{
-					api.RequestID("0000000000000000000000000000000000000000000000000000000000000001"),
+				stateIDs: []api.StateID{
+					api.StateID("0000000000000000000000000000000000000000000000000000000000000001"),
 				},
 			},
 			{
 				blockNumber: api.NewBigInt(big.NewInt(1002)),
-				requestIDs: []api.RequestID{
-					api.RequestID("0000000000000000000000000000000000000000000000000000000000000002"),
-					api.RequestID("0000000000000000000000000000000000000000000000000000000000000003"),
+				stateIDs: []api.StateID{
+					api.StateID("0000000000000000000000000000000000000000000000000000000000000002"),
+					api.StateID("0000000000000000000000000000000000000000000000000000000000000003"),
 				},
 			},
 			{
 				blockNumber: api.NewBigInt(big.NewInt(1003)),
-				requestIDs: []api.RequestID{
-					api.RequestID("0000000000000000000000000000000000000000000000000000000000000004"),
-					api.RequestID("0000000000000000000000000000000000000000000000000000000000000005"),
-					api.RequestID("0000000000000000000000000000000000000000000000000000000000000006"),
+				stateIDs: []api.StateID{
+					api.StateID("0000000000000000000000000000000000000000000000000000000000000004"),
+					api.StateID("0000000000000000000000000000000000000000000000000000000000000005"),
+					api.StateID("0000000000000000000000000000000000000000000000000000000000000006"),
 				},
 			},
 		}
 
 		// Store all records
 		for _, tc := range testCases {
-			records := createTestBlockRecords(tc.blockNumber, tc.requestIDs)
+			records := createTestBlockRecords(tc.blockNumber, tc.stateIDs)
 			err := storage.Store(ctx, records)
 			require.NoError(t, err, "Store should not return an error for block %s", tc.blockNumber.String())
 		}
@@ -233,9 +233,9 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 			require.NoError(t, err, "Should be able to retrieve stored record for block %s", tc.blockNumber.String())
 
 			assert.Equal(t, tc.blockNumber.String(), storedRecord.BlockNumber.String())
-			assert.Equal(t, len(tc.requestIDs), len(storedRecord.RequestIDs))
-			for i, requestID := range tc.requestIDs {
-				assert.Equal(t, string(requestID), string(storedRecord.RequestIDs[i]))
+			assert.Equal(t, len(tc.stateIDs), len(storedRecord.StateIDs))
+			for i, stateID := range tc.stateIDs {
+				assert.Equal(t, string(stateID), string(storedRecord.StateIDs[i]))
 			}
 		}
 	})
@@ -243,11 +243,11 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 	t.Run("should store block records with zero block number", func(t *testing.T) {
 		// Create test data with zero block number
 		blockNumber := api.NewBigInt(big.NewInt(0))
-		requestIDs := []api.RequestID{
-			api.RequestID("0000000000000000000000000000000000000000000000000000000000000000"),
+		stateIDs := []api.StateID{
+			api.StateID("0000000000000000000000000000000000000000000000000000000000000000"),
 		}
 
-		records := createTestBlockRecords(blockNumber, requestIDs)
+		records := createTestBlockRecords(blockNumber, stateIDs)
 
 		// Store the records
 		err := storage.Store(ctx, records)
@@ -259,7 +259,7 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 
 		// Verify the stored data
 		assert.Equal(t, "0", storedRecord.BlockNumber.String())
-		assert.Equal(t, len(requestIDs), len(storedRecord.RequestIDs))
+		assert.Equal(t, len(stateIDs), len(storedRecord.StateIDs))
 	})
 
 	t.Run("should handle context cancellation", func(t *testing.T) {
@@ -269,11 +269,11 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 
 		// Create test data
 		blockNumber := api.NewBigInt(big.NewInt(99999))
-		requestIDs := []api.RequestID{
-			api.RequestID("0000000000000000000000000000000000000000000000000000000000099999"),
+		stateIDs := []api.StateID{
+			api.StateID("0000000000000000000000000000000000000000000000000000000000099999"),
 		}
 
-		records := createTestBlockRecords(blockNumber, requestIDs)
+		records := createTestBlockRecords(blockNumber, stateIDs)
 
 		// Attempt to store with cancelled context
 		err := storage.Store(cancelledCtx, records)
@@ -291,11 +291,11 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 
 		// Create test data
 		blockNumber := api.NewBigInt(big.NewInt(88888))
-		requestIDs := []api.RequestID{
-			api.RequestID("0000000000000000000000000000000000000000000000000000000000088888"),
+		stateIDs := []api.StateID{
+			api.StateID("0000000000000000000000000000000000000000000000000000000000088888"),
 		}
 
-		records := createTestBlockRecords(blockNumber, requestIDs)
+		records := createTestBlockRecords(blockNumber, stateIDs)
 
 		// Attempt to store with timed out context
 		err := storage.Store(timeoutCtx, records)
@@ -310,15 +310,15 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 		assert.ErrorContainsf(t, err, "block records is nil", "Store should return an error when records is nil")
 	})
 
-	t.Run("should store block records with very long request ID list", func(t *testing.T) {
-		// Create test data with many request IDs
+	t.Run("should store block records with very long state ID list", func(t *testing.T) {
+		// Create test data with many state IDs
 		blockNumber := api.NewBigInt(big.NewInt(77777))
-		requestIDs := make([]api.RequestID, 1000)
+		stateIDs := make([]api.StateID, 1000)
 		for i := 0; i < 1000; i++ {
-			requestIDs[i] = api.RequestID(fmt.Sprintf("0000%060d", i))
+			stateIDs[i] = api.StateID(fmt.Sprintf("0000%060d", i))
 		}
 
-		records := createTestBlockRecords(blockNumber, requestIDs)
+		records := createTestBlockRecords(blockNumber, stateIDs)
 
 		// Store the records
 		err := storage.Store(ctx, records)
@@ -330,12 +330,12 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 
 		// Verify the stored data
 		assert.Equal(t, blockNumber.String(), storedRecord.BlockNumber.String())
-		assert.Equal(t, 1000, len(storedRecord.RequestIDs))
+		assert.Equal(t, 1000, len(storedRecord.StateIDs))
 
-		// Verify a few random request IDs
-		assert.Equal(t, string(requestIDs[0]), string(storedRecord.RequestIDs[0]))
-		assert.Equal(t, string(requestIDs[500]), string(storedRecord.RequestIDs[500]))
-		assert.Equal(t, string(requestIDs[999]), string(storedRecord.RequestIDs[999]))
+		// Verify a few random state IDs
+		assert.Equal(t, string(stateIDs[0]), string(storedRecord.StateIDs[0]))
+		assert.Equal(t, string(stateIDs[500]), string(storedRecord.StateIDs[500]))
+		assert.Equal(t, string(stateIDs[999]), string(storedRecord.StateIDs[999]))
 	})
 
 	t.Run("should handle decimal128 conversion correctly", func(t *testing.T) {
@@ -344,11 +344,11 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 
 		for _, num := range testCases {
 			blockNumber := api.NewBigInt(big.NewInt(num))
-			requestIDs := []api.RequestID{
-				api.RequestID("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
-				api.RequestID("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
+			stateIDs := []api.StateID{
+				api.StateID("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
+				api.StateID("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
 			}
-			blockRecords := createTestBlockRecords(blockNumber, requestIDs)
+			blockRecords := createTestBlockRecords(blockNumber, stateIDs)
 
 			err := storage.Store(ctx, blockRecords)
 			require.NoError(t, err, "Should store block with number %d", num)
@@ -371,8 +371,8 @@ func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
 	err := storage.CreateIndexes(ctx)
 	require.NoError(t, err)
 
-	requestIDs := []api.RequestID{
-		api.RequestID("0000000000000000000000000000000000000000000000000000000000000000"),
+	stateIDs := []api.StateID{
+		api.StateID("0000000000000000000000000000000000000000000000000000000000000000"),
 	}
 
 	t.Run("should return nil when no block records exist", func(t *testing.T) {
@@ -384,7 +384,7 @@ func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
 	t.Run("should return latest block with single record", func(t *testing.T) {
 		// Store single record
 		blockNumber := api.NewBigInt(big.NewInt(5))
-		records := createTestBlockRecords(blockNumber, requestIDs)
+		records := createTestBlockRecords(blockNumber, stateIDs)
 		err := storage.Store(ctx, records)
 		require.NoError(t, err)
 
@@ -409,7 +409,7 @@ func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
 		}
 
 		for i, bn := range blockNumbers {
-			records := createTestBlockRecords(api.NewBigInt(bn), requestIDs)
+			records := createTestBlockRecords(api.NewBigInt(bn), stateIDs)
 			err := storage.Store(ctx, records)
 			require.NoError(t, err, "Should store record %d", i)
 		}
@@ -437,7 +437,7 @@ func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
 			bi := new(big.Int)
 			bi.SetString(numStr, 10)
 			blockNumber := api.NewBigInt(bi)
-			records := createTestBlockRecords(blockNumber, requestIDs)
+			records := createTestBlockRecords(blockNumber, stateIDs)
 
 			err := storage.Store(ctx, records)
 			require.NoError(t, err, "Should store large number record")
@@ -467,8 +467,8 @@ func TestBlockRecordsStorage_GetNextBlock(t *testing.T) {
 	err := storage.CreateIndexes(ctx)
 	require.NoError(t, err)
 
-	requestIDs := []api.RequestID{
-		api.RequestID("0000000000000000000000000000000000000000000000000000000000000000"),
+	stateIDs := []api.StateID{
+		api.StateID("0000000000000000000000000000000000000000000000000000000000000000"),
 	}
 
 	t.Run("should return nil when no block records exist", func(t *testing.T) {
@@ -481,7 +481,7 @@ func TestBlockRecordsStorage_GetNextBlock(t *testing.T) {
 		blockNumbers := []*big.Int{big.NewInt(10), big.NewInt(5), big.NewInt(20)}
 
 		for _, bn := range blockNumbers {
-			records := createTestBlockRecords(api.NewBigInt(bn), requestIDs)
+			records := createTestBlockRecords(api.NewBigInt(bn), stateIDs)
 			err := storage.Store(ctx, records)
 			require.NoError(t, err)
 		}
@@ -504,7 +504,7 @@ func TestBlockRecordsStorage_GetNextBlock(t *testing.T) {
 		}
 
 		for _, bn := range blockNumbers {
-			records := createTestBlockRecords(api.NewBigInt(bn), requestIDs)
+			records := createTestBlockRecords(api.NewBigInt(bn), stateIDs)
 			err := storage.Store(ctx, records)
 			require.NoError(t, err)
 		}
@@ -522,7 +522,7 @@ func TestBlockRecordsStorage_GetNextBlock(t *testing.T) {
 		blockNumbers := []*big.Int{big.NewInt(200), big.NewInt(210)}
 
 		for _, bn := range blockNumbers {
-			records := createTestBlockRecords(api.NewBigInt(bn), requestIDs)
+			records := createTestBlockRecords(api.NewBigInt(bn), stateIDs)
 			err := storage.Store(ctx, records)
 			require.NoError(t, err)
 		}
@@ -548,7 +548,7 @@ func TestBlockRecordsStorage_GetNextBlock(t *testing.T) {
 			blockNumber := api.NewBigInt(bi)
 			stored = append(stored, blockNumber)
 
-			records := createTestBlockRecords(blockNumber, requestIDs)
+			records := createTestBlockRecords(blockNumber, stateIDs)
 			err := storage.Store(ctx, records)
 			require.NoError(t, err)
 		}
@@ -581,11 +581,11 @@ func TestBlockRecordsStorage_Store_Integration(t *testing.T) {
 
 		// Create test data
 		blockNumber := api.NewBigInt(big.NewInt(555555))
-		requestIDs := []api.RequestID{
-			api.RequestID("0000000000000000000000000000000000000000000000000000000000555555"),
+		stateIDs := []api.StateID{
+			api.StateID("0000000000000000000000000000000000000000000000000000000000555555"),
 		}
 
-		records := createTestBlockRecords(blockNumber, requestIDs)
+		records := createTestBlockRecords(blockNumber, stateIDs)
 
 		// Store the records
 		err = storage.Store(ctx, records)
@@ -598,8 +598,8 @@ func TestBlockRecordsStorage_Store_Integration(t *testing.T) {
 
 		// Verify the data
 		assert.Equal(t, blockNumber.String(), retrievedRecords.BlockNumber.String())
-		assert.Equal(t, len(requestIDs), len(retrievedRecords.RequestIDs))
-		assert.Equal(t, string(requestIDs[0]), string(retrievedRecords.RequestIDs[0]))
+		assert.Equal(t, len(stateIDs), len(retrievedRecords.StateIDs))
+		assert.Equal(t, string(stateIDs[0]), string(retrievedRecords.StateIDs[0]))
 	})
 
 	t.Run("should handle duplicate block numbers with unique index", func(t *testing.T) {
@@ -609,15 +609,15 @@ func TestBlockRecordsStorage_Store_Integration(t *testing.T) {
 
 		// Create test data with same block number
 		blockNumber := api.NewBigInt(big.NewInt(666666))
-		requestIDs1 := []api.RequestID{
-			api.RequestID("0000000000000000000000000000000000000000000000000000000000666661"),
+		stateIDs1 := []api.StateID{
+			api.StateID("0000000000000000000000000000000000000000000000000000000000666661"),
 		}
-		requestIDs2 := []api.RequestID{
-			api.RequestID("0000000000000000000000000000000000000000000000000000000000666662"),
+		stateIDs2 := []api.StateID{
+			api.StateID("0000000000000000000000000000000000000000000000000000000000666662"),
 		}
 
-		records1 := createTestBlockRecords(blockNumber, requestIDs1)
-		records2 := createTestBlockRecords(blockNumber, requestIDs2)
+		records1 := createTestBlockRecords(blockNumber, stateIDs1)
+		records2 := createTestBlockRecords(blockNumber, stateIDs2)
 
 		// Store the first record
 		err = storage.Store(ctx, records1)
@@ -635,35 +635,35 @@ func TestBlockRecordsStorage_Store_Unit(t *testing.T) {
 	t.Run("should validate BlockRecords structure", func(t *testing.T) {
 		// Test that BlockRecords can be created properly
 		blockNumber := api.NewBigInt(big.NewInt(42))
-		requestIDs := []api.RequestID{
-			api.RequestID("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
-			api.RequestID("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
+		stateIDs := []api.StateID{
+			api.StateID("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
+			api.StateID("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
 		}
 
-		records := createTestBlockRecords(blockNumber, requestIDs)
+		records := createTestBlockRecords(blockNumber, stateIDs)
 
 		// Validate the created records
 		assert.NotNil(t, records, "Created records should not be nil")
 		assert.Equal(t, blockNumber.String(), records.BlockNumber.String())
-		assert.Equal(t, len(requestIDs), len(records.RequestIDs))
+		assert.Equal(t, len(stateIDs), len(records.StateIDs))
 		assert.NotNil(t, records.CreatedAt)
 
-		for i, requestID := range requestIDs {
-			assert.Equal(t, string(requestID), string(records.RequestIDs[i]))
+		for i, stateID := range stateIDs {
+			assert.Equal(t, string(stateID), string(records.StateIDs[i]))
 		}
 	})
 
-	t.Run("should handle empty request IDs list", func(t *testing.T) {
-		// Test that BlockRecords can be created with empty request IDs
+	t.Run("should handle empty state IDs list", func(t *testing.T) {
+		// Test that BlockRecords can be created with empty state IDs
 		blockNumber := api.NewBigInt(big.NewInt(100))
-		requestIDs := []api.RequestID{}
+		stateIDs := []api.StateID{}
 
-		records := createTestBlockRecords(blockNumber, requestIDs)
+		records := createTestBlockRecords(blockNumber, stateIDs)
 
 		// Validate the created records
 		assert.NotNil(t, records, "Created records should not be nil")
 		assert.Equal(t, blockNumber.String(), records.BlockNumber.String())
-		assert.Equal(t, 0, len(records.RequestIDs))
+		assert.Equal(t, 0, len(records.StateIDs))
 		assert.NotNil(t, records.CreatedAt)
 	})
 
@@ -673,55 +673,55 @@ func TestBlockRecordsStorage_Store_Unit(t *testing.T) {
 		require.True(t, ok, "Should be able to create large big.Int")
 
 		blockNumber := api.NewBigInt(largeNumber)
-		requestIDs := []api.RequestID{
-			api.RequestID("ffff123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde00"),
+		stateIDs := []api.StateID{
+			api.StateID("ffff123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde00"),
 		}
 
-		records := createTestBlockRecords(blockNumber, requestIDs)
+		records := createTestBlockRecords(blockNumber, stateIDs)
 
 		// Validate the created records
 		assert.NotNil(t, records, "Created records should not be nil")
 		assert.Equal(t, largeNumber.String(), records.BlockNumber.String())
-		assert.Equal(t, len(requestIDs), len(records.RequestIDs))
+		assert.Equal(t, len(stateIDs), len(records.StateIDs))
 		assert.NotNil(t, records.CreatedAt)
 	})
 
 	t.Run("should handle zero block number", func(t *testing.T) {
 		// Test that BlockRecords can be created with zero block number
 		blockNumber := api.NewBigInt(big.NewInt(0))
-		requestIDs := []api.RequestID{
-			api.RequestID("0000000000000000000000000000000000000000000000000000000000000000"),
+		stateIDs := []api.StateID{
+			api.StateID("0000000000000000000000000000000000000000000000000000000000000000"),
 		}
 
-		records := createTestBlockRecords(blockNumber, requestIDs)
+		records := createTestBlockRecords(blockNumber, stateIDs)
 
 		// Validate the created records
 		assert.NotNil(t, records, "Created records should not be nil")
 		assert.Equal(t, "0", records.BlockNumber.String())
-		assert.Equal(t, len(requestIDs), len(records.RequestIDs))
+		assert.Equal(t, len(stateIDs), len(records.StateIDs))
 		assert.NotNil(t, records.CreatedAt)
 	})
 
-	t.Run("should handle many request IDs", func(t *testing.T) {
-		// Test that BlockRecords can be created with many request IDs
+	t.Run("should handle many state IDs", func(t *testing.T) {
+		// Test that BlockRecords can be created with many state IDs
 		blockNumber := api.NewBigInt(big.NewInt(1000))
-		requestIDs := make([]api.RequestID, 100)
+		stateIDs := make([]api.StateID, 100)
 		for i := 0; i < 100; i++ {
-			requestIDs[i] = api.RequestID(fmt.Sprintf("0000%060d", i))
+			stateIDs[i] = api.StateID(fmt.Sprintf("0000%060d", i))
 		}
 
-		records := createTestBlockRecords(blockNumber, requestIDs)
+		records := createTestBlockRecords(blockNumber, stateIDs)
 
 		// Validate the created records
 		assert.NotNil(t, records, "Created records should not be nil")
 		assert.Equal(t, blockNumber.String(), records.BlockNumber.String())
-		assert.Equal(t, 100, len(records.RequestIDs))
+		assert.Equal(t, 100, len(records.StateIDs))
 		assert.NotNil(t, records.CreatedAt)
 
-		// Verify a few random request IDs
-		assert.Equal(t, string(requestIDs[0]), string(records.RequestIDs[0]))
-		assert.Equal(t, string(requestIDs[50]), string(records.RequestIDs[50]))
-		assert.Equal(t, string(requestIDs[99]), string(records.RequestIDs[99]))
+		// Verify a few random state IDs
+		assert.Equal(t, string(stateIDs[0]), string(records.StateIDs[0]))
+		assert.Equal(t, string(stateIDs[50]), string(records.StateIDs[50]))
+		assert.Equal(t, string(stateIDs[99]), string(records.StateIDs[99]))
 	})
 
 	t.Run("should create storage instance", func(t *testing.T) {
@@ -744,12 +744,12 @@ func TestBlockRecordsStorage_Store_BSON(t *testing.T) {
 	t.Run("should marshal and unmarshal BlockRecords to BSON", func(t *testing.T) {
 		// Create test data
 		blockNumber := api.NewBigInt(big.NewInt(12345))
-		requestIDs := []api.RequestID{
-			api.RequestID("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
-			api.RequestID("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
+		stateIDs := []api.StateID{
+			api.StateID("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
+			api.StateID("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
 		}
 
-		originalRecords := createTestBlockRecords(blockNumber, requestIDs)
+		originalRecords := createTestBlockRecords(blockNumber, stateIDs)
 		originalBSON, err := originalRecords.ToBSON()
 		require.NoError(t, err)
 
@@ -767,39 +767,39 @@ func TestBlockRecordsStorage_Store_BSON(t *testing.T) {
 
 		// Verify the data matches
 		assert.Equal(t, originalRecords.BlockNumber.String(), unmarshaledRecords.BlockNumber.String())
-		assert.Equal(t, len(originalRecords.RequestIDs), len(unmarshaledRecords.RequestIDs))
+		assert.Equal(t, len(originalRecords.StateIDs), len(unmarshaledRecords.StateIDs))
 
-		for i, requestID := range originalRecords.RequestIDs {
-			assert.Equal(t, string(requestID), string(unmarshaledRecords.RequestIDs[i]))
+		for i, stateID := range originalRecords.StateIDs {
+			assert.Equal(t, string(stateID), string(unmarshaledRecords.StateIDs[i]))
 		}
 
 		// Note: CreatedAt comparison would need special handling due to potential precision differences
 		assert.NotNil(t, unmarshaledRecords.CreatedAt)
 	})
 
-	t.Run("should marshal and unmarshal empty request IDs", func(t *testing.T) {
-		// Create test data with empty request IDs
+	t.Run("should marshal and unmarshal empty state IDs", func(t *testing.T) {
+		// Create test data with empty state IDs
 		blockNumber := api.NewBigInt(big.NewInt(54321))
-		requestIDs := []api.RequestID{}
+		stateIDs := []api.StateID{}
 
-		originalRecords := createTestBlockRecords(blockNumber, requestIDs)
+		originalRecords := createTestBlockRecords(blockNumber, stateIDs)
 		originalBSON, err := originalRecords.ToBSON()
 		require.NoError(t, err)
 
 		// Marshal to BSON
 		bsonData, err := bson.Marshal(originalBSON)
-		require.NoError(t, err, "Should be able to marshal BlockRecords with empty requestIDs to BSON")
+		require.NoError(t, err, "Should be able to marshal BlockRecords with empty stateIDs to BSON")
 
 		// Unmarshal from BSON
 		var unmarshaledRecordsBSON models.BlockRecordsBSON
 		err = bson.Unmarshal(bsonData, &unmarshaledRecordsBSON)
-		require.NoError(t, err, "Should be able to unmarshal BlockRecords with empty requestIDs from BSON")
+		require.NoError(t, err, "Should be able to unmarshal BlockRecords with empty stateIDs from BSON")
 		unmarshaledRecords, err := unmarshaledRecordsBSON.FromBSON()
 		require.NoError(t, err)
 
 		// Verify the data matches
 		assert.Equal(t, originalRecords.BlockNumber.String(), unmarshaledRecords.BlockNumber.String())
-		assert.Equal(t, 0, len(unmarshaledRecords.RequestIDs))
+		assert.Equal(t, 0, len(unmarshaledRecords.StateIDs))
 		assert.NotNil(t, unmarshaledRecords.CreatedAt)
 	})
 
@@ -809,11 +809,11 @@ func TestBlockRecordsStorage_Store_BSON(t *testing.T) {
 		require.True(t, ok, "Should be able to create large big.Int")
 
 		blockNumber := api.NewBigInt(largeNumber)
-		requestIDs := []api.RequestID{
-			api.RequestID("ffff123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde00"),
+		stateIDs := []api.StateID{
+			api.StateID("ffff123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde00"),
 		}
 
-		originalRecords := createTestBlockRecords(blockNumber, requestIDs)
+		originalRecords := createTestBlockRecords(blockNumber, stateIDs)
 		originalBSON, err := originalRecords.ToBSON()
 		require.NoError(t, err)
 
@@ -830,8 +830,8 @@ func TestBlockRecordsStorage_Store_BSON(t *testing.T) {
 
 		// Verify the data matches
 		assert.Equal(t, originalRecords.BlockNumber.String(), unmarshaledRecords.BlockNumber.String())
-		assert.Equal(t, len(originalRecords.RequestIDs), len(unmarshaledRecords.RequestIDs))
-		assert.Equal(t, string(originalRecords.RequestIDs[0]), string(unmarshaledRecords.RequestIDs[0]))
+		assert.Equal(t, len(originalRecords.StateIDs), len(unmarshaledRecords.StateIDs))
+		assert.Equal(t, string(originalRecords.StateIDs[0]), string(unmarshaledRecords.StateIDs[0]))
 		assert.NotNil(t, unmarshaledRecords.CreatedAt)
 	})
 }
@@ -841,27 +841,27 @@ func TestBlockRecordsStorage_Store_Comprehensive(t *testing.T) {
 	t.Run("should demonstrate complete BlockRecords functionality", func(t *testing.T) {
 		// This test demonstrates that all components work together:
 		// - BigInt BSON marshaling/unmarshaling
-		// - RequestID (ImprintHexString) BSON marshaling/unmarshaling
+		// - StateID (ImprintHexString) BSON marshaling/unmarshaling
 		// - Timestamp BSON marshaling/unmarshaling
 		// - BlockRecords structure and BSON serialization
 
 		// Create test data with various data types
 		blockNumber := api.NewBigInt(big.NewInt(123456789))
-		requestIDs := []api.RequestID{
-			api.RequestID("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
-			api.RequestID("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
-			api.RequestID("ffff123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde00"),
+		stateIDs := []api.StateID{
+			api.StateID("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
+			api.StateID("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
+			api.StateID("ffff123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde00"),
 		}
 
 		// Create BlockRecords
-		originalRecords := createTestBlockRecords(blockNumber, requestIDs)
+		originalRecords := createTestBlockRecords(blockNumber, stateIDs)
 		originalRecordsBSON, err := originalRecords.ToBSON()
 		require.NoError(t, err)
 
 		// Verify structure is correct
 		assert.NotNil(t, originalRecords)
 		assert.Equal(t, blockNumber.String(), originalRecords.BlockNumber.String())
-		assert.Equal(t, len(requestIDs), len(originalRecords.RequestIDs))
+		assert.Equal(t, len(stateIDs), len(originalRecords.StateIDs))
 		assert.NotNil(t, originalRecords.CreatedAt)
 
 		// Test BSON round-trip
@@ -876,10 +876,10 @@ func TestBlockRecordsStorage_Store_Comprehensive(t *testing.T) {
 
 		// Verify all data is preserved through BSON round-trip
 		assert.Equal(t, originalRecords.BlockNumber.String(), unmarshaledRecords.BlockNumber.String())
-		assert.Equal(t, len(originalRecords.RequestIDs), len(unmarshaledRecords.RequestIDs))
+		assert.Equal(t, len(originalRecords.StateIDs), len(unmarshaledRecords.StateIDs))
 
-		for i, originalID := range originalRecords.RequestIDs {
-			assert.Equal(t, string(originalID), string(unmarshaledRecords.RequestIDs[i]))
+		for i, originalID := range originalRecords.StateIDs {
+			assert.Equal(t, string(originalID), string(unmarshaledRecords.StateIDs[i]))
 		}
 
 		// Verify that all custom types still function after unmarshaling
@@ -888,14 +888,14 @@ func TestBlockRecordsStorage_Store_Comprehensive(t *testing.T) {
 		bigIntBytes := unmarshaledRecords.BlockNumber.Int.Bytes()
 		assert.True(t, len(bigIntBytes) > 0, "BigInt should have byte representation")
 
-		// Test RequestID functionality
-		for _, requestID := range unmarshaledRecords.RequestIDs {
-			imprintBytes, err := requestID.Imprint()
-			assert.NoError(t, err, "RequestID should be able to convert to imprint")
-			assert.True(t, len(imprintBytes) > 0, "RequestID should have imprint bytes")
+		// Test StateID functionality
+		for _, stateID := range unmarshaledRecords.StateIDs {
+			imprintBytes, err := stateID.Imprint()
+			assert.NoError(t, err, "StateID should be able to convert to imprint")
+			assert.True(t, len(imprintBytes) > 0, "StateID should have imprint bytes")
 
-			algorithm, err := requestID.Algorithm()
-			assert.NoError(t, err, "RequestID should be able to extract algorithm")
+			algorithm, err := stateID.Algorithm()
+			assert.NoError(t, err, "StateID should be able to extract algorithm")
 			assert.Len(t, algorithm, 2, "Algorithm should be 2 bytes")
 		}
 
@@ -904,7 +904,7 @@ func TestBlockRecordsStorage_Store_Comprehensive(t *testing.T) {
 
 		t.Logf("✓ Complete round-trip successful:")
 		t.Logf("  Block Number: %s", unmarshaledRecords.BlockNumber.String())
-		t.Logf("  Request IDs: %d", len(unmarshaledRecords.RequestIDs))
+		t.Logf("  State IDs: %d", len(unmarshaledRecords.StateIDs))
 		t.Logf("  Created At: %v", unmarshaledRecords.CreatedAt.Time)
 		t.Logf("  BSON Size: %d bytes", len(bsonData))
 	})
@@ -915,17 +915,17 @@ func TestBlockRecordsStorage_Store_Comprehensive(t *testing.T) {
 		testCases := []struct {
 			name        string
 			blockNumber *api.BigInt
-			requestIDs  []api.RequestID
+			stateIDs    []api.StateID
 		}{
 			{
 				name:        "zero block number",
 				blockNumber: api.NewBigInt(big.NewInt(0)),
-				requestIDs:  []api.RequestID{"0000000000000000000000000000000000000000000000000000000000000000"},
+				stateIDs:    []api.StateID{"0000000000000000000000000000000000000000000000000000000000000000"},
 			},
 			{
-				name:        "empty request IDs",
+				name:        "empty state IDs",
 				blockNumber: api.NewBigInt(big.NewInt(999)),
-				requestIDs:  []api.RequestID{},
+				stateIDs:    []api.StateID{},
 			},
 			{
 				name: "large block number",
@@ -933,13 +933,13 @@ func TestBlockRecordsStorage_Store_Comprehensive(t *testing.T) {
 					large, _ := new(big.Int).SetString("999999999999999999999999999999999", 10)
 					return api.NewBigInt(large)
 				}(),
-				requestIDs: []api.RequestID{"ffff000000000000000000000000000000000000000000000000000000000000"},
+				stateIDs: []api.StateID{"ffff000000000000000000000000000000000000000000000000000000000000"},
 			},
 		}
 
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				records := createTestBlockRecords(tc.blockNumber, tc.requestIDs)
+				records := createTestBlockRecords(tc.blockNumber, tc.stateIDs)
 				recordsBSON, err := records.ToBSON()
 				require.NoError(t, err)
 
@@ -955,10 +955,10 @@ func TestBlockRecordsStorage_Store_Comprehensive(t *testing.T) {
 
 				// Verify data integrity
 				assert.Equal(t, records.BlockNumber.String(), unmarshaled.BlockNumber.String())
-				assert.Equal(t, len(records.RequestIDs), len(unmarshaled.RequestIDs))
+				assert.Equal(t, len(records.StateIDs), len(unmarshaled.StateIDs))
 
-				t.Logf("✓ %s: Block %s with %d request IDs",
-					tc.name, unmarshaled.BlockNumber.String(), len(unmarshaled.RequestIDs))
+				t.Logf("✓ %s: Block %s with %d state IDs",
+					tc.name, unmarshaled.BlockNumber.String(), len(unmarshaled.StateIDs))
 			})
 		}
 	})

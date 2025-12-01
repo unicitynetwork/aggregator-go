@@ -47,7 +47,7 @@ type Round struct {
 	Number      *api.BigInt
 	StartTime   time.Time
 	State       RoundState
-	Commitments []*models.Commitment
+	Commitments []*models.CertificationRequest
 	Block       *models.Block
 	// Track commitments that have been added to SMT but not yet finalized in a block
 	PendingRecords  []*models.AggregatorRecord
@@ -95,7 +95,7 @@ type RoundManager struct {
 	roundDuration time.Duration
 
 	// Streaming support
-	commitmentStream chan *models.Commitment
+	commitmentStream chan *models.CertificationRequest
 	streamMutex      sync.RWMutex
 	lastFetchedID    string             // Cursor for MongoDB pagination
 	prefetchCancel   context.CancelFunc // Cancel function for running streamer/prefetcher
@@ -110,8 +110,8 @@ type RoundManager struct {
 	processingRatio     float64       // Ratio of round duration for processing (starts at 0.9)
 
 	// Metrics
-	totalRounds      int64
-	totalCommitments int64
+	totalRounds int64
+	totalCount  int64
 }
 
 type RootAggregatorClient interface {
@@ -137,12 +137,12 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 		smt:                 smt.NewThreadSafeSMT(smtInstance),
 		rootClient:          rootAggregatorClient,
 		stateTracker:        stateTracker,
-		roundDuration:       cfg.Processing.RoundDuration,         // Configurable round duration (default 1s)
-		commitmentStream:    make(chan *models.Commitment, 10000), // Reasonable buffer for streaming
-		avgProcessingRate:   1.0,                                  // Initial estimate: 1 commitment per ms
-		processingRatio:     0.7,                                  // Start with 70% of round for processing (conservative but good throughput)
-		avgFinalizationTime: 200 * time.Millisecond,               // Initial estimate (conservative)
-		avgSMTUpdateTime:    5 * time.Millisecond,                 // Initial estimate per batch
+		roundDuration:       cfg.Processing.RoundDuration,                   // Configurable round duration (default 1s)
+		commitmentStream:    make(chan *models.CertificationRequest, 10000), // Reasonable buffer for streaming
+		avgProcessingRate:   1.0,                                            // Initial estimate: 1 certification request per ms
+		processingRatio:     0.7,                                            // Start with 70% of round for processing (conservative but good throughput)
+		avgFinalizationTime: 200 * time.Millisecond,                         // Initial estimate (conservative)
+		avgSMTUpdateTime:    5 * time.Millisecond,                           // Initial estimate per batch
 	}
 
 	// create BFT client for standalone mode
@@ -225,7 +225,7 @@ func (rm *RoundManager) GetCurrentRound() *Round {
 		Number:      rm.currentRound.Number,
 		StartTime:   rm.currentRound.StartTime,
 		State:       rm.currentRound.State,
-		Commitments: append([]*models.Commitment(nil), rm.currentRound.Commitments...),
+		Commitments: append([]*models.CertificationRequest(nil), rm.currentRound.Commitments...),
 		Block:       rm.currentRound.Block,
 	}
 }
@@ -272,9 +272,9 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 	defer rm.roundMutex.RUnlock()
 
 	stats := map[string]interface{}{
-		"totalRounds":      rm.totalRounds,
-		"totalCommitments": rm.totalCommitments,
-		"roundDuration":    rm.roundDuration.String(),
+		"totalRounds":   rm.totalRounds,
+		"totalCount":    rm.totalCount,
+		"roundDuration": rm.roundDuration.String(),
 	}
 
 	if rm.currentRound != nil {
@@ -324,7 +324,7 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 		Number:      roundNumber,
 		StartTime:   time.Now(),
 		State:       RoundStateCollecting,
-		Commitments: make([]*models.Commitment, 0),
+		Commitments: make([]*models.CertificationRequest, 0),
 		Snapshot:    rm.smt.CreateSnapshot(), // Create snapshot for this round
 	}
 
@@ -398,7 +398,7 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	if rm.config.Processing.MaxCommitmentsPerRound > 0 {
 		capacity = rm.config.Processing.MaxCommitmentsPerRound
 	}
-	rm.currentRound.Commitments = make([]*models.Commitment, 0, capacity)
+	rm.currentRound.Commitments = make([]*models.CertificationRequest, 0, capacity)
 
 	// Calculate adaptive processing deadline based on historical data
 	processingDuration := time.Duration(float64(rm.roundDuration) * rm.processingRatio)
@@ -421,7 +421,7 @@ ProcessLoop:
 	for time.Now().Before(processingDeadline) {
 		select {
 		case commitment := <-rm.commitmentStream:
-			// Add commitment to current round
+			// Add certification request to current round
 			rm.roundMutex.Lock()
 			rm.currentRound.Commitments = append(rm.currentRound.Commitments, commitment)
 			commitmentsProcessed++
@@ -455,7 +455,7 @@ ProcessLoop:
 			return ctx.Err()
 
 		default:
-			// No commitment immediately available
+			// No certification request immediately available
 			remainingTime := time.Until(processingDeadline)
 			if remainingTime < 50*time.Millisecond {
 				// Not enough time to wait for more
@@ -561,7 +561,7 @@ ProcessLoop:
 
 	// Update stats
 	rm.totalRounds++
-	rm.totalCommitments += int64(len(rm.currentRound.Commitments))
+	rm.totalCount += int64(len(rm.currentRound.Commitments))
 
 	roundTotalTime := time.Since(rm.currentRound.StartTime)
 	rm.logger.WithContext(ctx).Info("Round processing completed successfully",
@@ -573,23 +573,23 @@ ProcessLoop:
 	return nil
 }
 
-// redisCommitmentStreamer uses StreamCommitments to continuously stream commitments
+// redisCommitmentStreamer uses StreamCertificationRequests to continuously stream commitments
 func (rm *RoundManager) redisCommitmentStreamer(ctx context.Context) {
-	rm.logger.WithContext(ctx).Info("Redis commitment streamer started")
+	rm.logger.WithContext(ctx).Info("Redis certification request streamer started")
 
-	err := rm.commitmentQueue.StreamCommitments(ctx, rm.commitmentStream)
+	err := rm.commitmentQueue.StreamCertificationRequests(ctx, rm.commitmentStream)
 
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		rm.logger.WithContext(ctx).Error("Redis commitment streamer ended with error",
+		rm.logger.WithContext(ctx).Error("Redis certification request streamer ended with error",
 			"error", err.Error())
 	} else {
-		rm.logger.WithContext(ctx).Info("Redis commitment streamer stopped gracefully")
+		rm.logger.WithContext(ctx).Info("Redis certification request streamer stopped gracefully")
 	}
 }
 
 // commitmentPrefetcher continuously fetches commitments from storage and feeds them into the stream
 func (rm *RoundManager) commitmentPrefetcher(ctx context.Context) {
-	rm.logger.WithContext(ctx).Info("Commitment prefetcher started")
+	rm.logger.WithContext(ctx).Info("CertificationData prefetcher started")
 
 	ticker := time.NewTicker(10 * time.Millisecond) // Check more frequently for high throughput
 	defer ticker.Stop()
@@ -597,7 +597,7 @@ func (rm *RoundManager) commitmentPrefetcher(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			rm.logger.WithContext(ctx).Info("Commitment prefetcher context cancelled")
+			rm.logger.WithContext(ctx).Info("CertificationData prefetcher context cancelled")
 			return
 		case <-ticker.C:
 			// Check channel space - be conservative to avoid race conditions
@@ -872,7 +872,7 @@ func (rm *RoundManager) startCommitmentPrefetcher(ctx context.Context) {
 	defer rm.streamMutex.Unlock()
 
 	if rm.prefetchCancel != nil {
-		rm.logger.WithContext(ctx).Warn("Commitment prefetcher already running, ignoring start")
+		rm.logger.WithContext(ctx).Warn("CertificationData prefetcher already running, ignoring start")
 		return
 	}
 
@@ -880,12 +880,12 @@ func (rm *RoundManager) startCommitmentPrefetcher(ctx context.Context) {
 	rm.prefetchCancel = cancel
 
 	if rm.config.Storage.UseRedisForCommitments {
-		rm.logger.WithContext(ctx).Info("Starting Redis commitment streamer")
+		rm.logger.WithContext(ctx).Info("Starting Redis certification request streamer")
 		rm.wg.Go(func() {
 			rm.redisCommitmentStreamer(prefetcherCtx)
 		})
 	} else {
-		rm.logger.WithContext(ctx).Info("Starting MongoDB commitment prefetcher")
+		rm.logger.WithContext(ctx).Info("Starting MongoDB certification request prefetcher")
 		rm.lastFetchedID = ""
 		rm.wg.Go(func() {
 			rm.commitmentPrefetcher(prefetcherCtx)

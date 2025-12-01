@@ -26,12 +26,12 @@ type Server struct {
 
 // Service represents the business logic service interface
 type Service interface {
-	SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error)
+	CertificationRequest(ctx context.Context, req *api.CertificationRequest) (*api.CertificationResponse, error)
 	GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error)
 	GetNoDeletionProof(ctx context.Context) (*api.GetNoDeletionProofResponse, error)
 	GetBlockHeight(ctx context.Context) (*api.GetBlockHeightResponse, error)
 	GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error)
-	GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error)
+	GetBlockRecords(ctx context.Context, req *api.GetBlockRecords) (*api.GetBlockRecordsResponse, error)
 	GetHealthStatus(ctx context.Context) (*api.HealthStatus, error)
 
 	// Parent mode specific methods (will return errors in standalone mode)
@@ -117,7 +117,7 @@ func (s *Server) setupRoutes() {
 // setupJSONRPCHandlers sets up JSON-RPC method handlers
 func (s *Server) setupJSONRPCHandlers() {
 	// Add middleware
-	s.rpcServer.AddMiddleware(jsonrpc.RequestIDMiddleware())
+	s.rpcServer.AddMiddleware(jsonrpc.StateIDMiddleware())
 	s.rpcServer.AddMiddleware(jsonrpc.LoggingMiddleware(s.logger))
 	s.rpcServer.AddMiddleware(jsonrpc.TimeoutMiddleware(30 * time.Second))
 
@@ -128,7 +128,7 @@ func (s *Server) setupJSONRPCHandlers() {
 		s.rpcServer.RegisterMethod("get_shard_proof", s.handleGetShardProof)
 	} else {
 		// Standalone mode handlers (default)
-		s.rpcServer.RegisterMethod("submit_commitment", s.handleSubmitCommitment)
+		s.rpcServer.RegisterMethod("certification_request", s.handleCertificationRequest)
 		s.rpcServer.RegisterMethod("get_inclusion_proof", s.handleGetInclusionProof)
 	}
 
@@ -136,7 +136,7 @@ func (s *Server) setupJSONRPCHandlers() {
 	s.rpcServer.RegisterMethod("get_no_deletion_proof", s.handleGetNoDeletionProof)
 	s.rpcServer.RegisterMethod("get_block_height", s.handleGetBlockHeight)
 	s.rpcServer.RegisterMethod("get_block", s.handleGetBlock)
-	s.rpcServer.RegisterMethod("get_block_commitments", s.handleGetBlockCommitments)
+	s.rpcServer.RegisterMethod("get_block_records", s.handleGetBlockRecords)
 }
 
 // Start starts the HTTP server

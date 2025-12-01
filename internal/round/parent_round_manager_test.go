@@ -282,7 +282,7 @@ func (suite *ParentRoundManagerTestSuite) TestEmptyRound() {
 	suite.Require().NotNil(initialRoot, "Initial root should exist")
 
 	// Don't submit any shard updates - just wait for the round to process
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(time.Second)
 
 	// The root should remain the same (no changes)
 	currentRoot := prm.parentSMT.GetRootHash()

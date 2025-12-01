@@ -65,15 +65,15 @@ func (ars *AggregatorRecordStorage) StoreBatch(ctx context.Context, records []*m
 	return nil
 }
 
-// GetByRequestID retrieves an aggregator record by request ID
-func (ars *AggregatorRecordStorage) GetByRequestID(ctx context.Context, requestID api.RequestID) (*models.AggregatorRecord, error) {
+// GetByStateID retrieves an aggregator record by state ID
+func (ars *AggregatorRecordStorage) GetByStateID(ctx context.Context, stateID api.StateID) (*models.AggregatorRecord, error) {
 	var recordBSON models.AggregatorRecordBSON
-	err := ars.collection.FindOne(ctx, bson.M{"requestId": string(requestID)}).Decode(&recordBSON)
+	err := ars.collection.FindOne(ctx, bson.M{"stateId": string(stateID)}).Decode(&recordBSON)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("failed to get aggregator record by request ID: %w", err)
+		return nil, fmt.Errorf("failed to get aggregator record by state ID: %w", err)
 	}
 
 	record, err := recordBSON.FromBSON()
@@ -158,7 +158,7 @@ func (ars *AggregatorRecordStorage) GetLatest(ctx context.Context, limit int) ([
 func (ars *AggregatorRecordStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
 		{
-			Keys:    bson.D{{Key: "requestId", Value: 1}},
+			Keys:    bson.D{{Key: "stateId", Value: 1}},
 			Options: options.Index().SetUnique(true),
 		},
 		{

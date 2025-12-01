@@ -70,7 +70,7 @@ func createRedisCommitmentQueue(cfg *config.Config, log *logger.Logger) (interfa
 		serverID = "aggregator-server"
 	}
 
-	// Create commitment storage
+	// Create certification request storage
 	commitmentStorage := redis.NewCommitmentStorage(redisClient, serverID, batchConfig, log)
 
 	return commitmentStorage, nil

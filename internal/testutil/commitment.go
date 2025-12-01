@@ -13,8 +13,8 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-// CreateTestCommitment creates a valid, signed commitment for testing
-func CreateTestCommitment(t *testing.T, baseData string) *models.Commitment {
+// CreateTestCertificationRequest creates a valid, signed CertificationRequest for testing
+func CreateTestCertificationRequest(t *testing.T, baseData string) *models.CertificationRequest {
 	privateKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err, "Failed to generate private key")
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
@@ -25,10 +25,12 @@ func CreateTestCommitment(t *testing.T, baseData string) *models.Commitment {
 		_, err = rand.Read(stateData[len(baseData):])
 		require.NoError(t, err, "Failed to generate random state data")
 	}
-	stateHashImprint := signing.CreateDataHashImprint(stateData)
+	sourceStateHash := signing.CreateDataHashImprint(stateData)
+	sourceStateHashImprint, err := sourceStateHash.Imprint()
+	require.NoError(t, err)
 
-	requestID, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
-	require.NoError(t, err, "Failed to create request ID")
+	stateID, err := api.CreateStateID(sourceStateHash, publicKeyBytes)
+	require.NoError(t, err, "Failed to create state ID")
 
 	transactionData := make([]byte, 32)
 	txPrefix := fmt.Sprintf("tx_%s", baseData)
@@ -37,21 +39,20 @@ func CreateTestCommitment(t *testing.T, baseData string) *models.Commitment {
 		_, err = rand.Read(transactionData[len(txPrefix):])
 		require.NoError(t, err, "Failed to generate random transaction data")
 	}
-	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
-
-	transactionHashBytes, err := transactionHashImprint.DataBytes()
+	transactionHash := signing.CreateDataHashImprint(transactionData)
+	transactionHashImprint, err := transactionHash.Bytes()
 	require.NoError(t, err, "Failed to extract transaction hash")
 
 	signingService := signing.NewSigningService()
-	signatureBytes, err := signingService.SignHash(transactionHashBytes, privateKey.Serialize())
+	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionHashImprint)
+	signatureBytes, err := signingService.SignDataHash(sigDataHash, privateKey.Serialize())
 	require.NoError(t, err, "Failed to sign transaction")
 
-	authenticator := models.Authenticator{
-		Algorithm: "secp256k1",
-		PublicKey: publicKeyBytes,
-		Signature: signatureBytes,
-		StateHash: stateHashImprint,
+	certData := models.CertificationData{
+		PublicKey:       publicKeyBytes,
+		SourceStateHash: sourceStateHash,
+		TransactionHash: transactionHash,
+		Signature:       signatureBytes,
 	}
-
-	return models.NewCommitment(requestID, transactionHashImprint, authenticator)
+	return models.NewCertificationRequest(stateID, certData)
 }

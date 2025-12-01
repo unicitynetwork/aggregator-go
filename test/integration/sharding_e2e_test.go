@@ -280,13 +280,13 @@ func (suite *ShardingE2ETestSuite) rpcCall(url string, method string, params int
 	return rpcResp.Result, nil
 }
 
-func (suite *ShardingE2ETestSuite) submitCommitment(url string, commitment *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error) {
-	result, err := suite.rpcCall(url, "submit_commitment", commitment)
+func (suite *ShardingE2ETestSuite) submitCommitment(url string, commitment *api.CertificationRequest) (*api.CertificationResponse, error) {
+	result, err := suite.rpcCall(url, "certification_request", commitment)
 	if err != nil {
 		return nil, err
 	}
 
-	var response api.SubmitCommitmentResponse
+	var response api.CertificationResponse
 	if err := json.Unmarshal(result, &response); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
@@ -294,8 +294,8 @@ func (suite *ShardingE2ETestSuite) submitCommitment(url string, commitment *api.
 	return &response, nil
 }
 
-func (suite *ShardingE2ETestSuite) getInclusionProof(url string, requestID string) (*api.GetInclusionProofResponse, error) {
-	params := map[string]string{"requestId": requestID}
+func (suite *ShardingE2ETestSuite) getInclusionProof(url string, stateID string) (*api.GetInclusionProofResponse, error) {
+	params := map[string]string{"stateId": stateID}
 	result, err := suite.rpcCall(url, "get_inclusion_proof", params)
 	if err != nil {
 		return nil, err
@@ -323,40 +323,39 @@ func (suite *ShardingE2ETestSuite) getBlockHeight(url string) (*api.GetBlockHeig
 	return &response, nil
 }
 
-func (suite *ShardingE2ETestSuite) createCommitmentForShard(shardID api.ShardID, shardIDLength int) (*api.SubmitCommitmentRequest, string) {
-	// Shard ID is encoded in the LSBs of the requestID (see commitment_validator.go verifyShardID)
+func (suite *ShardingE2ETestSuite) createCommitmentForShard(shardID api.ShardID, shardIDLength int) (*api.CertificationRequest, string) {
+	// Shard ID is encoded in the LSBs of the stateID (see commitment_validator.go verifyShardID)
 	msbPos := shardIDLength
 	compareMask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), uint(msbPos)), big.NewInt(1))
 	expectedLSBs := new(big.Int).And(big.NewInt(int64(shardID)), compareMask)
 
 	for attempts := 0; attempts < 1000; attempts++ {
 		baseData := fmt.Sprintf("shard_%d_attempt_%d", shardID, attempts)
-		commitment := testutil.CreateTestCommitment(suite.T(), baseData)
+		commitment := testutil.CreateTestCertificationRequest(suite.T(), baseData)
 
-		requestIDBytes, err := commitment.RequestID.Bytes()
+		stateIDBytes, err := commitment.StateID.Bytes()
 		suite.Require().NoError(err)
-		requestIDBigInt := new(big.Int).SetBytes(requestIDBytes)
-		requestIDLSBs := new(big.Int).And(requestIDBigInt, compareMask)
+		stateIDBigInt := new(big.Int).SetBytes(stateIDBytes)
+		stateIDLSBs := new(big.Int).And(stateIDBigInt, compareMask)
 
-		if requestIDLSBs.Cmp(expectedLSBs) == 0 {
+		if stateIDLSBs.Cmp(expectedLSBs) == 0 {
 			receipt := true
-			apiCommitment := &api.SubmitCommitmentRequest{
-				RequestID:       commitment.RequestID,
-				TransactionHash: api.TransactionHash(commitment.TransactionHash),
-				Authenticator: api.Authenticator{
-					Algorithm: commitment.Authenticator.Algorithm,
-					PublicKey: api.HexBytes(commitment.Authenticator.PublicKey),
-					Signature: api.HexBytes(commitment.Authenticator.Signature),
-					StateHash: api.StateHash(commitment.Authenticator.StateHash),
+			apiCommitment := &api.CertificationRequest{
+				StateID: commitment.StateID,
+				CertificationData: api.CertificationData{
+					PublicKey:       commitment.CertificationData.PublicKey,
+					Signature:       commitment.CertificationData.Signature,
+					SourceStateHash: commitment.CertificationData.SourceStateHash,
+					TransactionHash: commitment.CertificationData.TransactionHash,
 				},
 				Receipt: &receipt,
 			}
 
-			return apiCommitment, commitment.RequestID.String()
+			return apiCommitment, commitment.StateID.String()
 		}
 	}
 
-	suite.FailNow("Failed to generate commitment for shard after 1000 attempts")
+	suite.FailNow("Failed to generate certification request for shard after 1000 attempts")
 	return nil, ""
 }
 
@@ -374,17 +373,17 @@ func (suite *ShardingE2ETestSuite) waitForBlock(url string, blockNumber int64, t
 
 // waitForProofAvailable waits for a VALID inclusion proof to become available
 // This includes waiting for the parent proof to be received and joined
-func (suite *ShardingE2ETestSuite) waitForProofAvailable(url, requestID string, timeout time.Duration) *api.GetInclusionProofResponse {
+func (suite *ShardingE2ETestSuite) waitForProofAvailable(url, stateIDStr string, timeout time.Duration) *api.GetInclusionProofResponse {
 	deadline := time.Now().Add(timeout)
-	reqID := api.RequestID(requestID)
-	reqIDPath, err := reqID.GetPath()
+	stateID := api.StateID(stateIDStr)
+	stateIDPath, err := stateID.GetPath()
 	suite.Require().NoError(err)
 
 	for time.Now().Before(deadline) {
-		resp, err := suite.getInclusionProof(url, requestID)
+		resp, err := suite.getInclusionProof(url, stateIDStr)
 		if err == nil && resp.InclusionProof != nil && resp.InclusionProof.MerkleTreePath != nil {
 			// Also verify that the proof is valid (includes parent proof)
-			result, verifyErr := resp.InclusionProof.MerkleTreePath.Verify(reqIDPath)
+			result, verifyErr := resp.InclusionProof.MerkleTreePath.Verify(stateIDPath)
 			if verifyErr == nil && result != nil && result.Result {
 				return resp
 			}
@@ -392,7 +391,7 @@ func (suite *ShardingE2ETestSuite) waitForProofAvailable(url, requestID string, 
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	suite.FailNow(fmt.Sprintf("Timeout waiting for valid proof for requestID %s at %s", requestID, url))
+	suite.FailNow(fmt.Sprintf("Timeout waiting for valid proof for stateID %s at %s", stateID, url))
 	return nil
 }
 
@@ -420,33 +419,33 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 
 	suite.T().Log("Phase 1: Submitting commitments...")
 
-	commitment1, reqID1 := suite.createCommitmentForShard(2, 1)
+	commitment1, stateID1 := suite.createCommitmentForShard(2, 1)
 	submitTime1 := time.Now()
 	resp1, err := suite.submitCommitment(child0URL, commitment1)
 	suite.Require().NoError(err)
 	suite.Require().Equal("SUCCESS", resp1.Status)
-	suite.T().Logf("  Submitted commitment 1 to child 0: %s", reqID1)
+	suite.T().Logf("  Submitted certification request 1 to child 0: %s", stateID1)
 
-	commitment2, reqID2 := suite.createCommitmentForShard(2, 1)
+	commitment2, stateID2 := suite.createCommitmentForShard(2, 1)
 	submitTime2 := time.Now()
 	resp2, err := suite.submitCommitment(child0URL, commitment2)
 	suite.Require().NoError(err)
 	suite.Require().Equal("SUCCESS", resp2.Status)
-	suite.T().Logf("  Submitted commitment 2 to child 0: %s", reqID2)
+	suite.T().Logf("  Submitted certification request 2 to child 0: %s", stateID2)
 
-	commitment3, reqID3 := suite.createCommitmentForShard(3, 1)
+	commitment3, stateID3 := suite.createCommitmentForShard(3, 1)
 	submitTime3 := time.Now()
 	resp3, err := suite.submitCommitment(child1URL, commitment3)
 	suite.Require().NoError(err)
 	suite.Require().Equal("SUCCESS", resp3.Status)
-	suite.T().Logf("  Submitted commitment 3 to child 1: %s", reqID3)
+	suite.T().Logf("  Submitted certification request 3 to child 1: %s", stateID3)
 
-	commitment4, reqID4 := suite.createCommitmentForShard(3, 1)
+	commitment4, stateID4 := suite.createCommitmentForShard(3, 1)
 	submitTime4 := time.Now()
 	resp4, err := suite.submitCommitment(child1URL, commitment4)
 	suite.Require().NoError(err)
 	suite.Require().Equal("SUCCESS", resp4.Status)
-	suite.T().Logf("  Submitted commitment 4 to child 1: %s", reqID4)
+	suite.T().Logf("  Submitted certification request 4 to child 1: %s", stateID4)
 
 	suite.T().Log("✓ Submitted 2 commitments to child 0")
 	suite.T().Log("✓ Submitted 2 commitments to child 1")
@@ -458,21 +457,21 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 	suite.T().Log("Phase 3: Verifying joined proofs...")
 
 	testCases := []struct {
-		requestID  string
+		stateID    string
 		childURL   string
 		shardID    int
 		name       string
 		submitTime time.Time
 	}{
-		{reqID1, child0URL, 2, "commitment 1 (child 0)", submitTime1},
-		{reqID2, child0URL, 2, "commitment 2 (child 0)", submitTime2},
-		{reqID3, child1URL, 3, "commitment 3 (child 1)", submitTime3},
-		{reqID4, child1URL, 3, "commitment 4 (child 1)", submitTime4},
+		{stateID1, child0URL, 2, "commitment 1 (child 0)", submitTime1},
+		{stateID2, child0URL, 2, "commitment 2 (child 0)", submitTime2},
+		{stateID3, child1URL, 3, "commitment 3 (child 1)", submitTime3},
+		{stateID4, child1URL, 3, "commitment 4 (child 1)", submitTime4},
 	}
 
 	for _, tc := range testCases {
 		proofAvailableStart := time.Now()
-		childProofResp := suite.waitForProofAvailable(tc.childURL, tc.requestID, 500*time.Millisecond)
+		childProofResp := suite.waitForProofAvailable(tc.childURL, tc.stateID, 500*time.Millisecond)
 		totalLatency := time.Since(tc.submitTime)
 		suite.T().Logf("%s: proof available after %v (total from submit: %v)",
 			tc.name, time.Since(proofAvailableStart), totalLatency)
@@ -480,11 +479,11 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 		suite.Require().NotNil(childProofResp.InclusionProof.MerkleTreePath, "Merkle path is nil for %s", tc.name)
 		joinedProof := childProofResp.InclusionProof.MerkleTreePath
 
-		reqID := api.RequestID(tc.requestID)
-		reqIDPath, err := reqID.GetPath()
-		suite.Require().NoError(err, "Failed to get path from requestID for %s", tc.name)
+		stateID := api.StateID(tc.stateID)
+		stateIDPath, err := stateID.GetPath()
+		suite.Require().NoError(err, "Failed to get path from stateID for %s", tc.name)
 
-		result, err := joinedProof.Verify(reqIDPath)
+		result, err := joinedProof.Verify(stateIDPath)
 		suite.Require().NoError(err, "Proof verification failed for %s", tc.name)
 		suite.Require().NotNil(result, "Verification result is nil for %s", tc.name)
 
@@ -499,11 +498,11 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 
 	suite.T().Log("Phase 4: Testing with additional blocks...")
 
-	commitment5, reqID5 := suite.createCommitmentForShard(2, 1)
+	commitment5, stateID5 := suite.createCommitmentForShard(2, 1)
 	submitTime5 := time.Now()
 	suite.submitCommitment(child0URL, commitment5)
 
-	commitment6, reqID6 := suite.createCommitmentForShard(3, 1)
+	commitment6, stateID6 := suite.createCommitmentForShard(3, 1)
 	submitTime6 := time.Now()
 	suite.submitCommitment(child1URL, commitment6)
 
@@ -511,46 +510,46 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 
 	suite.T().Log("Verifying old commitments still work...")
 	for _, tc := range testCases {
-		childProofResp, err := suite.getInclusionProof(tc.childURL, tc.requestID)
+		childProofResp, err := suite.getInclusionProof(tc.childURL, tc.stateID)
 		suite.Require().NoError(err, "Failed to get proof for old %s", tc.name)
 		suite.Require().NotNil(childProofResp.InclusionProof)
 
-		reqID := api.RequestID(tc.requestID)
-		reqIDPath, err := reqID.GetPath()
+		stateID := api.StateID(tc.stateID)
+		stateIDPath, err := stateID.GetPath()
 		suite.Require().NoError(err)
 
-		result, err := childProofResp.InclusionProof.MerkleTreePath.Verify(reqIDPath)
+		result, err := childProofResp.InclusionProof.MerkleTreePath.Verify(stateIDPath)
 		suite.Require().NoError(err, "Verification failed for old %s", tc.name)
-		suite.Require().True(result.Result, "Old commitment proof invalid for %s", tc.name)
+		suite.Require().True(result.Result, "Old certification request proof invalid for %s", tc.name)
 	}
 	suite.T().Log("✓ All old commitments still verify correctly")
 
 	suite.T().Log("Verifying new commitments...")
 	newTestCases := []struct {
-		requestID  string
+		stateID    string
 		childURL   string
 		name       string
 		submitTime time.Time
 	}{
-		{reqID5, child0URL, "new commitment (child 0)", submitTime5},
-		{reqID6, child1URL, "new commitment (child 1)", submitTime6},
+		{stateID5, child0URL, "new certification request (child 0)", submitTime5},
+		{stateID6, child1URL, "new certification request (child 1)", submitTime6},
 	}
 
 	for _, tc := range newTestCases {
 		proofAvailableStart := time.Now()
-		childProofResp := suite.waitForProofAvailable(tc.childURL, tc.requestID, 10*time.Second)
+		childProofResp := suite.waitForProofAvailable(tc.childURL, tc.stateID, 10*time.Second)
 		totalLatency := time.Since(tc.submitTime)
 		suite.T().Logf("%s: proof available after %v (total from submit: %v)",
 			tc.name, time.Since(proofAvailableStart), totalLatency)
 		suite.Require().NotNil(childProofResp.InclusionProof)
 
-		reqID := api.RequestID(tc.requestID)
-		reqIDPath, err := reqID.GetPath()
+		stateID := api.StateID(tc.stateID)
+		stateIDPath, err := stateID.GetPath()
 		suite.Require().NoError(err)
 
-		result, err := childProofResp.InclusionProof.MerkleTreePath.Verify(reqIDPath)
+		result, err := childProofResp.InclusionProof.MerkleTreePath.Verify(stateIDPath)
 		suite.Require().NoError(err, "Verification failed for %s", tc.name)
-		suite.Require().True(result.Result, "New commitment proof invalid for %s", tc.name)
+		suite.Require().True(result.Result, "New certification request proof invalid for %s", tc.name)
 
 		suite.T().Logf("✓ Verified %s", tc.name)
 	}

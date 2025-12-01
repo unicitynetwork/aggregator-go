@@ -41,16 +41,16 @@ type Block struct {
 	Timestamp string `json:"timestamp"`
 }
 
-type GetBlockCommitmentsRequest struct {
+type GetBlockRecordsRequest struct {
 	BlockNumber string `json:"blockNumber"`
 }
 
-type GetBlockCommitmentsResponse struct {
-	Commitments []AggregatorRecord `json:"commitments"`
+type GetBlockRecordsResponse struct {
+	AggregatorRecords []AggregatorRecord `json:"aggregatorRecords"`
 }
 
 type AggregatorRecord struct {
-	RequestID   string `json:"requestId"`
+	StateID     string `json:"stateId"`
 	BlockNumber string `json:"blockNumber"`
 }
 
@@ -68,7 +68,7 @@ type ShardMetrics struct {
 	totalRequests         int64
 	successfulRequests    int64
 	failedRequests        int64
-	requestIdExistsErr    int64
+	stateIdExistsErr      int64
 	blockCommitmentCounts []int
 	totalBlockCommitments int64
 	mutex                 sync.RWMutex
@@ -78,7 +78,7 @@ type ShardMetrics struct {
 type Metrics struct {
 	startTime            time.Time
 	startingBlockNumbers map[string]int64
-	submittedRequestIDs  sync.Map
+	submittedStateIDs    sync.Map
 	shardMetrics         map[string]*ShardMetrics
 	mutex                sync.RWMutex
 }
@@ -93,7 +93,7 @@ type JSONRPCClient struct {
 	httpClient *http.Client
 	url        string
 	authHeader string
-	requestID  int64
+	stateID    int64
 }
 
 func NewJSONRPCClient(url string, authHeader string) *JSONRPCClient {
@@ -116,7 +116,7 @@ func NewJSONRPCClient(url string, authHeader string) *JSONRPCClient {
 }
 
 func (c *JSONRPCClient) call(method string, params interface{}) (*JSONRPCResponse, error) {
-	id := atomic.AddInt64(&c.requestID, 1)
+	id := atomic.AddInt64(&c.stateID, 1)
 
 	request := JSONRPCRequest{
 		JSONRPC: "2.0",

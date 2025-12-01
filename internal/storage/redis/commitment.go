@@ -45,13 +45,13 @@ func DefaultBatchConfig() *BatchConfig {
 	}
 }
 
-// pendingCommitment represents a commitment waiting to be batched
+// pendingCommitment represents a certification request waiting to be batched
 type pendingCommitment struct {
-	commitment *models.Commitment
+	commitment *models.CertificationRequest
 	resultChan chan error
 }
 
-// CommitmentStorage implements commitment storage using Redis streams with cursor support
+// CommitmentStorage implements certification request storage using Redis streams with cursor support
 type CommitmentStorage struct {
 	client      *redis.Client
 	serverID    string
@@ -72,7 +72,7 @@ type CommitmentStorage struct {
 	flushTicker *time.Ticker
 }
 
-// NewCommitmentStorage creates a new Redis-based commitment storage instance with custom batching config
+// NewCommitmentStorage creates a new Redis-based certification request storage instance with custom batching config
 func NewCommitmentStorage(client *redis.Client, serverID string, batchConfig *BatchConfig, log *logger.Logger) *CommitmentStorage {
 	cs := &CommitmentStorage{
 		client:      client,
@@ -200,7 +200,7 @@ func (cs *CommitmentStorage) flushBatch(batch []*pendingCommitment) {
 		return
 	}
 
-	commitments := make([]*models.Commitment, len(batch))
+	commitments := make([]*models.CertificationRequest, len(batch))
 	for i, pending := range batch {
 		commitments[i] = pending.commitment
 	}
@@ -218,7 +218,7 @@ func (cs *CommitmentStorage) flushBatch(batch []*pendingCommitment) {
 }
 
 // storeBatchSync is the synchronous version of StoreBatch (internal use)
-func (cs *CommitmentStorage) storeBatchSync(ctx context.Context, commitments []*models.Commitment) error {
+func (cs *CommitmentStorage) storeBatchSync(ctx context.Context, commitments []*models.CertificationRequest) error {
 	if len(commitments) == 0 {
 		return nil
 	}
@@ -228,7 +228,7 @@ func (cs *CommitmentStorage) storeBatchSync(ctx context.Context, commitments []*
 	for i, commitment := range commitments {
 		commitmentJSON, err := json.Marshal(commitment)
 		if err != nil {
-			return fmt.Errorf("failed to serialize commitment %d: %w", i, err)
+			return fmt.Errorf("failed to serialize certification request %d: %w", i, err)
 		}
 		serializedCommitments[i] = string(commitmentJSON)
 	}
@@ -241,8 +241,8 @@ func (cs *CommitmentStorage) storeBatchSync(ctx context.Context, commitments []*
 		pipe.XAdd(ctx, &redis.XAddArgs{
 			Stream: commitmentStream,
 			Values: map[string]interface{}{
-				"requestId": string(commitment.RequestID),
-				"data":      serializedCommitments[i],
+				"stateId": string(commitment.StateID),
+				"data":    serializedCommitments[i],
 			},
 		})
 	}
@@ -263,9 +263,9 @@ func (cs *CommitmentStorage) storeBatchSync(ctx context.Context, commitments []*
 	return nil
 }
 
-// Store stores a new commitment using asynchronous batching
-func (cs *CommitmentStorage) Store(ctx context.Context, commitment *models.Commitment) error {
-	// Create pending commitment with result channel
+// Store stores a new certification request using asynchronous batching
+func (cs *CommitmentStorage) Store(ctx context.Context, commitment *models.CertificationRequest) error {
+	// Create pending certification request with result channel
 	pending := &pendingCommitment{
 		commitment: commitment,
 		resultChan: make(chan error, 1),
@@ -287,7 +287,7 @@ func (cs *CommitmentStorage) Store(ctx context.Context, commitment *models.Commi
 }
 
 // StoreBatch stores multiple commitments using Redis pipelining for high throughput
-func (cs *CommitmentStorage) StoreBatch(ctx context.Context, commitments []*models.Commitment) error {
+func (cs *CommitmentStorage) StoreBatch(ctx context.Context, commitments []*models.CertificationRequest) error {
 	if len(commitments) == 0 {
 		return nil
 	}
@@ -297,7 +297,7 @@ func (cs *CommitmentStorage) StoreBatch(ctx context.Context, commitments []*mode
 	for i, commitment := range commitments {
 		commitmentJSON, err := json.Marshal(commitment)
 		if err != nil {
-			return fmt.Errorf("failed to serialize commitment %d: %w", i, err)
+			return fmt.Errorf("failed to serialize certification request %d: %w", i, err)
 		}
 		serializedCommitments[i] = string(commitmentJSON)
 	}
@@ -310,8 +310,8 @@ func (cs *CommitmentStorage) StoreBatch(ctx context.Context, commitments []*mode
 		pipe.XAdd(ctx, &redis.XAddArgs{
 			Stream: commitmentStream,
 			Values: map[string]interface{}{
-				"requestId": string(commitment.RequestID),
-				"data":      serializedCommitments[i],
+				"stateId": string(commitment.StateID),
+				"data":    serializedCommitments[i],
 			},
 		})
 	}
@@ -332,23 +332,23 @@ func (cs *CommitmentStorage) StoreBatch(ctx context.Context, commitments []*mode
 	return nil
 }
 
-// GetByRequestID is not implemented for Redis
-func (cs *CommitmentStorage) GetByRequestID(ctx context.Context, requestID api.RequestID) (*models.Commitment, error) {
-	return nil, fmt.Errorf("GetByRequestID not implemented for Redis")
+// GetByStateID is not implemented for Redis
+func (cs *CommitmentStorage) GetByStateID(ctx context.Context, stateID api.StateID) (*models.CertificationRequest, error) {
+	return nil, fmt.Errorf("GetByStateID not implemented for Redis")
 }
 
-// GetUnprocessedBatch is not implemented for Redis - use StreamCommitments instead
-func (cs *CommitmentStorage) GetUnprocessedBatch(ctx context.Context, limit int) ([]*models.Commitment, error) {
-	return nil, fmt.Errorf("GetUnprocessedBatch not implemented for Redis - use StreamCommitments")
+// GetUnprocessedBatch is not implemented for Redis - use StreamCertificationRequests instead
+func (cs *CommitmentStorage) GetUnprocessedBatch(ctx context.Context, limit int) ([]*models.CertificationRequest, error) {
+	return nil, fmt.Errorf("GetUnprocessedBatch not implemented for Redis - use StreamCertificationRequests")
 }
 
-// GetUnprocessedBatchWithCursor is not implemented for Redis - use StreamCommitments instead
-func (cs *CommitmentStorage) GetUnprocessedBatchWithCursor(ctx context.Context, lastID string, limit int) ([]*models.Commitment, string, error) {
-	return nil, "", fmt.Errorf("GetUnprocessedBatchWithCursor not implemented for Redis - use StreamCommitments")
+// GetUnprocessedBatchWithCursor is not implemented for Redis - use StreamCertificationRequests instead
+func (cs *CommitmentStorage) GetUnprocessedBatchWithCursor(ctx context.Context, lastID string, limit int) ([]*models.CertificationRequest, string, error) {
+	return nil, "", fmt.Errorf("GetUnprocessedBatchWithCursor not implemented for Redis - use StreamCertificationRequests")
 }
 
 // MarkProcessed acknowledges commitments using their Redis stream IDs.
-func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interfaces.CommitmentAck) error {
+func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interfaces.CertificationRequestAck) error {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -356,7 +356,7 @@ func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interf
 	streamIDs := make([]string, len(entries))
 	for i, entry := range entries {
 		if entry.StreamID == "" {
-			return fmt.Errorf("missing stream ID for requestID %s", entry.RequestID.String())
+			return fmt.Errorf("missing stream ID for stateID %s", entry.StateID.String())
 		}
 		streamIDs[i] = entry.StreamID
 	}
@@ -377,7 +377,7 @@ func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interf
 }
 
 // Delete removes processed commitments (not typically needed with streams)
-func (cs *CommitmentStorage) Delete(ctx context.Context, requestIDs []api.RequestID) error {
+func (cs *CommitmentStorage) Delete(ctx context.Context, stateIDs []api.StateID) error {
 	// In Redis streams, we typically don't delete individual messages
 	// The periodic cleanup handles old messages
 	return nil
@@ -443,14 +443,14 @@ func (cs *CommitmentStorage) CountUnprocessed(ctx context.Context) (int64, error
 	return pending.Count, nil
 }
 
-// parseCommitment parses a Redis stream message into a Commitment
-func (cs *CommitmentStorage) parseCommitment(message redis.XMessage) (*models.Commitment, error) {
+// parseCommitment parses a Redis stream message into a CertificationData
+func (cs *CommitmentStorage) parseCommitment(message redis.XMessage) (*models.CertificationRequest, error) {
 	dataStr, exists := message.Values["data"]
 	if !exists {
 		return nil, fmt.Errorf("data field not found in message")
 	}
 
-	var commitment models.Commitment
+	var commitment models.CertificationRequest
 	if err := json.Unmarshal([]byte(dataStr.(string)), &commitment); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal commitment: %w", err)
 	}
@@ -494,9 +494,9 @@ func (cs *CommitmentStorage) trimStream(ctx context.Context) {
 	}
 }
 
-// StreamCommitments continuously streams commitments using blocking Redis reads
+// StreamCertificationRequests continuously streams commitments using blocking Redis reads
 // This streams commitments directly to the provided channel as they arrive
-func (cs *CommitmentStorage) StreamCommitments(ctx context.Context, commitmentChan chan<- *models.Commitment) error {
+func (cs *CommitmentStorage) StreamCertificationRequests(ctx context.Context, commitmentChan chan<- *models.CertificationRequest) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -579,7 +579,7 @@ func (cs *CommitmentStorage) StreamCommitments(ctx context.Context, commitmentCh
 					// Attach stream ID for precise acknowledgement support
 					commitment.StreamID = message.ID
 
-					// Stream commitment directly to channel
+					// Stream certification request directly to channel
 					select {
 					case commitmentChan <- commitment:
 					case <-ctx.Done():

@@ -196,8 +196,8 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 }
 
 // Helper function to make JSON-RPC requests and unmarshal responses
-func makeJSONRPCRequest[T any](t *testing.T, serverAddr, method, requestID string, params any) T {
-	request, err := jsonrpc.NewRequest(method, params, requestID)
+func makeJSONRPCRequest[T any](t *testing.T, serverAddr, method, stateID string, params any) T {
+	request, err := jsonrpc.NewRequest(method, params, stateID)
 	require.NoError(t, err)
 
 	bodyBytes, err := json.Marshal(request)
@@ -224,9 +224,8 @@ func makeJSONRPCRequest[T any](t *testing.T, serverAddr, method, requestID strin
 }
 
 // Helper function to validate inclusion proof structure and encoding
-func validateInclusionProof(t *testing.T, proof *api.InclusionProof, requestID api.RequestID) {
-	assert.NotNil(t, proof.TransactionHash, "Should have transaction hash")
-	assert.NotNil(t, proof.Authenticator, "Should have authenticator")
+func validateInclusionProof(t *testing.T, proof *api.InclusionProof, stateID api.StateID) {
+	assert.NotNil(t, proof.CertificationData, "Should have certification data")
 	assert.NotNil(t, proof.MerkleTreePath, "Should have merkle tree path")
 
 	// Validate unicity certificate field
@@ -237,23 +236,22 @@ func validateInclusionProof(t *testing.T, proof *api.InclusionProof, requestID a
 		assert.NoError(t, err, "Unicity certificate should be valid hex")
 	}
 
-	// Validate authenticator encoding
-	if proof.Authenticator != nil {
-		assert.NotEmpty(t, proof.Authenticator.Algorithm, "Authenticator should have algorithm")
-		assert.NotEmpty(t, proof.Authenticator.PublicKey, "Authenticator should have public key")
-		assert.NotEmpty(t, proof.Authenticator.Signature, "Authenticator should have signature")
-		assert.NotEmpty(t, proof.Authenticator.StateHash, "Authenticator should have state hash")
+	// Validate certification data encoding
+	if proof.CertificationData != nil {
+		assert.NotEmpty(t, proof.CertificationData.PublicKey, "CertificationData should have public key")
+		assert.NotEmpty(t, proof.CertificationData.Signature, "CertificationData should have signature")
+		assert.NotEmpty(t, proof.CertificationData.SourceStateHash, "CertificationData should have source state hash")
+		assert.NotEmpty(t, proof.CertificationData.TransactionHash, "CertificationData should have transaction hash")
 
-		// Verify CBOR encoding of authenticator
-		authenticatorBytes, err := cbor.Marshal(proof.Authenticator)
-		require.NoError(t, err, "Authenticator should be CBOR encodable")
-		assert.NotEmpty(t, authenticatorBytes, "CBOR encoded authenticator should not be empty")
+		// Verify CBOR encoding of certification data
+		certDataBytes, err := cbor.Marshal(proof.CertificationData)
+		require.NoError(t, err, "CertificationData should be CBOR encodable")
+		assert.NotEmpty(t, certDataBytes, "CBOR encoded certification data should not be empty")
 
 		// Verify we can decode it back
-		var decodedAuth api.Authenticator
-		err = cbor.Unmarshal(authenticatorBytes, &decodedAuth)
-		require.NoError(t, err, "Should be able to decode CBOR authenticator")
-		assert.Equal(t, proof.Authenticator.Algorithm, decodedAuth.Algorithm, "Decoded authenticator should match original")
+		var decodedAuth api.CertificationData
+		err = cbor.Unmarshal(certDataBytes, &decodedAuth)
+		require.NoError(t, err, "Should be able to decode CBOR certification data")
 	}
 
 	// Validate merkle tree path encoding
@@ -261,11 +259,11 @@ func validateInclusionProof(t *testing.T, proof *api.InclusionProof, requestID a
 		assert.NotEmpty(t, proof.MerkleTreePath.Root, "Merkle path should have root")
 		assert.NotNil(t, proof.MerkleTreePath.Steps, "Merkle path should have steps")
 
-		// Verify Merkle tree path with request ID
-		requestIDBigInt, err := requestID.GetPath()
-		require.NoError(t, err, "Should be able to get path from requestID")
+		// Verify Merkle tree path with state ID
+		stateIDBigInt, err := stateID.GetPath()
+		require.NoError(t, err, "Should be able to get path from stateID")
 
-		verificationResult, err := proof.MerkleTreePath.Verify(requestIDBigInt)
+		verificationResult, err := proof.MerkleTreePath.Verify(stateIDBigInt)
 		require.NoError(t, err, "Merkle tree path verification should not error")
 		assert.True(t, verificationResult.PathValid, "Merkle tree path should be valid")
 		assert.True(t, verificationResult.PathIncluded, "Request should be included in the Merkle tree")
@@ -287,26 +285,25 @@ func validateInclusionProof(t *testing.T, proof *api.InclusionProof, requestID a
 // TestInclusionProofMissingRecord tests getting inclusion proof for non-existent record
 func (suite *AggregatorTestSuite) TestInclusionProofMissingRecord() {
 	// First, submit some commitments and wait for block processing to ensure we have blocks
-	testCommitments := createTestCommitments(suite.T(), 1)
-	submitResponse := makeJSONRPCRequest[api.SubmitCommitmentResponse](
-		suite.T(), suite.serverAddr, "submit_commitment", "submit-setup", testCommitments[0])
+	testCommitments := createTestCertificationRequests(suite.T(), 1)
+	submitResponse := makeJSONRPCRequest[api.CertificationResponse](
+		suite.T(), suite.serverAddr, "certification_request", "submit-setup", testCommitments[0])
 	suite.Equal("SUCCESS", submitResponse.Status)
 
 	// Wait for block processing
 	time.Sleep(3 * time.Second)
 
-	// Now test non-inclusion proof for a different request ID
-	requestId := ""
+	// Now test non-inclusion proof for a different state ID
+	stateId := ""
 	for i := 0; i < 2+32; i++ {
-		requestId = requestId + "00"
+		stateId = stateId + "00"
 	}
 	inclusionProof := makeJSONRPCRequest[api.GetInclusionProofResponse](
 		suite.T(), suite.serverAddr, "get_inclusion_proof", "test-request-id",
-		&api.GetInclusionProofRequest{RequestID: api.RequestID(requestId)})
+		&api.GetInclusionProofRequest{StateID: api.StateID(stateId)})
 
 	// Validate non-inclusion proof structure
-	suite.Nil(inclusionProof.InclusionProof.TransactionHash)
-	suite.Nil(inclusionProof.InclusionProof.Authenticator)
+	suite.Nil(inclusionProof.InclusionProof.CertificationData)
 	suite.NotNil(inclusionProof.InclusionProof.MerkleTreePath)
 
 	// Verify that UnicityCertificate is included in non-inclusion proof
@@ -316,17 +313,16 @@ func (suite *AggregatorTestSuite) TestInclusionProofMissingRecord() {
 
 // TestInclusionProof tests the complete inclusion proof workflow
 func (suite *AggregatorTestSuite) TestInclusionProof() {
-
 	// 1) Send commitments
-	testCommitments := createTestCommitments(suite.T(), 3)
-	var submittedRequestIDs []string
+	testRequests := createTestCertificationRequests(suite.T(), 3)
+	var submittedStateIDs []string
 
-	for i, commitment := range testCommitments {
-		submitResponse := makeJSONRPCRequest[api.SubmitCommitmentResponse](
-			suite.T(), suite.serverAddr, "submit_commitment", fmt.Sprintf("submit-%d", i), commitment)
+	for i, req := range testRequests {
+		submitResponse := makeJSONRPCRequest[api.CertificationResponse](
+			suite.T(), suite.serverAddr, "certification_request", fmt.Sprintf("submit-%d", i), req)
 
 		suite.Equal("SUCCESS", submitResponse.Status, "Should return SUCCESS status")
-		submittedRequestIDs = append(submittedRequestIDs, commitment.RequestID.String())
+		submittedStateIDs = append(submittedStateIDs, req.StateID.String())
 	}
 
 	// Wait for block processing
@@ -335,49 +331,49 @@ func (suite *AggregatorTestSuite) TestInclusionProof() {
 	// 2) Verify inclusion proofs and store root hashes
 	firstBatchRootHashes := make(map[string]string)
 
-	for _, requestID := range submittedRequestIDs {
-		proofRequest := &api.GetInclusionProofRequest{RequestID: api.RequestID(requestID)}
+	for _, stateID := range submittedStateIDs {
+		proofRequest := &api.GetInclusionProofRequest{StateID: api.StateID(stateID)}
 		proofResponse := makeJSONRPCRequest[api.GetInclusionProofResponse](
 			suite.T(), suite.serverAddr, "get_inclusion_proof", "get-proof", proofRequest)
 
 		// Validate inclusion proof structure and encoding
-		validateInclusionProof(suite.T(), proofResponse.InclusionProof, api.RequestID(requestID))
+		validateInclusionProof(suite.T(), proofResponse.InclusionProof, api.StateID(stateID))
 
 		// Store root hash for later stability check
 		suite.Require().NotNil(proofResponse.InclusionProof.MerkleTreePath)
 		rootHash := proofResponse.InclusionProof.MerkleTreePath.Root
-		firstBatchRootHashes[requestID] = rootHash
+		firstBatchRootHashes[stateID] = rootHash
 	}
 
-	// 3) Send more commitments
-	additionalCommitments := createTestCommitments(suite.T(), 2)
+	// 3) Send more requests
+	additionalRequests := createTestCertificationRequests(suite.T(), 2)
 
-	for i, commitment := range additionalCommitments {
-		makeJSONRPCRequest[api.SubmitCommitmentResponse](
-			suite.T(), suite.serverAddr, "submit_commitment", fmt.Sprintf("additional-submit-%d", i), commitment)
+	for i, req := range additionalRequests {
+		makeJSONRPCRequest[api.CertificationResponse](
+			suite.T(), suite.serverAddr, "certification_request", fmt.Sprintf("additional-submit-%d", i), req)
 	}
 
 	// Wait for new block processing
 	time.Sleep(3 * time.Second)
 
 	// 4) Verify original commitments now reference current root hash
-	for _, requestID := range submittedRequestIDs {
-		proofRequest := &api.GetInclusionProofRequest{RequestID: api.RequestID(requestID)}
+	for _, stateID := range submittedStateIDs {
+		proofRequest := &api.GetInclusionProofRequest{StateID: api.StateID(stateID)}
 		proofResponse := makeJSONRPCRequest[api.GetInclusionProofResponse](
 			suite.T(), suite.serverAddr, "get_inclusion_proof", "stability-check", proofRequest)
 
 		suite.Require().NotNil(proofResponse.InclusionProof.MerkleTreePath)
 		currentRootHash := proofResponse.InclusionProof.MerkleTreePath.Root
-		originalRootHash, exists := firstBatchRootHashes[requestID]
+		originalRootHash, exists := firstBatchRootHashes[stateID]
 
-		suite.True(exists, "Should have stored original root hash for %s", requestID)
+		suite.True(exists, "Should have stored original root hash for %s", stateID)
 		// With on-demand proof generation, the root hash should now be different (current SMT state)
 		suite.NotEqual(originalRootHash, currentRootHash,
-			"Root hash in inclusion proof should be current (not original) for RequestID %s. Original: %s, Current: %s",
-			requestID, originalRootHash, currentRootHash)
+			"Root hash in inclusion proof should be current (not original) for StateID %s. Original: %s, Current: %s",
+			stateID, originalRootHash, currentRootHash)
 
 		// Validate that the proof is still valid for the commitment
-		validateInclusionProof(suite.T(), proofResponse.InclusionProof, api.RequestID(requestID))
+		validateInclusionProof(suite.T(), proofResponse.InclusionProof, api.StateID(stateID))
 	}
 }
 
@@ -386,8 +382,8 @@ func TestAggregatorTestSuite(t *testing.T) {
 	suite.Run(t, new(AggregatorTestSuite))
 }
 
-func createTestCommitments(t *testing.T, count int) []*api.SubmitCommitmentRequest {
-	commitments := make([]*api.SubmitCommitmentRequest, count)
+func createTestCertificationRequests(t *testing.T, count int) []*api.CertificationRequest {
+	requests := make([]*api.CertificationRequest, count)
 
 	for i := 0; i < count; i++ {
 		privateKey, err := btcec.NewPrivateKey()
@@ -398,10 +394,10 @@ func createTestCommitments(t *testing.T, count int) []*api.SubmitCommitmentReque
 		for j := range stateData {
 			stateData[j] = byte(i*32 + j + 1)
 		}
-		stateHashImprint := signing.CreateDataHashImprint(stateData)
+		sourceStateHashImprint := signing.CreateDataHashImprint(stateData)
 
-		requestID, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
-		require.NoError(t, err, "Failed to create request ID")
+		stateID, err := api.CreateStateID(sourceStateHashImprint, publicKeyBytes)
+		require.NoError(t, err, "Failed to create state ID")
 
 		transactionData := make([]byte, 32)
 		for j := range transactionData {
@@ -409,27 +405,23 @@ func createTestCommitments(t *testing.T, count int) []*api.SubmitCommitmentReque
 		}
 		transactionHashImprint := signing.CreateDataHashImprint(transactionData)
 
-		transactionHashBytes, err := transactionHashImprint.DataBytes()
-		require.NoError(t, err, "Failed to extract transaction hash")
-
+		// Sign the transaction
 		signingService := signing.NewSigningService()
-		signatureBytes, err := signingService.SignHash(transactionHashBytes, privateKey.Serialize())
-		require.NoError(t, err, "Failed to sign transaction")
+		certData := &api.CertificationData{
+			PublicKey:       publicKeyBytes,
+			SourceStateHash: sourceStateHashImprint,
+			TransactionHash: transactionHashImprint,
+		}
+		require.NoError(t, signingService.SignCertData(certData, privateKey.Serialize()))
 
 		receipt := false
 
-		commitments[i] = &api.SubmitCommitmentRequest{
-			RequestID:       requestID,
-			TransactionHash: transactionHashImprint,
-			Authenticator: api.Authenticator{
-				Algorithm: "secp256k1",
-				PublicKey: publicKeyBytes,
-				Signature: signatureBytes,
-				StateHash: stateHashImprint,
-			},
-			Receipt: &receipt,
+		requests[i] = &api.CertificationRequest{
+			StateID:           stateID,
+			CertificationData: *certData,
+			Receipt:           &receipt,
 		}
 	}
 
-	return commitments
+	return requests
 }

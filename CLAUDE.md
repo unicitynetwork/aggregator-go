@@ -69,17 +69,17 @@ make performance-test
 
 ### Core Components
 - **AggregatorGateway**: Main service orchestrator handling HTTP server lifecycle and subsystem coordination
-- **AggregatorService**: Business logic layer for commitment validation and proof generation
-- **RoundManager**: Block creation orchestrator that batches commitments and coordinates with consensus
+- **AggregatorService**: Business logic layer for certification request validation and proof generation
+- **RoundManager**: Block creation orchestrator that batches certification requests and coordinates with consensus
 - **Storage Layer**: Interface-based abstraction with MongoDB implementations for various data types
 - **High Availability**: Leader election system for distributed processing with automatic failover
 - **Consensus Integration**: Alphabill blockchain integration for finality
 
 ### Key Data Flow
-1. Client submits commitment via JSON-RPC API
-2. Commitment validated and stored temporarily
-3. RoundManager batches commitments (1000 per batch) every second
-4. SMT updated with new commitments in parallel
+1. Client submits certification request via JSON-RPC API
+2. Certification request validated and stored temporarily
+3. RoundManager batches certification requests (1000 per batch) every second
+4. SMT updated with new certification requests in parallel
 5. Root hash submitted to Alphabill consensus
 6. Block created with transaction proof and stored
 7. Inclusion proofs generated from SMT for queries
@@ -89,7 +89,7 @@ make performance-test
 - **IAggregatorRecordStorage**: Finalized commitment records
 - **ICommitmentStorage**: Temporary commitments with cursor-based processing
 - **ISmtStorage**: Sparse Merkle Tree nodes
-- **IBlockRecordsStorage**: Block number to request ID mappings
+- **IBlockRecordsStorage**: Block number to state ID mappings
 - **ILeadershipStorage**: High availability leader election state
 
 ### High Availability System
@@ -119,7 +119,7 @@ make performance-test
 ### Concurrency Patterns
 - TypeScript uses async/await extensively - translate to goroutines and channels
 - SMT operations require locking mechanism for thread safety
-- Cursor-based commitment processing needs careful state management
+- Cursor-based certification request processing needs careful state management
 - Block creation process must be atomic and coordinated
 
 ### Error Handling
@@ -160,12 +160,12 @@ make performance-test
 All endpoints follow JSON-RPC 2.0 specification:
 
 ### Core Methods
-- `submit_commitment`: Submit state transition request
-- `get_inclusion_proof`: Retrieve merkle proof for commitment
+- `certification_request`: Submit state transition request
+- `get_inclusion_proof`: Retrieve merkle proof for certification request
 - `get_no_deletion_proof`: Get global no-deletion proof (not implemented)
 - `get_block_height`: Current block number
 - `get_block`: Block data by number or "latest"
-- `get_block_commitments`: All commitments in specific block
+- `get_block_records`: All certification request in specific block
 
 ### Infrastructure Endpoints
 - `GET /health`: Service health and leader status
@@ -175,10 +175,10 @@ All endpoints follow JSON-RPC 2.0 specification:
 
 ### Critical Collections
 - **blocks**: Chain metadata with transaction proofs
-- **aggregator_records**: Finalized commitments with authenticators
-- **commitments**: Temporary storage with cursor state
+- **aggregator_records**: Finalized certification request with certification data
+- **certification_requests**: Temporary storage with cursor state
 - **smt_nodes**: Sparse merkle tree leaf nodes
-- **block_records**: Block number to request ID mappings
+- **block_records**: Block number to state ID mappings
 - **leadership**: High availability leader election state
 
 ### Schema Patterns
@@ -221,7 +221,7 @@ This ensures documentation stays accurate and useful for future development sess
 ### Performance Testing
 - **ALWAYS use `make performance-test`** to run the performance test, not the direct binary
 - The make target ensures proper environment setup and consistent execution
-- Performance test tracks only commitments submitted in the current run for accurate metrics
+- Performance test tracks only certification requests submitted in the current run for accurate metrics
 
 ### Docker Compose Management
 - **Clean rebuild**: `make docker-run-clean`

@@ -9,40 +9,37 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-// AggregatorRecord represents a finalized commitment with proof data
+// AggregatorRecord represents a finalized state transition certification request with proof data
 type AggregatorRecord struct {
-	RequestID             api.RequestID       `json:"requestId"`
-	TransactionHash       api.TransactionHash `json:"transactionHash"`
-	Authenticator         Authenticator       `json:"authenticator"`
-	AggregateRequestCount uint64              `json:"aggregateRequestCount"`
-	BlockNumber           *api.BigInt         `json:"blockNumber"`
-	LeafIndex             *api.BigInt         `json:"leafIndex"`
-	CreatedAt             *api.Timestamp      `json:"createdAt"`
-	FinalizedAt           *api.Timestamp      `json:"finalizedAt"`
+	StateID               api.StateID       `json:"stateId"`
+	CertificationData     CertificationData `json:"certificationData"`
+	AggregateRequestCount uint64            `json:"aggregateRequestCount"`
+	BlockNumber           *api.BigInt       `json:"blockNumber"`
+	LeafIndex             *api.BigInt       `json:"leafIndex"`
+	CreatedAt             *api.Timestamp    `json:"createdAt"`
+	FinalizedAt           *api.Timestamp    `json:"finalizedAt"`
 }
 
 // AggregatorRecordBSON represents the BSON version of AggregatorRecord for MongoDB storage
 type AggregatorRecordBSON struct {
-	RequestID             string               `bson:"requestId"`
-	TransactionHash       string               `bson:"transactionHash"`
-	Authenticator         AuthenticatorBSON    `bson:"authenticator"`
-	AggregateRequestCount uint64               `bson:"aggregateRequestCount"`
-	BlockNumber           primitive.Decimal128 `bson:"blockNumber"`
-	LeafIndex             primitive.Decimal128 `bson:"leafIndex"`
-	CreatedAt             time.Time            `bson:"createdAt"`
-	FinalizedAt           time.Time            `bson:"finalizedAt"`
+	StateID               string                `bson:"stateId"`
+	CertificationData     CertificationDataBSON `bson:"certificationData"`
+	AggregateRequestCount uint64                `bson:"aggregateRequestCount"`
+	BlockNumber           primitive.Decimal128  `bson:"blockNumber"`
+	LeafIndex             primitive.Decimal128  `bson:"leafIndex"`
+	CreatedAt             time.Time             `bson:"createdAt"`
+	FinalizedAt           time.Time             `bson:"finalizedAt"`
 }
 
-// NewAggregatorRecord creates a new aggregator record from a commitment
-func NewAggregatorRecord(commitment *Commitment, blockNumber, leafIndex *api.BigInt) *AggregatorRecord {
+// NewAggregatorRecord creates a new aggregator record from a certification request
+func NewAggregatorRecord(certRequest *CertificationRequest, blockNumber, leafIndex *api.BigInt) *AggregatorRecord {
 	return &AggregatorRecord{
-		RequestID:             commitment.RequestID,
-		TransactionHash:       commitment.TransactionHash,
-		Authenticator:         commitment.Authenticator,
-		AggregateRequestCount: commitment.AggregateRequestCount,
+		StateID:               certRequest.StateID,
+		CertificationData:     certRequest.CertificationData,
+		AggregateRequestCount: certRequest.AggregateRequestCount,
 		BlockNumber:           blockNumber,
 		LeafIndex:             leafIndex,
-		CreatedAt:             commitment.CreatedAt,
+		CreatedAt:             certRequest.CreatedAt,
 		FinalizedAt:           api.Now(),
 	}
 }
@@ -58,9 +55,8 @@ func (ar *AggregatorRecord) ToBSON() (*AggregatorRecordBSON, error) {
 		return nil, fmt.Errorf("error converting leaf index to decimal-128: %w", err)
 	}
 	return &AggregatorRecordBSON{
-		RequestID:             ar.RequestID.String(),
-		TransactionHash:       ar.TransactionHash.String(),
-		Authenticator:         ar.Authenticator.ToBSON(),
+		StateID:               ar.StateID.String(),
+		CertificationData:     ar.CertificationData.ToBSON(),
 		AggregateRequestCount: ar.AggregateRequestCount,
 		BlockNumber:           blockNumber,
 		LeafIndex:             leafIndex,
@@ -87,15 +83,14 @@ func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
 		aggregateRequestCount = 1
 	}
 
-	authenticatorBSON, err := arb.Authenticator.FromBSON()
+	certDataBSON, err := arb.CertificationData.FromBSON()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse authenticator: %w", err)
+		return nil, fmt.Errorf("failed to parse CertificationData: %w", err)
 	}
 
 	return &AggregatorRecord{
-		RequestID:             api.RequestID(arb.RequestID),
-		TransactionHash:       api.TransactionHash(arb.TransactionHash),
-		Authenticator:         *authenticatorBSON,
+		StateID:               api.StateID(arb.StateID),
+		CertificationData:     *certDataBSON,
 		AggregateRequestCount: aggregateRequestCount,
 		BlockNumber:           blockNumber,
 		LeafIndex:             leafIndex,

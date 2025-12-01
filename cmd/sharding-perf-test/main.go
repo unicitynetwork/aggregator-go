@@ -25,8 +25,8 @@ const (
 	requestsPerSec = 5000 // Target requests per second
 )
 
-// Generate a cryptographically valid commitment request
-func generateCommitmentRequest() *api.SubmitCommitmentRequest {
+// Generate a cryptographically valid certification request request
+func generateCommitmentRequest() *api.CertificationRequest {
 	// Generate a real secp256k1 key pair
 	privateKey, err := btcec.NewPrivateKey()
 	if err != nil {
@@ -37,12 +37,12 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 	// Generate random state data and create DataHash imprint
 	stateData := make([]byte, 32)
 	rand.Read(stateData)
-	stateHashImprint := signing.CreateDataHashImprint(stateData)
+	sourceStateHashImprint := signing.CreateDataHashImprint(stateData)
 
-	// Create RequestID deterministically
-	requestID, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
+	// Create StateID deterministically
+	stateID, err := api.CreateStateID(sourceStateHashImprint, publicKeyBytes)
 	if err != nil {
-		panic(fmt.Sprintf("Failed to create request ID: %v", err))
+		panic(fmt.Sprintf("Failed to create state ID: %v", err))
 	}
 
 	// Generate random transaction data and create DataHash imprint
@@ -50,32 +50,24 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 	rand.Read(transactionData)
 	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
 
-	// Extract transaction hash bytes for signing
-	transactionHashBytes, err := transactionHashImprint.DataBytes()
-	if err != nil {
-		panic(fmt.Sprintf("Failed to extract transaction hash: %v", err))
-	}
-
-	// Sign the transaction hash bytes
+	// Sign the transaction
 	signingService := signing.NewSigningService()
-	signatureBytes, err := signingService.SignHash(transactionHashBytes, privateKey.Serialize())
-	if err != nil {
-		panic(fmt.Sprintf("Failed to sign transaction: %v", err))
+	certData := &api.CertificationData{
+		PublicKey:       publicKeyBytes,
+		SourceStateHash: sourceStateHashImprint,
+		TransactionHash: transactionHashImprint,
+	}
+	if err = signingService.SignCertData(certData, privateKey.Serialize()); err != nil {
+		panic("Failed to sign certification request")
 	}
 
 	// Create receipt flag
 	receipt := false
 
-	return &api.SubmitCommitmentRequest{
-		RequestID:       requestID,
-		TransactionHash: transactionHashImprint,
-		Authenticator: api.Authenticator{
-			Algorithm: "secp256k1",
-			PublicKey: publicKeyBytes,
-			Signature: signatureBytes,
-			StateHash: stateHashImprint,
-		},
-		Receipt: &receipt,
+	return &api.CertificationRequest{
+		StateID:           stateID,
+		CertificationData: *certData,
+		Receipt:           &receipt,
 	}
 }
 
@@ -92,13 +84,13 @@ func commitmentWorker(ctx context.Context, clients []*JSONRPCClient, metrics *Me
 			return
 		case <-ticker.C:
 			wg.Add(1)
-			// Generate and submit commitment asynchronously
+			// Generate and submit certification request asynchronously
 			go func() {
 				defer wg.Done()
 				req := generateCommitmentRequest()
 
-				// choose correct client based on generated request ID
-				reqBytes, _ := req.RequestID.Bytes()
+				// choose correct client based on generated state ID
+				reqBytes, _ := req.StateID.Bytes()
 				lsb := reqBytes[len(reqBytes)-1]
 				var client *JSONRPCClient
 				if lsb&1 == 0 {
@@ -110,26 +102,26 @@ func commitmentWorker(ctx context.Context, clients []*JSONRPCClient, metrics *Me
 				shardM := metrics.shardMetrics[client.url]
 				atomic.AddInt64(&shardM.totalRequests, 1)
 
-				resp, err := client.call("submit_commitment", req)
+				resp, err := client.call("certification_request", req)
 				if err != nil {
 					atomic.AddInt64(&shardM.failedRequests, 1)
 					// Don't print network errors - too noisy
 					return
 				}
 
-				requestIDStr := strings.ToLower(req.RequestID.String())
+				stateIDStr := strings.ToLower(req.StateID.String())
 				if resp.Error != nil {
 					atomic.AddInt64(&shardM.failedRequests, 1)
-					if resp.Error.Message == "REQUEST_ID_EXISTS" {
-						atomic.AddInt64(&shardM.requestIdExistsErr, 1)
+					if resp.Error.Message == "STATE_ID_EXISTS" {
+						atomic.AddInt64(&shardM.stateIdExistsErr, 1)
 						// Track this ID - it exists so it will be in blocks!
-						metrics.submittedRequestIDs.Store(requestIDStr, &requestInfo{URL: client.url, Found: 0})
+						metrics.submittedStateIDs.Store(stateIDStr, &requestInfo{URL: client.url, Found: 0})
 					}
 					return
 				}
 
 				// Parse response
-				var submitResp api.SubmitCommitmentResponse
+				var submitResp api.CertificationResponse
 				respBytes, _ := json.Marshal(resp.Result)
 				if err := json.Unmarshal(respBytes, &submitResp); err != nil {
 					atomic.AddInt64(&shardM.failedRequests, 1)
@@ -138,18 +130,18 @@ func commitmentWorker(ctx context.Context, clients []*JSONRPCClient, metrics *Me
 
 				if submitResp.Status == "SUCCESS" {
 					atomic.AddInt64(&shardM.successfulRequests, 1)
-					// Track this request ID as submitted by us (normalized to lowercase)
-					metrics.submittedRequestIDs.Store(requestIDStr, &requestInfo{URL: client.url, Found: 0})
-				} else if submitResp.Status == "REQUEST_ID_EXISTS" {
-					atomic.AddInt64(&shardM.requestIdExistsErr, 1)
+					// Track this state ID as submitted by us (normalized to lowercase)
+					metrics.submittedStateIDs.Store(stateIDStr, &requestInfo{URL: client.url, Found: 0})
+				} else if submitResp.Status == "STATE_ID_EXISTS" {
+					atomic.AddInt64(&shardM.stateIdExistsErr, 1)
 					atomic.AddInt64(&shardM.successfulRequests, 1) // Count as successful - it will be in blocks!
 					// Also track this ID - it exists so it will be in blocks! (normalized to lowercase)
-					metrics.submittedRequestIDs.Store(requestIDStr, &requestInfo{URL: client.url, Found: 0})
+					metrics.submittedStateIDs.Store(stateIDStr, &requestInfo{URL: client.url, Found: 0})
 				} else {
 					atomic.AddInt64(&shardM.failedRequests, 1)
 					// Log unexpected status
 					if submitResp.Status != "" {
-						fmt.Printf("Unexpected status '%s' for request %s\n", submitResp.Status, req.RequestID)
+						fmt.Printf("Unexpected status '%s' for request %s\n", submitResp.Status, req.StateID)
 					}
 				}
 			}()
@@ -214,7 +206,7 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	// Start commitment workers
+	// Start certification request workers
 	wg.Add(workerCount)
 	for i := 0; i < workerCount; i++ {
 		go func() {
@@ -239,7 +231,7 @@ func main() {
 					total += atomic.LoadInt64(&sm.totalRequests)
 					successful += atomic.LoadInt64(&sm.successfulRequests)
 					failed += atomic.LoadInt64(&sm.failedRequests)
-					exists += atomic.LoadInt64(&sm.requestIdExistsErr)
+					exists += atomic.LoadInt64(&sm.stateIdExistsErr)
 				}
 
 				rps := float64(total) / elapsed.Seconds()
@@ -307,11 +299,11 @@ func main() {
 		fmt.Printf("\nChecking blocks %d to %d...\n", currentCheckBlock, safeBlockNumber)
 
 		for currentCheckBlock <= safeBlockNumber && atomic.LoadInt64(&shardM.totalBlockCommitments) < shardSuccessful {
-			commitReq := GetBlockCommitmentsRequest{
+			commitReq := GetBlockRecordsRequest{
 				BlockNumber: fmt.Sprintf("%d", currentCheckBlock),
 			}
 
-			commitResp, err := waitClient.call("get_block_commitments", commitReq)
+			commitResp, err := waitClient.call("get_block_records", commitReq)
 			if err != nil {
 				currentCheckBlock++
 				continue
@@ -322,7 +314,7 @@ func main() {
 				continue
 			}
 
-			var commitsResp GetBlockCommitmentsResponse
+			var commitsResp GetBlockRecordsResponse
 			commitRespBytes, err := json.Marshal(commitResp.Result)
 			if err != nil {
 				currentCheckBlock++
@@ -335,9 +327,9 @@ func main() {
 
 			ourCommitmentCount := 0
 			notOurs := 0
-			for _, commitment := range commitsResp.Commitments {
-				requestIDStr := strings.ToLower(commitment.RequestID)
-				if val, exists := metrics.submittedRequestIDs.Load(requestIDStr); exists {
+			for _, commitment := range commitsResp.AggregatorRecords {
+				stateIDStr := strings.ToLower(commitment.StateID)
+				if val, exists := metrics.submittedStateIDs.Load(stateIDStr); exists {
 					info := val.(*requestInfo)
 					if info.URL == waitClient.url {
 						if atomic.CompareAndSwapInt32(&info.Found, 0, 1) {
@@ -356,9 +348,9 @@ func main() {
 			shardM.addBlockCommitmentCount(ourCommitmentCount)
 			if ourCommitmentCount > 0 {
 				atomic.AddInt64(&shardM.totalBlockCommitments, int64(ourCommitmentCount))
-				fmt.Printf("Block %d: %d our commitments (total in block: %d, shard total: %d/%d)\n", currentCheckBlock, ourCommitmentCount, len(commitsResp.Commitments), atomic.LoadInt64(&shardM.totalBlockCommitments), shardSuccessful)
-			} else if len(commitsResp.Commitments) > 0 {
-				fmt.Printf("Block %d: %d commitments from other sources\n", currentCheckBlock, len(commitsResp.Commitments))
+				fmt.Printf("Block %d: %d our commitments (total in block: %d, shard total: %d/%d)\n", currentCheckBlock, ourCommitmentCount, len(commitsResp.AggregatorRecords), atomic.LoadInt64(&shardM.totalBlockCommitments), shardSuccessful)
+			} else if len(commitsResp.AggregatorRecords) > 0 {
+				fmt.Printf("Block %d: %d commitments from other sources\n", currentCheckBlock, len(commitsResp.AggregatorRecords))
 			}
 
 			currentCheckBlock++
@@ -374,19 +366,19 @@ func main() {
 			lastReportTime := time.Now()
 
 			type blockRetryInfo struct {
-				blockNumber      int64
-				totalCommitments int
-				lastChecked      time.Time
-				retryCount       int
+				blockNumber int64
+				totalCount  int
+				lastChecked time.Time
+				retryCount  int
 			}
 			blocksToRetry := make(map[int64]*blockRetryInfo)
 
 			checkBlock := func(blockNum int64) bool {
-				commitReq := GetBlockCommitmentsRequest{
+				commitReq := GetBlockRecordsRequest{
 					BlockNumber: fmt.Sprintf("%d", blockNum),
 				}
 
-				commitResp, err := waitClient.call("get_block_commitments", commitReq)
+				commitResp, err := waitClient.call("get_block_records", commitReq)
 				if err != nil {
 					fmt.Printf("Block %d: network error: %v\n", blockNum, err)
 					return false
@@ -399,7 +391,7 @@ func main() {
 					return false
 				}
 
-				var commitsResp GetBlockCommitmentsResponse
+				var commitsResp GetBlockRecordsResponse
 				commitRespBytes, _ := json.Marshal(commitResp.Result)
 				if err := json.Unmarshal(commitRespBytes, &commitsResp); err != nil {
 					fmt.Printf("Block %d: failed to parse response: %v\n", blockNum, err)
@@ -407,9 +399,9 @@ func main() {
 				}
 
 				ourCommitmentCount := 0
-				for _, commitment := range commitsResp.Commitments {
-					requestIDStr := strings.ToLower(commitment.RequestID)
-					if val, exists := metrics.submittedRequestIDs.Load(requestIDStr); exists {
+				for _, commitment := range commitsResp.AggregatorRecords {
+					stateIDStr := strings.ToLower(commitment.StateID)
+					if val, exists := metrics.submittedStateIDs.Load(stateIDStr); exists {
 						info := val.(*requestInfo)
 						if info.URL == waitClient.url {
 							if atomic.CompareAndSwapInt32(&info.Found, 0, 1) {
@@ -422,19 +414,19 @@ func main() {
 				if ourCommitmentCount > 0 {
 					shardM.addBlockCommitmentCount(ourCommitmentCount)
 					atomic.AddInt64(&shardM.totalBlockCommitments, int64(ourCommitmentCount))
-					fmt.Printf("Block %d: %d our commitments (total in block: %d, shard total: %d/%d)\n", blockNum, ourCommitmentCount, len(commitsResp.Commitments), atomic.LoadInt64(&shardM.totalBlockCommitments), shardSuccessful)
+					fmt.Printf("Block %d: %d our commitments (total in block: %d, shard total: %d/%d)\n", blockNum, ourCommitmentCount, len(commitsResp.AggregatorRecords), atomic.LoadInt64(&shardM.totalBlockCommitments), shardSuccessful)
 					lastProgressTime = time.Now()
 					delete(blocksToRetry, blockNum)
 					return true
-				} else if len(commitsResp.Commitments) > 0 {
+				} else if len(commitsResp.AggregatorRecords) > 0 {
 					if _, exists := blocksToRetry[blockNum]; !exists {
 						blocksToRetry[blockNum] = &blockRetryInfo{
-							blockNumber:      blockNum,
-							totalCommitments: len(commitsResp.Commitments),
-							lastChecked:      time.Now(),
-							retryCount:       0,
+							blockNumber: blockNum,
+							totalCount:  len(commitsResp.AggregatorRecords),
+							lastChecked: time.Now(),
+							retryCount:  0,
 						}
-						fmt.Printf("Block %d: 0 our commitments yet (will retry, total: %d)\n", blockNum, len(commitsResp.Commitments))
+						fmt.Printf("Block %d: 0 our commitments yet (will retry, total: %d)\n", blockNum, len(commitsResp.AggregatorRecords))
 					}
 				}
 				return false
@@ -494,19 +486,19 @@ func main() {
 	foundCount := 0
 	var sampleMissingIDs []string
 
-	metrics.submittedRequestIDs.Range(func(key, value interface{}) bool {
+	metrics.submittedStateIDs.Range(func(key, value interface{}) bool {
 		trackedCount++
-		requestID := key.(string)
+		stateID := key.(string)
 		info := value.(*requestInfo)
 		if info.Found == 1 {
 			foundCount++
 		} else if len(sampleMissingIDs) < 5 {
-			sampleMissingIDs = append(sampleMissingIDs, requestID)
+			sampleMissingIDs = append(sampleMissingIDs, stateID)
 		}
 		return true
 	})
 
-	fmt.Printf("\nDebug: Tracked %d request IDs, found in blocks: %d, missing: %d\n", trackedCount, foundCount, trackedCount-foundCount)
+	fmt.Printf("\nDebug: Tracked %d state IDs, found in blocks: %d, missing: %d\n", trackedCount, foundCount, trackedCount-foundCount)
 	if len(sampleMissingIDs) > 0 {
 		fmt.Printf("Sample missing IDs:\n")
 		for i, id := range sampleMissingIDs {
@@ -536,7 +528,7 @@ func main() {
 		shardTotal := atomic.LoadInt64(&shardM.totalRequests)
 		shardSuccessful := atomic.LoadInt64(&shardM.successfulRequests)
 		shardFailed := atomic.LoadInt64(&shardM.failedRequests)
-		shardExists := atomic.LoadInt64(&shardM.requestIdExistsErr)
+		shardExists := atomic.LoadInt64(&shardM.stateIdExistsErr)
 		shardProcessedInBlocks := atomic.LoadInt64(&shardM.totalBlockCommitments)
 
 		total += shardTotal
@@ -548,7 +540,7 @@ func main() {
 		fmt.Printf("Total requests: %d\n", shardTotal)
 		fmt.Printf("Successful requests: %d\n", shardSuccessful)
 		fmt.Printf("Failed requests: %d\n", shardFailed)
-		fmt.Printf("REQUEST_ID_EXISTS: %d\n", shardExists)
+		fmt.Printf("STATE_ID_EXISTS: %d\n", shardExists)
 		if elapsed.Seconds() > 0 {
 			fmt.Printf("Average RPS: %.2f\n", float64(shardTotal)/elapsed.Seconds())
 		}
@@ -597,7 +589,7 @@ func main() {
 	fmt.Printf("Total requests: %d\n", total)
 	fmt.Printf("Successful requests: %d\n", successful)
 	fmt.Printf("Failed requests: %d\n", failed)
-	fmt.Printf("REQUEST_ID_EXISTS: %d\n", exists)
+	fmt.Printf("STATE_ID_EXISTS: %d\n", exists)
 	if elapsed.Seconds() > 0 {
 		fmt.Printf("Average RPS: %.2f\n", float64(total)/elapsed.Seconds())
 	}
@@ -643,8 +635,8 @@ func verifyInclusionProofs(metrics *Metrics, clients []*JSONRPCClient) {
 	const maxConcurrentVerifications = 100
 	semaphore := make(chan struct{}, maxConcurrentVerifications)
 
-	metrics.submittedRequestIDs.Range(func(key, value interface{}) bool {
-		requestIDStr := key.(string)
+	metrics.submittedStateIDs.Range(func(key, value interface{}) bool {
+		stateIDStr := key.(string)
 		info := value.(*requestInfo)
 
 		if info.Found == 1 {
@@ -666,7 +658,7 @@ func verifyInclusionProofs(metrics *Metrics, clients []*JSONRPCClient) {
 				}
 
 				// 1. Get inclusion proof
-				params := map[string]string{"requestId": rid}
+				params := map[string]string{"stateId": rid}
 				resp, err := client.call("get_inclusion_proof", params)
 				if err != nil {
 					fmt.Printf("ERROR for %s: failed to get inclusion proof: %v\n", rid, err)
@@ -693,17 +685,17 @@ func verifyInclusionProofs(metrics *Metrics, clients []*JSONRPCClient) {
 					return
 				}
 
-				// 2. Get path from request ID
-				reqID := api.RequestID(rid)
-				reqIDPath, err := reqID.GetPath()
+				// 2. Get path from state ID
+				stateID := api.StateID(rid)
+				stateIDPath, err := stateID.GetPath()
 				if err != nil {
-					fmt.Printf("ERROR for %s: failed to get path from request ID: %v\n", rid, err)
+					fmt.Printf("ERROR for %s: failed to get path from state ID: %v\n", rid, err)
 					results <- false
 					return
 				}
 
 				// 3. Verify proof
-				verifyResult, err := proofResp.InclusionProof.MerkleTreePath.Verify(reqIDPath)
+				verifyResult, err := proofResp.InclusionProof.MerkleTreePath.Verify(stateIDPath)
 				if err != nil {
 					fmt.Printf("ERROR for %s: proof verification returned an error: %v\n", rid, err)
 					results <- false
@@ -718,7 +710,7 @@ func verifyInclusionProofs(metrics *Metrics, clients []*JSONRPCClient) {
 
 				// Success
 				results <- true
-			}(requestIDStr, info.URL)
+			}(stateIDStr, info.URL)
 		}
 		return true
 	})
