@@ -17,6 +17,7 @@ require (
 	go.mongodb.org/mongo-driver v1.17.4
 	go.opentelemetry.io/otel/metric v1.38.0
 	go.opentelemetry.io/otel/trace v1.38.0
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
 require (

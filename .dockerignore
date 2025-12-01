@@ -56,3 +56,6 @@ changes.txt
 # Local development
 .env
 .env.local
+
+# Data directory (MongoDB, Redis, logs, genesis files)
+data/
