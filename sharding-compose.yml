@@ -92,18 +92,15 @@ services:
       - "27017:27017"
     networks:
       - default
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: password
-      MONGO_INITDB_DATABASE: aggregator
     volumes:
       - ./data/mongodb_shard1_data:/data/db
-      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    command: ["--replSet", "rs-shard1", "--bind_ip_all", "--noauth"]
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
+      test: ["CMD", "mongosh", "--eval", "try { rs.status().ok } catch(e) { rs.initiate({_id:'rs-shard1',members:[{_id:0,host:'mongodb-shard1:27017'}]}) }"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 10s
   mongodb-shard2:
     image: mongo:7.0
     container_name: aggregator-shard2-mongodb
@@ -113,18 +110,15 @@ services:
       - "27018:27017"
     networks:
       - default
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: password
-      MONGO_INITDB_DATABASE: aggregator
     volumes:
       - ./data/mongodb_shard2_data:/data/db
-      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    command: ["--replSet", "rs-shard2", "--bind_ip_all", "--noauth"]
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
+      test: ["CMD", "mongosh", "--eval", "try { rs.status().ok } catch(e) { rs.initiate({_id:'rs-shard2',members:[{_id:0,host:'mongodb-shard2:27017'}]}) }"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 10s
 
   redis-shared:
     image: redis:7-alpine
@@ -153,18 +147,15 @@ services:
       - "27019:27017"
     networks:
       - default
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: password
-      MONGO_INITDB_DATABASE: aggregator
     volumes:
       - ./data/mongodb_root_data:/data/db
-      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    command: ["--replSet", "rs-root", "--bind_ip_all", "--noauth"]
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
+      test: ["CMD", "mongosh", "--eval", "try { rs.status().ok } catch(e) { rs.initiate({_id:'rs-root',members:[{_id:0,host:'mongodb-root:27017'}]}) }"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 10s
   aggregator-shard1: &aggregator-base
     build:
       context: .
@@ -189,9 +180,12 @@ services:
       CONCURRENCY_LIMIT: "5000"
       ENABLE_DOCS: "true"
       ENABLE_CORS: "true"
+      ENABLE_TLS: "true"
+      TLS_CERT_FILE: "/app/certs/cert.pem"
+      TLS_KEY_FILE: "/app/certs/key.pem"
 
       # Database Configuration
-      MONGODB_URI: "mongodb://admin:password@mongodb-shard1:27017/aggregator?authSource=admin"
+      MONGODB_URI: "mongodb://mongodb-shard1:27017/aggregator?replicaSet=rs-shard1&directConnection=true"
       MONGODB_DATABASE: "aggregator"
       MONGODB_CONNECT_TIMEOUT: "10s"
       MONGODB_SERVER_SELECTION_TIMEOUT: "5s"
@@ -263,7 +257,7 @@ services:
         exec /app/aggregator
 
     depends_on:
-      bft-aggregator-genesis-gen:
+      upload-configurations:
         condition: service_completed_successfully
       mongodb-shard1:
         condition: service_healthy
@@ -281,11 +275,11 @@ services:
       - "3002:3000"
     environment:
       <<: *environment-base
-      MONGODB_URI: "mongodb://admin:password@mongodb-shard2:27017/aggregator?authSource=admin"
+      MONGODB_URI: "mongodb://mongodb-shard2:27017/aggregator?replicaSet=rs-shard2&directConnection=true"
       SHARDING_CHILD_SHARD_ID: 2 # 0b10
       REDIS_STREAM_NAME: "commitments:shard:2"
     depends_on:
-      bft-aggregator-genesis-gen:
+      upload-configurations:
         condition: service_completed_successfully
       mongodb-shard2:
         condition: service_healthy
@@ -303,11 +297,12 @@ services:
       - "3009:3000"
     environment:
       <<: *environment-base
-      MONGODB_URI: "mongodb://admin:password@mongodb-root:27017/aggregator?authSource=admin"
+      MONGODB_URI: "mongodb://mongodb-root:27017/aggregator?replicaSet=rs-root&directConnection=true"
       SHARDING_MODE: "parent"
       BFT_ENABLED: "true"
+      ENABLE_TLS: "false"
     depends_on:
-      bft-aggregator-genesis-gen:
+      upload-configurations:
         condition: service_completed_successfully
       mongodb-root:
         condition: service_healthy

@@ -330,12 +330,20 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 				"roundNumber", roundNumber.String(),
 				"error", err.Error())
 
-			// If we're a child aggregator and processing failed, start the next round to avoid getting stuck
-			if rm.config.Sharding.Mode.IsChild() {
+			// If we're a child aggregator and processing failed (but not due to shutdown), start the next round to avoid getting stuck
+			if rm.config.Sharding.Mode.IsChild() && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				nextRoundNumber := big.NewInt(0).Add(roundNumber.Int, big.NewInt(1))
 				rm.logger.WithContext(ctx).Info("Attempting to start new round after processing failure.",
 					"failedRound", roundNumber.String(),
 					"nextRound", nextRoundNumber.String())
+
+				// Wait before retrying to prevent resource exhaustion on repeated failures
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(1 * time.Second):
+				}
+
 				if startErr := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); startErr != nil {
 					rm.logger.WithContext(ctx).Error("Failed to start new round after processing error",
 						"nextRound", nextRoundNumber.String(),

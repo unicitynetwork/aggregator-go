@@ -314,25 +314,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	}
 	rm.roundMutex.Unlock()
 
-	// Store the block first - before committing the snapshot
-	rm.logger.WithContext(ctx).Debug("Storing block in database",
-		"blockNumber", block.Index.String())
-
-	storeBlockStart = time.Now()
-	if err := rm.storage.BlockStorage().Store(ctx, block); err != nil {
-		rm.logger.WithContext(ctx).Error("Failed to store block",
-			"blockNumber", block.Index.String(),
-			"error", err.Error())
-		return fmt.Errorf("failed to store block: %w", err)
-	}
-
-	// Store block records mapping
-	if err := rm.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds)); err != nil {
-		return fmt.Errorf("failed to store block record: %w", err)
-	}
-	storeBlockTime = time.Since(storeBlockStart)
-
-	// Now that block is stored with unicity certificate, persist SMT nodes and aggregator records
+	// Get pending data before transaction
 	rm.roundMutex.Lock()
 	var pendingLeaves []*smt.Leaf
 	var commitments []*models.Commitment
@@ -343,39 +325,68 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	}
 	rm.roundMutex.Unlock()
 
-	// Store SMT nodes and aggregator records if we have commitments
-	if len(commitments) > 0 {
-		persistDataStart = time.Now()
-		var wg sync.WaitGroup
-		var smtPersistErr, aggregatorRecordErr error
+	// Use MongoDB transaction to atomically store block, block records, SMT nodes, and aggregator records
+	// This prevents data inconsistency if MongoDB crashes during finalization
+	storeBlockStart = time.Now()
+	persistDataStart = time.Now()
 
-		// Only persist SMT nodes if we have pending leaves
-		if len(pendingLeaves) > 0 {
+	err := rm.storage.WithTransaction(ctx, func(txCtx context.Context) error {
+		// 1. Store block
+		rm.logger.WithContext(txCtx).Debug("Storing block in database",
+			"blockNumber", block.Index.String())
+		if err := rm.storage.BlockStorage().Store(txCtx, block); err != nil {
+			rm.logger.WithContext(txCtx).Error("Failed to store block",
+				"blockNumber", block.Index.String(),
+				"error", err.Error())
+			return fmt.Errorf("failed to store block: %w", err)
+		}
+
+		// 2. Store block records mapping
+		if err := rm.storage.BlockRecordsStorage().Store(txCtx, models.NewBlockRecords(block.Index, requestIds)); err != nil {
+			return fmt.Errorf("failed to store block record: %w", err)
+		}
+
+		// 3. Store SMT nodes and aggregator records if we have commitments
+		if len(commitments) > 0 {
+			var wg sync.WaitGroup
+			var smtPersistErr, aggregatorRecordErr error
+
+			// Persist SMT nodes if we have pending leaves
+			if len(pendingLeaves) > 0 {
+				wg.Go(func() {
+					smtPersistErr = rm.persistSmtNodes(txCtx, pendingLeaves)
+				})
+			}
+
+			// Persist aggregator records
 			wg.Go(func() {
-				smtPersistErr = rm.persistSmtNodes(ctx, pendingLeaves)
+				aggregatorRecordErr = rm.persistAggregatorRecords(txCtx, commitments, block.Index)
 			})
+
+			wg.Wait()
+
+			if smtPersistErr != nil {
+				return fmt.Errorf("failed to persist SMT nodes: %w", smtPersistErr)
+			}
+			if aggregatorRecordErr != nil {
+				return fmt.Errorf("failed to store aggregator records: %w", aggregatorRecordErr)
+			}
+
+			rm.logger.WithContext(txCtx).Info("Successfully persisted data in transaction",
+				"blockNumber", block.Index.String(),
+				"leafCount", len(pendingLeaves),
+				"recordCount", len(commitments))
 		}
 
-		// Always persist aggregator records if we have commitments
-		wg.Go(func() {
-			aggregatorRecordErr = rm.persistAggregatorRecords(ctx, commitments, block.Index)
-		})
+		return nil
+	})
 
-		wg.Wait()
-		persistDataTime = time.Since(persistDataStart)
-
-		if smtPersistErr != nil {
-			return fmt.Errorf("failed to persist SMT nodes: %w", smtPersistErr)
-		}
-		if aggregatorRecordErr != nil {
-			return fmt.Errorf("failed to store aggregator records: %w", aggregatorRecordErr)
-		}
-
-		rm.logger.WithContext(ctx).Info("Successfully persisted data",
-			"blockNumber", block.Index.String(),
-			"leafCount", len(pendingLeaves),
-			"recordCount", len(commitments))
+	if err != nil {
+		return fmt.Errorf("failed to finalize block in transaction: %w", err)
 	}
+
+	storeBlockTime = time.Since(storeBlockStart)
+	persistDataTime = time.Since(persistDataStart)
 
 	// CRITICAL: Commit the snapshot to the main SMT AFTER storing the block successfully
 	// This ensures the SMT state only reflects successfully persisted blocks
@@ -450,6 +461,23 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 
 	if totalRoundTime == 0 {
 		totalRoundTime = processingTime + actualFinalizationTime
+	}
+
+	// For child shards, ensure minimum round duration
+	// This prevents rounds from completing too quickly when there are no commitments
+	if rm.config.Sharding.Mode.IsChild() {
+		rm.roundMutex.RLock()
+		roundStartTime := rm.currentRound.StartTime
+		rm.roundMutex.RUnlock()
+
+		elapsed := time.Since(roundStartTime)
+		minRoundDuration := rm.roundDuration
+		if elapsed < minRoundDuration {
+			delay := minRoundDuration - elapsed
+			time.Sleep(delay)
+			// Recalculate totalRoundTime to include the delay
+			totalRoundTime = time.Since(roundStartTime)
+		}
 	}
 
 	shortDur := func(d time.Duration) string {

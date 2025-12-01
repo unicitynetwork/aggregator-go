@@ -133,7 +133,7 @@ func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.
 		return nil, fmt.Errorf("invalid shard ID: %w", err)
 	}
 
-	pas.logger.WithContext(ctx).Info("Shard proof requested", "shardId", req.ShardID)
+	pas.logger.WithContext(ctx).Debug("Shard proof requested", "shardId", req.ShardID)
 
 	shardPath := new(big.Int).SetInt64(int64(req.ShardID))
 	merkleTreePath, err := pas.parentRoundManager.GetSMT().GetPath(shardPath)

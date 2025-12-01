@@ -57,6 +57,8 @@ type ParentRoundManager struct {
 	totalShardUpdates int64
 }
 
+const parentRoundRetryDelay = 1 * time.Second
+
 // NewParentRoundManager creates a new parent round manager
 func NewParentRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*ParentRoundManager, error) {
 	// Initialize parent SMT in parent mode with support for mutable leaves
@@ -214,7 +216,37 @@ func (prm *ParentRoundManager) processCurrentRound(ctx context.Context) error {
 
 	prm.roundMutex.Unlock()
 
-	return prm.processRound(ctx, round)
+	if err := prm.processRound(ctx, round); err != nil {
+		return prm.retryRound(ctx, round)
+	}
+	return nil
+}
+
+// retryRound retries processing a round until it succeeds or context is cancelled
+func (prm *ParentRoundManager) retryRound(ctx context.Context, round *ParentRound) error {
+	for {
+		select {
+		case <-ctx.Done():
+			prm.logger.WithContext(ctx).Warn("Stopping parent round retries due to context cancellation",
+				"roundNumber", round.Number.String())
+			return ctx.Err()
+		case <-time.After(parentRoundRetryDelay):
+		}
+
+		prm.logger.WithContext(ctx).Warn("Retrying parent round processing",
+			"roundNumber", round.Number.String())
+
+		if err := prm.processRound(ctx, round); err != nil {
+			prm.logger.WithContext(ctx).Error("Parent round retry failed",
+				"roundNumber", round.Number.String(),
+				"error", err.Error())
+			continue
+		}
+
+		prm.logger.WithContext(ctx).Info("Parent round retry succeeded",
+			"roundNumber", round.Number.String())
+		return nil
+	}
 }
 
 // processRound processes a specific round
