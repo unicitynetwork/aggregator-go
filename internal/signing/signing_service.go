@@ -67,12 +67,17 @@ func (s *SigningService) SignCertData(certData *api.CertificationData, privateKe
 	if err != nil {
 		return fmt.Errorf("failed to generate signature bytes: %w", err)
 	}
-	sig, err := s.SignHash(sigDataHash, privateKey)
+	sig, err := s.SignDataHash(sigDataHash, privateKey)
 	if err != nil {
 		return fmt.Errorf("error generating signature: %w", err)
 	}
 	certData.Signature = sig
 	return nil
+}
+
+// SignDataHash signs the given data hash with the private key and returns the signature
+func (s *SigningService) SignDataHash(dataHash *api.DataHash, privateKey []byte) ([]byte, error) {
+	return s.SignHash(dataHash.RawHash, privateKey)
 }
 
 // SignHash signs the given hash with the private key and returns the signature
@@ -97,6 +102,12 @@ func (s *SigningService) VerifyWithPublicKey(data []byte, signature []byte, publ
 	return s.VerifyHashWithPublicKey(hash[:], signature, publicKey)
 }
 
+// VerifyDataHashWithPublicKey verifies a signature against data hash using a public key
+func (s *SigningService) VerifyDataHashWithPublicKey(dataHash *api.DataHash, signature []byte, publicKey []byte) (bool, error) {
+	return s.VerifyHashWithPublicKey(dataHash.RawHash, signature, publicKey)
+}
+
+// VerifyHashWithPublicKey verifies a signature against data hash using a public key
 func (s *SigningService) VerifyHashWithPublicKey(dataHash []byte, signature []byte, publicKey []byte) (bool, error) {
 	if len(signature) != 65 {
 		return false, fmt.Errorf("signature must be 65 bytes (64 bytes + recovery), got %d", len(signature))

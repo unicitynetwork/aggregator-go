@@ -47,9 +47,8 @@ type CertificationData struct {
 }
 
 // SigDataHash returns the data hash used for signature generation.
-// The hash is calculated as CBOR array of [sourceStateHashImprint, transactionHashImprint] and
-// the value returned is in DataHash imprint format (2-byte algorithm prefix + hash of cbor array).
-func (c CertificationData) SigDataHash() ([]byte, error) {
+// The hash is calculated as CBOR array of [sourceStateHashImprint, transactionHashImprint].
+func (c CertificationData) SigDataHash() (*DataHash, error) {
 	sourceStateHashImprint, err := c.SourceStateHash.Imprint()
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert source state hash to bytes: %w", err)
@@ -58,10 +57,11 @@ func (c CertificationData) SigDataHash() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert transaction hash to bytes: %w", err)
 	}
-
-	return SigDataHash(sourceStateHashImprint, transactionHashImprint).GetImprint(), nil
+	return SigDataHash(sourceStateHashImprint, transactionHashImprint), nil
 }
 
+// SigDataHash returns the data hash used for signature generation.
+// The hash is calculated as CBOR array of [sourceStateHashImprint, transactionHashImprint].
 func SigDataHash(sourceStateHashImprint []byte, transactionHashImprint []byte) *DataHash {
 	return NewDataHasher(SHA256).AddData(
 		CborArray(2)).
@@ -85,6 +85,8 @@ func (c CertificationData) Hash() ([]byte, error) {
 	return CertDataHash(c.PublicKey, sourceStateHashImprint, transactionHashImprint, c.Signature).GetImprint(), nil
 }
 
+// CertDataHash returns the data hash of certification data, used as a key in the state tree.
+// The hash is calculated as CBOR array of [PublicKey, SourceStateHashImprint, TransactionHashImprint, Signature].
 func CertDataHash(publicKey, sourceStateHashImprint, transactionHashImprint, signature []byte) *DataHash {
 	return NewDataHasher(SHA256).AddData(
 		CborArray(4)).

@@ -40,8 +40,7 @@ func TestValidator_Success(t *testing.T) {
 	// Sign the actual transaction hash bytes (what the validator expects)
 	signingService := NewSigningService()
 	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionDataHashImprint)
-
-	signatureBytes, err := signingService.SignHash(sigDataHash.GetImprint(), privateKey.Serialize())
+	signatureBytes, err := signingService.SignDataHash(sigDataHash, privateKey.Serialize())
 	require.NoError(t, err, "Failed to sign transaction data")
 
 	// Create certification request with valid data
@@ -346,8 +345,7 @@ func TestValidator_RealSecp256k1Data(t *testing.T) {
 	// Sign the actual transaction hash bytes (what the validator expects)
 	signingService := NewSigningService()
 	sigDataHash := api.SigDataHash(sourceStateHashImprintBytes, transactionHashImprintBytes)
-
-	signatureBytes, err := signingService.SignHash(sigDataHash.GetImprint(), privateKeyBytes)
+	signatureBytes, err := signingService.SignDataHash(sigDataHash, privateKeyBytes)
 	if err != nil {
 		t.Fatalf("Failed to sign transaction data: %v", err)
 	}

@@ -48,8 +48,7 @@ func createTestCommitment() *models.CertificationRequest {
 	// Sign the transaction
 	signingService := signing.NewSigningService()
 	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionHashImprint)
-
-	signatureBytes, err := signingService.SignHash(sigDataHash.GetImprint(), privateKey.Serialize())
+	signatureBytes, err := signingService.SignDataHash(sigDataHash, privateKey.Serialize())
 	if err != nil {
 		panic(fmt.Sprintf("Failed to sign transaction: %v", err))
 	}

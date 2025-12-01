@@ -385,7 +385,7 @@ func createTestCommitment(t *testing.T, baseData string) *models.CertificationRe
 
 	signingService := signing.NewSigningService()
 	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionHashImprint)
-	signatureBytes, err := signingService.SignHash(sigDataHash.GetImprint(), privateKey.Serialize())
+	signatureBytes, err := signingService.SignDataHash(sigDataHash, privateKey.Serialize())
 	require.NoError(t, err, "Failed to sign transaction")
 
 	certData := models.CertificationData{

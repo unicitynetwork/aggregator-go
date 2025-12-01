@@ -175,9 +175,8 @@ func (v *CertificationRequestValidator) Validate(commitment *models.Certificatio
 	}
 
 	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionHashImprint)
-
-	isValidSignature, err := v.signingService.VerifyHashWithPublicKey(
-		sigDataHash.GetImprint(),
+	isValidSignature, err := v.signingService.VerifyDataHashWithPublicKey(
+		sigDataHash,
 		signatureBytes,
 		publicKeyBytes,
 	)
