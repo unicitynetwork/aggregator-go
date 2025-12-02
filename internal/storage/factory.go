@@ -14,9 +14,9 @@ import (
 )
 
 // NewStorage creates commitment queue and storage based on configuration
-func NewStorage(cfg *config.Config, log *logger.Logger) (interfaces.CommitmentQueue, interfaces.Storage, error) {
+func NewStorage(ctx context.Context, cfg *config.Config, log *logger.Logger) (interfaces.CommitmentQueue, interfaces.Storage, error) {
 	// Always create MongoDB for persistence
-	mongoStorage, err := mongodb.NewStorage(*cfg)
+	mongoStorage, err := mongodb.NewStorage(ctx, *cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create MongoDB storage: %w", err)
 	}

@@ -43,7 +43,7 @@ func TestParentShardIntegration_GoodCase(t *testing.T) {
 	rootAggregatorClient := testsharding.NewRootAggregatorClientStub()
 
 	// create round manager
-	rm, err := NewRoundManager(ctx, &cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), storage.CommitmentQueue(), storage, rootAggregatorClient, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(ctx, &cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), storage.CommitmentQueue(), storage, rootAggregatorClient, state.NewSyncStateTracker(), nil)
 	require.NoError(t, err)
 
 	// start round manager
@@ -94,7 +94,7 @@ func TestParentShardIntegration_RoundProcessingError(t *testing.T) {
 	rootAggregatorClient.SetSubmissionError(errors.New("some error"))
 
 	// create round manager
-	rm, err := NewRoundManager(ctx, &cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), storage.CommitmentQueue(), storage, rootAggregatorClient, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(ctx, &cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), storage.CommitmentQueue(), storage, rootAggregatorClient, state.NewSyncStateTracker(), nil)
 	require.NoError(t, err)
 
 	// start round manager

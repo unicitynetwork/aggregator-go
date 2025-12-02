@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/unicitynetwork/bft-go-base/types"
+
 	"github.com/unicitynetwork/aggregator-go/internal/bft"
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
@@ -59,7 +61,7 @@ type ParentRoundManager struct {
 }
 
 // NewParentRoundManager creates a new parent round manager
-func NewParentRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, storage interfaces.Storage) (*ParentRoundManager, error) {
+func NewParentRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, storage interfaces.Storage, luc *types.UnicityCertificate) (*ParentRoundManager, error) {
 	// Initialize parent SMT in parent mode with support for mutable leaves
 	smtInstance := smt.NewParentSparseMerkleTree(api.SHA256, cfg.Sharding.ShardIDLength)
 	parentSMT := smt.NewThreadSafeSMT(smtInstance)
@@ -76,7 +78,7 @@ func NewParentRoundManager(ctx context.Context, cfg *config.Config, logger *logg
 	// Create BFT client (same logic as regular RoundManager)
 	if cfg.BFT.Enabled {
 		var err error
-		prm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, prm, logger)
+		prm.bftClient, err = bft.NewBFTClient(&cfg.BFT, prm, storage.TrustBaseStorage(), luc, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create BFT client: %w", err)
 		}

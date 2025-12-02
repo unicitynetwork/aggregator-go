@@ -160,6 +160,22 @@ The service is configured via environment variables:
 | `BATCH_LIMIT` | Maximum number of commitments to process per batch | `1000` |
 | `ROUND_DURATION` | Duration between block creation rounds | `1s` |
 
+### BFT Configuration
+
+| Variable                            | Description                                                                         | Default                          |
+|-------------------------------------|-------------------------------------------------------------------------------------|----------------------------------|
+| `BFT_ENABLED`                       | Enables or disables the BFT client integration.                                     | `true`                           |
+| `BFT_ADDRESS`                       | The libp2p multiaddress for the BFT client to listen on.                            | `/ip4/0.0.0.0/tcp/9000`          |
+| `BFT_ANNOUNCE_ADDRESSES`            | Comma-separated list of public callback multi-addresses to announce to other peers. | `""`                             |
+| `BFT_BOOTSTRAP_ADDRESSES`           | Comma-separated list of bootstrap peer addresses.                                   | `""`                             |
+| `BFT_BOOTSTRAP_CONNECT_RETRY`       | Number of retries for connecting to bootstrap peers.                                | `3`                              |
+| `BFT_BOOTSTRAP_CONNECT_RETRY_DELAY` | Delay between bootstrap connection retries (in seconds).                            | `5`                              |
+| `BFT_HEARTBEAT_INTERVAL`            | How often the BFT client checks for inactivity.                                     | `1s`                             |
+| `BFT_INACTIVITY_TIMEOUT`            | Duration of inactivity before the BFT client sends a new handshake.                 | `5s`                             |
+| `BFT_KEY_CONF_FILE`                 | Path to the BFT key configuration file.                                             | `bft-config/keys.json`           |
+| `BFT_SHARD_CONF_FILE`               | Path to the aggregator shard configuration file.                                    | `bft-config/shard-conf-7_0.json` |
+| `BFT_TRUST_BASE_FILES`              | Comma-separated list of paths to trust base files.                                  | `bft-config/trust-base.json`     |
+
 ## API Endpoints
 
 ### JSON-RPC 2.0 Methods
@@ -417,6 +433,24 @@ Returns the health status and role of the service.
     "database": "connected",
     "commitment_queue": "42"
   }
+}
+```
+
+#### `PUT /api/v1/trustbases`
+Adds trust base to the trust base store. The request body must be a valid trust base in json format.
+
+Example curl request
+```curl -X PUT -H 'Content-Type: application/json' -d @./test-nodes/trust-base-1.json http://localhost:3000/api/v1/trustbases```
+
+**If trust base was stored successfully then status 200 with empty response body is returned:**
+```json
+{}
+```
+
+**If trust base is invalid error then status 400 with error cause is returned:**
+```json
+{
+  "error":"failed to store trust base: trust base already exists"
 }
 ```
 

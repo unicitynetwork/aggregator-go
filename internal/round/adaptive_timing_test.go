@@ -36,7 +36,7 @@ func TestAdaptiveProcessingRatio(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create round manager
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(t.Context(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker(), nil)
 	require.NoError(t, err)
 
 	// Test initial values
@@ -131,7 +131,7 @@ func TestAdaptiveDeadlineCalculation(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(t.Context(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker(), nil)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -198,7 +198,7 @@ func TestSMTUpdateTimeTracking(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(context.Background(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker(), nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -261,7 +261,7 @@ func TestStreamingMetrics(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(t.Context(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker(), nil)
 	require.NoError(t, err)
 
 	// Set some test values
@@ -314,7 +314,7 @@ func TestAdaptiveTimingIntegration(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(context.Background(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(t.Context(), cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), nil, nil, nil, state.NewSyncStateTracker(), nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()

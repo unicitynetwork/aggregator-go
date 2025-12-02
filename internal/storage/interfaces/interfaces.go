@@ -2,6 +2,9 @@ package interfaces
 
 import (
 	"context"
+	"errors"
+
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -147,7 +150,6 @@ type BlockRecordsStorage interface {
 	GetLatestBlock(ctx context.Context) (*models.BlockRecords, error)
 }
 
-
 // LeadershipStorage handles high availability leadership state
 type LeadershipStorage interface {
 	// TryAcquireLock attempts to acquire the leadership lock,
@@ -166,6 +168,16 @@ type LeadershipStorage interface {
 	IsLeader(ctx context.Context, lockID string, serverID string) (bool, error)
 }
 
+var ErrTrustBaseNotFound = errors.New("trust base not found")
+var ErrTrustBaseAlreadyExists = errors.New("trust base already exists")
+
+type TrustBaseStorage interface {
+	Store(ctx context.Context, trustBase types.RootTrustBase) error
+	GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error)
+	GetByRound(ctx context.Context, round uint64) (types.RootTrustBase, error)
+	GetAll(ctx context.Context) ([]types.RootTrustBase, error)
+}
+
 // Storage handles persistent data storage
 type Storage interface {
 	AggregatorRecordStorage() AggregatorRecordStorage
@@ -173,6 +185,7 @@ type Storage interface {
 	SmtStorage() SmtStorage
 	BlockRecordsStorage() BlockRecordsStorage
 	LeadershipStorage() LeadershipStorage
+	TrustBaseStorage() TrustBaseStorage
 
 	Initialize(ctx context.Context) error
 	Ping(ctx context.Context) error
