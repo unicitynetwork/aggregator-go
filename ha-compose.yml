@@ -28,7 +28,7 @@ services:
           ubft trust-base sign --home /genesis/root --trust-base /genesis/trust-base.json
         fi
         echo "Starting root node..." &&
-        ubft root-node run --home /genesis/root --address "/ip4/$(hostname -i)/tcp/8000" --trust-base /genesis/trust-base.json --rpc-server-address "$(hostname -i):8002" &&
+        ubft root-node run --home /genesis/root --address "/ip4/$(hostname -i)/tcp/8000" --trust-base /genesis/trust-base.json --rpc-server-address "$(hostname -i):8002" --log-level debug &&
         ls -l /genesis/root
         echo "Root node started successfully."
 
