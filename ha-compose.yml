@@ -3,7 +3,7 @@ services:
     platform: linux/amd64
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
     # https://github.com/unicitynetwork/bft-core/pkgs/container/bft-core
-    image: ghcr.io/unicitynetwork/bft-core:49d48f8fd3686aff1066d98eff2512e5fc71713c
+    image: ghcr.io/unicitynetwork/bft-core:ff28a5da20d4eb3f664264a136303a4e79a88e4c
   bft-root:
     <<: *bft-base
     volumes:
@@ -100,7 +100,7 @@ services:
 
   mongo1:
     image: mongo:7.0
-    container_name: mongo-1
+    container_name: mongo1
     command: ["--replSet", "rs0", "--bind_ip_all", "--noauth"]
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
     networks:
@@ -116,7 +116,7 @@ services:
 
   mongo2:
     image: mongo:7.0
-    container_name: mongo-2
+    container_name: mongo2
     command: ["--replSet", "rs0", "--bind_ip_all", "--noauth"]
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
     networks:
@@ -132,7 +132,7 @@ services:
 
   mongo3:
     image: mongo:7.0
-    container_name: mongo-3
+    container_name: mongo3
     command: ["--replSet", "rs0", "--bind_ip_all", "--noauth"]
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
     networks:
@@ -225,8 +225,8 @@ services:
       # Database Configuration
       MONGODB_URI: "mongodb://mongo1:27017,mongo2:27017,mongo3:27017/aggregator?replicaSet=rs0"
       MONGODB_DATABASE: "aggregator"
-      MONGODB_CONNECT_TIMEOUT: "10s"
-      MONGODB_SERVER_SELECTION_TIMEOUT: "5s"
+      MONGODB_CONNECT_TIMEOUT: "30s"
+      MONGODB_SERVER_SELECTION_TIMEOUT: "30s"
 
       # Redis Configuration
       REDIS_HOST: "redis"
