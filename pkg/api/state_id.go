@@ -92,30 +92,30 @@ func (r *ImprintHexString) UnmarshalJSON(data []byte) error {
 }
 
 // CreateStateID creates a StateID from source state hash and public key
-func CreateStateID(sourceStateHash SourceStateHash, publicKey HexBytes) (StateID, error) {
+func CreateStateID(publicKey HexBytes, sourceStateHash SourceStateHash) (StateID, error) {
 	sourceStateHashImprint, err := sourceStateHash.Imprint()
 	if err != nil {
 		return "", fmt.Errorf("failed to convert source state hash imprint to bytes: %w", err)
 	}
-	return CreateStateIDFromImprint(sourceStateHashImprint, publicKey)
+	return CreateStateIDFromImprint(publicKey, sourceStateHashImprint)
 }
 
 // CreateStateIDFromImprint creates a StateID from source state hash imprint and public key bytes
-func CreateStateIDFromImprint(sourceStateHashImprint []byte, publicKey []byte) (StateID, error) {
-	dataHash := StateIDDataHash(sourceStateHashImprint, publicKey)
+func CreateStateIDFromImprint(publicKey []byte, sourceStateHashImprint []byte) (StateID, error) {
+	dataHash := StateIDDataHash(publicKey, sourceStateHashImprint)
 	return NewImprintHexString(dataHash.ToHex())
 }
 
-func StateIDDataHash(sourceStateHashImprint []byte, publicKey []byte) *DataHash {
+func StateIDDataHash(publicKey []byte, sourceStateHashImprint []byte) *DataHash {
 	return NewDataHasher(SHA256).
 		AddData(CborArray(2)).
-		AddCborBytes(sourceStateHashImprint).
 		AddCborBytes(publicKey).
+		AddCborBytes(sourceStateHashImprint).
 		GetHash()
 }
 
 func ValidateStateID(stateID StateID, sourceStateHashImprint []byte, publicKey []byte) (bool, error) {
-	expectedStateID, err := CreateStateIDFromImprint(sourceStateHashImprint, publicKey)
+	expectedStateID, err := CreateStateIDFromImprint(publicKey, sourceStateHashImprint)
 	if err != nil {
 		return false, err
 	}

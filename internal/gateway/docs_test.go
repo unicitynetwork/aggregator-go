@@ -19,14 +19,14 @@ func TestDocumentationExamplePayload(t *testing.T) {
 	// Extract the example payload from the documentation
 	// This is the exact payload shown in the docs
 	exampleJSON := `{
-	"stateId": "0000aed4141948861863a57c09827f0adf23cb483da9e1ab8138b88c4967a293b745",
-		"certificationData": {
-			"publicKey": "021d59880a09a122142c0806f5a99eed66391a8969df11a264f60e253d1640a142",
-			"sourceStateHash": "0000fc30e421e001d3c6a846749847b6a8e514d8d90dead42d6f245f1a4d74a24085",
-			"transactionHash": "000050a6635ff03e99d297b0802a14f0723f5246c555740d683ab0466b079ee421a5",
-			"signature": "0ad07921b2a67620deca14bbc7c62b54f3ec6b2eb977c5a50ee3a8f02bc5f7a24a2133998a7c20c1592db2171ba726c615b297a329c9dee2784e64f9e4bb165e00"
-		}
-	}`
+  	"stateId": "00008b21e56c7240474646033765f7768966f8265c673f35a42f42557b67b9ff353f",
+  	"certificationData": {
+    	"publicKey": "03fdf2cad258e66f01ed8d0265e0b69c95de62ece8c29a1114c3b291a15f2b410e",
+    	"sourceStateHash": "0000fc30e421e001d3c6a846749847b6a8e514d8d90dead42d6f245f1a4d74a24085",
+    	"transactionHash": "000050a6635ff03e99d297b0802a14f0723f5246c555740d683ab0466b079ee421a5",
+    	"signature": "cd7ea4da76def516b100da2478769a73458c53d9b5564bd282f77d4b4150f49a0e05f4cd2cd91b6bc64529095b6b7614bef739ecef9b250b964f5e0fba4dce3501"
+  	}
+}`
 
 	// Parse the JSON
 	var payload map[string]interface{}
@@ -75,7 +75,7 @@ func TestDocumentationExamplePayload(t *testing.T) {
 	require.Equal(t, 65, len(signature), "Expected signature length 65")
 
 	// 3. Verify state ID
-	expectedStateID, err := api.CreateStateIDFromImprint(sourceStateHashImprint, publicKey)
+	expectedStateID, err := api.CreateStateIDFromImprint(publicKey, sourceStateHashImprint)
 	require.NoError(t, err, "Failed to create expected state ID")
 
 	require.Equal(t, string(expectedStateID), string(stateID), "State ID mismatch")

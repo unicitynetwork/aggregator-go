@@ -78,7 +78,7 @@ func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
 		publicKey := make([]byte, 20) // matches new Uint8Array(20)
 
 		sourceStateHash := ImprintHexString("00000000000000000000000000000000000000000000000000000000000000000000")
-		stateID, err := CreateStateID(sourceStateHash, publicKey)
+		stateID, err := CreateStateID(publicKey, sourceStateHash)
 		require.NoError(t, err)
 
 		// Create transaction hash (matches new Uint8Array([0x01, ...new Uint8Array(33)]))

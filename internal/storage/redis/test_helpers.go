@@ -31,7 +31,7 @@ func createTestCommitment() *models.CertificationRequest {
 	}
 
 	// Create StateID deterministically like the performance test
-	stateID, err := api.CreateStateID(sourceStateHash, publicKeyBytes)
+	stateID, err := api.CreateStateID(publicKeyBytes, sourceStateHash)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create state ID: %v", err))
 	}

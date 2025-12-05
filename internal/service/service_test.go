@@ -396,7 +396,7 @@ func createTestCertificationRequests(t *testing.T, count int) []*api.Certificati
 		}
 		sourceStateHashImprint := signing.CreateDataHashImprint(stateData)
 
-		stateID, err := api.CreateStateID(sourceStateHashImprint, publicKeyBytes)
+		stateID, err := api.CreateStateID(publicKeyBytes, sourceStateHashImprint)
 		require.NoError(t, err, "Failed to create state ID")
 
 		transactionData := make([]byte, 32)

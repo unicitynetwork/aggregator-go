@@ -29,7 +29,7 @@ func CreateTestCertificationRequest(t *testing.T, baseData string) *models.Certi
 	sourceStateHashImprint, err := sourceStateHash.Imprint()
 	require.NoError(t, err)
 
-	stateID, err := api.CreateStateID(sourceStateHash, publicKeyBytes)
+	stateID, err := api.CreateStateID(publicKeyBytes, sourceStateHash)
 	require.NoError(t, err, "Failed to create state ID")
 
 	transactionData := make([]byte, 32)

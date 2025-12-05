@@ -21,11 +21,11 @@ func TestStateID_CreateAndSerialize(t *testing.T) {
 		require.NoError(t, err)
 
 		// Create StateID
-		stateID, err := CreateStateID(sourceStateHash, publicKey)
+		stateID, err := CreateStateID(publicKey, sourceStateHash)
 		require.NoError(t, err)
 
 		// Test JSON serialization matches TypeScript
-		expectedJSON := "0000c2db43b488c83f1000ef6e6fb9d12fba5e1423cefd1909d5eb2018d3855a9323"
+		expectedJSON := "0000f5190a1af2659ed9947bea957f90798d1e80d220a464ed41dfdeaf0a28e6b643"
 		jsonBytes, err := json.Marshal(stateID)
 		require.NoError(t, err)
 

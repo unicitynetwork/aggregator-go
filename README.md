@@ -175,7 +175,7 @@ Submit a state transition request to the aggregation layer with cryptographic va
   "jsonrpc": "2.0",
   "method": "certification_request",
   "params": {
-    "stateId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122",
+    "stateId": "0000c7aa6962316c0eeb1469dc3d7793e39e140c005e6eea0e188dcc73035d765937",
     "certificationData": {
       "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
       "signature": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
@@ -215,7 +215,7 @@ Submit a state transition request to the aggregation layer with cryptographic va
 - `INVALID_PUBLIC_KEY_FORMAT` - Invalid secp256k1 public key
 - `INVALID_SIGNATURE_FORMAT` - Invalid signature format or length
 - `SIGNATURE_VERIFICATION_FAILED` - Signature doesn't match transaction hash and public key
-- `STATE_ID_MISMATCH` - StateID doesn't match SHA256(CBOR[sourceStateHash, publicKey])
+- `STATE_ID_MISMATCH` - StateID doesn't match SHA256(CBOR[publicKey, sourceStateHash])
 - `INVALID_SOURCE_STATE_HASH_FORMAT` - SourceStateHash not in proper DataHash imprint format
 - `INVALID_TRANSACTION_HASH_FORMAT` - TransactionHash not in proper DataHash imprint format
 - `INVALID_SHARD` - The certification request was sent to the wrong shard
@@ -229,7 +229,7 @@ Retrieve the Sparse Merkle Tree inclusion proof for a specific state transition 
   "jsonrpc": "2.0",
   "method": "get_inclusion_proof",
   "params": {
-    "stateId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122"
+    "stateId": "0000c7aa6962316c0eeb1469dc3d7793e39e140c005e6eea0e188dcc73035d765937"
   },
   "id": 2
 }
@@ -343,7 +343,7 @@ Retrieve all certification requests included in a specific block.
   "result": {
     "aggregatorRecords": [
       {
-        "stateId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122",
+        "stateId": "0000c7aa6962316c0eeb1469dc3d7793e39e140c005e6eea0e188dcc73035d765937",
         "certificationData": {
           "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
           "signature": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",

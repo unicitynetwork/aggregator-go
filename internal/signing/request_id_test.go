@@ -14,13 +14,13 @@ func TestStateIDGenerator_CreateStateID(t *testing.T) {
 	publicKey := []byte{0x03, 0xd8, 0xe2, 0xb2, 0xff, 0x8a, 0xc4, 0xf0, 0x2b, 0x2b, 0x5c, 0x45, 0x12, 0xc5, 0xe4, 0xe6, 0xb1, 0xc7, 0xd2, 0xe3, 0xa8, 0xb9, 0xc1, 0xf8, 0xe9, 0xd1, 0xc2, 0xa3, 0xb4, 0xe5, 0xf6, 0xa7}
 	stateHash := []byte{0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64} // "Hello World"
 
-	stateID, err := api.CreateStateIDFromImprint(stateHash, publicKey)
+	stateID, err := api.CreateStateIDFromImprint(publicKey, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to create state ID: %v", err)
 	}
 
 	// Verify the result is deterministic by creating it again
-	stateID2, err := api.CreateStateIDFromImprint(stateHash, publicKey)
+	stateID2, err := api.CreateStateIDFromImprint(publicKey, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to create state ID second time: %v", err)
 	}
@@ -49,11 +49,11 @@ func TestStateIDGenerator_CreateStateIDCompatibility(t *testing.T) {
 	// Manually compute expected value using the same algorithm as TypeScript
 	publicKey := []byte{0x03, 0xd8, 0xe2, 0xb2, 0xff, 0x8a, 0xc4, 0xf0, 0x2b, 0x2b, 0x5c, 0x45, 0x12, 0xc5, 0xe4, 0xe6, 0xb1, 0xc7, 0xd2, 0xe3, 0xa8, 0xb9, 0xc1, 0xf8, 0xe9, 0xd1, 0xc2, 0xa3, 0xb4, 0xe5, 0xf6, 0xa7}
 	sourceStateHashBytes := []byte("test-state-hash")
-	stateIDDataHash := api.StateIDDataHash(sourceStateHashBytes, publicKey)
+	stateIDDataHash := api.StateIDDataHash(publicKey, sourceStateHashBytes)
 	expectedStateID := api.StateID(stateIDDataHash.ToHex())
 
 	// Generate using our function
-	actualStateID, err := api.CreateStateIDFromImprint(sourceStateHashBytes, publicKey)
+	actualStateID, err := api.CreateStateIDFromImprint(publicKey, sourceStateHashBytes)
 	if err != nil {
 		t.Fatalf("Failed to create state ID: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestStateIDGenerator_ValidateStateID(t *testing.T) {
 	sourceStateHash := []byte("test-state-for-validation")
 
 	// Create a valid state ID
-	validStateID, err := api.CreateStateIDFromImprint(sourceStateHash, publicKey)
+	validStateID, err := api.CreateStateIDFromImprint(publicKey, sourceStateHash)
 	if err != nil {
 		t.Fatalf("Failed to create valid state ID: %v", err)
 	}
@@ -125,13 +125,13 @@ func TestStateIDGenerator_EmptyInputs(t *testing.T) {
 	emptyPublicKey := []byte{}
 	stateHash := []byte("test-state")
 
-	stateID, err := api.CreateStateIDFromImprint(stateHash, emptyPublicKey)
+	stateID, err := api.CreateStateIDFromImprint(emptyPublicKey, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to create state ID with empty public key: %v", err)
 	}
 
 	// Should still be deterministic
-	stateID2, err := api.CreateStateIDFromImprint(stateHash, emptyPublicKey)
+	stateID2, err := api.CreateStateIDFromImprint(emptyPublicKey, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to create state ID with empty public key second time: %v", err)
 	}
@@ -144,13 +144,13 @@ func TestStateIDGenerator_EmptyInputs(t *testing.T) {
 	publicKey := []byte{0x03, 0xd8}
 	emptyStateHash := api.SourceStateHash([]byte{})
 
-	stateID, err = api.CreateStateID(emptyStateHash, publicKey)
+	stateID, err = api.CreateStateID(publicKey, emptyStateHash)
 	if err != nil {
 		t.Fatalf("Failed to create state ID with empty state hash: %v", err)
 	}
 
 	// Test with both empty
-	stateID, err = api.CreateStateID(api.SourceStateHash([]byte{}), []byte{})
+	stateID, err = api.CreateStateID([]byte{}, api.SourceStateHash([]byte{}))
 	if err != nil {
 		t.Fatalf("Failed to create state ID with both inputs empty: %v", err)
 	}
@@ -177,13 +177,13 @@ func TestStateIDGenerator_LargeInputs(t *testing.T) {
 		largeStateHash[i] = byte((i * 7) % 256)
 	}
 
-	stateID, err := api.CreateStateIDFromImprint(largeStateHash, largePublicKey)
+	stateID, err := api.CreateStateIDFromImprint(largePublicKey, largeStateHash)
 	if err != nil {
 		t.Fatalf("Failed to create state ID with large inputs: %v", err)
 	}
 
 	// Verify deterministic behavior
-	stateID2, err := api.CreateStateIDFromImprint(largeStateHash, largePublicKey)
+	stateID2, err := api.CreateStateIDFromImprint(largePublicKey, largeStateHash)
 	if err != nil {
 		t.Fatalf("Failed to create state ID with large inputs second time: %v", err)
 	}

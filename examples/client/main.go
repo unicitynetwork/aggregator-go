@@ -84,7 +84,7 @@ func createValidCertificationRequest() *api.CertificationRequest {
 
 	stateHashImprint := signing.CreateDataHashImprint(stateData)
 	// Create StateID deterministically
-	stateID, err := api.CreateStateID(stateHashImprint, publicKeyBytes)
+	stateID, err := api.CreateStateID(publicKeyBytes, stateHashImprint)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create state ID: %v", err))
 	}

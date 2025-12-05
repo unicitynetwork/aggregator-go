@@ -369,7 +369,7 @@ func createTestCommitment(t *testing.T, baseData string) *models.CertificationRe
 	sourceStateHashImprint, err := sourceStateHash.Imprint()
 	require.NoError(t, err)
 
-	stateID, err := api.CreateStateIDFromImprint(sourceStateHashImprint, publicKeyBytes)
+	stateID, err := api.CreateStateIDFromImprint(publicKeyBytes, sourceStateHashImprint)
 	require.NoError(t, err, "Failed to create state ID")
 
 	transactionData := make([]byte, 32)

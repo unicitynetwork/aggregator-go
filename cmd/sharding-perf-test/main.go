@@ -40,7 +40,7 @@ func generateCommitmentRequest() *api.CertificationRequest {
 	sourceStateHashImprint := signing.CreateDataHashImprint(stateData)
 
 	// Create StateID deterministically
-	stateID, err := api.CreateStateID(sourceStateHashImprint, publicKeyBytes)
+	stateID, err := api.CreateStateID(publicKeyBytes, sourceStateHashImprint)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create state ID: %v", err))
 	}

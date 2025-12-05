@@ -3,6 +3,7 @@ package signing
 import (
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -28,7 +29,7 @@ func TestValidator_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create state ID using the full imprint bytes (same as what validator will use)
-	stateID, err := api.CreateStateIDFromImprint(sourceStateHashImprint, publicKeyBytes)
+	stateID, err := api.CreateStateIDFromImprint(publicKeyBytes, sourceStateHashImprint)
 	require.NoError(t, err, "Failed to create state ID")
 
 	// Create transaction data and sign it
@@ -60,8 +61,9 @@ func TestValidator_Success(t *testing.T) {
 	require.Equal(t, ValidationStatusSuccess, result.Status, "Expected validation success, got status: %s, error: %v", result.Status.String(), result.Error)
 	require.NoError(t, result.Error, "Expected no error")
 
-	_, err = json.Marshal(commitment)
+	jsonBytes, err := json.Marshal(commitment)
 	require.NoError(t, err, "Failed to marshal commitment")
+	fmt.Println(string(jsonBytes))
 }
 
 func TestValidator_InvalidPublicKeyFormat(t *testing.T) {
@@ -226,7 +228,7 @@ func TestValidator_InvalidSignatureFormat(t *testing.T) {
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 	stateHashData := []byte("test-state-hash")
 	sourceStateHashImprint := CreateDataHashImprint(stateHashData)
-	stateID, err := api.CreateStateID(sourceStateHashImprint, publicKeyBytes)
+	stateID, err := api.CreateStateID(publicKeyBytes, sourceStateHashImprint)
 	require.NoError(t, err)
 
 	commitment := &models.CertificationRequest{
@@ -256,7 +258,7 @@ func TestValidator_InvalidTransactionHashFormat(t *testing.T) {
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 	stateHashData := []byte("test-state-hash")
 	sourceStateHashImprint := CreateDataHashImprint(stateHashData)
-	stateID, err := api.CreateStateID(sourceStateHashImprint, publicKeyBytes)
+	stateID, err := api.CreateStateID(publicKeyBytes, sourceStateHashImprint)
 	require.NoError(t, err)
 
 	commitment := &models.CertificationRequest{
@@ -285,7 +287,7 @@ func TestValidator_SignatureVerificationFailed(t *testing.T) {
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 	stateHashData := []byte("test-state-hash")
 	sourceStateHashImprint := CreateDataHashImprint(stateHashData)
-	stateID, err := api.CreateStateID(sourceStateHashImprint, publicKeyBytes)
+	stateID, err := api.CreateStateID(publicKeyBytes, sourceStateHashImprint)
 	require.NoError(t, err)
 
 	// Create transaction data
@@ -333,7 +335,7 @@ func TestValidator_RealSecp256k1Data(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create proper state ID
-	stateID, err := api.CreateStateIDFromImprint(sourceStateHashImprintBytes, publicKeyBytes)
+	stateID, err := api.CreateStateIDFromImprint(publicKeyBytes, sourceStateHashImprintBytes)
 	require.NoError(t, err)
 
 	// Create transaction data
