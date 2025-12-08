@@ -228,7 +228,7 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 	if smtInstance == nil {
 		return nil, fmt.Errorf("merkle tree not initialized")
 	}
-	if keyLen := smtInstance.GetKeyLength(); keyLen > 0 && path.BitLen()-1 != keyLen {
+	if keyLen := smtInstance.GetKeyLength(); path.BitLen()-1 != keyLen {
 		return nil, fmt.Errorf("request path length %d does not match SMT key length %d", path.BitLen()-1, keyLen)
 	}
 

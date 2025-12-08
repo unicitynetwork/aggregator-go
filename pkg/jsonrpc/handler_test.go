@@ -7,10 +7,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/aggregator-go/internal/logger"
 )
 
 func TestTimeoutMiddlewareRecoversFromPanic(t *testing.T) {
-	mw := TimeoutMiddleware(50 * time.Millisecond)
+	testLogger, _ := logger.New("error", "text", "stdout", false)
+	mw := TimeoutMiddleware(50*time.Millisecond, testLogger)
 
 	req := &Request{ID: 1}
 

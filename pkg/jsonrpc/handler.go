@@ -3,7 +3,6 @@ package jsonrpc
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -208,7 +207,7 @@ func LoggingMiddleware(logger *logger.Logger) MiddlewareFunc {
 }
 
 // TimeoutMiddleware adds timeout to requests
-func TimeoutMiddleware(timeout time.Duration) MiddlewareFunc {
+func TimeoutMiddleware(timeout time.Duration, log *logger.Logger) MiddlewareFunc {
 	return func(ctx context.Context, req *Request, next func(context.Context, *Request) *Response) *Response {
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
@@ -218,7 +217,7 @@ func TimeoutMiddleware(timeout time.Duration) MiddlewareFunc {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					fmt.Printf("panic in JSON-RPC handler: %v\n", r)
+					log.WithContext(ctx).Error("panic in JSON-RPC handler", "panic", r, "method", req.Method)
 					errResp := NewErrorResponse(NewError(InternalErrorCode, "Internal server error", nil), req.ID)
 					select {
 					case done <- errResp:

@@ -119,7 +119,7 @@ func (s *Server) setupJSONRPCHandlers() {
 	// Add middleware
 	s.rpcServer.AddMiddleware(jsonrpc.RequestIDMiddleware())
 	s.rpcServer.AddMiddleware(jsonrpc.LoggingMiddleware(s.logger))
-	s.rpcServer.AddMiddleware(jsonrpc.TimeoutMiddleware(30 * time.Second))
+	s.rpcServer.AddMiddleware(jsonrpc.TimeoutMiddleware(30*time.Second, s.logger))
 
 	// Register handlers based on mode
 	if s.config.Sharding.Mode.IsParent() {
