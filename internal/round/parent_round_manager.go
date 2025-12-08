@@ -391,6 +391,11 @@ func (prm *ParentRoundManager) Activate(ctx context.Context) error {
 		return fmt.Errorf("failed to start BFT client: %w", err)
 	}
 
+	// Wait for BFT client to receive first UC from root chain before starting rounds.
+	if err := prm.bftClient.WaitForInitialized(ctx); err != nil {
+		return fmt.Errorf("failed to wait for BFT client initialization: %w", err)
+	}
+
 	// Get latest block number to determine starting round
 	latestBlockNumber, err := prm.storage.BlockStorage().GetLatestNumber(ctx)
 	if err != nil {
@@ -432,6 +437,33 @@ func (prm *ParentRoundManager) Deactivate(ctx context.Context) error {
 
 	prm.logger.WithContext(ctx).Info("Parent round manager deactivated successfully")
 	return nil
+}
+
+// FinalizeBlockWithRetry attempts to finalize a block with retry logic.
+// For parent mode, this is simpler than child mode since parent blocks are stored atomically.
+func (prm *ParentRoundManager) FinalizeBlockWithRetry(ctx context.Context, block *models.Block) error {
+	const maxRetries = 3
+	const retryDelay = 1000 * time.Millisecond
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		err := prm.FinalizeBlock(ctx, block)
+		if err == nil {
+			return nil
+		}
+
+		prm.logger.Error("FinalizeBlock failed (parent mode)",
+			"attempt", attempt,
+			"maxAttempts", maxRetries,
+			"blockNumber", block.Index.String(),
+			"error", err.Error())
+
+		// Retry after delay (unless last attempt)
+		if attempt < maxRetries {
+			prm.logger.Info("Retrying FinalizeBlock", "attempt", attempt)
+			time.Sleep(retryDelay)
+		}
+	}
+	return fmt.Errorf("FinalizeBlock failed after %d attempts (parent mode)", maxRetries)
 }
 
 // FinalizeBlock is called by BFT client when block is finalized
@@ -476,6 +508,8 @@ func (prm *ParentRoundManager) FinalizeBlock(ctx context.Context, block *models.
 			"shardIDs", getShardIDs(processedShardUpdates))
 	}
 
+	// For parent mode, we store everything synchronously, so the block is finalized immediately
+	block.Finalized = true
 	if err := prm.storage.BlockStorage().Store(ctx, block); err != nil {
 		return fmt.Errorf("failed to store parent block: %w", err)
 	}

@@ -338,9 +338,45 @@ func (cs *CommitmentStorage) StoreBatch(ctx context.Context, commitments []*mode
 	return nil
 }
 
-// GetByRequestID is not implemented for Redis
+// GetByRequestID is not implemented for Redis - use GetAllPending and filter instead
 func (cs *CommitmentStorage) GetByRequestID(ctx context.Context, requestID api.RequestID) (*models.Commitment, error) {
 	return nil, fmt.Errorf("GetByRequestID not implemented for Redis")
+}
+
+// GetAllPending retrieves all pending (unacknowledged) commitments from the stream.
+// Used for crash recovery to get commitments that weren't processed.
+func (cs *CommitmentStorage) GetAllPending(ctx context.Context) ([]*models.Commitment, error) {
+	var commitments []*models.Commitment
+	lastID := "0"
+	const batchSize = 1000
+
+	for {
+		messages, err := cs.client.XRange(ctx, cs.streamName, lastID, "+").Result()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read Redis stream: %w", err)
+		}
+
+		if len(messages) == 0 {
+			break
+		}
+
+		for _, msg := range messages {
+			lastID = "(" + msg.ID // exclusive for next batch
+
+			commitment, err := cs.parseCommitment(msg)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse commitment: %w", err)
+			}
+			commitment.StreamID = msg.ID
+			commitments = append(commitments, commitment)
+		}
+
+		if len(messages) < batchSize {
+			break
+		}
+	}
+
+	return commitments, nil
 }
 
 // GetUnprocessedBatch is not implemented for Redis - use StreamCommitments instead

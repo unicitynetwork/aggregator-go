@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"net/url"
+
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
@@ -20,10 +22,8 @@ import (
 	"github.com/stretchr/testify/suite"
 	"github.com/testcontainers/testcontainers-go/modules/mongodb"
 	redisContainer "github.com/testcontainers/testcontainers-go/modules/redis"
-	"net/url"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
-	"github.com/unicitynetwork/aggregator-go/internal/storage"
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
@@ -31,6 +31,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	"github.com/unicitynetwork/aggregator-go/internal/storage"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
@@ -61,9 +62,15 @@ func (suite *AggregatorTestSuite) TearDownTest() {
 func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func()) {
 	var mongoContainer *mongodb.MongoDBContainer
 
+	// Override osExit to prevent test process termination during teardown
+	restoreExit := round.SetExitFunc(func(code int) {
+		t.Logf("os.Exit(%d) called but suppressed in test", code)
+	})
+
 	// Ensure cleanup happens even if setup fails
 	defer func() {
 		if r := recover(); r != nil {
+			restoreExit()
 			if mongoContainer != nil {
 				mongoContainer.Terminate(context.Background())
 			}
@@ -169,6 +176,9 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 
 	// Return the server address and cleanup function
 	return serverAddr, func() {
+		// Restore the original exit function at the end
+		defer restoreExit()
+
 		// Create shutdown context
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -435,4 +445,3 @@ func createTestCommitments(t *testing.T, count int) []*api.SubmitCommitmentReque
 
 	return commitments
 }
-

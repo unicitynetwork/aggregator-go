@@ -37,6 +37,11 @@ func (n *BFTClientStub) Stop() {
 	n.logger.Info("Stopping BFT Client Stub")
 }
 
+func (n *BFTClientStub) WaitForInitialized(ctx context.Context) error {
+	// Stub is always immediately initialized
+	return nil
+}
+
 func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.Block) error {
 	// Simulate BFT certification delay
 	if n.delay > 0 {

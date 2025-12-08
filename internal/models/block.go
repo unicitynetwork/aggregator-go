@@ -23,6 +23,7 @@ type Block struct {
 	CreatedAt            *api.Timestamp      `json:"createdAt"`
 	UnicityCertificate   api.HexBytes        `json:"unicityCertificate"`
 	ParentMerkleTreePath *api.MerkleTreePath `json:"parentMerkleTreePath,omitempty"` // child mode only
+	Finalized            bool                `json:"finalized"`                      // true when all data is persisted
 }
 
 // BlockBSON represents the BSON version of Block for MongoDB storage
@@ -38,6 +39,7 @@ type BlockBSON struct {
 	CreatedAt           time.Time            `bson:"createdAt"`
 	UnicityCertificate  string               `bson:"unicityCertificate"`
 	MerkleTreePath      string               `bson:"merkleTreePath,omitempty"` // child mode only
+	Finalized           bool                 `bson:"finalized"`
 }
 
 // ToBSON converts Block to BlockBSON for MongoDB storage
@@ -66,6 +68,7 @@ func (b *Block) ToBSON() (*BlockBSON, error) {
 		CreatedAt:           b.CreatedAt.Time,
 		UnicityCertificate:  b.UnicityCertificate.String(),
 		MerkleTreePath:      merkleTreePath,
+		Finalized:           b.Finalized,
 	}, nil
 }
 
@@ -120,6 +123,7 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 		CreatedAt:            api.NewTimestamp(bb.CreatedAt),
 		UnicityCertificate:   unicityCertificate,
 		ParentMerkleTreePath: parentMerkleTreePath,
+		Finalized:            bb.Finalized,
 	}, nil
 }
 

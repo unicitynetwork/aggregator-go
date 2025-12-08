@@ -263,6 +263,7 @@ func (pas *ParentAggregatorService) GetHealthStatus(ctx context.Context) (*api.H
 
 	// Add database connectivity check
 	if err := pas.storage.Ping(ctx); err != nil {
+		status.Status = "unhealthy"
 		status.AddDetail("database", "disconnected")
 		pas.logger.WithContext(ctx).Error("Database health check failed", "error", err.Error())
 	} else {

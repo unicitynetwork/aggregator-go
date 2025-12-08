@@ -95,6 +95,7 @@ func createBlock(ctx context.Context, t *testing.T, storage *mongodb.Storage) ap
 
 	// persist block
 	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", rootHash, nil, nil, nil)
+	block.Finalized = true // Mark as finalized so GetLatestNumber finds it
 	err = storage.BlockStorage().Store(ctx, block)
 	require.NoError(t, err)
 

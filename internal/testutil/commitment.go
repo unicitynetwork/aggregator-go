@@ -55,3 +55,12 @@ func CreateTestCommitment(t *testing.T, baseData string) *models.Commitment {
 
 	return models.NewCommitment(requestID, transactionHashImprint, authenticator)
 }
+
+// CreateTestCommitments creates multiple test commitments with unique IDs.
+func CreateTestCommitments(t *testing.T, count int, prefix string) []*models.Commitment {
+	commitments := make([]*models.Commitment, count)
+	for i := 0; i < count; i++ {
+		commitments[i] = CreateTestCommitment(t, fmt.Sprintf("%s_%d", prefix, i))
+	}
+	return commitments
+}

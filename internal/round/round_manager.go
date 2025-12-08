@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"os"
 	"sync"
 	"time"
 
@@ -28,6 +29,18 @@ const (
 )
 
 const miniBatchSize = 100 // Number of commitments to process per SMT mini-batch
+
+// osExit is the function used to exit the process on fatal errors.
+// It can be overridden in tests to prevent actual process termination.
+var osExit = os.Exit
+
+// SetExitFunc allows tests to override the exit function to prevent actual process termination.
+// Returns a function to restore the original exit function.
+func SetExitFunc(f func(int)) func() {
+	original := osExit
+	osExit = f
+	return func() { osExit = original }
+}
 
 func (rs RoundState) String() string {
 	switch rs {
@@ -179,8 +192,17 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 		"roundDuration", rm.roundDuration.String(),
 		"batchLimit", rm.config.Processing.BatchLimit)
 
-	// Restore SMT from storage - this will populate the existing empty SMT
-	_, err := rm.restoreSmtFromStorage(ctx)
+	recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+	if err != nil {
+		return fmt.Errorf("failed to recover unfinalized block: %w", err)
+	}
+	if recoveryResult.Recovered {
+		rm.logger.Info("Recovered unfinalized block during startup",
+			"blockNumber", recoveryResult.BlockNumber.String(),
+			"requestCount", len(recoveryResult.RequestIDs))
+	}
+
+	_, err = rm.restoreSmtFromStorage(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to restore SMT from storage: %w", err)
 	}
@@ -326,30 +348,19 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 
 	rm.wg.Go(func() {
 		if err := rm.processCurrentRound(ctx); err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to process round",
+			// Context.Canceled = graceful shutdown, exit cleanly
+			if errors.Is(err, context.Canceled) {
+				rm.logger.WithContext(ctx).Info("Round processing stopped due to shutdown",
+					"roundNumber", roundNumber.String())
+				return
+			}
+
+			// ANY other error means server is broken - exit immediately
+			// Continuing would accept commitments but not process them
+			rm.logger.WithContext(ctx).Error("FATAL: Round processing failed, exiting",
 				"roundNumber", roundNumber.String(),
 				"error", err.Error())
-
-			// If we're a child aggregator and processing failed (but not due to shutdown), start the next round to avoid getting stuck
-			if rm.config.Sharding.Mode.IsChild() && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				nextRoundNumber := big.NewInt(0).Add(roundNumber.Int, big.NewInt(1))
-				rm.logger.WithContext(ctx).Info("Attempting to start new round after processing failure.",
-					"failedRound", roundNumber.String(),
-					"nextRound", nextRoundNumber.String())
-
-				// Wait before retrying to prevent resource exhaustion on repeated failures
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(1 * time.Second):
-				}
-
-				if startErr := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); startErr != nil {
-					rm.logger.WithContext(ctx).Error("Failed to start new round after processing error",
-						"nextRound", nextRoundNumber.String(),
-						"error", startErr)
-				}
-			}
+			osExit(1)
 		}
 	})
 
@@ -779,14 +790,44 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 }
 
 func (rm *RoundManager) Activate(ctx context.Context) error {
+	if rm.config.HA.Enabled {
+		recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+		if err != nil {
+			return fmt.Errorf("failed to recover unfinalized block on activation: %w", err)
+		}
+		if recoveryResult.Recovered {
+			rm.logger.Info("Recovered unfinalized block on HA activation",
+				"blockNumber", recoveryResult.BlockNumber.String(),
+				"requestCount", len(recoveryResult.RequestIDs))
+
+			if err := LoadRecoveredNodesIntoSMT(ctx, rm.logger, rm.storage, rm.smt, recoveryResult.RequestIDs); err != nil {
+				return fmt.Errorf("failed to load recovered nodes into SMT: %w", err)
+			}
+		}
+	}
+
 	switch rm.config.Sharding.Mode {
 	case config.ShardingModeStandalone:
 		if err := rm.bftClient.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start BFT client: %w", err)
 		}
 	case config.ShardingModeChild:
-		roundNumber := rm.stateTracker.GetLastSyncedBlock()
-		roundNumber.Add(roundNumber, big.NewInt(1))
+		latestBlockNumber, err := rm.storage.BlockStorage().GetLatestNumber(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get latest block number: %w", err)
+		}
+
+		var roundNumber *big.Int
+		if latestBlockNumber == nil {
+			roundNumber = big.NewInt(1)
+		} else {
+			roundNumber = new(big.Int).Add(latestBlockNumber.Int, big.NewInt(1))
+		}
+
+		rm.logger.WithContext(ctx).Info("Starting child shard from database state",
+			"latestBlock", latestBlockNumber,
+			"nextRound", roundNumber.String())
+
 		if err := rm.StartNewRound(ctx, api.NewBigInt(roundNumber)); err != nil {
 			return fmt.Errorf("failed to start new round: %w", err)
 		}
