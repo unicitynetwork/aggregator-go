@@ -171,7 +171,7 @@ func (suite *ShardingE2ETestSuite) startAggregatorInstance(name string, cfg *con
 	log, err := logger.New(cfg.Logging.Level, cfg.Logging.Format, cfg.Logging.Output, cfg.Logging.EnableJSON)
 	suite.Require().NoError(err)
 
-	commitmentQueue, storageInstance, err := storage.NewStorage(cfg, log)
+	commitmentQueue, storageInstance, err := storage.NewStorage(ctx, cfg, log)
 	suite.Require().NoError(err)
 
 	err = commitmentQueue.Initialize(ctx)
@@ -179,7 +179,7 @@ func (suite *ShardingE2ETestSuite) startAggregatorInstance(name string, cfg *con
 
 	stateTracker := state.NewSyncStateTracker()
 
-	manager, err := round.NewManager(ctx, cfg, log, commitmentQueue, storageInstance, stateTracker)
+	manager, err := round.NewManager(ctx, cfg, log, commitmentQueue, storageInstance, stateTracker, nil)
 	suite.Require().NoError(err)
 
 	err = manager.Start(ctx)

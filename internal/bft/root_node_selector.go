@@ -13,7 +13,11 @@ import (
 const defaultHandshakeNodes = 3
 const defaultNofRootNodes = 2
 
-func randomNodeSelector(nodes peer.IDSlice, upToNodes int) (peer.IDSlice, error) {
+func randomNodeSelector(tb types.RootTrustBase, upToNodes int) (peer.IDSlice, error) {
+	nodes, err := rootNodesIDSlice(tb)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get peer.IDSlice from trust base: %w", err)
+	}
 	nodeCnt := len(nodes)
 	if nodeCnt < 1 {
 		return nil, fmt.Errorf("node list is empty")
@@ -35,9 +39,13 @@ func randomNodeSelector(nodes peer.IDSlice, upToNodes int) (peer.IDSlice, error)
 	return rNodes[:upToNodes], nil
 }
 
-func rootNodesSelector(luc *types.UnicityCertificate, nodes peer.IDSlice, upToNodes int) (peer.IDSlice, error) {
+func rootNodesSelector(luc *types.UnicityCertificate, tb types.RootTrustBase, upToNodes int) (peer.IDSlice, error) {
 	if luc == nil {
 		return nil, fmt.Errorf("UC is nil")
+	}
+	nodes, err := rootNodesIDSlice(tb)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get peer.IDSlice from trust base: %w", err)
 	}
 	nodeCnt := len(nodes)
 	if nodeCnt < 1 {
@@ -71,4 +79,16 @@ func rootNodesSelector(luc *types.UnicityCertificate, nodes peer.IDSlice, upToNo
 		}
 	}
 	return chosen, nil
+}
+
+func rootNodesIDSlice(tb types.RootTrustBase) (peer.IDSlice, error) {
+	var idSlice peer.IDSlice
+	for _, node := range tb.GetRootNodes() {
+		id, err := peer.Decode(node.NodeID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid root node id in trust base: %w", err)
+		}
+		idSlice = append(idSlice, id)
+	}
+	return idSlice, nil
 }

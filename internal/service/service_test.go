@@ -115,7 +115,7 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	require.NoError(t, err)
 
 	// Initialize storage
-	mongoStorage, err := mongodbStorage.NewStorage(*cfg)
+	mongoStorage, err := mongodbStorage.NewStorage(ctx, *cfg)
 	require.NoError(t, err)
 
 	// Use MongoDB for both commitment queue and storage
@@ -123,7 +123,7 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 
 	// Initialize round manager
 	rootAggregatorClient := sharding.NewRootAggregatorClientStub()
-	roundManager, err := round.NewRoundManager(ctx, cfg, log, smt.NewSparseMerkleTree(api.SHA256, 16+256), commitmentQueue, mongoStorage, rootAggregatorClient, state.NewSyncStateTracker())
+	roundManager, err := round.NewRoundManager(ctx, cfg, log, smt.NewSparseMerkleTree(api.SHA256, 16+256), commitmentQueue, mongoStorage, rootAggregatorClient, state.NewSyncStateTracker(), nil)
 	require.NoError(t, err)
 
 	// Start the round manager (restores SMT)

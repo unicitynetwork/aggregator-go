@@ -2,11 +2,14 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/unicitynetwork/bft-go-base/types"
 	"golang.org/x/net/http2"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
@@ -34,6 +37,7 @@ type Service interface {
 	GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error)
 	GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error)
 	GetHealthStatus(ctx context.Context) (*api.HealthStatus, error)
+	PutTrustBase(ctx context.Context, req *types.RootTrustBaseV1) error
 
 	// Parent mode specific methods (will return errors in standalone mode)
 	SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) (*api.SubmitShardRootResponse, error)
@@ -101,6 +105,7 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 func (s *Server) setupRoutes() {
 	// Health endpoint
 	s.router.GET("/health", s.handleHealth)
+	s.router.PUT("/api/v1/trustbases", s.handlePutTrustBase)
 
 	// JSON-RPC endpoint
 	s.router.POST("/", gin.WrapH(s.rpcServer))
@@ -181,6 +186,32 @@ func (s *Server) handleHealth(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, status)
+}
+
+func (s *Server) handlePutTrustBase(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	jsonData, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		s.logger.WithContext(ctx).Error("Failed to read request body", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	var trustBase *types.RootTrustBaseV1
+	if err := json.Unmarshal(jsonData, &trustBase); err != nil {
+		s.logger.WithContext(ctx).Warn("Failed to parse trust base from request body", "error", err.Error())
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to parse trust base from request body"})
+		return
+	}
+
+	if err := s.service.PutTrustBase(ctx, trustBase); err != nil {
+		s.logger.WithContext(ctx).Warn("Failed to store trust base", "error", err.Error())
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}) // make the actual error visible to client
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{})
 }
 
 // handleDocs handles the API documentation endpoint
