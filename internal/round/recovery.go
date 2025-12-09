@@ -18,6 +18,12 @@ type RecoveryResult struct {
 	RequestIDs  []api.RequestID
 }
 
+// indexedRequestID tracks a request ID with its original position in the block
+type indexedRequestID struct {
+	reqID     api.RequestID
+	leafIndex int
+}
+
 // RecoverUnfinalizedBlock checks for and completes any unfinalized blocks.
 // Must be called before starting the round manager.
 func RecoverUnfinalizedBlock(
@@ -89,18 +95,18 @@ func recoverBlock(
 		if err != nil {
 			return nil, fmt.Errorf("failed to get path for requestID: %w", err)
 		}
-		smtKeyStrings[i] = string(path.Bytes())
+		smtKeyStrings[i] = api.HexBytes(path.Bytes()).String()
 	}
 	existingSmtKeys, err := storage.SmtStorage().GetExistingKeys(ctx, smtKeyStrings)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check existing SMT nodes: %w", err)
 	}
 
-	var missingRecordIDs []api.RequestID
+	var missingRecords []indexedRequestID
 	var missingSmtKeys []api.RequestID
 	for i, reqID := range requestIDs {
 		if !existingRecordIDs[string(reqID)] {
-			missingRecordIDs = append(missingRecordIDs, reqID)
+			missingRecords = append(missingRecords, indexedRequestID{reqID: reqID, leafIndex: i})
 		}
 		if !existingSmtKeys[smtKeyStrings[i]] {
 			missingSmtKeys = append(missingSmtKeys, reqID)
@@ -111,11 +117,11 @@ func recoverBlock(
 		"totalRequestIDs", len(requestIDs),
 		"existingRecords", len(existingRecordIDs),
 		"existingSmtNodes", len(existingSmtKeys),
-		"missingRecords", len(missingRecordIDs),
+		"missingRecords", len(missingRecords),
 		"missingSmtNodes", len(missingSmtKeys))
 
-	if len(missingRecordIDs) > 0 || len(missingSmtKeys) > 0 {
-		if err := recoverMissingData(ctx, log, storage, commitmentQueue, block.Index, missingRecordIDs, missingSmtKeys); err != nil {
+	if len(missingRecords) > 0 || len(missingSmtKeys) > 0 {
+		if err := recoverMissingData(ctx, log, storage, commitmentQueue, block.Index, missingRecords, missingSmtKeys); err != nil {
 			return nil, err
 		}
 	}
@@ -160,7 +166,7 @@ func recoverMissingData(
 	storage interfaces.Storage,
 	commitmentQueue interfaces.CommitmentQueue,
 	blockNumber *api.BigInt,
-	missingRecordIDs []api.RequestID,
+	missingRecords []indexedRequestID,
 	missingSmtKeys []api.RequestID,
 ) error {
 	pendingCommitments, err := commitmentQueue.GetAllPending(ctx)
@@ -173,22 +179,22 @@ func recoverMissingData(
 		commitmentMap[string(c.RequestID)] = c
 	}
 
-	if len(missingRecordIDs) > 0 {
+	if len(missingRecords) > 0 {
 		var records []*models.AggregatorRecord
-		for i, reqID := range missingRecordIDs {
-			commitment, ok := commitmentMap[string(reqID)]
+		for _, missing := range missingRecords {
+			commitment, ok := commitmentMap[string(missing.reqID)]
 			if !ok {
-				existingRecord, err := storage.AggregatorRecordStorage().GetByRequestID(ctx, reqID)
+				existingRecord, err := storage.AggregatorRecordStorage().GetByRequestID(ctx, missing.reqID)
 				if err != nil {
 					return fmt.Errorf("failed to check existing record: %w", err)
 				}
 				if existingRecord != nil {
 					continue
 				}
-				return fmt.Errorf("FATAL: commitment not found for requestID %s", reqID)
+				return fmt.Errorf("FATAL: commitment not found for requestID %s", missing.reqID)
 			}
 			leafIndex := api.NewBigInt(nil)
-			leafIndex.SetInt64(int64(i))
+			leafIndex.SetInt64(int64(missing.leafIndex))
 			records = append(records, models.NewAggregatorRecord(commitment, blockNumber, leafIndex))
 		}
 

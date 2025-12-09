@@ -110,6 +110,16 @@ func (s *RecoveryTestSuite) TearDownSuite() {
 	}
 }
 
+func (s *RecoveryTestSuite) SetupTest() {
+	// Clean MongoDB collections
+	_ = s.storage.CleanAllCollections(s.ctx)
+	// Recreate indexes after dropping collections
+	_ = s.storage.Initialize(s.ctx)
+	// Flush Redis
+	_ = s.redisClient.FlushAll(s.ctx).Err()
+	_ = s.commitmentQueue.Initialize(s.ctx)
+}
+
 // Helper to create and store test data
 func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, prefix string) ([]*models.Commitment, *models.Block, []api.RequestID) {
 	t := s.T()
@@ -495,9 +505,130 @@ func (s *RecoveryTestSuite) Test08_CommitmentNotFound() {
 }
 
 // ============================================================================
-// Test 9: LoadRecoveredNodesIntoSMT
+// Test 9: Partial Aggregator Records - Verify LeafIndex Preservation
 // ============================================================================
-func (s *RecoveryTestSuite) Test09_LoadRecoveredNodesIntoSMT() {
+func (s *RecoveryTestSuite) Test09_PartialAggregatorRecords_LeafIndexPreserved() {
+	t := s.T()
+
+	// Create unfinalized block with 5 commitments
+	commitments, block, requestIDs := s.createTestData(10, 5, "t09partial")
+
+	// Store block (unfinalized)
+	err := s.storage.BlockStorage().Store(s.ctx, block)
+	require.NoError(t, err)
+
+	// Store block records
+	blockRecords := models.NewBlockRecords(block.Index, requestIDs)
+	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
+	require.NoError(t, err)
+
+	// Store ONLY aggregator records at positions 0, 1, and 4 (missing 2 and 3)
+	existingIndices := []int{0, 1, 4}
+	existingRecords := make([]*models.AggregatorRecord, len(existingIndices))
+	for i, idx := range existingIndices {
+		existingRecords[i] = models.NewAggregatorRecord(commitments[idx], block.Index, api.NewBigInt(big.NewInt(int64(idx))))
+	}
+	err = s.storage.AggregatorRecordStorage().StoreBatch(s.ctx, existingRecords)
+	require.NoError(t, err)
+
+	// Store all SMT nodes (so only aggregator records need recovery)
+	s.storeSmtNodes(commitments)
+
+	// Store ALL commitments in Redis (for recovery)
+	s.storeCommitmentsInRedis(commitments)
+
+	// Run recovery
+	result, err := RecoverUnfinalizedBlock(s.ctx, s.testLogger, s.storage, s.commitmentQueue)
+	require.NoError(t, err)
+	require.True(t, result.Recovered)
+
+	// Verify the recovered records have correct leaf indices
+	// Record at position 2 should have leafIndex=2, record at position 3 should have leafIndex=3
+	missingIndices := []int{2, 3}
+	for _, idx := range missingIndices {
+		record, err := s.storage.AggregatorRecordStorage().GetByRequestID(s.ctx, requestIDs[idx])
+		require.NoError(t, err)
+		require.NotNil(t, record, "Record at position %d should exist after recovery", idx)
+		require.Equal(t, int64(idx), record.LeafIndex.Int.Int64(),
+			"Record at position %d should have leafIndex=%d, got %d", idx, idx, record.LeafIndex.Int.Int64())
+	}
+
+	// Also verify existing records still have correct indices
+	for _, idx := range existingIndices {
+		record, err := s.storage.AggregatorRecordStorage().GetByRequestID(s.ctx, requestIDs[idx])
+		require.NoError(t, err)
+		require.NotNil(t, record, "Existing record at position %d should still exist", idx)
+		require.Equal(t, int64(idx), record.LeafIndex.Int.Int64(),
+			"Existing record at position %d should still have leafIndex=%d", idx, idx)
+	}
+
+	t.Log("✓ Test09_PartialAggregatorRecords_LeafIndexPreserved passed")
+}
+
+// ============================================================================
+// Test 10: Partial SMT Nodes - Verify Correct Detection of Missing Nodes
+// ============================================================================
+func (s *RecoveryTestSuite) Test10_PartialSmtNodes_CorrectDetection() {
+	t := s.T()
+
+	// Create unfinalized block with 5 commitments
+	commitments, block, requestIDs := s.createTestData(10, 5, "t10partial")
+
+	// Store block (unfinalized)
+	err := s.storage.BlockStorage().Store(s.ctx, block)
+	require.NoError(t, err)
+
+	// Store block records
+	blockRecords := models.NewBlockRecords(block.Index, requestIDs)
+	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
+	require.NoError(t, err)
+
+	// Store ALL aggregator records (so only SMT nodes need recovery)
+	s.storeAggregatorRecords(commitments, block.Index)
+
+	// Store ONLY SMT nodes at positions 0, 1, and 4 (missing 2 and 3)
+	existingIndices := []int{0, 1, 4}
+	existingNodes := make([]*models.SmtNode, len(existingIndices))
+	for i, idx := range existingIndices {
+		path, err := commitments[idx].RequestID.GetPath()
+		require.NoError(t, err)
+		leafValue, err := commitments[idx].CreateLeafValue()
+		require.NoError(t, err)
+		existingNodes[i] = models.NewSmtNode(api.HexBytes(path.Bytes()), leafValue)
+	}
+	err = s.storage.SmtStorage().StoreBatch(s.ctx, existingNodes)
+	require.NoError(t, err)
+
+	// Store ONLY the commitments that need recovery (positions 2 and 3) in Redis
+	missingIndices := []int{2, 3}
+	for _, idx := range missingIndices {
+		err = s.commitmentQueue.Store(s.ctx, commitments[idx])
+		require.NoError(t, err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify we have exactly 3 SMT nodes before recovery
+	smtCountBefore, err := s.storage.SmtStorage().Count(s.ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), smtCountBefore, "Should have 3 SMT nodes before recovery")
+
+	// Run recovery - should only recover 2 missing nodes
+	result, err := RecoverUnfinalizedBlock(s.ctx, s.testLogger, s.storage, s.commitmentQueue)
+	require.NoError(t, err, "Recovery should succeed")
+	require.True(t, result.Recovered)
+
+	// Verify we now have all 5 SMT nodes
+	smtCountAfter, err := s.storage.SmtStorage().Count(s.ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(5), smtCountAfter, "Should have 5 SMT nodes after recovery")
+
+	t.Log("✓ Test10_PartialSmtNodes_CorrectDetection passed")
+}
+
+// ============================================================================
+// Test 11: LoadRecoveredNodesIntoSMT
+// ============================================================================
+func (s *RecoveryTestSuite) Test11_LoadRecoveredNodesIntoSMT() {
 	t := s.T()
 
 	// Create test commitments and store their SMT nodes
@@ -536,5 +667,5 @@ func (s *RecoveryTestSuite) Test09_LoadRecoveredNodesIntoSMT() {
 	actualRootHash := targetSMT.GetRootHash()
 	require.Equal(t, expectedRootHash, actualRootHash, "SMT root hash should match after loading recovered nodes")
 
-	t.Log("✓ Test09_LoadRecoveredNodesIntoSMT passed")
+	t.Log("✓ Test11_LoadRecoveredNodesIntoSMT passed")
 }
