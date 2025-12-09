@@ -551,23 +551,19 @@ func (rm *RoundManager) storeDataParallel(
 	var wg sync.WaitGroup
 
 	if len(smtNodes) > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			t := time.Now()
 			smtErr = rm.storage.SmtStorage().StoreBatch(ctx, smtNodes)
 			smtTime = time.Since(t)
-		}()
+		})
 	}
 
 	if len(records) > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			t := time.Now()
 			recordsErr = rm.storage.AggregatorRecordStorage().StoreBatch(ctx, records)
 			recordsTime = time.Since(t)
-		}()
+		})
 	}
 
 	wg.Wait()

@@ -643,17 +643,19 @@ func (c *BFTClientImpl) WaitForInitialized(ctx context.Context) error {
 
 	c.logger.WithContext(ctx).Info("Waiting for BFT client initialization (first UC from root chain)")
 
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
-
-	timeout := time.After(30 * time.Second)
 
 	for {
 		select {
 		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded {
+				return fmt.Errorf("timeout waiting for BFT client initialization - no UC received from root chain within 30s")
+			}
 			return ctx.Err()
-		case <-timeout:
-			return fmt.Errorf("timeout waiting for BFT client initialization - no UC received from root chain within 30s")
 		case <-ticker.C:
 			if c.status.Load() == normal {
 				c.logger.WithContext(ctx).Info("BFT client initialized successfully")
