@@ -2,7 +2,7 @@ services:
   x-bft: &bft-base
     platform: linux/amd64
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
-    image: ghcr.io/unicitynetwork/bft-core:49d48f8fd3686aff1066d98eff2512e5fc71713c
+    image: ghcr.io/unicitynetwork/bft-core:ff28a5da20d4eb3f664264a136303a4e79a88e4c
   bft-root:
     <<: *bft-base
     volumes:
