@@ -60,7 +60,7 @@ func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(ctx, s.cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil)
 	require.NoError(t, err)
 
 	// Generate test commitments with unique IDs
@@ -141,7 +141,7 @@ func (s *FinalizeDuplicateTestSuite) Test2_NoDuplicates() {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(ctx, s.cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil)
 	require.NoError(t, err)
 
 	commitments := testutil.CreateTestCommitments(t, 3, "t2_req")
@@ -189,7 +189,7 @@ func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(ctx, s.cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil)
 	require.NoError(t, err)
 
 	commitments := testutil.CreateTestCommitments(t, 3, "t3_req")

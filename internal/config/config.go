@@ -203,10 +203,11 @@ func (c ChildConfig) Validate() error {
 }
 
 type BFTConfig struct {
-	Enabled   bool                              `mapstructure:"enabled"`
-	KeyConf   *partition.KeyConf                `mapstructure:"key_conf"`
-	ShardConf *types.PartitionDescriptionRecord `mapstructure:"shard_conf"`
-	TrustBase types.RootTrustBase               `mapstructure:"trust_base"`
+	Enabled    bool                              `mapstructure:"enabled"`
+	KeyConf    *partition.KeyConf                `mapstructure:"key_conf"`
+	ShardConf  *types.PartitionDescriptionRecord `mapstructure:"shard_conf"`
+	TrustBases []types.RootTrustBaseV1           `mapstructure:"trust_bases"`
+
 	// Peer configuration
 	Address                    string        `mapstructure:"address"`
 	AnnounceAddresses          []string      `mapstructure:"announce_addresses"`
@@ -214,6 +215,25 @@ type BFTConfig struct {
 	BootstrapConnectRetry      int           `mapstructure:"bootstrap_connect_retry"`
 	BootstrapConnectRetryDelay int           `mapstructure:"bootstrap_connect_retry_delay"`
 	StubDelay                  time.Duration `mapstructure:"stub_delay"` // Delay for BFT stub (testing only)
+
+	// HeartbeatInterval how often to perform the inactivity check.
+	HeartbeatInterval time.Duration `mapstructure:"heartbeat_interval"`
+	// InactivityTimeout duration of inactivity after which a new handshake must be sent.
+	InactivityTimeout time.Duration `mapstructure:"inactivity_timeout"`
+}
+
+func (c *BFTConfig) Validate() error {
+	if c.Enabled {
+		if len(c.BootstrapAddresses) == 0 {
+			return errors.New("BFT_BOOTSTRAP_ADDRESSES must be specified when BFT is enabled")
+		}
+		for _, addr := range c.BootstrapAddresses {
+			if _, err := peer.AddrInfoFromString(addr); err != nil {
+				return fmt.Errorf("invalid bootstrap address: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 // Load loads configuration from environment variables with defaults
@@ -305,9 +325,11 @@ func Load() (*Config, error) {
 		Enabled:                    getEnvBoolOrDefault("BFT_ENABLED", true),
 		Address:                    getEnvOrDefault("BFT_ADDRESS", "/ip4/0.0.0.0/tcp/9000"),
 		AnnounceAddresses:          strings.Split(getEnvOrDefault("BFT_ANNOUNCE_ADDRESSES", ""), ","),
-		BootstrapAddresses:         strings.Split(getEnvOrDefault("BFT_BOOTSTRAP_ADDRESSES", "/ip4/127.0.0.1/tcp/26662/p2p/16Uiu2HAm6eQMr2sQVbcWZsPPbpc2Su7AnnMVGHpC23PUzGTAATnp"), ","),
+		BootstrapAddresses:         strings.Split(getEnvOrDefault("BFT_BOOTSTRAP_ADDRESSES", ""), ","),
 		BootstrapConnectRetry:      getEnvIntOrDefault("BFT_BOOTSTRAP_CONNECT_RETRY", 3),
 		BootstrapConnectRetryDelay: getEnvIntOrDefault("BFT_BOOTSTRAP_CONNECT_RETRY_DELAY", 5),
+		HeartbeatInterval:          getEnvDurationOrDefault("BFT_HEARTBEAT_INTERVAL", "1s"),
+		InactivityTimeout:          getEnvDurationOrDefault("BFT_INACTIVITY_TIMEOUT", "5s"),
 	}
 	if config.BFT.Enabled {
 		if err := loadConf(getEnvOrDefault("BFT_KEY_CONF_FILE", "bft-config/keys.json"), &config.BFT.KeyConf); err != nil {
@@ -316,11 +338,15 @@ func Load() (*Config, error) {
 		if err := loadConf(getEnvOrDefault("BFT_SHARD_CONF_FILE", "bft-config/shard-conf-7_0.json"), &config.BFT.ShardConf); err != nil {
 			return nil, fmt.Errorf("failed to load shard configuration: %w", err)
 		}
-		trustBaseV1 := types.RootTrustBaseV1{}
-		if err := loadConf(getEnvOrDefault("BFT_TRUST_BASE_FILE", "bft-config/trust-base.json"), &trustBaseV1); err != nil {
-			return nil, fmt.Errorf("failed to load trust base configuration: %w", err)
+		trustBaseFiles := strings.Split(getEnvOrDefault("BFT_TRUST_BASE_FILES", "bft-config/trust-base.json"), ",")
+		config.BFT.TrustBases = make([]types.RootTrustBaseV1, 0, len(trustBaseFiles))
+		for _, file := range trustBaseFiles {
+			trustBaseV1 := types.RootTrustBaseV1{}
+			if err := loadConf(file, &trustBaseV1); err != nil {
+				return nil, fmt.Errorf("failed to load trust base configuration from %s: %w", file, err)
+			}
+			config.BFT.TrustBases = append(config.BFT.TrustBases, trustBaseV1)
 		}
-		config.BFT.TrustBase = &trustBaseV1
 	}
 
 	if err := config.Validate(); err != nil {
@@ -379,6 +405,10 @@ func (c *Config) Validate() error {
 
 	if err := c.Sharding.Validate(); err != nil {
 		return fmt.Errorf("invalid sharding configuration: %w", err)
+	}
+
+	if err := c.BFT.Validate(); err != nil {
+		return err
 	}
 
 	return nil
@@ -458,17 +488,4 @@ func (c *BFTConfig) PeerConf() (*network.PeerConfiguration, error) {
 	}
 
 	return network.NewPeerConfiguration(c.Address, c.AnnounceAddresses, authKeyPair, bootNodes, bootstrapConnectRetry)
-}
-
-func (c *BFTConfig) GetRootNodes() (peer.IDSlice, error) {
-	nodes := c.TrustBase.GetRootNodes()
-	idSlice := make(peer.IDSlice, len(nodes))
-	for i, node := range nodes {
-		id, err := peer.Decode(node.NodeID)
-		if err != nil {
-			return nil, fmt.Errorf("invalid root node id in trust base: %w", err)
-		}
-		idSlice[i] = id
-	}
-	return idSlice, nil
 }

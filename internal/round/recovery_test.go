@@ -78,7 +78,7 @@ func (s *RecoveryTestSuite) SetupSuite() {
 			MaxConnIdleTime:        5 * time.Minute,
 		},
 	}
-	s.storage, err = mongodb.NewStorage(cfg)
+	s.storage, err = mongodb.NewStorage(s.ctx, cfg)
 	s.Require().NoError(err)
 	err = s.storage.Initialize(s.ctx)
 	s.Require().NoError(err)

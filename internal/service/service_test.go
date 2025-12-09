@@ -129,13 +129,13 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	require.NoError(t, err)
 
 	// Initialize storage with Redis commitment queue
-	commitmentQueue, mongoStorage, err := storage.NewStorage(cfg, log)
+	commitmentQueue, mongoStorage, err := storage.NewStorage(ctx, cfg, log)
 	require.NoError(t, err)
 	commitmentQueue.Initialize(ctx)
 
 	// Initialize round manager
 	rootAggregatorClient := sharding.NewRootAggregatorClientStub()
-	roundManager, err := round.NewRoundManager(ctx, cfg, log, smt.NewSparseMerkleTree(api.SHA256, 16+256), commitmentQueue, mongoStorage, rootAggregatorClient, state.NewSyncStateTracker())
+	roundManager, err := round.NewRoundManager(ctx, cfg, log, smt.NewSparseMerkleTree(api.SHA256, 16+256), commitmentQueue, mongoStorage, rootAggregatorClient, state.NewSyncStateTracker(), nil)
 	require.NoError(t, err)
 
 	// Start the round manager (restores SMT)

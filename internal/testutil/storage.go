@@ -47,7 +47,7 @@ func SetupTestStorage(t *testing.T, conf config.Config) *mongodb.Storage {
 	if err := client.Ping(connectCtx, nil); err != nil {
 		t.Fatalf("Failed to ping MongoDB: %v", err)
 	}
-	storage, err := mongodb.NewStorage(conf)
+	storage, err := mongodb.NewStorage(ctx, conf)
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}

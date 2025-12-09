@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/unicitynetwork/bft-go-base/types"
+
 	"github.com/unicitynetwork/aggregator-go/internal/bft"
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
@@ -142,7 +144,17 @@ type RoundMetrics struct {
 }
 
 // NewRoundManager creates a new round manager
-func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, smtInstance *smt.SparseMerkleTree, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, rootAggregatorClient RootAggregatorClient, stateTracker *state.Tracker) (*RoundManager, error) {
+func NewRoundManager(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *logger.Logger,
+	smtInstance *smt.SparseMerkleTree,
+	commitmentQueue interfaces.CommitmentQueue,
+	storage interfaces.Storage,
+	rootAggregatorClient RootAggregatorClient,
+	stateTracker *state.Tracker,
+	luc *types.UnicityCertificate,
+) (*RoundManager, error) {
 	rm := &RoundManager{
 		config:              cfg,
 		logger:              logger,
@@ -162,7 +174,7 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 	if cfg.Sharding.Mode == config.ShardingModeStandalone {
 		if cfg.BFT.Enabled {
 			var err error
-			rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, logger)
+			rm.bftClient, err = bft.NewBFTClient(&cfg.BFT, rm, storage.TrustBaseStorage(), luc, logger)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create BFT client: %w", err)
 			}
@@ -839,7 +851,7 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 	return nil
 }
 
-func (rm *RoundManager) Deactivate(ctx context.Context) error {
+func (rm *RoundManager) Deactivate(_ context.Context) error {
 	rm.stopCommitmentPrefetcher()
 	if rm.bftClient != nil {
 		rm.bftClient.Stop()

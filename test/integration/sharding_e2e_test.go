@@ -153,10 +153,10 @@ func startAggregator(t *testing.T, ctx context.Context, name, port, mongoURI, re
 
 	aggCtx, aggCancel := context.WithCancel(ctx)
 	log, _ := logger.New("warn", "json", "", false)
-	queue, stor, _ := storage.NewStorage(cfg, log)
+	queue, stor, _ := storage.NewStorage(aggCtx, cfg, log)
 	queue.Initialize(aggCtx)
 
-	mgr, _ := round.NewManager(aggCtx, cfg, log, queue, stor, state.NewSyncStateTracker())
+	mgr, _ := round.NewManager(aggCtx, cfg, log, queue, stor, state.NewSyncStateTracker(), nil)
 	mgr.Start(aggCtx)
 	mgr.Activate(aggCtx)
 
