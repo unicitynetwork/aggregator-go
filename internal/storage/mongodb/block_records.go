@@ -122,24 +122,28 @@ func (brs *BlockRecordsStorage) GetNextBlock(ctx context.Context, blockNumber *a
 	return blockRecord, nil
 }
 
-// GetLatestBlock retrieves the latest block
-func (brs *BlockRecordsStorage) GetLatestBlock(ctx context.Context) (*models.BlockRecords, error) {
-	opts := options.FindOne().SetSort(bson.D{{Key: "blockNumber", Value: -1}})
+// GetLatestBlockNumber retrieves the latest block number
+func (brs *BlockRecordsStorage) GetLatestBlockNumber(ctx context.Context) (*api.BigInt, error) {
+	opts := options.FindOne().
+		SetProjection(bson.M{"blockNumber": 1}).
+		SetSort(bson.D{{Key: "blockNumber", Value: -1}})
 
-	var result models.BlockRecordsBSON
-	err := brs.collection.FindOne(ctx, bson.M{}, opts).Decode(&result)
-	if err != nil {
+	var result struct {
+		BlockNumber primitive.Decimal128 `bson:"blockNumber"`
+	}
+
+	if err := brs.collection.FindOne(ctx, bson.M{}, opts).Decode(&result); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("failed to get latest block record: %w", err)
+		return nil, fmt.Errorf("failed to get latest block record number: %w", err)
 	}
 
-	blockRecord, err := result.FromBSON()
+	blockNumber, _, err := result.BlockNumber.BigInt()
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+		return nil, fmt.Errorf("failed to parse blockNumber: %w", err)
 	}
-	return blockRecord, nil
+	return api.NewBigInt(blockNumber), nil
 }
 
 // CreateIndexes creates necessary indexes for the block records collection
