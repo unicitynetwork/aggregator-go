@@ -292,9 +292,11 @@ func startLeaderChangedEventListener(ctx context.Context, log *logger.Logger, cf
 				if cfg.Sharding.Mode != config.ShardingModeParent {
 					log.WithComponent("ha-listener").Info("Becoming leader, syncing to latest block...")
 					if err := bs.SyncToLatestBlock(ctx); err != nil {
-						return fmt.Errorf("failed to sync to latest block on leadership change: %w", err)
+						log.WithComponent("ha-listener").Error("failed to sync to latest block on leadership change", "error", err)
+						continue
+					} else {
+						log.WithComponent("ha-listener").Info("Sync complete.")
 					}
-					log.WithComponent("ha-listener").Info("Sync complete.")
 				}
 				if err := roundManager.Activate(ctx); err != nil {
 					log.WithComponent("ha-listener").Error("Failed to activate round manager", "error", err)
