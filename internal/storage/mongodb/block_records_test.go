@@ -35,6 +35,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -621,7 +622,7 @@ func TestBlockRecordsStorage_Store_Integration(t *testing.T) {
 		// Attempt to store the second record with the same block number
 		err = storage.Store(ctx, records2)
 		assert.Error(t, err, "Second store should return an error due to unique index")
-		assert.Contains(t, err.Error(), "failed to store block records")
+		assert.ErrorIs(t, err, interfaces.ErrDuplicateKey, "Error should wrap ErrDuplicateKey")
 	})
 }
 

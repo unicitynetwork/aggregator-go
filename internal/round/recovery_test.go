@@ -669,3 +669,168 @@ func (s *RecoveryTestSuite) Test11_LoadRecoveredNodesIntoSMT() {
 
 	t.Log("✓ Test11_LoadRecoveredNodesIntoSMT passed")
 }
+
+// ============================================================================
+// Test 12: CleanupProcessedPendingCommitments - No Pending
+// ============================================================================
+func (s *RecoveryTestSuite) Test12_CleanupNoPending() {
+	t := s.T()
+
+	// No pending commitments in Redis - cleanup should succeed with no-op
+	err := CleanupProcessedPendingCommitments(s.ctx, s.testLogger, s.storage, s.commitmentQueue)
+	require.NoError(t, err)
+
+	t.Log("✓ Test12_CleanupNoPending passed")
+}
+
+// ============================================================================
+// Test 13: CleanupProcessedPendingCommitments - All New (not processed)
+// ============================================================================
+func (s *RecoveryTestSuite) Test13_CleanupAllNew() {
+	t := s.T()
+
+	// Create and store commitments in Redis (but NOT in AggregatorRecords)
+	commitments := testutil.CreateTestCommitments(t, 3, "t13")
+	s.storeCommitmentsInRedis(commitments)
+
+	// Read them to make them "pending" (claimed but not ACKed)
+	s.readPendingToMakeThemClaimed()
+
+	// Verify we have 3 unprocessed (pending)
+	count, err := s.commitmentQueue.CountUnprocessed(s.ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), count, "Should have 3 unprocessed commitments")
+
+	// Run cleanup - none should be ACKed since they're not in AggregatorRecords
+	err = CleanupProcessedPendingCommitments(s.ctx, s.testLogger, s.storage, s.commitmentQueue)
+	require.NoError(t, err)
+
+	// Verify still 3 unprocessed (none were ACKed)
+	count, err = s.commitmentQueue.CountUnprocessed(s.ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), count, "Should still have 3 unprocessed commitments")
+
+	t.Log("✓ Test13_CleanupAllNew passed")
+}
+
+// ============================================================================
+// Test 14: CleanupProcessedPendingCommitments - All Processed
+// ============================================================================
+func (s *RecoveryTestSuite) Test14_CleanupAllProcessed() {
+	t := s.T()
+
+	// Create commitments
+	commitments, block, _ := s.createTestData(14, 3, "t14")
+
+	// Store in Redis and make them pending
+	s.storeCommitmentsInRedis(commitments)
+	s.readPendingToMakeThemClaimed()
+
+	// Store AggregatorRecords (simulate block was finalized)
+	s.storeAggregatorRecords(commitments, block.Index)
+
+	// Verify we have 3 unprocessed
+	count, err := s.commitmentQueue.CountUnprocessed(s.ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), count, "Should have 3 unprocessed commitments")
+
+	// Run cleanup - all should be ACKed since they're in AggregatorRecords
+	err = CleanupProcessedPendingCommitments(s.ctx, s.testLogger, s.storage, s.commitmentQueue)
+	require.NoError(t, err)
+
+	// Verify 0 unprocessed (all were ACKed)
+	count, err = s.commitmentQueue.CountUnprocessed(s.ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), count, "Should have 0 unprocessed commitments after cleanup")
+
+	t.Log("✓ Test14_CleanupAllProcessed passed")
+}
+
+// ============================================================================
+// Test 15: CleanupProcessedPendingCommitments - Mixed
+// ============================================================================
+func (s *RecoveryTestSuite) Test15_CleanupMixed() {
+	t := s.T()
+
+	// Create 4 commitments
+	commitments := testutil.CreateTestCommitments(t, 4, "t15")
+	blockNumber := api.NewBigInt(big.NewInt(15))
+
+	// Store all 4 in Redis and make them pending
+	s.storeCommitmentsInRedis(commitments)
+	s.readPendingToMakeThemClaimed()
+
+	// Store only first 2 in AggregatorRecords (simulate partial processing)
+	processedCommitments := commitments[:2]
+	s.storeAggregatorRecords(processedCommitments, blockNumber)
+
+	// Verify we have 4 unprocessed
+	count, err := s.commitmentQueue.CountUnprocessed(s.ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(4), count, "Should have 4 unprocessed commitments")
+
+	// Run cleanup - only 2 should be ACKed
+	err = CleanupProcessedPendingCommitments(s.ctx, s.testLogger, s.storage, s.commitmentQueue)
+	require.NoError(t, err)
+
+	// Verify 2 unprocessed remain (the new ones)
+	count, err = s.commitmentQueue.CountUnprocessed(s.ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), count, "Should have 2 unprocessed commitments after cleanup")
+
+	t.Log("✓ Test15_CleanupMixed passed")
+}
+
+// ============================================================================
+// Test 16: RecoverUnfinalizedBlock calls cleanup when no unfinalized block
+// ============================================================================
+func (s *RecoveryTestSuite) Test16_RecoveryCallsCleanup() {
+	t := s.T()
+
+	// Create a FINALIZED block with records
+	commitments, block, requestIDs := s.createTestData(16, 3, "t16")
+	block.Finalized = true
+	err := s.storage.BlockStorage().Store(s.ctx, block)
+	require.NoError(t, err)
+	err = s.storage.BlockRecordsStorage().Store(s.ctx, models.NewBlockRecords(block.Index, requestIDs))
+	require.NoError(t, err)
+	s.storeAggregatorRecords(commitments, block.Index)
+	s.storeSmtNodes(commitments)
+
+	// Store commitments in Redis as pending (simulating MarkProcessed failure)
+	s.storeCommitmentsInRedis(commitments)
+	s.readPendingToMakeThemClaimed()
+
+	// Verify we have 3 unprocessed
+	count, err := s.commitmentQueue.CountUnprocessed(s.ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), count, "Should have 3 unprocessed commitments")
+
+	// Run recovery - should call cleanup since no unfinalized blocks
+	result, err := RecoverUnfinalizedBlock(s.ctx, s.testLogger, s.storage, s.commitmentQueue)
+	require.NoError(t, err)
+	require.False(t, result.Recovered, "Should not have recovered any block")
+
+	// Verify cleanup ran - 0 unprocessed (all were ACKed)
+	count, err = s.commitmentQueue.CountUnprocessed(s.ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), count, "Should have 0 unprocessed commitments after recovery cleanup")
+
+	t.Log("✓ Test16_RecoveryCallsCleanup passed")
+}
+
+// Helper to read pending commitments to make them "claimed" state
+func (s *RecoveryTestSuite) readPendingToMakeThemClaimed() {
+	// Reading from stream claims the messages (moves them to pending state)
+	commitmentChan := make(chan *models.Commitment, 1000)
+	ctx, cancel := context.WithTimeout(s.ctx, 500*time.Millisecond)
+	defer cancel()
+
+	go func() {
+		_ = s.commitmentQueue.StreamCommitments(ctx, commitmentChan)
+	}()
+
+	// Wait for timeout to ensure all are claimed
+	<-ctx.Done()
+	close(commitmentChan)
+}

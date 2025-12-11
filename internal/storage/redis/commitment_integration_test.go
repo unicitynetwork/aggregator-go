@@ -685,3 +685,114 @@ CollectLoop2:
 
 	storage2.Close(ctx)
 }
+
+// TestGetByRequestIDs verifies that GetByRequestIDs returns only matching commitments.
+func (suite *RedisTestSuite) TestGetByRequestIDs() {
+	ctx := suite.ctx
+	t := suite.T()
+
+	// Store 5 commitments
+	commitments := make([]*models.Commitment, 5)
+	for i := 0; i < 5; i++ {
+		commitments[i] = createTestCommitment()
+	}
+	require.NoError(t, suite.storage.StoreBatch(ctx, commitments))
+	time.Sleep(100 * time.Millisecond)
+
+	// Request only 3 of them
+	requestIDs := []api.RequestID{
+		commitments[0].RequestID,
+		commitments[2].RequestID,
+		commitments[4].RequestID,
+	}
+
+	result, err := suite.storage.GetByRequestIDs(ctx, requestIDs)
+	require.NoError(t, err)
+	require.Len(t, result, 3, "Should return exactly 3 commitments")
+
+	// Verify correct ones returned
+	require.NotNil(t, result[string(commitments[0].RequestID)])
+	require.NotNil(t, result[string(commitments[2].RequestID)])
+	require.NotNil(t, result[string(commitments[4].RequestID)])
+	require.Nil(t, result[string(commitments[1].RequestID)])
+	require.Nil(t, result[string(commitments[3].RequestID)])
+}
+
+// TestGetByRequestIDs_WithMissingIDs verifies graceful handling of missing IDs.
+func (suite *RedisTestSuite) TestGetByRequestIDs_WithMissingIDs() {
+	ctx := suite.ctx
+	t := suite.T()
+
+	// Store 2 commitments
+	commitments := make([]*models.Commitment, 2)
+	for i := 0; i < 2; i++ {
+		commitments[i] = createTestCommitment()
+	}
+	require.NoError(t, suite.storage.StoreBatch(ctx, commitments))
+	time.Sleep(100 * time.Millisecond)
+
+	// Request 3 IDs (one doesn't exist)
+	nonExistent := createTestCommitment()
+	requestIDs := []api.RequestID{
+		commitments[0].RequestID,
+		commitments[1].RequestID,
+		nonExistent.RequestID, // This one doesn't exist in Redis
+	}
+
+	result, err := suite.storage.GetByRequestIDs(ctx, requestIDs)
+	require.NoError(t, err)
+	require.Len(t, result, 2, "Should return only 2 existing commitments")
+}
+
+// TestGetAllPending_OnlyReturnsPending verifies that GetAllPending returns ONLY
+// pending (unACKed) messages, not all messages in the stream.
+func (suite *RedisTestSuite) TestGetAllPending_OnlyReturnsPending() {
+	ctx := suite.ctx
+	t := suite.T()
+
+	// Store 5 commitments
+	commitments := make([]*models.Commitment, 5)
+	for i := 0; i < 5; i++ {
+		commitments[i] = createTestCommitment()
+	}
+	require.NoError(t, suite.storage.StoreBatch(ctx, commitments))
+	time.Sleep(100 * time.Millisecond)
+
+	// Read them via StreamCommitments to make them "pending"
+	commitmentChan := make(chan *models.Commitment, 10)
+	streamCtx, cancelStream := context.WithTimeout(ctx, 500*time.Millisecond)
+
+	go func() {
+		_ = suite.storage.StreamCommitments(streamCtx, commitmentChan)
+	}()
+
+	var received []*models.Commitment
+	for c := range commitmentChan {
+		received = append(received, c)
+		if len(received) == 5 {
+			break
+		}
+	}
+	cancelStream()
+	require.Len(t, received, 5, "Should have received 5 commitments")
+
+	// ACK 3 of them
+	ackEntries := make([]interfaces.CommitmentAck, 3)
+	for i := 0; i < 3; i++ {
+		ackEntries[i] = interfaces.CommitmentAck{
+			RequestID: received[i].RequestID,
+			StreamID:  received[i].StreamID,
+		}
+	}
+	require.NoError(t, suite.storage.MarkProcessed(ctx, ackEntries))
+
+	// Verify CountUnprocessed shows 2 pending
+	count, err := suite.storage.CountUnprocessed(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), count, "Should have 2 unprocessed (pending) commitments")
+
+	// GetAllPending should return ONLY the 2 pending, NOT all 5
+	pending, err := suite.storage.GetAllPending(ctx)
+	require.NoError(t, err)
+	require.Len(t, pending, 2, "GetAllPending should return only 2 pending commitments, not all 5")
+}
