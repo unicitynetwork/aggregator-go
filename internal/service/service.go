@@ -409,6 +409,7 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 
 	// Add database connectivity check
 	if err := as.storage.Ping(ctx); err != nil {
+		status.Status = "unhealthy"
 		status.AddDetail("database", "disconnected")
 		as.logger.WithContext(ctx).Error("Database health check failed", "error", err.Error())
 	} else {

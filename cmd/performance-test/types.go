@@ -121,7 +121,8 @@ type ShardClient struct {
 	name          string
 	url           string
 	shardMask     int
-	client        *JSONRPCClient
+	client        *JSONRPCClient // For submissions
+	proofClient   *JSONRPCClient // Separate pool for proof requests
 	startingBlock int64
 }
 
@@ -483,6 +484,10 @@ func (c *JSONRPCClient) nextHTTPClient() *http.Client {
 }
 
 func (c *JSONRPCClient) call(method string, params interface{}) (*JSONRPCResponse, error) {
+	return c.callWithContext(context.Background(), method, params)
+}
+
+func (c *JSONRPCClient) callWithContext(ctx context.Context, method string, params interface{}) (*JSONRPCResponse, error) {
 	id := atomic.AddInt64(&c.requestID, 1)
 
 	request := JSONRPCRequest{
@@ -497,7 +502,7 @@ func (c *JSONRPCClient) call(method string, params interface{}) (*JSONRPCRespons
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.url, bytes.NewBuffer(reqBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.url, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

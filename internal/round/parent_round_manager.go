@@ -59,6 +59,8 @@ type ParentRoundManager struct {
 	totalShardUpdates int64
 }
 
+const parentRoundRetryDelay = 1 * time.Second
+
 // NewParentRoundManager creates a new parent round manager
 func NewParentRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, storage interfaces.Storage, luc *types.UnicityCertificate) (*ParentRoundManager, error) {
 	// Initialize parent SMT in parent mode with support for mutable leaves
@@ -96,7 +98,7 @@ func NewParentRoundManager(ctx context.Context, cfg *config.Config, logger *logg
 			}
 		}
 		nextBlockNumber.Add(lastBlockNumber.Int, big.NewInt(1))
-		prm.bftClient = bft.NewBFTClientStub(logger, prm, nextBlockNumber)
+		prm.bftClient = bft.NewBFTClientStub(logger, prm, nextBlockNumber, cfg.BFT.StubDelay)
 	}
 
 	return prm, nil
@@ -162,10 +164,19 @@ func (prm *ParentRoundManager) StartNewRound(ctx context.Context, roundNumber *a
 
 // startNewRound is the internal implementation
 func (prm *ParentRoundManager) startNewRound(ctx context.Context, roundNumber *api.BigInt) error {
+	prm.roundMutex.Lock()
+
+	// Check if this round or a later one is already in progress
+	if prm.currentRound != nil && prm.currentRound.Number.Cmp(roundNumber.Int) >= 0 {
+		prm.roundMutex.Unlock()
+		prm.logger.WithContext(ctx).Debug("Skipping duplicate round start",
+			"requestedRound", roundNumber.String(),
+			"currentRound", prm.currentRound.Number.String())
+		return nil
+	}
+
 	prm.logger.WithContext(ctx).Info("Starting new parent round",
 		"roundNumber", roundNumber.String())
-
-	prm.roundMutex.Lock()
 
 	var shardUpdates map[int]*models.ShardRootUpdate
 	if prm.currentRound != nil {
@@ -187,6 +198,13 @@ func (prm *ParentRoundManager) startNewRound(ctx context.Context, roundNumber *a
 	prm.logger.WithContext(ctx).Info("Parent round started",
 		"roundNumber", roundNumber.String(),
 		"duration", prm.roundDuration.String())
+
+	// Wait for round duration to collect shard updates
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(prm.roundDuration):
+	}
 
 	if err := prm.processCurrentRound(ctx); err != nil {
 		return err
@@ -216,7 +234,37 @@ func (prm *ParentRoundManager) processCurrentRound(ctx context.Context) error {
 
 	prm.roundMutex.Unlock()
 
-	return prm.processRound(ctx, round)
+	if err := prm.processRound(ctx, round); err != nil {
+		return prm.retryRound(ctx, round)
+	}
+	return nil
+}
+
+// retryRound retries processing a round until it succeeds or context is cancelled
+func (prm *ParentRoundManager) retryRound(ctx context.Context, round *ParentRound) error {
+	for {
+		select {
+		case <-ctx.Done():
+			prm.logger.WithContext(ctx).Warn("Stopping parent round retries due to context cancellation",
+				"roundNumber", round.Number.String())
+			return ctx.Err()
+		case <-time.After(parentRoundRetryDelay):
+		}
+
+		prm.logger.WithContext(ctx).Warn("Retrying parent round processing",
+			"roundNumber", round.Number.String())
+
+		if err := prm.processRound(ctx, round); err != nil {
+			prm.logger.WithContext(ctx).Error("Parent round retry failed",
+				"roundNumber", round.Number.String(),
+				"error", err.Error())
+			continue
+		}
+
+		prm.logger.WithContext(ctx).Info("Parent round retry succeeded",
+			"roundNumber", round.Number.String())
+		return nil
+	}
 }
 
 // processRound processes a specific round
@@ -345,6 +393,11 @@ func (prm *ParentRoundManager) Activate(ctx context.Context) error {
 		return fmt.Errorf("failed to start BFT client: %w", err)
 	}
 
+	// Wait for BFT client to receive first UC from root chain before starting rounds.
+	if err := prm.bftClient.WaitForInitialized(ctx); err != nil {
+		return fmt.Errorf("failed to wait for BFT client initialization: %w", err)
+	}
+
 	// Get latest block number to determine starting round
 	latestBlockNumber, err := prm.storage.BlockStorage().GetLatestNumber(ctx)
 	if err != nil {
@@ -386,6 +439,33 @@ func (prm *ParentRoundManager) Deactivate(ctx context.Context) error {
 
 	prm.logger.WithContext(ctx).Info("Parent round manager deactivated successfully")
 	return nil
+}
+
+// FinalizeBlockWithRetry attempts to finalize a block with retry logic.
+// For parent mode, this is simpler than child mode since parent blocks are stored atomically.
+func (prm *ParentRoundManager) FinalizeBlockWithRetry(ctx context.Context, block *models.Block) error {
+	const maxRetries = 3
+	const retryDelay = 1000 * time.Millisecond
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		err := prm.FinalizeBlock(ctx, block)
+		if err == nil {
+			return nil
+		}
+
+		prm.logger.Error("FinalizeBlock failed (parent mode)",
+			"attempt", attempt,
+			"maxAttempts", maxRetries,
+			"blockNumber", block.Index.String(),
+			"error", err.Error())
+
+		// Retry after delay (unless last attempt)
+		if attempt < maxRetries {
+			prm.logger.Info("Retrying FinalizeBlock", "attempt", attempt)
+			time.Sleep(retryDelay)
+		}
+	}
+	return fmt.Errorf("FinalizeBlock failed after %d attempts (parent mode)", maxRetries)
 }
 
 // FinalizeBlock is called by BFT client when block is finalized
@@ -430,6 +510,8 @@ func (prm *ParentRoundManager) FinalizeBlock(ctx context.Context, block *models.
 			"shardIDs", getShardIDs(processedShardUpdates))
 	}
 
+	// For parent mode, we store everything synchronously, so the block is finalized immediately
+	block.Finalized = true
 	if err := prm.storage.BlockStorage().Store(ctx, block); err != nil {
 		return fmt.Errorf("failed to store parent block: %w", err)
 	}

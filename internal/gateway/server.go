@@ -185,6 +185,12 @@ func (s *Server) handleHealth(c *gin.Context) {
 		return
 	}
 
+	// Return 503 if unhealthy so load balancers can remove from rotation
+	if status.Status == "unhealthy" {
+		c.JSON(http.StatusServiceUnavailable, status)
+		return
+	}
+
 	c.JSON(http.StatusOK, status)
 }
 

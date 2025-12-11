@@ -154,20 +154,88 @@ func (s *Storage) CleanAllCollections(ctx context.Context) error {
 	return nil
 }
 
-// WithTransaction executes a function within a MongoDB transaction
+// MongoDB transaction error labels
+const (
+	labelTransientTransaction     = "TransientTransactionError"
+	labelUnknownTransactionCommit = "UnknownTransactionCommitResult"
+)
+
+// WithTransaction executes a function within a MongoDB transaction with limited retries.
+// Only retries on transient errors (TransientTransactionError label).
 func (s *Storage) WithTransaction(ctx context.Context, fn func(context.Context) error) error {
+	const maxRetries = 3
+
 	session, err := s.client.StartSession()
 	if err != nil {
 		return fmt.Errorf("failed to start session: %w", err)
 	}
 	defer session.EndSession(ctx)
 
-	callback := func(sessCtx mongo.SessionContext) (interface{}, error) {
-		return nil, fn(sessCtx)
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		err = session.StartTransaction()
+		if err != nil {
+			return fmt.Errorf("failed to start transaction: %w", err)
+		}
+
+		err = mongo.WithSession(ctx, session, func(sessCtx mongo.SessionContext) error {
+			return fn(sessCtx)
+		})
+
+		if err != nil {
+			// Abort the transaction on error
+			_ = session.AbortTransaction(ctx)
+
+			// Check if this is a transient error that we should retry
+			if cmdErr, ok := err.(mongo.CommandError); ok {
+				if cmdErr.HasErrorLabel(labelTransientTransaction) && attempt < maxRetries {
+					lastErr = err
+					continue // Retry
+				}
+			}
+			// Non-transient error or max retries reached
+			return fmt.Errorf("transaction failed (attempt %d/%d): %w", attempt, maxRetries, err)
+		}
+
+		// Try to commit with retry for unknown commit result
+		for commitAttempt := 1; commitAttempt <= maxRetries; commitAttempt++ {
+			err = session.CommitTransaction(ctx)
+			if err == nil {
+				return nil // Success
+			}
+
+			cmdErr, ok := err.(mongo.CommandError)
+			if !ok {
+				return fmt.Errorf("transaction commit failed (attempt %d/%d): %w", attempt, maxRetries, err)
+			}
+
+			// TransientTransactionError on commit - retry whole transaction
+			if cmdErr.HasErrorLabel(labelTransientTransaction) && attempt < maxRetries {
+				lastErr = err
+				break // Break inner loop, continue outer loop to retry whole transaction
+			}
+
+			// UnknownTransactionCommitResult - retry just the commit
+			if cmdErr.HasErrorLabel(labelUnknownTransactionCommit) && commitAttempt < maxRetries {
+				lastErr = err
+				continue // Retry commit
+			}
+
+			return fmt.Errorf("transaction commit failed (attempt %d/%d, commit %d/%d): %w",
+				attempt, maxRetries, commitAttempt, maxRetries, err)
+		}
+
+		// If we broke out of commit loop due to transient error, continue to retry whole transaction
+		if lastErr != nil {
+			continue
+		}
+
+		// Success
+		return nil
 	}
 
-	_, err = session.WithTransaction(ctx, callback)
-	return err
+	// Should not reach here, but just in case
+	return fmt.Errorf("transaction failed after %d retries: %w", maxRetries, lastErr)
 }
 
 // createIndexes creates all necessary database indexes

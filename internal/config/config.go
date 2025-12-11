@@ -209,11 +209,12 @@ type BFTConfig struct {
 	TrustBases []types.RootTrustBaseV1           `mapstructure:"trust_bases"`
 
 	// Peer configuration
-	Address                    string   `mapstructure:"address"`
-	AnnounceAddresses          []string `mapstructure:"announce_addresses"`
-	BootstrapAddresses         []string `mapstructure:"bootstrap_addresses"`
-	BootstrapConnectRetry      int      `mapstructure:"bootstrap_connect_retry"`
-	BootstrapConnectRetryDelay int      `mapstructure:"bootstrap_connect_retry_delay"`
+	Address                    string        `mapstructure:"address"`
+	AnnounceAddresses          []string      `mapstructure:"announce_addresses"`
+	BootstrapAddresses         []string      `mapstructure:"bootstrap_addresses"`
+	BootstrapConnectRetry      int           `mapstructure:"bootstrap_connect_retry"`
+	BootstrapConnectRetryDelay int           `mapstructure:"bootstrap_connect_retry_delay"`
+	StubDelay                  time.Duration `mapstructure:"stub_delay"` // Delay for BFT stub (testing only)
 
 	// HeartbeatInterval how often to perform the inactivity check.
 	HeartbeatInterval time.Duration `mapstructure:"heartbeat_interval"`

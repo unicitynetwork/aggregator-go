@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,22 +26,103 @@ import (
 )
 
 const (
-	defaultAggregatorURL = "http://localhost:3000"
-	testDuration         = 30 * time.Second
-	workerCount          = 20
-	httpClientPoolSize   = 12
-	requestsPerSec       = 1000
-	aggregatorLogPath    = "logs/aggregator.log"
-	proofMaxRetries      = 10
-	proofRetryDelay      = 1000 * time.Millisecond
-	proofInitialDelay    = 3500 * time.Millisecond
+	defaultAggregatorURL     = "https://localhost:3000"
+	defaultTestDuration      = 30 * time.Second
+	workerCount              = 20
+	proofWorkerCount         = 10 // Separate worker pool for proof requests
+	httpClientPoolSize       = 4
+	defaultRequestsPerSec    = 2000
+	aggregatorLogPath        = "logs/aggregator.log"
+	proofMaxRetries          = 10
+	proofRetryDelay          = 1000 * time.Millisecond
+	defaultProofInitialDelay = 4000 * time.Millisecond
 )
 
-// Optional shard targets (leave empty for single-aggregator mode)
-var shardTargets = []shardTarget{
-	{name: "shard-3", url: "http://localhost:3001", shardMask: 3},
-	{name: "shard-2", url: "http://localhost:3002", shardMask: 2},
+// Configurable via environment variables
+var (
+	testDuration      = getEnvDuration("TEST_DURATION", defaultTestDuration)
+	requestsPerSec    = getEnvInt("REQUESTS_PER_SEC", defaultRequestsPerSec)
+	proofInitialDelay = getEnvDuration("PROOF_INITIAL_DELAY", defaultProofInitialDelay)
+	shardTargets      = getEnvShardTargets()
+)
+
+func getEnvInt(key string, defaultVal int) int {
+	if val := os.Getenv(key); val != "" {
+		if i, err := strconv.Atoi(val); err == nil {
+			return i
+		}
+	}
+	return defaultVal
 }
+
+func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
+	if val := os.Getenv(key); val != "" {
+		if d, err := time.ParseDuration(val); err == nil {
+			return d
+		}
+		// Also try parsing as seconds (integer)
+		if secs, err := strconv.Atoi(val); err == nil {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return defaultVal
+}
+
+// getEnvShardTargets parses SHARD_TARGETS env var
+// Format: "url1:mask1,url2:mask2,..." e.g. "https://localhost:3001:7,https://localhost:3002:6"
+func getEnvShardTargets() []shardTarget {
+	val := os.Getenv("SHARD_TARGETS")
+	if val == "" {
+		// Default: single shard on localhost
+		return []shardTarget{
+			{name: "shard-7", url: "https://localhost:3001", shardMask: 7},
+		}
+	}
+
+	var targets []shardTarget
+	parts := strings.Split(val, ",")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		// Find the last colon to split URL and mask (URL may contain colons for port)
+		lastColon := strings.LastIndex(part, ":")
+		if lastColon == -1 {
+			log.Printf("Warning: invalid shard target format (missing mask): %s", part)
+			continue
+		}
+		url := part[:lastColon]
+		maskStr := part[lastColon+1:]
+		mask, err := strconv.Atoi(maskStr)
+		if err != nil {
+			log.Printf("Warning: invalid shard mask '%s': %v", maskStr, err)
+			continue
+		}
+		name := fmt.Sprintf("shard-%d", mask)
+		targets = append(targets, shardTarget{name: name, url: url, shardMask: mask})
+	}
+
+	if len(targets) == 0 {
+		log.Fatal("No valid shard targets found in SHARD_TARGETS")
+	}
+
+	return targets
+}
+
+// Default shard configs for reference:
+// 4 shards (2-bit): "https://localhost:3001:7,https://localhost:3002:6,https://localhost:3003:5,https://localhost:3004:4"
+// 2 shards (1-bit): "https://localhost:3001:3,https://localhost:3002:2"
+//
+// Legacy hardcoded config (for reference)
+//var shardTargets = []shardTarget{
+//	{name: "shard-7", url: "https://localhost:3001", shardMask: 7}, // 0b111
+//	{name: "shard-6", url: "https://localhost:3002", shardMask: 6}, // 0b110
+//	{name: "shard-5", url: "https://localhost:3003", shardMask: 5}, // 0b101
+//	{name: "shard-4", url: "https://localhost:3004", shardMask: 4}, // 0b100
+//}
+//	{name: "shard-2", url: "https://localhost:3002", shardMask: 2},
+//}
 
 func normalizeRequestID(id string) string {
 	return strings.ToLower(id)
@@ -50,9 +132,10 @@ func buildShardClients(aggregatorURL, authHeader string, metrics *Metrics) []*Sh
 	if len(shardTargets) == 0 {
 		return []*ShardClient{
 			{
-				name:   "default",
-				url:    aggregatorURL,
-				client: NewJSONRPCClient(aggregatorURL, authHeader, metrics),
+				name:        "default",
+				url:         aggregatorURL,
+				client:      NewJSONRPCClient(aggregatorURL, authHeader, metrics),
+				proofClient: NewJSONRPCClient(aggregatorURL, authHeader, metrics), // Separate pool for proofs
 			},
 		}
 	}
@@ -68,19 +151,21 @@ func buildShardClients(aggregatorURL, authHeader string, metrics *Metrics) []*Sh
 			name = fmt.Sprintf("shard-%d", i)
 		}
 		clients = append(clients, &ShardClient{
-			name:      name,
-			url:       trimmed,
-			shardMask: target.shardMask,
-			client:    NewJSONRPCClient(trimmed, authHeader, metrics),
+			name:        name,
+			url:         trimmed,
+			shardMask:   target.shardMask,
+			client:      NewJSONRPCClient(trimmed, authHeader, metrics),
+			proofClient: NewJSONRPCClient(trimmed, authHeader, metrics), // Separate pool for proofs
 		})
 	}
 
 	if len(clients) == 0 {
 		return []*ShardClient{
 			{
-				name:   "default",
-				url:    aggregatorURL,
-				client: NewJSONRPCClient(aggregatorURL, authHeader, metrics),
+				name:        "default",
+				url:         aggregatorURL,
+				client:      NewJSONRPCClient(aggregatorURL, authHeader, metrics),
+				proofClient: NewJSONRPCClient(aggregatorURL, authHeader, metrics), // Separate pool for proofs
 			},
 		}
 	}
@@ -137,6 +222,23 @@ func matchesShardMask(requestIDHex string, shardMask int) (bool, error) {
 	return requestLowBits.Cmp(expected) == 0, nil
 }
 
+// matchesAnyShardTarget checks if a request ID matches any of the configured shard targets
+func matchesAnyShardTarget(requestIDHex string) bool {
+	if len(shardTargets) == 0 {
+		return true // No targets configured, accept all
+	}
+	for _, target := range shardTargets {
+		if target.shardMask <= 0 {
+			continue
+		}
+		ok, err := matchesShardMask(requestIDHex, target.shardMask)
+		if err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
 // Generate a cryptographically valid commitment request
 func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 	// Generate a real secp256k1 key pair
@@ -151,10 +253,35 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 	rand.Read(stateData)
 	stateHashImprint := signing.CreateDataHashImprint(stateData)
 
-	// Create RequestID deterministically
-	requestID, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to create request ID: %v", err))
+	var requestID api.RequestID
+
+	// Check if we have shard targets with masks configured
+	hasShardMasks := false
+	for _, target := range shardTargets {
+		if target.shardMask > 0 {
+			hasShardMasks = true
+			break
+		}
+	}
+
+	for {
+		calculated, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create request ID: %v", err))
+		}
+		// If no shard masks configured, accept any request ID
+		if !hasShardMasks {
+			requestID = calculated
+			break
+		}
+		// Check if the request ID matches any of the configured shard targets
+		if matchesAnyShardTarget(string(calculated)) {
+			requestID = calculated
+			break
+		}
+		// Regenerate state hash and try again
+		rand.Read(stateData)
+		stateHashImprint = signing.CreateDataHashImprint(stateData)
 	}
 
 	// Generate random transaction data and create DataHash imprint
@@ -192,7 +319,7 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 }
 
 // Worker function that continuously submits commitments
-func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics *Metrics, proofQueue chan proofJob, commitmentPool []*api.SubmitCommitmentRequest, poolIndex *atomic.Int64, counters *RequestRateCounters) {
+func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics *Metrics, proofQueue chan proofJob, commitmentPool []*api.SubmitCommitmentRequest, poolIndex *atomic.Int64, counters *RequestRateCounters, submissionWg *sync.WaitGroup) {
 	requestsPerWorker := float64(requestsPerSec) / float64(workerCount)
 	if requestsPerWorker <= 0 {
 		requestsPerWorker = 1
@@ -210,7 +337,10 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 			return
 		case <-ticker.C:
 			// Get pre-generated commitment from pool (round-robin)
+			submissionWg.Add(1)
 			go func() {
+				defer submissionWg.Done()
+
 				idx := poolIndex.Add(1) % int64(len(commitmentPool))
 				req := commitmentPool[idx]
 
@@ -226,12 +356,22 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 					sm.totalRequests.Add(1)
 				}
 
-				resp, err := client.call("submit_commitment", req)
+				// Create a context with 3 second timeout for submission
+				submitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+
+				resp, err := client.callWithContext(submitCtx, "submit_commitment", req)
+
 				if counters != nil {
 					counters.IncSubmitCompleted()
 				}
 				if err != nil {
 					atomic.AddInt64(&metrics.failedRequests, 1)
+					if sm := metrics.shard(shardIdx); sm != nil {
+						sm.failedRequests.Add(1)
+					}
+					// Log timeout/error details
+					metrics.recordError(fmt.Sprintf("submit failed: %v", err))
 					return
 				}
 
@@ -307,7 +447,7 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 				time.Sleep(proofInitialDelay)
 				startTime := time.Now()
 				normalizedID := normalizeRequestID(reqID)
-				client := shardClients[shardIdx].client
+				client := shardClients[shardIdx].proofClient // Use separate proof client pool
 
 				for attempt := 0; attempt < proofMaxRetries; attempt++ {
 					atomic.AddInt64(&metrics.proofAttempts, 1)
@@ -331,7 +471,12 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 						counters.IncProofStarted()
 					}
 					requestStart := time.Now()
-					resp, err := client.call("get_inclusion_proof", proofReq)
+
+					// Create a context with 5 second timeout for proof retrieval
+					proofCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					resp, err := client.callWithContext(proofCtx, "get_inclusion_proof", proofReq)
+					cancel()
+
 					if counters != nil {
 						counters.IncProofCompleted()
 					}
@@ -524,8 +669,9 @@ func logClientPerfRates(ctx context.Context, metrics *Metrics, counters *Request
 			activeConns := metrics.currentActiveConnections()
 			totalConn := metrics.totalConnectionAttempts()
 			failedConn := metrics.totalFailedConnections()
-			fmt.Printf("%s submitted=%d/%d (%.1f%%) fail=%d progress=%.1f%% rps=%.1f submit_started=%d/s submit_completed=%d/s proof_started=%d/s proof_completed=%d/s proof_retries=%d/s verified=%d/%d (%.1f%%) proof_lag=%d conns_active=%d conns_total=%d conns_failed=%d\n",
-				timestamp, successful, total, successRate, failed, progress, overallRPS, submitStartRate, submitCompleteRate, proofStartRate, proofCompleteRate, proofRetryRate, verified, successful, verificationPct, lag, activeConns, totalConn, failedConn)
+			outstanding := submitStarted - submitCompleted
+			fmt.Printf("%s submitted=%d/%d (%.1f%%) fail=%d progress=%.1f%% rps=%.1f submit_started=%d/s submit_completed=%d/s outstanding=%d proof_started=%d/s proof_completed=%d/s proof_retries=%d/s verified=%d/%d (%.1f%%) proof_lag=%d conns_active=%d conns_total=%d conns_failed=%d\n",
+				timestamp, successful, total, successRate, failed, progress, overallRPS, submitStartRate, submitCompleteRate, outstanding, proofStartRate, proofCompleteRate, proofRetryRate, verified, successful, verificationPct, lag, activeConns, totalConn, failedConn)
 
 			if len(shardClients) > 1 && len(metrics.shardMetrics) > 1 {
 				for idx, sc := range shardClients {
@@ -810,7 +956,8 @@ func main() {
 		fmt.Printf("Authorization: [configured]\n")
 	}
 	fmt.Printf("Duration: %v\n", testDuration)
-	fmt.Printf("Workers: %d\n", workerCount)
+	fmt.Printf("Submission workers: %d\n", workerCount)
+	fmt.Printf("Proof workers: %d\n", proofWorkerCount)
 	fmt.Printf("HTTP client pool size: %d\n", httpClientPoolSize)
 	fmt.Printf("Target RPS: %d\n", requestsPerSec)
 	fmt.Printf("----------------------------------------\n")
@@ -822,15 +969,6 @@ func main() {
 		startTime: time.Now(),
 	}
 	rateCounters := &RequestRateCounters{}
-
-	// Create context with timeout for commitment submission
-	submitCtx, submitCancel := context.WithTimeout(context.Background(), testDuration)
-	defer submitCancel()
-
-	// Create longer context for proof verification (allows extra time for late submissions)
-	proofTimeout := testDuration + 20*time.Second
-	proofCtx, proofCancel := context.WithTimeout(context.Background(), proofTimeout)
-	defer proofCancel()
 
 	shardClients := buildShardClients(aggregatorURL, authHeader, metrics)
 	metrics.initShardMetrics(len(shardClients))
@@ -899,28 +1037,115 @@ func main() {
 	preGenWG.Wait()
 	fmt.Printf("✓ Pre-generated %d commitments\n\n", poolSize)
 
+	// === WARMUP PHASE ===
+	fmt.Printf("========================================\n")
+	fmt.Printf("WARMUP PHASE\n")
+	fmt.Printf("========================================\n")
+	warmupDuration := 3 * time.Second
+	warmupPoolSize := int(float64(requestsPerSec) * warmupDuration.Seconds() * 1.1)
+	fmt.Printf("Generating %d warmup commitments (%d RPS × %v + 10%% buffer)...\n", warmupPoolSize, requestsPerSec, warmupDuration)
+
+	// Generate separate warmup pool
+	warmupPool := make([]*api.SubmitCommitmentRequest, warmupPoolSize)
+	warmupJobs := make(chan int, workerCountPreGen*2)
+	var warmupPreGenWG sync.WaitGroup
+	for w := 0; w < workerCountPreGen; w++ {
+		warmupPreGenWG.Add(1)
+		go func() {
+			defer warmupPreGenWG.Done()
+			for idx := range warmupJobs {
+				warmupPool[idx] = generateCommitmentRequest()
+			}
+		}()
+	}
+	for i := 0; i < warmupPoolSize; i++ {
+		warmupJobs <- i
+	}
+	close(warmupJobs)
+	warmupPreGenWG.Wait()
+	fmt.Printf("✓ Generated %d warmup commitments\n", warmupPoolSize)
+	fmt.Printf("Warming up servers...\n")
+
+	warmupCtx, warmupCancel := context.WithTimeout(context.Background(), warmupDuration)
+
+	var warmupWg sync.WaitGroup
+	var warmupSubmissionWg sync.WaitGroup
+	var warmupPoolIndex atomic.Int64
+	var warmupMetrics Metrics
+	warmupMetrics.submittedRequestIDs.Store("init", true) // Initialize map
+	warmupMetrics.submissionStartTime = time.Now()
+
+	// Start warmup workers with separate warmup pool
+	for i := 0; i < workerCount; i++ {
+		warmupWg.Add(1)
+		go func() {
+			defer warmupWg.Done()
+			commitmentWorker(warmupCtx, shardClients, &warmupMetrics, nil, warmupPool, &warmupPoolIndex, nil, &warmupSubmissionWg)
+		}()
+	}
+
+	// Wait for warmup to complete
+	<-warmupCtx.Done()
+	warmupCancel()
+
+	// Wait for outstanding warmup requests
+	warmupSubmissionWg.Wait()
+	warmupWg.Wait()
+
+	warmupTotal := atomic.LoadInt64(&warmupMetrics.totalRequests)
+	warmupSuccess := atomic.LoadInt64(&warmupMetrics.successfulRequests)
+	warmupFailed := atomic.LoadInt64(&warmupMetrics.failedRequests)
+	warmupDurationActual := time.Since(warmupMetrics.submissionStartTime)
+
+	// Calculate average submission latency during warmup
+	var warmupAvgLatency time.Duration
+	if warmupSuccess > 0 {
+		warmupAvgLatency = time.Duration(atomic.LoadInt64(&warmupMetrics.failedRequests) / warmupSuccess)
+	}
+
+	fmt.Printf("✓ Warmup complete: %d submitted, %d successful, %d failed\n", warmupTotal, warmupSuccess, warmupFailed)
+	fmt.Printf("  Duration: %v\n", warmupDurationActual.Round(time.Millisecond))
+	fmt.Printf("  Submission latency - Avg: %v\n", warmupAvgLatency.Round(time.Millisecond))
+	fmt.Printf("Waiting 5 seconds before starting actual test...\n\n")
+	time.Sleep(5 * time.Second)
+
+	// === ACTUAL TEST ===
+	fmt.Printf("========================================\n")
+	fmt.Printf("STARTING ACTUAL TEST\n")
+	fmt.Printf("========================================\n\n")
+
+	// Create contexts for actual test (AFTER warmup completes)
+	submitCtx, submitCancel := context.WithTimeout(context.Background(), testDuration)
+	defer submitCancel()
+
+	proofTimeout := testDuration + 20*time.Second
+	proofCtx, proofCancel := context.WithTimeout(context.Background(), proofTimeout)
+	defer proofCancel()
+
 	var poolIndex atomic.Int64
 	var wg sync.WaitGroup
+	var submissionWg sync.WaitGroup // Track outstanding submission requests
 
 	// Record when submission actually starts
 	metrics.submissionStartTime = time.Now()
 
 	// Start commitment workers (use submitCtx - stops after testDuration)
+	// These workers ONLY handle submissions - no proof requests
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			commitmentWorker(submitCtx, shardClients, metrics, proofQueue, commitmentPool, &poolIndex, rateCounters)
+			commitmentWorker(submitCtx, shardClients, metrics, proofQueue, commitmentPool, &poolIndex, rateCounters, &submissionWg)
 		}()
 	}
 
-	// Start proof verification workers (use proofCtx - runs longer)
-	// Note: We don't close the proof queue manually; workers exit when proofCtx is cancelled
-	// after all proofs are verified or timeout is reached
-	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
+	// Start SEPARATE proof verification workers (use proofCtx - runs longer)
+	// These workers are dedicated to proof requests, so they don't compete with submissions
+	var proofWg sync.WaitGroup
+	for i := 0; i < proofWorkerCount; i++ {
+		proofWg.Add(1)
 		go func() {
-			defer wg.Done()
+			defer proofWg.Done()
 			proofVerificationWorker(proofCtx, shardClients, metrics, proofQueue, proofCancel, rateCounters)
 		}()
 	}
@@ -935,13 +1160,20 @@ func main() {
 	// Monitor when submission phase completes
 	go func() {
 		<-submitCtx.Done()
+
+		// Wait for all outstanding submissions to complete
+		fmt.Printf("\n----------------------------------------\n")
+		fmt.Printf("Submission window closed; waiting for outstanding requests to complete...\n")
+		submissionWg.Wait()
+
 		metrics.submissionEndTime = time.Now()
+		fmt.Printf("All submissions completed.\n")
 	}()
 
 	// Wait for all workers to complete (both submission and proof verification)
 	// Note: Proof workers continue running for up to 20 seconds after submissions stop
 	fmt.Printf("\n----------------------------------------\n")
-	fmt.Printf("Commitment submissions complete; waiting for proof verification...\n")
+	fmt.Printf("Commitment submissions in progress; will verify proofs after...\n")
 
 	// Monitor proof verification progress and cancel early when all proofs are verified
 	lastProofCount := int64(0)
@@ -984,7 +1216,8 @@ func main() {
 		}
 	}()
 
-	wg.Wait()
+	wg.Wait()      // Wait for submission workers
+	proofWg.Wait() // Wait for proof workers
 
 	// Stop submission phase and get counts
 	fmt.Printf("\n----------------------------------------\n")

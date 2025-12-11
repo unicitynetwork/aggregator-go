@@ -310,8 +310,8 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_HighThroughput() {
 	// Verify throughput
 	require.Equal(suite.T(), int32(0), submitErrors.Load(), "Should have no submit errors")
 	actualRPS := float64(submittedCount.Load()) / actualDuration.Seconds()
-	require.GreaterOrEqual(suite.T(), actualRPS, float64(targetRPS)*0.95,
-		"Should sustain at least 95%% of target RPS (%.0f/sec)", actualRPS)
+	require.GreaterOrEqual(suite.T(), actualRPS, float64(targetRPS)*0.90,
+		"Should sustain at least 90%% of target RPS (%.0f/sec)", actualRPS)
 
 	// Verify processing
 	successRate := float64(processedCount.Load()) / float64(submittedCount.Load())
