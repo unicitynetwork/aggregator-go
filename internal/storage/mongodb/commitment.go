@@ -177,6 +177,30 @@ func (cs *CommitmentStorage) CountUnprocessed(ctx context.Context) (int64, error
 	return count, nil
 }
 
+// GetAllPending retrieves all unprocessed commitments (for crash recovery)
+func (cs *CommitmentStorage) GetAllPending(ctx context.Context) ([]*models.Commitment, error) {
+	filter := bson.M{"processedAt": bson.M{"$exists": false}}
+	cursor, err := cs.collection.Find(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pending commitments: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var commitments []*models.Commitment
+	for cursor.Next(ctx) {
+		var commitmentBSON models.CommitmentBSON
+		if err := cursor.Decode(&commitmentBSON); err != nil {
+			return nil, fmt.Errorf("failed to decode commitment: %w", err)
+		}
+		commitment, err := commitmentBSON.FromBSON()
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+		}
+		commitments = append(commitments, commitment)
+	}
+	return commitments, cursor.Err()
+}
+
 // Initialize initializes the commitment storage (no-op for MongoDB)
 func (cs *CommitmentStorage) Initialize(ctx context.Context) error {
 	return nil

@@ -95,6 +95,7 @@ func createTestBlock(index *api.BigInt) *models.Block {
 		NoDeletionProofHash: noDeletionProofHash,
 		CreatedAt:           api.Now(),
 		UnicityCertificate:  unicityCertificate,
+		Finalized:           true, // Blocks are finalized by default in tests
 	}
 
 	return block
@@ -117,6 +118,7 @@ func createTestBlockWithRootHash(index int64, chainID string, rootHash api.HexBy
 		NoDeletionProofHash: noDeletionProofHash,
 		CreatedAt:           api.Now(),
 		UnicityCertificate:  unicityCertificate,
+		Finalized:           true, // Blocks are finalized by default in tests
 	}
 
 	return block

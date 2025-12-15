@@ -160,6 +160,18 @@ The service is configured via environment variables:
 | `BATCH_LIMIT` | Maximum number of commitments to process per batch | `1000` |
 | `ROUND_DURATION` | Duration between block creation rounds | `1s` |
 
+### Storage Configuration
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `USE_REDIS_FOR_COMMITMENTS` | Use Redis for commitment queue (instead of MongoDB) | `false` |
+| `REDIS_HOST` | Redis server hostname | `localhost` |
+| `REDIS_PORT` | Redis server port | `6379` |
+| `REDIS_PASSWORD` | Redis server password | `` |
+| `REDIS_DB` | Redis database number | `0` |
+| `REDIS_STREAM_NAME` | Redis stream name for commitments (allows multiple shards to share a Redis instance) | `commitments` |
+| `REDIS_FLUSH_INTERVAL` | Interval for flushing pending commitments to Redis | `50ms` |
+| `REDIS_MAX_BATCH_SIZE` | Maximum batch size before forcing flush | `2000` |
+
 ### BFT Configuration
 
 | Variable                            | Description                                                                         | Default                          |

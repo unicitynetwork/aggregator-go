@@ -143,7 +143,7 @@ func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.
 		return nil, fmt.Errorf("invalid shard ID: %w", err)
 	}
 
-	pas.logger.WithContext(ctx).Info("Shard proof requested", "shardId", req.ShardID)
+	pas.logger.WithContext(ctx).Debug("Shard proof requested", "shardId", req.ShardID)
 
 	shardPath := new(big.Int).SetInt64(int64(req.ShardID))
 	merkleTreePath, err := pas.parentRoundManager.GetSMT().GetPath(shardPath)
@@ -273,6 +273,7 @@ func (pas *ParentAggregatorService) GetHealthStatus(ctx context.Context) (*api.H
 
 	// Add database connectivity check
 	if err := pas.storage.Ping(ctx); err != nil {
+		status.Status = "unhealthy"
 		status.AddDetail("database", "disconnected")
 		pas.logger.WithContext(ctx).Error("Database health check failed", "error", err.Error())
 	} else {

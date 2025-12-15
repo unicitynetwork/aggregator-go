@@ -93,7 +93,7 @@ func TestAggregatorRecordStorage_StoreBatch_DuplicateHandling(t *testing.T) {
 	err := storage.CreateIndexes(ctx)
 	require.NoError(t, err, "CreateIndexes should not return an error")
 
-	// Create test records with some duplicates
+	// Create test records
 	records1 := []*models.AggregatorRecord{
 		createTestAggregatorRecord("request1", 1, 0),
 		createTestAggregatorRecord("request2", 1, 1),
@@ -110,25 +110,36 @@ func TestAggregatorRecordStorage_StoreBatch_DuplicateHandling(t *testing.T) {
 	err = storage.StoreBatch(ctx, records1)
 	require.NoError(t, err, "First StoreBatch should not return an error")
 
-	// Store second batch with duplicates - should not error
+	// Store second batch with duplicates - duplicates are ignored
+	// With SetOrdered(false), non-duplicate inserts still happen
 	err = storage.StoreBatch(ctx, records2)
-	assert.NoError(t, err, "StoreBatch with duplicates should not return an error")
+	require.NoError(t, err, "StoreBatch should ignore duplicate key errors")
 
-	// Verify that we only have 4 unique records (3 from first batch + 1 new from second)
+	// With SetOrdered(false), request4 was still inserted despite duplicates
 	count, err := storage.Count(ctx)
 	require.NoError(t, err, "Count should not return an error")
-	assert.Equal(t, int64(4), count, "Should have exactly 4 records (duplicates ignored)")
+	assert.Equal(t, int64(4), count, "Should have 4 records (3 original + 1 new, duplicates failed)")
 
-	// Verify the new record was stored
-	newRecord, err := storage.GetByRequestID(ctx, "request4")
-	require.NoError(t, err, "GetByRequestID should not return an error")
-	assert.NotNil(t, newRecord, "New record should be found")
-	assert.Equal(t, api.RequestID("request4"), newRecord.RequestID, "New record should have correct request ID")
+	// Test GetExistingRequestIDs to filter duplicates before inserting
+	requestIDs := []string{"request1", "request2", "request4", "request5"}
+	existing, err := storage.GetExistingRequestIDs(ctx, requestIDs)
+	require.NoError(t, err, "GetExistingRequestIDs should not return an error")
+	assert.True(t, existing["request1"], "request1 should exist")
+	assert.True(t, existing["request2"], "request2 should exist")
+	assert.True(t, existing["request4"], "request4 should exist now")
+	assert.False(t, existing["request5"], "request5 should not exist")
 
-	// Verify duplicates were ignored (original records still exist)
-	record1, err := storage.GetByRequestID(ctx, "request1")
-	require.NoError(t, err, "GetByRequestID should not return an error")
-	assert.NotNil(t, record1, "Original record should still exist")
+	// Insert only new records (after filtering with GetExistingRequestIDs)
+	newRecords := []*models.AggregatorRecord{
+		createTestAggregatorRecord("request5", 1, 4),
+	}
+	err = storage.StoreBatch(ctx, newRecords)
+	require.NoError(t, err, "StoreBatch with only new records should succeed")
+
+	// Verify all 5 records now exist
+	count, err = storage.Count(ctx)
+	require.NoError(t, err, "Count should not return an error")
+	assert.Equal(t, int64(5), count, "Should have exactly 5 records now")
 }
 
 func TestAggregatorRecordStorage_GetByBlockNumber(t *testing.T) {

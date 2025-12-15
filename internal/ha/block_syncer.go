@@ -133,12 +133,14 @@ func (bs *blockSyncer) updateSMTForBlock(ctx context.Context, blockRecord *model
 }
 
 func (bs *blockSyncer) getLastStoredBlockRecordNumber(ctx context.Context) (*big.Int, error) {
-	blockRecord, err := bs.storage.BlockRecordsStorage().GetLatestBlock(ctx)
+	// Use BlockStorage which filters on finalized=true
+	// This ensures we only sync up to the latest finalized block
+	latestNumber, err := bs.storage.BlockStorage().GetLatestNumber(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch latest block number: %w", err)
+		return nil, fmt.Errorf("failed to fetch latest finalized block number: %w", err)
 	}
-	if blockRecord == nil {
+	if latestNumber == nil {
 		return big.NewInt(0), nil
 	}
-	return blockRecord.BlockNumber.Int, nil
+	return latestNumber.Int, nil
 }

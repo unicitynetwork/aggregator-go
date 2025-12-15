@@ -409,6 +409,7 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 
 	// Add database connectivity check
 	if err := as.storage.Ping(ctx); err != nil {
+		status.Status = "unhealthy"
 		status.AddDetail("database", "disconnected")
 		as.logger.WithContext(ctx).Error("Database health check failed", "error", err.Error())
 	} else {
@@ -435,6 +436,17 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 				"count", unprocessedCount)
 		} else {
 			status.AddDetail("commitment_queue_status", "healthy")
+		}
+	}
+
+	if as.config.Sharding.Mode == config.ShardingModeChild {
+		if err := as.roundManager.CheckParentHealth(ctx); err != nil {
+			status.Status = "degraded"
+			status.AddDetail("parent", "unreachable")
+			status.AddDetail("parent_error", err.Error())
+			as.logger.WithContext(ctx).Warn("Parent aggregator health check failed", "error", err.Error())
+		} else {
+			status.AddDetail("parent", "connected")
 		}
 	}
 
