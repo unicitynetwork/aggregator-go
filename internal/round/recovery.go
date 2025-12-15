@@ -169,11 +169,15 @@ func recoverMissingData(
 	missingSmtKeys []api.RequestID,
 ) error {
 	// Collect all needed request IDs
-	neededIDs := make([]api.RequestID, 0, len(missingRecords)+len(missingSmtKeys))
+	neededIDsMap := make(map[string]api.RequestID, len(missingRecords)+len(missingSmtKeys))
 	for _, missing := range missingRecords {
-		neededIDs = append(neededIDs, missing.reqID)
+		neededIDsMap[string(missing.reqID)] = missing.reqID
 	}
 	for _, reqID := range missingSmtKeys {
+		neededIDsMap[string(reqID)] = reqID
+	}
+	neededIDs := make([]api.RequestID, 0, len(neededIDsMap))
+	for _, reqID := range neededIDsMap {
 		neededIDs = append(neededIDs, reqID)
 	}
 
