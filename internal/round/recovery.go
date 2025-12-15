@@ -284,6 +284,10 @@ func LoadRecoveredNodesIntoSMT(
 		return fmt.Errorf("failed to get SMT nodes: %w", err)
 	}
 
+	if len(nodes) != len(keys) {
+		return fmt.Errorf("FATAL: expected %d SMT nodes but found %d - data corruption", len(keys), len(nodes))
+	}
+
 	leaves := make([]*smt.Leaf, len(nodes))
 	for i, node := range nodes {
 		path := new(big.Int).SetBytes(node.Key)

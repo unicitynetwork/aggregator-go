@@ -419,10 +419,10 @@ func (cs *CommitmentStorage) GetByRequestIDs(ctx context.Context, requestIDs []a
 
 	result := make(map[string]*models.Commitment, len(requestIDs))
 	lastID := "0"
-	const batchSize = 1000
+	const batchSize = 10000
 
 	for {
-		messages, err := cs.client.XRange(ctx, cs.streamName, lastID, "+").Result()
+		messages, err := cs.client.XRangeN(ctx, cs.streamName, lastID, "+", batchSize).Result()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read Redis stream: %w", err)
 		}

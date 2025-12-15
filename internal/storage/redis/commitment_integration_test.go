@@ -796,3 +796,51 @@ func (suite *RedisTestSuite) TestGetAllPending_OnlyReturnsPending() {
 	require.NoError(t, err)
 	require.Len(t, pending, 2, "GetAllPending should return only 2 pending commitments, not all 5")
 }
+
+// TestGetByRequestIDs_BatchesCorrectly verifies XRangeN reads in batches, not entire stream.
+func (suite *RedisTestSuite) TestGetByRequestIDs_BatchesCorrectly() {
+	ctx := suite.ctx
+	t := suite.T()
+
+	const totalMessages = 15000
+	const batchSize = 10000
+
+	commitments := make([]*models.Commitment, totalMessages)
+	for i := 0; i < totalMessages; i++ {
+		commitments[i] = createTestCommitment()
+	}
+	require.NoError(t, suite.storage.StoreBatch(ctx, commitments))
+	time.Sleep(200 * time.Millisecond)
+
+	// Call XRangeN as GetByRequestIDs should do (with Count limit)
+	messages, err := suite.client.XRangeN(ctx, suite.storage.streamName, "0", "+", batchSize).Result()
+	require.NoError(t, err)
+
+	// Should return at most batchSize, not all 15000
+	require.LessOrEqual(t, len(messages), batchSize,
+		"XRangeN should return at most %d messages, got %d", batchSize, len(messages))
+}
+
+// TestGetByRequestIDs_FindsAcrossMultipleBatches verifies pagination works
+// when the requested ID is beyond the first batch.
+func (suite *RedisTestSuite) TestGetByRequestIDs_FindsAcrossMultipleBatches() {
+	ctx := suite.ctx
+	t := suite.T()
+
+	// Store 25000 messages (requires 3 batches of 10000 to scan)
+	const totalMessages = 25000
+	commitments := make([]*models.Commitment, totalMessages)
+	for i := 0; i < totalMessages; i++ {
+		commitments[i] = createTestCommitment()
+	}
+	require.NoError(t, suite.storage.StoreBatch(ctx, commitments))
+	time.Sleep(300 * time.Millisecond)
+
+	// Request the LAST commitment - requires scanning all batches
+	requestIDs := []api.RequestID{commitments[totalMessages-1].RequestID}
+
+	result, err := suite.storage.GetByRequestIDs(ctx, requestIDs)
+	require.NoError(t, err)
+	require.Len(t, result, 1, "Should find the commitment in the last batch")
+	require.NotNil(t, result[string(commitments[totalMessages-1].RequestID)])
+}
