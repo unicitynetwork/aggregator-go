@@ -11,6 +11,7 @@ import (
 // CertificationRequest represents a state transition certification request
 type CertificationRequest struct {
 	ID                    primitive.ObjectID `json:"-"`
+	Version               int                `json:"version"`
 	StateID               api.StateID        `json:"stateId"`
 	CertificationData     CertificationData  `json:"certificationData"`
 	AggregateRequestCount uint64             `json:"aggregateRequestCount"`
@@ -22,7 +23,8 @@ type CertificationRequest struct {
 // CertificationRequestBSON represents the BSON version of CertificationRequest for MongoDB storage
 type CertificationRequestBSON struct {
 	ID                    primitive.ObjectID    `bson:"_id,omitempty"`
-	StateID               string                `bson:"stateId"`
+	Version               int                   `json:"version"`
+	StateID               string                `bson:"requestId"` // keep stateID stored as "requestId"
 	TransactionHash       string                `bson:"transactionHash"`
 	CertificationData     CertificationDataBSON `bson:"certificationData"`
 	AggregateRequestCount uint64                `bson:"aggregateRequestCount"`
@@ -33,6 +35,7 @@ type CertificationRequestBSON struct {
 // NewCertificationRequest creates a new certification request
 func NewCertificationRequest(stateID api.StateID, certData CertificationData) *CertificationRequest {
 	return &CertificationRequest{
+		Version:               2,
 		StateID:               stateID,
 		CertificationData:     certData,
 		AggregateRequestCount: 1, // Default to 1 for direct requests
@@ -43,6 +46,7 @@ func NewCertificationRequest(stateID api.StateID, certData CertificationData) *C
 // NewCertificationRequestWithAggregate creates a new certification request with aggregate count
 func NewCertificationRequestWithAggregate(stateID api.StateID, certData CertificationData, aggregateCount uint64) *CertificationRequest {
 	return &CertificationRequest{
+		Version:               2,
 		StateID:               stateID,
 		CertificationData:     certData,
 		AggregateRequestCount: aggregateCount,
@@ -58,6 +62,7 @@ func (c *CertificationRequest) ToBSON() *CertificationRequestBSON {
 	}
 	return &CertificationRequestBSON{
 		ID:                    c.ID,
+		Version:               c.Version,
 		StateID:               c.StateID.String(),
 		CertificationData:     c.CertificationData.ToBSON(),
 		AggregateRequestCount: c.AggregateRequestCount,
@@ -78,10 +83,19 @@ func (cb *CertificationRequestBSON) FromBSON() (*CertificationRequest, error) {
 	}
 	return &CertificationRequest{
 		ID:                    cb.ID,
+		Version:               cb.Version,
 		StateID:               api.StateID(cb.StateID),
 		CertificationData:     *certData,
 		AggregateRequestCount: cb.AggregateRequestCount,
 		CreatedAt:             api.NewTimestamp(cb.CreatedAt),
 		ProcessedAt:           processedAt,
 	}, nil
+}
+
+func (c *CertificationRequest) ToAPI() *api.CertificationRequest {
+	return &api.CertificationRequest{
+		StateID:               c.StateID,
+		CertificationData:     *c.CertificationData.ToAPI(),
+		AggregateRequestCount: c.AggregateRequestCount,
+	}
 }

@@ -161,7 +161,7 @@ All endpoints follow JSON-RPC 2.0 specification:
 
 ### Core Methods
 - `certification_request`: Submit state transition request
-- `get_inclusion_proof`: Retrieve merkle proof for certification request
+- `get_inclusion_proof.v2`: Retrieve merkle proof for certification request
 - `get_no_deletion_proof`: Get global no-deletion proof (not implemented)
 - `get_block_height`: Current block number
 - `get_block`: Block data by number or "latest"

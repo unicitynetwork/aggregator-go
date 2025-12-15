@@ -356,7 +356,7 @@ func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interf
 	streamIDs := make([]string, len(entries))
 	for i, entry := range entries {
 		if entry.StreamID == "" {
-			return fmt.Errorf("missing stream ID for stateID %s", entry.StateID.String())
+			return fmt.Errorf("missing stream ID for stateID %s", entry.RequestID.String())
 		}
 		streamIDs[i] = entry.StreamID
 	}

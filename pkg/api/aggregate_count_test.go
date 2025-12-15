@@ -48,27 +48,27 @@ func TestAggregateRequestCountSerialization(t *testing.T) {
 				Index:   blockIndex,
 				ChainID: "test",
 			},
-			TotalCount: 186,
+			TotalCommitments: 186,
 		}
 
 		// Marshal to JSON
 		data, err := json.Marshal(resp)
 		require.NoError(t, err)
 
-		// Check that totalCount is serialized as string
+		// Check that totalCommitments is serialized as string
 		var jsonMap map[string]interface{}
 		err = json.Unmarshal(data, &jsonMap)
 		require.NoError(t, err)
 
-		totalCount, exists := jsonMap["totalCount"]
-		require.True(t, exists, "totalCount should exist in JSON")
-		require.Equal(t, "186", totalCount, "totalCount should be serialized as string")
+		totalCommitments, exists := jsonMap["totalCommitments"]
+		require.True(t, exists, "totalCommitments should exist in JSON")
+		require.Equal(t, "186", totalCommitments, "totalCommitments should be serialized as string")
 
 		// Unmarshal back
 		var decoded GetBlockResponse
 		err = json.Unmarshal(data, &decoded)
 		require.NoError(t, err)
-		require.Equal(t, uint64(186), decoded.TotalCount)
+		require.Equal(t, uint64(186), decoded.TotalCommitments)
 	})
 
 	t.Run("AggregatorRecord JSON serialization", func(t *testing.T) {

@@ -35,9 +35,9 @@ func (s *Server) handleCertificationRequest(ctx context.Context, params json.Raw
 	return response, nil
 }
 
-// handleGetInclusionProof handles the get_inclusion_proof method
-func (s *Server) handleGetInclusionProof(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
-	var req api.GetInclusionProofRequest
+// handleGetInclusionProofV2 handles the get_inclusion_proof.v2 method
+func (s *Server) handleGetInclusionProofV2(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
+	var req api.GetInclusionProofRequestV2
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
 	}
@@ -48,7 +48,7 @@ func (s *Server) handleGetInclusionProof(ctx context.Context, params json.RawMes
 	}
 
 	// Call service
-	response, err := s.service.GetInclusionProof(ctx, &req)
+	response, err := s.service.GetInclusionProofV2(ctx, &req)
 	if err != nil {
 		s.logger.WithContext(ctx).Error("Failed to get inclusion proof", "error", err.Error())
 		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to get inclusion proof", err.Error())

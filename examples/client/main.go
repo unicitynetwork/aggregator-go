@@ -57,8 +57,8 @@ func main() {
 
 	// Example 3: Show other API types usage
 	fmt.Println("\n3. Other API types available:")
-	fmt.Println("   - api.GetInclusionProofRequest")
-	fmt.Println("   - api.GetInclusionProofResponse")
+	fmt.Println("   - api.GetInclusionProofRequestV2")
+	fmt.Println("   - api.GetInclusionProofResponseV2")
 	fmt.Println("   - api.GetBlockRequest")
 	fmt.Println("   - api.GetBlockResponse")
 	fmt.Println("   - api.GetBlockRecords")

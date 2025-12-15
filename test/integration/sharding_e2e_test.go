@@ -280,7 +280,7 @@ func (suite *ShardingE2ETestSuite) rpcCall(url string, method string, params int
 	return rpcResp.Result, nil
 }
 
-func (suite *ShardingE2ETestSuite) submitCommitment(url string, commitment *api.CertificationRequest) (*api.CertificationResponse, error) {
+func (suite *ShardingE2ETestSuite) certificationRequest(url string, commitment *api.CertificationRequest) (*api.CertificationResponse, error) {
 	result, err := suite.rpcCall(url, "certification_request", commitment)
 	if err != nil {
 		return nil, err
@@ -294,14 +294,14 @@ func (suite *ShardingE2ETestSuite) submitCommitment(url string, commitment *api.
 	return &response, nil
 }
 
-func (suite *ShardingE2ETestSuite) getInclusionProof(url string, stateID string) (*api.GetInclusionProofResponse, error) {
+func (suite *ShardingE2ETestSuite) getInclusionProof(url string, stateID string) (*api.GetInclusionProofResponseV2, error) {
 	params := map[string]string{"stateId": stateID}
-	result, err := suite.rpcCall(url, "get_inclusion_proof", params)
+	result, err := suite.rpcCall(url, "get_inclusion_proof.v2", params)
 	if err != nil {
 		return nil, err
 	}
 
-	var response api.GetInclusionProofResponse
+	var response api.GetInclusionProofResponseV2
 	if err := json.Unmarshal(result, &response); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
@@ -373,7 +373,7 @@ func (suite *ShardingE2ETestSuite) waitForBlock(url string, blockNumber int64, t
 
 // waitForProofAvailable waits for a VALID inclusion proof to become available
 // This includes waiting for the parent proof to be received and joined
-func (suite *ShardingE2ETestSuite) waitForProofAvailable(url, stateIDStr string, timeout time.Duration) *api.GetInclusionProofResponse {
+func (suite *ShardingE2ETestSuite) waitForProofAvailable(url, stateIDStr string, timeout time.Duration) *api.GetInclusionProofResponseV2 {
 	deadline := time.Now().Add(timeout)
 	stateID := api.StateID(stateIDStr)
 	stateIDPath, err := stateID.GetPath()
@@ -421,28 +421,28 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 
 	commitment1, stateID1 := suite.createCommitmentForShard(2, 1)
 	submitTime1 := time.Now()
-	resp1, err := suite.submitCommitment(child0URL, commitment1)
+	resp1, err := suite.certificationRequest(child0URL, commitment1)
 	suite.Require().NoError(err)
 	suite.Require().Equal("SUCCESS", resp1.Status)
 	suite.T().Logf("  Submitted certification request 1 to child 0: %s", stateID1)
 
 	commitment2, stateID2 := suite.createCommitmentForShard(2, 1)
 	submitTime2 := time.Now()
-	resp2, err := suite.submitCommitment(child0URL, commitment2)
+	resp2, err := suite.certificationRequest(child0URL, commitment2)
 	suite.Require().NoError(err)
 	suite.Require().Equal("SUCCESS", resp2.Status)
 	suite.T().Logf("  Submitted certification request 2 to child 0: %s", stateID2)
 
 	commitment3, stateID3 := suite.createCommitmentForShard(3, 1)
 	submitTime3 := time.Now()
-	resp3, err := suite.submitCommitment(child1URL, commitment3)
+	resp3, err := suite.certificationRequest(child1URL, commitment3)
 	suite.Require().NoError(err)
 	suite.Require().Equal("SUCCESS", resp3.Status)
 	suite.T().Logf("  Submitted certification request 3 to child 1: %s", stateID3)
 
 	commitment4, stateID4 := suite.createCommitmentForShard(3, 1)
 	submitTime4 := time.Now()
-	resp4, err := suite.submitCommitment(child1URL, commitment4)
+	resp4, err := suite.certificationRequest(child1URL, commitment4)
 	suite.Require().NoError(err)
 	suite.Require().Equal("SUCCESS", resp4.Status)
 	suite.T().Logf("  Submitted certification request 4 to child 1: %s", stateID4)
@@ -500,11 +500,11 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 
 	commitment5, stateID5 := suite.createCommitmentForShard(2, 1)
 	submitTime5 := time.Now()
-	suite.submitCommitment(child0URL, commitment5)
+	suite.certificationRequest(child0URL, commitment5)
 
 	commitment6, stateID6 := suite.createCommitmentForShard(3, 1)
 	submitTime6 := time.Now()
-	suite.submitCommitment(child1URL, commitment6)
+	suite.certificationRequest(child1URL, commitment6)
 
 	suite.T().Log("✓ Submitted additional commitments")
 

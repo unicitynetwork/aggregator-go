@@ -251,7 +251,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 
 		for i, commitment := range rm.currentRound.Commitments {
 			stateIds[i] = commitment.StateID
-			ackEntries[i] = interfaces.CertificationRequestAck{StateID: commitment.StateID, StreamID: commitment.StreamID}
+			ackEntries[i] = interfaces.CertificationRequestAck{RequestID: commitment.StateID, StreamID: commitment.StreamID}
 		}
 	}
 	rm.roundMutex.Unlock()

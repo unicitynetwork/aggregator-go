@@ -42,7 +42,7 @@ func (cs *CommitmentStorage) Store(ctx context.Context, commitment *models.Certi
 // GetByStateID retrieves a certification request by state ID
 func (cs *CommitmentStorage) GetByStateID(ctx context.Context, stateID api.StateID) (*models.CertificationRequest, error) {
 	var commitmentBSON models.CertificationRequestBSON
-	err := cs.collection.FindOne(ctx, bson.M{"stateId": stateID}).Decode(&commitmentBSON)
+	err := cs.collection.FindOne(ctx, bson.M{"requestId": stateID}).Decode(&commitmentBSON)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
@@ -127,12 +127,12 @@ func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interf
 		return nil
 	}
 
-	stateIDs := make([]api.StateID, len(entries))
+	requestIDs := make([]api.RequestID, len(entries))
 	for i, entry := range entries {
-		stateIDs[i] = entry.StateID
+		requestIDs[i] = entry.RequestID
 	}
 
-	filter := bson.M{"stateId": bson.M{"$in": stateIDs}}
+	filter := bson.M{"requestId": bson.M{"$in": requestIDs}}
 	update := bson.M{"$set": bson.M{"processedAt": time.Now()}}
 
 	_, err := cs.collection.UpdateMany(ctx, filter, update)
@@ -149,7 +149,7 @@ func (cs *CommitmentStorage) Delete(ctx context.Context, stateIDs []api.StateID)
 		return nil
 	}
 
-	filter := bson.M{"stateId": bson.M{"$in": stateIDs}}
+	filter := bson.M{"requestId": bson.M{"$in": stateIDs}}
 	_, err := cs.collection.DeleteMany(ctx, filter)
 	if err != nil {
 		return fmt.Errorf("failed to delete commitments: %w", err)
@@ -196,7 +196,7 @@ func (cs *CommitmentStorage) Close(ctx context.Context) error {
 func (cs *CommitmentStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
 		{
-			Keys:    bson.D{{Key: "stateId", Value: 1}},
+			Keys:    bson.D{{Key: "requestId", Value: 1}},
 			Options: options.Index().SetUnique(true),
 		},
 		{

@@ -10,6 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	modelsV1 "github.com/unicitynetwork/aggregator-go/internal/models/v1"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -67,20 +68,15 @@ func (ars *AggregatorRecordStorage) StoreBatch(ctx context.Context, records []*m
 
 // GetByStateID retrieves an aggregator record by state ID
 func (ars *AggregatorRecordStorage) GetByStateID(ctx context.Context, stateID api.StateID) (*models.AggregatorRecord, error) {
-	var recordBSON models.AggregatorRecordBSON
-	err := ars.collection.FindOne(ctx, bson.M{"stateId": string(stateID)}).Decode(&recordBSON)
-	if err != nil {
+	var raw bson.Raw
+	filter := bson.M{"requestId": stateID.String()}
+	if err := ars.collection.FindOne(ctx, filter).Decode(&raw); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get aggregator record by state ID: %w", err)
 	}
-
-	record, err := recordBSON.FromBSON()
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert from BSON: %w", err)
-	}
-	return record, nil
+	return ars.decodeRecord(raw)
 }
 
 // GetByBlockNumber retrieves all records for a specific block
@@ -92,15 +88,15 @@ func (ars *AggregatorRecordStorage) GetByBlockNumber(ctx context.Context, blockN
 	}
 	defer cursor.Close(ctx)
 
-	records := make([]*models.AggregatorRecord, 0)
+	var records []*models.AggregatorRecord
 	for cursor.Next(ctx) {
-		var recordBSON models.AggregatorRecordBSON
-		if err := cursor.Decode(&recordBSON); err != nil {
+		var raw bson.Raw
+		if err := cursor.Decode(&raw); err != nil {
 			return nil, fmt.Errorf("failed to decode aggregator record: %w", err)
 		}
-		record, err := recordBSON.FromBSON()
+		record, err := ars.decodeRecord(raw)
 		if err != nil {
-			return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+			return nil, err
 		}
 		records = append(records, record)
 	}
@@ -110,6 +106,41 @@ func (ars *AggregatorRecordStorage) GetByBlockNumber(ctx context.Context, blockN
 	}
 
 	return records, nil
+}
+
+type versionProbe struct {
+	Version int `bson:"version"`
+}
+
+func (ars *AggregatorRecordStorage) decodeRecord(raw bson.Raw) (*models.AggregatorRecord, error) {
+	var probe versionProbe
+
+	if err := bson.Unmarshal(raw, &probe); err != nil {
+		return nil, fmt.Errorf("failed to probe record version: %w", err)
+	}
+
+	switch probe.Version {
+	case 0: // data stored before commitment-v2
+		var bsonV1 modelsV1.AggregatorRecordV1BSON
+		if err := bson.Unmarshal(raw, &bsonV1); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal v1 aggregator record: %w", err)
+		}
+		aggregatorRecordV1, err := bsonV1.FromBSON()
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert aggregator record v1 bson to domain: %w", err)
+		}
+		return modelsV1.AggregatorRecordFromV1(aggregatorRecordV1)
+	case 1, 2:
+		// version 1 - data stored after commitment-v2 through v1 api
+		// version 2 - data stored after commitment-v2 through v2 api
+		var v2 models.AggregatorRecordBSON
+		if err := bson.Unmarshal(raw, &v2); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal v2 aggregator record: %w", err)
+		}
+		return v2.FromBSON()
+	default:
+		return nil, fmt.Errorf("unsupported aggregator record version: %d", probe.Version)
+	}
 }
 
 // Count returns the total number of records
@@ -121,44 +152,11 @@ func (ars *AggregatorRecordStorage) Count(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
-// GetLatest retrieves the most recent records
-func (ars *AggregatorRecordStorage) GetLatest(ctx context.Context, limit int) ([]*models.AggregatorRecord, error) {
-	opts := options.Find().
-		SetLimit(int64(limit)).
-		SetSort(bson.M{"finalizedAt": -1}) // Most recent first
-
-	cursor, err := ars.collection.Find(ctx, bson.M{}, opts)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find latest records: %w", err)
-	}
-	defer cursor.Close(ctx)
-
-	var records []*models.AggregatorRecord
-	for cursor.Next(ctx) {
-		var recordBSON models.AggregatorRecordBSON
-		if err := cursor.Decode(&recordBSON); err != nil {
-			return nil, fmt.Errorf("failed to decode aggregator record: %w", err)
-		}
-
-		record, err := recordBSON.FromBSON()
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert from BSON: %w", err)
-		}
-		records = append(records, record)
-	}
-
-	if err := cursor.Err(); err != nil {
-		return nil, fmt.Errorf("cursor error: %w", err)
-	}
-
-	return records, nil
-}
-
 // CreateIndexes creates necessary indexes for the aggregator record collection
 func (ars *AggregatorRecordStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
 		{
-			Keys:    bson.D{{Key: "stateId", Value: 1}},
+			Keys:    bson.D{{Key: "requestId", Value: 1}},
 			Options: options.Index().SetUnique(true),
 		},
 		{

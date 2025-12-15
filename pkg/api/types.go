@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// Basic types for API
 type SourceStateHash = ImprintHexString
 type TransactionHash = ImprintHexString
 type ShardID = int
@@ -100,17 +99,19 @@ type Receipt struct {
 
 // JSON-RPC Request and Response Types
 
-// GetInclusionProofRequest represents the get_inclusion_proof JSON-RPC request
-type GetInclusionProofRequest struct {
+// GetInclusionProofRequestV2 represents the get_inclusion_proof JSON-RPC request
+type GetInclusionProofRequestV2 struct {
 	StateID StateID `json:"stateId"`
 }
 
-// GetInclusionProofResponse represents the get_inclusion_proof JSON-RPC response
-type GetInclusionProofResponse struct {
+// GetInclusionProofResponseV2 represents the get_inclusion_proof JSON-RPC response
+type GetInclusionProofResponseV2 struct {
+	BlockNumber    *BigInt         `json:"blockNumber"`
 	InclusionProof *InclusionProof `json:"inclusionProof"`
 }
 
 type InclusionProof struct {
+	Version            int                `json:"version"`
 	CertificationData  *CertificationData `json:"certificationData"`
 	MerkleTreePath     *MerkleTreePath    `json:"merkleTreePath"`
 	UnicityCertificate HexBytes           `json:"unicityCertificate"`
@@ -138,8 +139,8 @@ type GetBlockRequest struct {
 
 // GetBlockResponse represents the get_block JSON-RPC response
 type GetBlockResponse struct {
-	Block      *Block `json:"block"`
-	TotalCount uint64 `json:"totalCount,string"`
+	Block            *Block `json:"block"`
+	TotalCommitments uint64 `json:"totalCommitments,string"`
 }
 
 // GetBlockRecords represents the get_block_records JSON-RPC request

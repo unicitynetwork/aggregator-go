@@ -11,6 +11,7 @@ import (
 
 // AggregatorRecord represents a finalized state transition certification request with proof data
 type AggregatorRecord struct {
+	Version               int               `json:"version"`
 	StateID               api.StateID       `json:"stateId"`
 	CertificationData     CertificationData `json:"certificationData"`
 	AggregateRequestCount uint64            `json:"aggregateRequestCount"`
@@ -22,7 +23,8 @@ type AggregatorRecord struct {
 
 // AggregatorRecordBSON represents the BSON version of AggregatorRecord for MongoDB storage
 type AggregatorRecordBSON struct {
-	StateID               string                `bson:"stateId"`
+	Version               int                   `bson:"version"`
+	StateID               string                `bson:"requestId"` // keep requestId in BSON to match V1
 	CertificationData     CertificationDataBSON `bson:"certificationData"`
 	AggregateRequestCount uint64                `bson:"aggregateRequestCount"`
 	BlockNumber           primitive.Decimal128  `bson:"blockNumber"`
@@ -34,6 +36,7 @@ type AggregatorRecordBSON struct {
 // NewAggregatorRecord creates a new aggregator record from a certification request
 func NewAggregatorRecord(certRequest *CertificationRequest, blockNumber, leafIndex *api.BigInt) *AggregatorRecord {
 	return &AggregatorRecord{
+		Version:               certRequest.Version,
 		StateID:               certRequest.StateID,
 		CertificationData:     certRequest.CertificationData,
 		AggregateRequestCount: certRequest.AggregateRequestCount,
@@ -55,6 +58,7 @@ func (ar *AggregatorRecord) ToBSON() (*AggregatorRecordBSON, error) {
 		return nil, fmt.Errorf("error converting leaf index to decimal-128: %w", err)
 	}
 	return &AggregatorRecordBSON{
+		Version:               ar.Version,
 		StateID:               ar.StateID.String(),
 		CertificationData:     ar.CertificationData.ToBSON(),
 		AggregateRequestCount: ar.AggregateRequestCount,
@@ -89,6 +93,7 @@ func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
 	}
 
 	return &AggregatorRecord{
+		Version:               arb.Version,
 		StateID:               api.StateID(arb.StateID),
 		CertificationData:     *certDataBSON,
 		AggregateRequestCount: aggregateRequestCount,

@@ -28,7 +28,7 @@ The service provides **executable** interactive API documentation accessible at 
 ### Core Methods
 
 1. **`certification_request`** - Submit state transition requests
-2. **`get_inclusion_proof`** - Retrieve inclusion proofs for commitments
+2. **`get_inclusion_proof.v2`** - Retrieve inclusion proofs for commitments
 3. **`get_no_deletion_proof`** - Get global no-deletion proofs
 4. **`get_block_height`** - Get current blockchain height
 5. **`get_block`** - Retrieve block information

@@ -8,7 +8,7 @@ import (
 // sometimes also referred to as StateTransitionCertificationRequest, Commitment or UnicityServiceRequest.
 type CertificationRequest struct {
 	// StateID is the unique identifier of the certification request, used as a key in the state tree.
-	// Calculated as hash of CBOR array [CertificationData.SourceStateHashImprint, CertificationData.PublicKey],
+	// Calculated as hash of CBOR array [CertificationData.PublicKey, CertificationData.SourceStateHashImprint],
 	// prefixed by two bytes that define the hashing algorithm (two zero bytes in case of SHA2_256).
 	StateID StateID `json:"stateId"`
 

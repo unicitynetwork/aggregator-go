@@ -77,8 +77,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Add state ID to context
-	ctx := context.WithValue(r.Context(), "state_id", uuid.New().String())
+	// Add request ID to context
+	ctx := context.WithValue(r.Context(), "request_id", uuid.New().String())
 
 	// Parse request
 	var req Request
@@ -140,7 +140,7 @@ func (s *Server) handleRequest(ctx context.Context, req *Request) *Response {
 		s.logger.WithContext(ctx).Error("JSON-RPC request failed",
 			"method", req.Method,
 			"duration_ms", duration.Milliseconds(),
-			"state_id", ctx.Value("state_id"),
+			"request_id", ctx.Value("request_id"),
 			"error_code", rpcErr.Code)
 		return NewErrorResponse(rpcErr, req.ID)
 	}
@@ -148,7 +148,7 @@ func (s *Server) handleRequest(ctx context.Context, req *Request) *Response {
 	s.logger.WithContext(ctx).Debug("JSON-RPC request completed",
 		"method", req.Method,
 		"duration_ms", duration.Milliseconds(),
-		"state_id", ctx.Value("state_id"))
+		"request_id", ctx.Value("request_id"))
 	return NewResponse(result, req.ID)
 }
 
@@ -168,11 +168,11 @@ func (s *Server) writeErrorResponse(w http.ResponseWriter, rpcErr *Error, id int
 	s.writeJSONResponse(w, response)
 }
 
-// StateIDMiddleware adds state ID to the context
-func StateIDMiddleware() MiddlewareFunc {
+// RequestIDMiddleware adds request ID to the context
+func RequestIDMiddleware() MiddlewareFunc {
 	return func(ctx context.Context, req *Request, next func(context.Context, *Request) *Response) *Response {
-		stateID := uuid.New().String()
-		ctx = context.WithValue(ctx, "state_id", stateID)
+		requestID := uuid.New().String()
+		ctx = context.WithValue(ctx, "request_id", requestID)
 		return next(ctx, req)
 	}
 }
@@ -184,7 +184,7 @@ func LoggingMiddleware(logger *logger.Logger) MiddlewareFunc {
 
 		logger.WithContext(ctx).Info("Processing JSON-RPC request",
 			"method", req.Method,
-			"state_id", ctx.Value("state_id"))
+			"request_id", ctx.Value("request_id"))
 
 		response := next(ctx, req)
 
@@ -193,13 +193,13 @@ func LoggingMiddleware(logger *logger.Logger) MiddlewareFunc {
 		if response.Error != nil {
 			logger.WithContext(ctx).Error("JSON-RPC request failed",
 				"method", req.Method,
-				"state_id", ctx.Value("state_id"),
+				"request_id", ctx.Value("request_id"),
 				"duration_ms", duration.Milliseconds(),
 				"error_code", response.Error.Code)
 		} else {
 			logger.WithContext(ctx).Debug("JSON-RPC request completed",
 				"method", req.Method,
-				"state_id", ctx.Value("state_id"),
+				"request_id", ctx.Value("request_id"),
 				"duration_ms", duration.Milliseconds())
 		}
 

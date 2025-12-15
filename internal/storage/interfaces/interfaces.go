@@ -41,10 +41,10 @@ type CommitmentQueue interface {
 	Close(ctx context.Context) error
 }
 
-// CertificationRequestAck represents the metadata required to acknowledge a certification request.
+// CertificationRequestAck represents the metadata required to acknowledge a commitment.
 type CertificationRequestAck struct {
-	StateID  api.StateID
-	StreamID string
+	RequestID api.RequestID
+	StreamID  string
 }
 
 // AggregatorRecordStorage handles finalized aggregator records
@@ -63,9 +63,6 @@ type AggregatorRecordStorage interface {
 
 	// Count returns the total number of records
 	Count(ctx context.Context) (int64, error)
-
-	// GetLatest retrieves the most recent records
-	GetLatest(ctx context.Context, limit int) ([]*models.AggregatorRecord, error)
 }
 
 // BlockStorage handles blockchain block storage

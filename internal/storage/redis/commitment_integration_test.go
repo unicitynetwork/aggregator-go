@@ -122,7 +122,7 @@ CollectLoop:
 	// Mark as processed
 	acks := make([]interfaces.CertificationRequestAck, len(streamed))
 	for i, c := range streamed {
-		acks[i] = interfaces.CertificationRequestAck{StateID: c.StateID, StreamID: c.StreamID}
+		acks[i] = interfaces.CertificationRequestAck{RequestID: c.StateID, StreamID: c.StreamID}
 	}
 
 	err := suite.storage.MarkProcessed(ctx, acks)

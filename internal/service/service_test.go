@@ -196,8 +196,8 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 }
 
 // Helper function to make JSON-RPC requests and unmarshal responses
-func makeJSONRPCRequest[T any](t *testing.T, serverAddr, method, stateID string, params any) T {
-	request, err := jsonrpc.NewRequest(method, params, stateID)
+func makeJSONRPCRequest[T any](t *testing.T, serverAddr, method, requestID string, params any) T {
+	request, err := jsonrpc.NewRequest(method, params, requestID)
 	require.NoError(t, err)
 
 	bodyBytes, err := json.Marshal(request)
@@ -298,9 +298,9 @@ func (suite *AggregatorTestSuite) TestInclusionProofMissingRecord() {
 	for i := 0; i < 2+32; i++ {
 		stateId = stateId + "00"
 	}
-	inclusionProof := makeJSONRPCRequest[api.GetInclusionProofResponse](
-		suite.T(), suite.serverAddr, "get_inclusion_proof", "test-request-id",
-		&api.GetInclusionProofRequest{StateID: api.StateID(stateId)})
+	inclusionProof := makeJSONRPCRequest[api.GetInclusionProofResponseV2](
+		suite.T(), suite.serverAddr, "get_inclusion_proof.v2", "test-request-id",
+		&api.GetInclusionProofRequestV2{StateID: api.StateID(stateId)})
 
 	// Validate non-inclusion proof structure
 	suite.Nil(inclusionProof.InclusionProof.CertificationData)
@@ -332,9 +332,9 @@ func (suite *AggregatorTestSuite) TestInclusionProof() {
 	firstBatchRootHashes := make(map[string]string)
 
 	for _, stateID := range submittedStateIDs {
-		proofRequest := &api.GetInclusionProofRequest{StateID: api.StateID(stateID)}
-		proofResponse := makeJSONRPCRequest[api.GetInclusionProofResponse](
-			suite.T(), suite.serverAddr, "get_inclusion_proof", "get-proof", proofRequest)
+		proofRequest := &api.GetInclusionProofRequestV2{StateID: api.StateID(stateID)}
+		proofResponse := makeJSONRPCRequest[api.GetInclusionProofResponseV2](
+			suite.T(), suite.serverAddr, "get_inclusion_proof.v2", "get-proof", proofRequest)
 
 		// Validate inclusion proof structure and encoding
 		validateInclusionProof(suite.T(), proofResponse.InclusionProof, api.StateID(stateID))
@@ -358,9 +358,9 @@ func (suite *AggregatorTestSuite) TestInclusionProof() {
 
 	// 4) Verify original commitments now reference current root hash
 	for _, stateID := range submittedStateIDs {
-		proofRequest := &api.GetInclusionProofRequest{StateID: api.StateID(stateID)}
-		proofResponse := makeJSONRPCRequest[api.GetInclusionProofResponse](
-			suite.T(), suite.serverAddr, "get_inclusion_proof", "stability-check", proofRequest)
+		proofRequest := &api.GetInclusionProofRequestV2{StateID: api.StateID(stateID)}
+		proofResponse := makeJSONRPCRequest[api.GetInclusionProofResponseV2](
+			suite.T(), suite.serverAddr, "get_inclusion_proof.v2", "stability-check", proofRequest)
 
 		suite.Require().NotNil(proofResponse.InclusionProof.MerkleTreePath)
 		currentRootHash := proofResponse.InclusionProof.MerkleTreePath.Root

@@ -11,14 +11,14 @@ print('Creating collections and indexes...');
 
 // Commitments collection
 db.createCollection('commitments');
-db.commitments.createIndex({ stateId: 1 }, { unique: true });
+db.commitments.createIndex({ requestId: 1 }, { unique: true });
 db.commitments.createIndex({ createdAt: 1 });
 db.commitments.createIndex({ processedAt: 1 });
 db.commitments.createIndex({ processedAt: 1, createdAt: 1 });
 
 // Aggregator records collection
 db.createCollection('aggregator_records');
-db.aggregator_records.createIndex({ stateId: 1 }, { unique: true });
+db.aggregator_records.createIndex({ requestId: 1 }, { unique: true });
 db.aggregator_records.createIndex({ blockNumber: 1 });
 db.aggregator_records.createIndex({ leafIndex: 1 });
 db.aggregator_records.createIndex({ finalizedAt: -1 });
@@ -39,7 +39,7 @@ db.smt_nodes.createIndex({ createdAt: -1 });
 // Block records collection
 db.createCollection('block_records');
 db.block_records.createIndex({ blockNumber: 1 }, { unique: true });
-db.block_records.createIndex({ stateIds: 1 });
+db.block_records.createIndex({ requestIds: 1 });
 db.block_records.createIndex({ createdAt: -1 });
 
 // Leadership collection

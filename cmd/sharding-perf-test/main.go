@@ -671,7 +671,7 @@ func verifyInclusionProofs(metrics *Metrics, clients []*JSONRPCClient) {
 					return
 				}
 
-				var proofResp api.GetInclusionProofResponse
+				var proofResp api.GetInclusionProofResponseV2
 				respBytes, _ := json.Marshal(resp.Result)
 				if err := json.Unmarshal(respBytes, &proofResp); err != nil {
 					fmt.Printf("ERROR for %s: failed to parse inclusion proof response: %v\n", rid, err)

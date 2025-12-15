@@ -69,8 +69,8 @@ func toAckEntries(commitments []*models.CertificationRequest) []interfaces.Certi
 	acks := make([]interfaces.CertificationRequestAck, len(commitments))
 	for i, commitment := range commitments {
 		acks[i] = interfaces.CertificationRequestAck{
-			StateID:  commitment.StateID,
-			StreamID: commitment.StreamID,
+			RequestID: commitment.StateID,
+			StreamID:  commitment.StreamID,
 		}
 	}
 	return acks
