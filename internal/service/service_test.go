@@ -519,7 +519,8 @@ func (s *stubRoundManager) Activate(context.Context) error { return nil }
 func (s *stubRoundManager) Deactivate(context.Context) error {
 	return nil
 }
-func (s *stubRoundManager) GetSMT() *smt.ThreadSafeSMT { return s.smt }
+func (s *stubRoundManager) GetSMT() *smt.ThreadSafeSMT              { return s.smt }
+func (s *stubRoundManager) CheckParentHealth(context.Context) error { return nil }
 
 func newAggregatorServiceForTest(t *testing.T, shardingCfg config.ShardingConfig, baseTree *smt.SparseMerkleTree) *AggregatorService {
 	t.Helper()
