@@ -4,7 +4,7 @@ services:
     platform: linux/amd64
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
     # https://github.com/unicitynetwork/bft-core/pkgs/container/bft-core
-    image: ghcr.io/unicitynetwork/bft-core:49d48f8fd3686aff1066d98eff2512e5fc71713c
+    image: ghcr.io/unicitynetwork/bft-core:ff28a5da20d4eb3f664264a136303a4e79a88e4c
   bft-root:
     <<: *bft-base
     volumes:
@@ -92,18 +92,15 @@ services:
       - "27017:27017"
     networks:
       - default
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: password
-      MONGO_INITDB_DATABASE: aggregator
     volumes:
       - ./data/mongodb_shard1_data:/data/db
-      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    command: ["--replSet", "rs-shard1", "--bind_ip_all", "--noauth"]
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
+      test: ["CMD", "mongosh", "--eval", "try { rs.status().ok } catch(e) { rs.initiate({_id:'rs-shard1',members:[{_id:0,host:'mongodb-shard1:27017'}]}) }"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 10s
   mongodb-shard2:
     image: mongo:7.0
     container_name: aggregator-shard2-mongodb
@@ -113,18 +110,34 @@ services:
       - "27018:27017"
     networks:
       - default
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: password
-      MONGO_INITDB_DATABASE: aggregator
     volumes:
       - ./data/mongodb_shard2_data:/data/db
-      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    command: ["--replSet", "rs-shard2", "--bind_ip_all", "--noauth"]
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
+      test: ["CMD", "mongosh", "--eval", "try { rs.status().ok } catch(e) { rs.initiate({_id:'rs-shard2',members:[{_id:0,host:'mongodb-shard2:27017'}]}) }"]
+      interval: 5s
       timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis-shared:
+    image: redis:7-alpine
+    container_name: aggregator-redis-shared
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - default
+    volumes:
+      - ./data/redis_shared_data:/data
+    command: redis-server --appendonly yes --appendfsync everysec
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
       retries: 5
+
   mongodb-root:
     image: mongo:7.0
     container_name: aggregator-root-mongodb
@@ -134,18 +147,15 @@ services:
       - "27019:27017"
     networks:
       - default
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: password
-      MONGO_INITDB_DATABASE: aggregator
     volumes:
       - ./data/mongodb_root_data:/data/db
-      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    command: ["--replSet", "rs-root", "--bind_ip_all", "--noauth"]
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
+      test: ["CMD", "mongosh", "--eval", "try { rs.status().ok } catch(e) { rs.initiate({_id:'rs-root',members:[{_id:0,host:'mongodb-root:27017'}]}) }"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 10s
   aggregator-shard1: &aggregator-base
     build:
       context: .
@@ -158,17 +168,25 @@ services:
       - default
     volumes:
       - ./data/genesis:/app/bft-config
-      - ./data/logs/shard1:/app/logs
+      - ./logs/shard1:/app/logs
+      - ./certs:/app/certs:ro
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     environment: &environment-base
       # Server Configuration
       PORT: "3000"
       HOST: "0.0.0.0"
-      CONCURRENCY_LIMIT: "1000"
+      CONCURRENCY_LIMIT: "5000"
       ENABLE_DOCS: "true"
       ENABLE_CORS: "true"
+      ENABLE_TLS: "true"
+      TLS_CERT_FILE: "/app/certs/cert.pem"
+      TLS_KEY_FILE: "/app/certs/key.pem"
 
       # Database Configuration
-      MONGODB_URI: "mongodb://admin:password@mongodb-shard1:27017/aggregator?authSource=admin"
+      MONGODB_URI: "mongodb://mongodb-shard1:27017/aggregator?replicaSet=rs-shard1&directConnection=true"
       MONGODB_DATABASE: "aggregator"
       MONGODB_CONNECT_TIMEOUT: "10s"
       MONGODB_SERVER_SELECTION_TIMEOUT: "5s"
@@ -187,6 +205,7 @@ services:
 
       # Processing Configuration
       BATCH_LIMIT: "1000"
+      COLLECT_PHASE_DURATION: "500ms"
 
       # BFT Configuration
       # Enable BFT support and specify configuration file paths
@@ -197,7 +216,7 @@ services:
       # BFT_BOOTSTRAP_ADDRESSES will be set dynamically by the entrypoint script
 
       # Redis Configuration
-      REDIS_HOST: "redis"
+      REDIS_HOST: "redis-shared"
       REDIS_PORT: "6379"
       REDIS_PASSWORD: ""
       REDIS_DB: "0"
@@ -205,7 +224,8 @@ services:
       REDIS_MIN_IDLE_CONNS: "10"
 
       # Storage Configuration
-      USE_REDIS_FOR_COMMITMENTS: "false"
+      USE_REDIS_FOR_COMMITMENTS: "true"
+      REDIS_STREAM_NAME: "commitments:shard:1"
       REDIS_FLUSH_INTERVAL: "50ms"
       REDIS_MAX_BATCH_SIZE: "2000"
 
@@ -239,9 +259,11 @@ services:
         exec /app/aggregator
 
     depends_on:
-      bft-aggregator-genesis-gen:
+      upload-configurations:
         condition: service_completed_successfully
       mongodb-shard1:
+        condition: service_healthy
+      redis-shared:
         condition: service_healthy
     healthcheck:
       test: [ "CMD", "nc", "-zv", "localhost", "3000" ]
@@ -255,15 +277,18 @@ services:
       - "3002:3000"
     volumes:
       - ./data/genesis:/app/bft-config
-      - ./data/logs/shard2:/app/logs
+      - ./logs/shard2:/app/logs
     environment:
       <<: *environment-base
-      MONGODB_URI: "mongodb://admin:password@mongodb-shard2:27017/aggregator?authSource=admin"
+      MONGODB_URI: "mongodb://mongodb-shard2:27017/aggregator?replicaSet=rs-shard2&directConnection=true"
       SHARDING_CHILD_SHARD_ID: 2 # 0b10
+      REDIS_STREAM_NAME: "commitments:shard:2"
     depends_on:
-      bft-aggregator-genesis-gen:
+      upload-configurations:
         condition: service_completed_successfully
       mongodb-shard2:
+        condition: service_healthy
+      redis-shared:
         condition: service_healthy
     healthcheck:
       test: [ "CMD", "nc", "-zv", "localhost", "3000" ]
@@ -277,13 +302,15 @@ services:
       - "3009:3000"
     volumes:
       - ./data/genesis:/app/bft-config
-      - ./data/logs/root:/app/logs
+      - ./logs/root:/app/logs
     environment:
       <<: *environment-base
-      MONGODB_URI: "mongodb://admin:password@mongodb-root:27017/aggregator?authSource=admin"
+      MONGODB_URI: "mongodb://mongodb-root:27017/aggregator?replicaSet=rs-root&directConnection=true"
       SHARDING_MODE: "parent"
+      BFT_ENABLED: "true"
+      ENABLE_TLS: "false"
     depends_on:
-      bft-aggregator-genesis-gen:
+      upload-configurations:
         condition: service_completed_successfully
       mongodb-root:
         condition: service_healthy

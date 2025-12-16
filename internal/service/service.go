@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/unicitynetwork/bft-go-base/types"
+
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -25,6 +27,7 @@ type Service interface {
 	GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error)
 	GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error)
 	GetHealthStatus(ctx context.Context) (*api.HealthStatus, error)
+	PutTrustBase(ctx context.Context, req *types.RootTrustBaseV1) error
 
 	// Parent mode specific methods
 	SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) (*api.SubmitShardRootResponse, error)
@@ -62,6 +65,7 @@ type AggregatorService struct {
 	roundManager        round.Manager
 	leaderSelector      LeaderSelector
 	commitmentValidator *signing.CommitmentValidator
+	trustBaseValidator  *TrustBaseValidator
 }
 
 type LeaderSelector interface {
@@ -115,7 +119,13 @@ func modelToAPIHealthStatus(modelHealth *models.HealthStatus) *api.HealthStatus 
 }
 
 // NewAggregatorService creates a new aggregator service
-func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManager round.Manager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) *AggregatorService {
+func NewAggregatorService(cfg *config.Config,
+	logger *logger.Logger,
+	roundManager round.Manager,
+	commitmentQueue interfaces.CommitmentQueue,
+	storage interfaces.Storage,
+	leaderSelector LeaderSelector,
+) *AggregatorService {
 	return &AggregatorService{
 		config:              cfg,
 		logger:              logger,
@@ -124,6 +134,7 @@ func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManage
 		roundManager:        roundManager,
 		leaderSelector:      leaderSelector,
 		commitmentValidator: signing.NewCommitmentValidator(cfg.Sharding),
+		trustBaseValidator:  NewTrustBaseValidator(storage.TrustBaseStorage()),
 	}
 }
 
@@ -398,6 +409,7 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 
 	// Add database connectivity check
 	if err := as.storage.Ping(ctx); err != nil {
+		status.Status = "unhealthy"
 		status.AddDetail("database", "disconnected")
 		as.logger.WithContext(ctx).Error("Database health check failed", "error", err.Error())
 	} else {
@@ -427,6 +439,17 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 		}
 	}
 
+	if as.config.Sharding.Mode == config.ShardingModeChild {
+		if err := as.roundManager.CheckParentHealth(ctx); err != nil {
+			status.Status = "degraded"
+			status.AddDetail("parent", "unreachable")
+			status.AddDetail("parent_error", err.Error())
+			as.logger.WithContext(ctx).Warn("Parent aggregator health check failed", "error", err.Error())
+		} else {
+			status.AddDetail("parent", "connected")
+		}
+	}
+
 	return modelToAPIHealthStatus(status), nil
 }
 
@@ -438,4 +461,12 @@ func (as *AggregatorService) SubmitShardRoot(ctx context.Context, req *api.Submi
 // GetShardProof - not supported in standalone mode
 func (as *AggregatorService) GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.GetShardProofResponse, error) {
 	return nil, fmt.Errorf("get_shard_proof is not supported in standalone mode")
+}
+
+// PutTrustBase verifies and stores the trust base.
+func (as *AggregatorService) PutTrustBase(ctx context.Context, trustBase *types.RootTrustBaseV1) error {
+	if err := as.trustBaseValidator.Verify(ctx, trustBase); err != nil {
+		return fmt.Errorf("failed to verify trust base: %w", err)
+	}
+	return as.storage.TrustBaseStorage().Store(ctx, trustBase)
 }

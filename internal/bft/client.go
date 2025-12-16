@@ -3,18 +3,20 @@ package bft
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
+	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
-	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/network/protocol/handshake"
-	"github.com/unicitynetwork/bft-go-base/crypto"
+	cryptobft "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
@@ -22,6 +24,18 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
+
+// osExit is the function used to exit the process on fatal errors.
+// It can be overridden in tests to prevent actual process termination.
+var osExit = os.Exit
+
+// SetExitFunc allows tests to override the exit function to prevent actual process termination.
+// Returns a function to restore the original exit function.
+func SetExitFunc(f func(int)) func() {
+	original := osExit
+	osExit = f
+	return func() { osExit = original }
+}
 
 const (
 	idle status = iota
@@ -38,12 +52,11 @@ type (
 		shardID     types.ShardID
 		logger      *logger.Logger
 
-		// mutex for peer, network, signer, rootNodes
-		mu        sync.Mutex
-		peer      *network.Peer
-		network   *BftNetwork
-		rootNodes peer.IDSlice
-		signer    crypto.Signer
+		// mutex for peer, network, signer TODO: there are readers without mutex
+		mu      sync.Mutex
+		peer    *network.Peer
+		network *BftNetwork
+		signer  cryptobft.Signer
 
 		// Latest UC this node has seen. Can be ahead of the committed UC during recovery.
 		luc           atomic.Pointer[types.UnicityCertificate]
@@ -57,32 +70,46 @@ type (
 		ucProcessingMutex sync.Mutex
 
 		msgLoopCancelFn context.CancelFunc
+
+		// timestamp when last UC was received
+		lastCertResponseTime atomic.Int64
+
+		trustBaseStore TrustBaseStore
 	}
 
 	BFTClient interface {
 		Start(ctx context.Context) error
 		Stop()
+		WaitForInitialized(ctx context.Context) error
 		CertificationRequest(ctx context.Context, block *models.Block) error
 	}
 
 	RoundManager interface {
 		FinalizeBlock(ctx context.Context, block *models.Block) error
+		FinalizeBlockWithRetry(ctx context.Context, block *models.Block) error
 		StartNewRound(ctx context.Context, roundNumber *api.BigInt) error
+	}
+
+	TrustBaseStore interface {
+		GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error)
 	}
 
 	status int
 )
 
-func NewBFTClient(ctx context.Context, conf *config.BFTConfig, roundManager RoundManager, logger *logger.Logger) (*BFTClientImpl, error) {
+func NewBFTClient(conf *config.BFTConfig, roundManager RoundManager, trustBaseStore TrustBaseStore, luc *types.UnicityCertificate, logger *logger.Logger) (*BFTClientImpl, error) {
 	logger.Info("Creating BFT Client")
 	bftClient := &BFTClientImpl{
-		logger:       logger,
-		partitionID:  conf.ShardConf.PartitionID,
-		shardID:      conf.ShardConf.ShardID,
-		roundManager: roundManager,
-		conf:         conf,
+		logger:         logger,
+		partitionID:    conf.ShardConf.PartitionID,
+		shardID:        conf.ShardConf.ShardID,
+		roundManager:   roundManager,
+		trustBaseStore: trustBaseStore,
+		conf:           conf,
 	}
 	bftClient.status.Store(idle)
+	bftClient.luc.Store(luc)
+	bftClient.lastCertResponseTime.Store(time.Now().UnixMilli())
 	return bftClient, nil
 }
 
@@ -119,10 +146,6 @@ func (c *BFTClientImpl) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	rootNodes, err := c.conf.GetRootNodes()
-	if err != nil {
-		return fmt.Errorf("failed to get root nodes: %w", err)
-	}
 	signer, err := c.conf.KeyConf.Signer()
 	if err != nil {
 		return fmt.Errorf("failed to create signer: %w", err)
@@ -136,19 +159,20 @@ func (c *BFTClientImpl) Start(ctx context.Context) error {
 	c.peer = self
 	c.network = networkP2P
 	c.signer = signer
-	c.rootNodes = rootNodes
 
 	if err := c.peer.BootstrapConnect(ctx, c.logger.Logger); err != nil {
 		return fmt.Errorf("failed to bootstrap peer: %w", err)
 	}
 
-	if err := c.sendHandshake(ctx); err != nil {
-		return fmt.Errorf("failed to send handshake: %w", err)
-	}
-
 	msgLoopCtx, cancelFn := context.WithCancel(ctx)
 	c.msgLoopCancelFn = cancelFn
-	go c.loop(msgLoopCtx)
+	go func() {
+		if err := c.loop(msgLoopCtx); err != nil {
+			c.logger.Error("BFT event loop thread exited with error", "error", err.Error())
+		} else {
+			c.logger.Info("BFT event loop thread finished")
+		}
+	}()
 
 	return nil
 }
@@ -170,16 +194,21 @@ func (c *BFTClientImpl) Stop() {
 		c.peer = nil
 		c.network = nil
 		c.signer = nil
-		c.rootNodes = nil
 	}
 }
 
 func (c *BFTClientImpl) sendHandshake(ctx context.Context) error {
 	c.logger.WithContext(ctx).Debug("sending handshake to root chain")
-	// select some random root nodes
-	rootIDs, err := randomNodeSelector(c.rootNodes, defaultHandshakeNodes)
+
+	// load trust base
+	rootEpoch := c.luc.Load().GetRootEpoch()
+	tb, err := c.trustBaseStore.GetByEpoch(ctx, rootEpoch)
 	if err != nil {
-		// error should only happen in case the root nodes are not initialized
+		return fmt.Errorf("failed to load trust base for epoch %d: %w", rootEpoch, err)
+	}
+	// select some random root nodes
+	rootIDs, err := randomNodeSelector(tb, defaultHandshakeNodes)
+	if err != nil {
 		return fmt.Errorf("failed to select root nodes for handshake: %w", err)
 	}
 	if err = c.network.Send(ctx,
@@ -195,6 +224,13 @@ func (c *BFTClientImpl) sendHandshake(ctx context.Context) error {
 }
 
 func (c *BFTClientImpl) loop(ctx context.Context) error {
+	if err := c.sendHandshake(ctx); err != nil {
+		return fmt.Errorf("failed to send initial handshake: %w", err)
+	}
+
+	heartbeat := time.NewTicker(c.conf.HeartbeatInterval)
+	defer heartbeat.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -205,6 +241,15 @@ func (c *BFTClientImpl) loop(ctx context.Context) error {
 			}
 			c.logger.WithContext(ctx).Debug("received message", "type", fmt.Sprintf("%T", m))
 			c.handleMessage(ctx, m)
+		case <-heartbeat.C:
+			lastCertMillis := c.lastCertResponseTime.Load()
+			lastCertTime := time.UnixMilli(lastCertMillis)
+			if time.Since(lastCertTime) > c.conf.InactivityTimeout {
+				c.logger.Warn("BFT client inactivity timeout exceeded, sending new handshake")
+				if err := c.sendHandshake(ctx); err != nil {
+					c.logger.Error("failed to send handshake on inactivity timeout", "error", err.Error())
+				}
+			}
 		}
 	}
 }
@@ -213,16 +258,30 @@ func (c *BFTClientImpl) handleMessage(ctx context.Context, msg any) {
 	switch mt := msg.(type) {
 	case *certification.CertificationResponse:
 		c.logger.WithContext(ctx).Info("received CertificationResponse")
-		c.handleCertificationResponse(ctx, mt)
+		if err := c.handleCertificationResponse(ctx, mt); err != nil {
+			c.logger.WithContext(ctx).Error("error processing CertificationResponse message", "error", err.Error())
+		}
 	default:
 		c.logger.WithContext(ctx).Info("received unknown message")
 	}
 }
 
 func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *certification.CertificationResponse) error {
+	c.lastCertResponseTime.Store(time.Now().UnixMilli())
+
 	if err := cr.IsValid(); err != nil {
 		return fmt.Errorf("invalid CertificationResponse: %w", err)
 	}
+
+	// verify UC
+	tb, err := c.trustBaseStore.GetByEpoch(ctx, cr.UC.GetRootEpoch())
+	if err != nil {
+		return fmt.Errorf("failed to load trust base for epoch %d: %w", cr.UC.GetRootEpoch(), err)
+	}
+	if err := cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, nil); err != nil {
+		return fmt.Errorf("failed to verify UC: %w", err)
+	}
+
 	c.logger.WithContext(ctx).Info(fmt.Sprintf("handleCertificationResponse: UC round %d, next round %d, next leader %s",
 		cr.UC.GetRoundNumber(), cr.Technical.Round, cr.Technical.Leader))
 
@@ -413,11 +472,12 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 	}
 	c.proposedBlock.UnicityCertificate = api.NewHexBytes(ucCbor)
 
-	if err := c.roundManager.FinalizeBlock(ctx, c.proposedBlock); err != nil {
-		c.logger.WithContext(ctx).Error("Failed to finalize block",
+	if err := c.roundManager.FinalizeBlockWithRetry(ctx, c.proposedBlock); err != nil {
+		// Fatal error - exit immediately, recovery will handle on restart
+		c.logger.WithContext(ctx).Error("FATAL: Failed to finalize block after retries, exiting",
 			"blockNumber", c.proposedBlock.Index.String(),
 			"error", err.Error())
-		return err
+		osExit(1)
 	}
 
 	// Clear the proposed block after finalization
@@ -441,7 +501,10 @@ func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 		return fmt.Errorf("failed to decode root hash: %w", err)
 	}
 
-	luc := c.luc.Load()
+	luc, err := c.waitForLatestUC(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to prepare certification request: %w", err)
+	}
 
 	var blockHash []byte
 	if !bytes.Equal(rootHashBytes, luc.InputRecord.Hash) {
@@ -472,7 +535,12 @@ func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 	}
 	c.logger.WithContext(ctx).Info(fmt.Sprintf("Round %d sending block certification request to root chain, IR hash %X",
 		req.InputRecord.RoundNumber, req.InputRecord.Hash))
-	rootIDs, err := rootNodesSelector(luc, c.rootNodes, defaultNofRootNodes)
+
+	tb, err := c.trustBaseStore.GetByEpoch(ctx, luc.GetRootEpoch())
+	if err != nil {
+		return fmt.Errorf("failed to load trust base for epoch %d: %w", luc.GetRootEpoch(), err)
+	}
+	rootIDs, err := rootNodesSelector(luc, tb, defaultNofRootNodes)
 	if err != nil {
 		return fmt.Errorf("selecting root nodes: %w", err)
 	}
@@ -484,6 +552,10 @@ func (c *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String(),
 		"lastRootRound", c.lastRootRound.Load())
+
+	if err := c.ensureInitialized(ctx); err != nil {
+		return err
+	}
 
 	// Always prefer the expected round number from root chain if available
 	expectedRound := c.nextExpectedRound.Load()
@@ -534,4 +606,61 @@ func (c *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.
 	c.logger.WithContext(ctx).Info("Certification request completed",
 		"blockNumber", block.Index.String())
 	return nil
+}
+
+func (c *BFTClientImpl) waitForLatestUC(ctx context.Context) (*types.UnicityCertificate, error) {
+	if luc := c.luc.Load(); luc != nil {
+		return luc, nil
+	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+			if luc := c.luc.Load(); luc != nil {
+				return luc, nil
+			}
+		}
+	}
+}
+
+func (c *BFTClientImpl) ensureInitialized(ctx context.Context) error {
+	if c.status.Load() == normal {
+		return nil
+	}
+	_, err := c.waitForLatestUC(ctx)
+	return err
+}
+
+// WaitForInitialized blocks until the BFT client has received its first UC and is ready.
+// This should be called after Start() and before attempting any certification requests.
+func (c *BFTClientImpl) WaitForInitialized(ctx context.Context) error {
+	if c.status.Load() == normal {
+		return nil
+	}
+
+	c.logger.WithContext(ctx).Info("Waiting for BFT client initialization (first UC from root chain)")
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded {
+				return fmt.Errorf("timeout waiting for BFT client initialization - no UC received from root chain within 30s")
+			}
+			return ctx.Err()
+		case <-ticker.C:
+			if c.status.Load() == normal {
+				c.logger.WithContext(ctx).Info("BFT client initialized successfully")
+				return nil
+			}
+		}
+	}
 }

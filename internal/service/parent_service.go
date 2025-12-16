@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/unicitynetwork/bft-go-base/types"
+
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -21,6 +23,7 @@ type ParentAggregatorService struct {
 	storage            interfaces.Storage
 	parentRoundManager *round.ParentRoundManager
 	leaderSelector     LeaderSelector
+	trustBaseValidator *TrustBaseValidator
 }
 
 func (pas *ParentAggregatorService) isLeader(ctx context.Context) (bool, error) {
@@ -38,13 +41,20 @@ func (pas *ParentAggregatorService) isLeader(ctx context.Context) (bool, error) 
 }
 
 // NewParentAggregatorService creates a new parent aggregator service
-func NewParentAggregatorService(cfg *config.Config, logger *logger.Logger, parentRoundManager *round.ParentRoundManager, storage interfaces.Storage, leaderSelector LeaderSelector) *ParentAggregatorService {
+func NewParentAggregatorService(
+	cfg *config.Config,
+	logger *logger.Logger,
+	parentRoundManager *round.ParentRoundManager,
+	storage interfaces.Storage,
+	leaderSelector LeaderSelector,
+) *ParentAggregatorService {
 	return &ParentAggregatorService{
 		config:             cfg,
 		logger:             logger,
 		storage:            storage,
 		parentRoundManager: parentRoundManager,
 		leaderSelector:     leaderSelector,
+		trustBaseValidator: NewTrustBaseValidator(storage.TrustBaseStorage()),
 	}
 }
 
@@ -133,7 +143,7 @@ func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.
 		return nil, fmt.Errorf("invalid shard ID: %w", err)
 	}
 
-	pas.logger.WithContext(ctx).Info("Shard proof requested", "shardId", req.ShardID)
+	pas.logger.WithContext(ctx).Debug("Shard proof requested", "shardId", req.ShardID)
 
 	shardPath := new(big.Int).SetInt64(int64(req.ShardID))
 	merkleTreePath, err := pas.parentRoundManager.GetSMT().GetPath(shardPath)
@@ -263,6 +273,7 @@ func (pas *ParentAggregatorService) GetHealthStatus(ctx context.Context) (*api.H
 
 	// Add database connectivity check
 	if err := pas.storage.Ping(ctx); err != nil {
+		status.Status = "unhealthy"
 		status.AddDetail("database", "disconnected")
 		pas.logger.WithContext(ctx).Error("Database health check failed", "error", err.Error())
 	} else {
@@ -270,4 +281,12 @@ func (pas *ParentAggregatorService) GetHealthStatus(ctx context.Context) (*api.H
 	}
 
 	return modelToAPIHealthStatus(status), nil
+}
+
+// PutTrustBase verifies and stores the trust base.
+func (pas *ParentAggregatorService) PutTrustBase(ctx context.Context, trustBase *types.RootTrustBaseV1) error {
+	if err := pas.trustBaseValidator.Verify(ctx, trustBase); err != nil {
+		return fmt.Errorf("failed to verify trust base: %w", err)
+	}
+	return pas.storage.TrustBaseStorage().Store(ctx, trustBase)
 }

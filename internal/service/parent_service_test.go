@@ -80,7 +80,7 @@ func (suite *ParentServiceTestSuite) SetupTest() {
 
 	// Create parent round manager
 	var err error
-	suite.prm, err = round.NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage)
+	suite.prm, err = round.NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil)
 	require.NoError(suite.T(), err, "Should create parent round manager")
 	require.NotNil(suite.T(), suite.prm, "Parent round manager should not be nil")
 
