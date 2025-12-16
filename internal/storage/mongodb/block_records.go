@@ -37,7 +37,8 @@ func (brs *BlockRecordsStorage) Store(ctx context.Context, records *models.Block
 	if err != nil {
 		return fmt.Errorf("failed to convert block records to BSON: %w", err)
 	}
-	if _, err = brs.collection.InsertOne(ctx, recordsBSON); err != nil {
+	_, err = brs.collection.InsertOne(ctx, recordsBSON)
+	if err != nil {
 		return fmt.Errorf("failed to store block records: %w", err)
 	}
 	return nil

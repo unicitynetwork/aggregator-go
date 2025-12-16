@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"os"
 	"sync"
 	"time"
+
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/bft"
 	"github.com/unicitynetwork/aggregator-go/internal/config"
@@ -28,6 +31,18 @@ const (
 )
 
 const miniBatchSize = 100 // Number of commitments to process per SMT mini-batch
+
+// osExit is the function used to exit the process on fatal errors.
+// It can be overridden in tests to prevent actual process termination.
+var osExit = os.Exit
+
+// SetExitFunc allows tests to override the exit function to prevent actual process termination.
+// Returns a function to restore the original exit function.
+func SetExitFunc(f func(int)) func() {
+	original := osExit
+	osExit = f
+	return func() { osExit = original }
+}
 
 func (rs RoundState) String() string {
 	switch rs {
@@ -57,9 +72,11 @@ type Round struct {
 	// Store data for persistence during FinalizeBlock
 	PendingLeaves []*smt.Leaf
 	// Timing metrics for this round
-	ProcessingTime   time.Duration
-	ProposalTime     time.Time // When block was proposed to BFT
-	FinalizationTime time.Time // When block was actually finalized
+	ProcessingTime     time.Duration
+	ProposalTime       time.Time     // When block was proposed to BFT
+	FinalizationTime   time.Time     // When block was actually finalized
+	SubmissionDuration time.Duration // Child mode: time to submit root to parent
+	ProofWaitDuration  time.Duration // Child mode: time spent waiting for parent proof
 }
 
 // RoundManager handles the creation of blocks and processing of commitments.
@@ -88,7 +105,6 @@ type RoundManager struct {
 	// Round management
 	currentRound *Round
 	roundMutex   sync.RWMutex
-	roundTimer   *time.Timer
 	wg           sync.WaitGroup
 
 	// Round duration (configurable, default 1 second)
@@ -107,7 +123,6 @@ type RoundManager struct {
 	// Adaptive timing
 	avgFinalizationTime time.Duration // Running average of finalization time
 	avgSMTUpdateTime    time.Duration // Running average of SMT update time per batch
-	processingRatio     float64       // Ratio of round duration for processing (starts at 0.9)
 
 	// Metrics
 	totalRounds      int64
@@ -117,6 +132,7 @@ type RoundManager struct {
 type RootAggregatorClient interface {
 	SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) error
 	GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.RootShardInclusionProof, error)
+	CheckHealth(ctx context.Context) error
 }
 
 // RoundMetrics tracks performance metrics for a round
@@ -128,7 +144,17 @@ type RoundMetrics struct {
 }
 
 // NewRoundManager creates a new round manager
-func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Logger, smtInstance *smt.SparseMerkleTree, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, rootAggregatorClient RootAggregatorClient, stateTracker *state.Tracker) (*RoundManager, error) {
+func NewRoundManager(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *logger.Logger,
+	smtInstance *smt.SparseMerkleTree,
+	commitmentQueue interfaces.CommitmentQueue,
+	storage interfaces.Storage,
+	rootAggregatorClient RootAggregatorClient,
+	stateTracker *state.Tracker,
+	luc *types.UnicityCertificate,
+) (*RoundManager, error) {
 	rm := &RoundManager{
 		config:              cfg,
 		logger:              logger,
@@ -140,7 +166,6 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 		roundDuration:       cfg.Processing.RoundDuration,         // Configurable round duration (default 1s)
 		commitmentStream:    make(chan *models.Commitment, 10000), // Reasonable buffer for streaming
 		avgProcessingRate:   1.0,                                  // Initial estimate: 1 commitment per ms
-		processingRatio:     0.7,                                  // Start with 70% of round for processing (conservative but good throughput)
 		avgFinalizationTime: 200 * time.Millisecond,               // Initial estimate (conservative)
 		avgSMTUpdateTime:    5 * time.Millisecond,                 // Initial estimate per batch
 	}
@@ -149,7 +174,7 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 	if cfg.Sharding.Mode == config.ShardingModeStandalone {
 		if cfg.BFT.Enabled {
 			var err error
-			rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, logger)
+			rm.bftClient, err = bft.NewBFTClient(&cfg.BFT, rm, storage.TrustBaseStorage(), luc, logger)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create BFT client: %w", err)
 			}
@@ -167,7 +192,7 @@ func NewRoundManager(ctx context.Context, cfg *config.Config, logger *logger.Log
 				}
 			}
 			nextBlockNumber.Add(lastBlockNumber.Int, big.NewInt(1))
-			rm.bftClient = bft.NewBFTClientStub(logger, rm, nextBlockNumber)
+			rm.bftClient = bft.NewBFTClientStub(logger, rm, nextBlockNumber, cfg.BFT.StubDelay)
 		}
 	}
 	return rm, nil
@@ -179,8 +204,17 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 		"roundDuration", rm.roundDuration.String(),
 		"batchLimit", rm.config.Processing.BatchLimit)
 
-	// Restore SMT from storage - this will populate the existing empty SMT
-	_, err := rm.restoreSmtFromStorage(ctx)
+	recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+	if err != nil {
+		return fmt.Errorf("failed to recover unfinalized block: %w", err)
+	}
+	if recoveryResult.Recovered {
+		rm.logger.Info("Recovered unfinalized block during startup",
+			"blockNumber", recoveryResult.BlockNumber.String(),
+			"requestCount", len(recoveryResult.RequestIDs))
+	}
+
+	_, err = rm.restoreSmtFromStorage(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to restore SMT from storage: %w", err)
 	}
@@ -197,18 +231,19 @@ func (rm *RoundManager) Stop(ctx context.Context) error {
 		rm.logger.WithContext(ctx).Error("Failed to deactivate Round Manager", "error", err.Error())
 	}
 
-	// Stop current round timer
-	rm.roundMutex.Lock()
-	if rm.roundTimer != nil {
-		rm.roundTimer.Stop()
-	}
-	rm.roundMutex.Unlock()
-
 	// Wait for goroutines to finish
 	rm.wg.Wait()
 
 	rm.logger.Info("Round Manager stopped")
 	return nil
+}
+
+// CheckParentHealth verifies the parent aggregator is reachable when running in child mode.
+func (rm *RoundManager) CheckParentHealth(ctx context.Context) error {
+	if rm.config.Sharding.Mode != config.ShardingModeChild || rm.rootClient == nil {
+		return nil
+	}
+	return rm.rootClient.CheckHealth(ctx)
 }
 
 // GetCurrentRound returns information about the current round
@@ -236,8 +271,6 @@ func (rm *RoundManager) GetStreamingMetrics() map[string]interface{} {
 	defer rm.streamMutex.RUnlock()
 
 	channelUtilization := float64(len(rm.commitmentStream)) / float64(cap(rm.commitmentStream)) * 100
-	processingMs := time.Duration(float64(rm.roundDuration) * rm.processingRatio).Milliseconds()
-	finalizationMs := time.Duration(float64(rm.roundDuration) * (1 - rm.processingRatio)).Milliseconds()
 
 	return map[string]interface{}{
 		"avgProcessingRate":       rm.avgProcessingRate,
@@ -246,11 +279,9 @@ func (rm *RoundManager) GetStreamingMetrics() map[string]interface{} {
 		"channelCapacity":         cap(rm.commitmentStream),
 		"channelUtilization":      fmt.Sprintf("%.2f%%", channelUtilization),
 		"adaptiveTiming": map[string]interface{}{
-			"processingRatio":     fmt.Sprintf("%.2f", rm.processingRatio),
-			"processingWindow":    fmt.Sprintf("%dms", processingMs),
-			"finalizationWindow":  fmt.Sprintf("%dms", finalizationMs),
-			"avgFinalizationTime": rm.avgFinalizationTime.String(),
-			"avgSMTUpdateTime":    rm.avgSMTUpdateTime.String(),
+			"collectPhaseDuration": rm.config.Processing.CollectPhaseDuration.String(),
+			"avgFinalizationTime":  rm.avgFinalizationTime.String(),
+			"avgSMTUpdateTime":     rm.avgSMTUpdateTime.String(),
 		},
 		"lastRound": map[string]interface{}{
 			"number":               rm.lastRoundMetrics.RoundNumber,
@@ -294,7 +325,6 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
 	rm.logger.WithContext(ctx).Info("StartNewRound called", "roundNumber", roundNumber.String())
 	rm.roundMutex.Lock()
-	defer rm.roundMutex.Unlock()
 
 	// Log previous round state if exists
 	if rm.currentRound != nil {
@@ -314,12 +344,6 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 		}
 	}
 
-	// Stop any existing timer
-	if rm.roundTimer != nil {
-		rm.logger.WithContext(ctx).Debug("Stopping existing round timer")
-		rm.roundTimer.Stop()
-	}
-
 	rm.currentRound = &Round{
 		Number:      roundNumber,
 		StartTime:   time.Now(),
@@ -328,34 +352,29 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 		Snapshot:    rm.smt.CreateSnapshot(), // Create snapshot for this round
 	}
 
-	// Start round timer
-	rm.roundTimer = time.AfterFunc(rm.roundDuration, func() {
-		rm.logger.WithContext(ctx).Info("Round timer fired",
-			"roundNumber", roundNumber.String(),
-			"elapsed", rm.roundDuration.String())
-		if err := rm.processCurrentRound(ctx); err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to process round",
-				"roundNumber", roundNumber.String(),
-				"error", err.Error())
-
-			if rm.config.Sharding.Mode.IsChild() {
-				nextRoundNumber := big.NewInt(0).Add(roundNumber.Int, big.NewInt(1))
-				rm.logger.WithContext(ctx).Info("Attempting to start new round after processing failure.",
-					"failedRound", roundNumber.String(),
-					"nextRound", nextRoundNumber.String())
-				if startErr := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); startErr != nil {
-					rm.logger.WithContext(ctx).Error("Failed to start new round after processing error",
-						"nextRound", nextRoundNumber.String(),
-						"error", startErr)
-				}
-			}
-		}
-	})
+	rm.roundMutex.Unlock()
 
 	rm.logger.WithContext(ctx).Info("Started new round",
 		"roundNumber", roundNumber.String(),
-		"duration", rm.roundDuration.String(),
-		"timerSet", rm.roundTimer != nil)
+		"duration", rm.roundDuration.String())
+
+	rm.wg.Go(func() {
+		if err := rm.processCurrentRound(ctx); err != nil {
+			// Context.Canceled = graceful shutdown, exit cleanly
+			if errors.Is(err, context.Canceled) {
+				rm.logger.WithContext(ctx).Info("Round processing stopped due to shutdown",
+					"roundNumber", roundNumber.String())
+				return
+			}
+
+			// ANY other error means server is broken - exit immediately
+			// Continuing would accept commitments but not process them
+			rm.logger.WithContext(ctx).Error("FATAL: Round processing failed, exiting",
+				"roundNumber", roundNumber.String(),
+				"error", err.Error())
+			osExit(1)
+		}
+	})
 
 	return nil
 }
@@ -400,13 +419,12 @@ func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
 	}
 	rm.currentRound.Commitments = make([]*models.Commitment, 0, capacity)
 
-	// Calculate adaptive processing deadline based on historical data
-	processingDuration := time.Duration(float64(rm.roundDuration) * rm.processingRatio)
-	rm.logger.WithContext(ctx).Debug("Using adaptive processing deadline",
-		"roundDuration", rm.roundDuration,
-		"processingRatio", rm.processingRatio,
-		"processingDuration", processingDuration,
-		"expectedFinalizationTime", rm.avgFinalizationTime)
+	processingDuration := rm.config.Processing.CollectPhaseDuration
+	if processingDuration <= 0 {
+		processingDuration = 500 * time.Millisecond
+	}
+	rm.logger.WithContext(ctx).Debug("Using fixed collect phase duration",
+		"processingDuration", processingDuration)
 
 	rm.roundMutex.Unlock()
 
@@ -679,54 +697,6 @@ func (rm *RoundManager) commitmentPrefetcher(ctx context.Context) {
 
 // adjustProcessingRatio dynamically adjusts the processing ratio based on actual performance
 func (rm *RoundManager) adjustProcessingRatio(ctx context.Context, processingTime, expectedFinalizationTime time.Duration) {
-	// Only adjust if we have meaningful data (processing took at least 100ms)
-	if processingTime < 100*time.Millisecond {
-		return
-	}
-
-	// Calculate what ratio we actually used
-	actualRatio := float64(processingTime) / float64(rm.roundDuration)
-
-	// Calculate ideal ratio based on actual finalization time
-	// We want: processingTime + finalizationTime <= roundDuration
-	// So: processingTime <= roundDuration - finalizationTime
-	// Therefore: idealRatio = (roundDuration - expectedFinalizationTime) / roundDuration
-
-	// Add a safety buffer based on the variability we've seen
-	safetyBuffer := 100 * time.Millisecond
-	if expectedFinalizationTime > 100*time.Millisecond {
-		// For longer finalization times, use a proportional buffer
-		safetyBuffer = expectedFinalizationTime / 5 // 20% buffer
-	}
-
-	safeFinalizationTime := expectedFinalizationTime + safetyBuffer
-	idealRatio := 1.0 - (float64(safeFinalizationTime) / float64(rm.roundDuration))
-
-	// Clamp ideal ratio to reasonable bounds
-	// We want at least 50-70% for processing to maintain good throughput
-	if idealRatio < 0.5 {
-		idealRatio = 0.5 // At least 50% for processing (500ms in 1s round)
-	} else if idealRatio > 0.85 {
-		idealRatio = 0.85 // At most 85% for processing (leave 150ms for finalization)
-	}
-
-	// Adjust current ratio towards ideal with momentum
-	// If we're consistently missing deadlines, adjust faster
-	adjustmentWeight := 0.2 // Default: 20% weight on new measurement
-	if actualRatio > rm.processingRatio && processingTime > time.Duration(float64(rm.roundDuration)*0.9) {
-		// We're using more time than allocated and getting close to the limit
-		adjustmentWeight = 0.4 // Adjust faster
-	}
-
-	rm.processingRatio = rm.processingRatio*(1-adjustmentWeight) + idealRatio*adjustmentWeight
-
-	rm.logger.WithContext(ctx).Debug("Adjusted processing ratio",
-		"actualRatio", fmt.Sprintf("%.2f", actualRatio),
-		"idealRatio", fmt.Sprintf("%.2f", idealRatio),
-		"newRatio", fmt.Sprintf("%.2f", rm.processingRatio),
-		"avgFinalizationTime", rm.avgFinalizationTime,
-		"processingTime", processingTime,
-		"roundDuration", rm.roundDuration)
 }
 
 // restoreSmtFromStorage restores the SMT tree from persisted nodes in storage
@@ -832,14 +802,44 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 }
 
 func (rm *RoundManager) Activate(ctx context.Context) error {
+	if rm.config.HA.Enabled {
+		recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+		if err != nil {
+			return fmt.Errorf("failed to recover unfinalized block on activation: %w", err)
+		}
+		if recoveryResult.Recovered {
+			rm.logger.Info("Recovered unfinalized block on HA activation",
+				"blockNumber", recoveryResult.BlockNumber.String(),
+				"requestCount", len(recoveryResult.RequestIDs))
+
+			if err := LoadRecoveredNodesIntoSMT(ctx, rm.logger, rm.storage, rm.smt, recoveryResult.RequestIDs); err != nil {
+				return fmt.Errorf("failed to load recovered nodes into SMT: %w", err)
+			}
+		}
+	}
+
 	switch rm.config.Sharding.Mode {
 	case config.ShardingModeStandalone:
 		if err := rm.bftClient.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start BFT client: %w", err)
 		}
 	case config.ShardingModeChild:
-		roundNumber := rm.stateTracker.GetLastSyncedBlock()
-		roundNumber.Add(roundNumber, big.NewInt(1))
+		latestBlockNumber, err := rm.storage.BlockStorage().GetLatestNumber(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get latest block number: %w", err)
+		}
+
+		var roundNumber *big.Int
+		if latestBlockNumber == nil {
+			roundNumber = big.NewInt(1)
+		} else {
+			roundNumber = new(big.Int).Add(latestBlockNumber.Int, big.NewInt(1))
+		}
+
+		rm.logger.WithContext(ctx).Info("Starting child shard from database state",
+			"latestBlock", latestBlockNumber,
+			"nextRound", roundNumber.String())
+
 		if err := rm.StartNewRound(ctx, api.NewBigInt(roundNumber)); err != nil {
 			return fmt.Errorf("failed to start new round: %w", err)
 		}
@@ -851,18 +851,11 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 	return nil
 }
 
-func (rm *RoundManager) Deactivate(ctx context.Context) error {
+func (rm *RoundManager) Deactivate(_ context.Context) error {
 	rm.stopCommitmentPrefetcher()
 	if rm.bftClient != nil {
 		rm.bftClient.Stop()
 	}
-
-	// stop creating blocks if we become follower
-	rm.roundMutex.Lock()
-	if rm.roundTimer != nil {
-		rm.roundTimer.Stop()
-	}
-	rm.roundMutex.Unlock()
 
 	return nil
 }

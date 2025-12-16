@@ -70,26 +70,53 @@ func (ss *SmtStorage) UpsertBatch(ctx context.Context, nodes []*models.SmtNode) 
 	return nil
 }
 
-// StoreBatch stores multiple SMT nodes using insert operations, skipping duplicates
+// StoreBatch stores multiple SMT nodes using InsertMany.
+// Duplicate key errors are ignored (duplicates are simply skipped).
 func (ss *SmtStorage) StoreBatch(ctx context.Context, nodes []*models.SmtNode) error {
 	if len(nodes) == 0 {
 		return nil
 	}
 
-	documents := make([]interface{}, len(nodes))
+	docs := make([]interface{}, len(nodes))
 	for i, node := range nodes {
-		documents[i] = node.ToBSON()
+		docs[i] = node.ToBSON()
 	}
 
-	opts := options.InsertMany().SetOrdered(false)
-	_, err := ss.collection.InsertMany(ctx, documents, opts)
+	_, err := ss.collection.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
 	if err != nil {
+		// Ignore duplicate key errors - with SetOrdered(false), non-duplicates are still inserted
 		if mongo.IsDuplicateKeyError(err) {
 			return nil
 		}
 		return fmt.Errorf("failed to store SMT nodes batch: %w", err)
 	}
 	return nil
+}
+
+// GetExistingKeys returns which of the given keys already exist in the database.
+// Used to filter duplicates before inserting.
+func (ss *SmtStorage) GetExistingKeys(ctx context.Context, keys []string) (map[string]bool, error) {
+	if len(keys) == 0 {
+		return make(map[string]bool), nil
+	}
+
+	cursor, err := ss.collection.Find(ctx, bson.M{"key": bson.M{"$in": keys}},
+		options.Find().SetProjection(bson.M{"key": 1}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query existing SMT keys: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	existingKeys := make(map[string]bool)
+	for cursor.Next(ctx) {
+		var doc bson.M
+		if err := cursor.Decode(&doc); err == nil {
+			if key, ok := doc["key"].(string); ok {
+				existingKeys[key] = true
+			}
+		}
+	}
+	return existingKeys, nil
 }
 
 // GetByKey retrieves an SMT node by key

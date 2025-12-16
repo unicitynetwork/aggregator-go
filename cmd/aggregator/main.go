@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
@@ -16,6 +19,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/service"
 	"github.com/unicitynetwork/aggregator-go/internal/storage"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
 // gracefulExit flushes async logger and exits with the given code
@@ -68,7 +72,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	commitmentQueue, storageInstance, err := storage.NewStorage(cfg, log)
+	commitmentQueue, storageInstance, err := storage.NewStorage(ctx, cfg, log)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to initialize storage", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
@@ -94,6 +98,25 @@ func main() {
 
 	log.WithComponent("main").Info("Database connection established")
 
+	// Store trust bases from config files
+	trustBaseValidator := service.NewTrustBaseValidator(storageInstance.TrustBaseStorage())
+	for _, tb := range cfg.BFT.TrustBases {
+		if err := trustBaseValidator.Verify(ctx, &tb); err != nil {
+			log.WithComponent("main").Error(fmt.Sprintf("Trust base verification failed"), "error", err.Error())
+			gracefulExit(asyncLogger, 1)
+		}
+		if err := storageInstance.TrustBaseStorage().Store(ctx, &tb); err != nil {
+			if errors.Is(err, interfaces.ErrTrustBaseAlreadyExists) {
+				log.WithComponent("main").Warn(fmt.Sprintf("Trust base already exists, not overwriting it"), "epoch", tb.GetEpoch())
+			} else {
+				log.WithComponent("main").Error("Failed to store trust base", "epoch", tb.GetEpoch(), "error", err.Error())
+				gracefulExit(asyncLogger, 1)
+			}
+		} else {
+			log.WithComponent("main").Info("Stored trust base", "epoch", tb.GetEpoch())
+		}
+	}
+
 	if err := commitmentQueue.Initialize(ctx); err != nil {
 		log.WithComponent("main").Error("Failed to initialize commitment queue", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
@@ -102,8 +125,22 @@ func main() {
 	// Create the shared state tracker for block sync height
 	stateTracker := state.NewSyncStateTracker()
 
+	// Load last committed unicity certificate (can be nil for genesis)
+	var luc *types.UnicityCertificate
+	lastBlock, err := storageInstance.BlockStorage().GetLatest(ctx)
+	if err != nil {
+		log.WithComponent("main").Error("Failed to load last stored block", "error", err.Error())
+		gracefulExit(asyncLogger, 1)
+	}
+	if lastBlock != nil {
+		if err := types.Cbor.Unmarshal(lastBlock.UnicityCertificate, &luc); err != nil {
+			log.WithComponent("main").Error("Failed to decode unicity certificate", "error", err.Error())
+			gracefulExit(asyncLogger, 1)
+		}
+	}
+
 	// Create round manager based on sharding mode
-	roundManager, err := round.NewManager(ctx, cfg, log, commitmentQueue, storageInstance, stateTracker)
+	roundManager, err := round.NewManager(ctx, cfg, log, commitmentQueue, storageInstance, stateTracker, luc)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to create round manager", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
