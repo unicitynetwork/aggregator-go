@@ -22,6 +22,7 @@ type Manager interface {
 	Activate(ctx context.Context) error
 	Deactivate(ctx context.Context) error
 	GetSMT() *smt.ThreadSafeSMT
+	CheckParentHealth(ctx context.Context) error
 }
 
 // NewManager creates the appropriate round manager based on sharding mode

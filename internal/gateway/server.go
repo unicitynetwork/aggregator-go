@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/unicitynetwork/bft-go-base/types"
+	"golang.org/x/net/http2"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
@@ -85,6 +86,18 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 		MaxHeaderBytes: 1 << 20, // 1MB
 	}
 
+	if cfg.Server.EnableTLS {
+		gatewayLogger := logger.WithComponent("gateway")
+		h2Config := &http2.Server{
+			MaxConcurrentStreams: uint32(cfg.Server.HTTP2MaxConcurrentStreams),
+		}
+		if err := http2.ConfigureServer(server.httpServer, h2Config); err != nil {
+			gatewayLogger.Warn("Failed to configure HTTP/2 server", "error", err.Error())
+		} else {
+			gatewayLogger.Info("Configured HTTP/2 server", "maxConcurrentStreams", cfg.Server.HTTP2MaxConcurrentStreams)
+		}
+	}
+
 	return server
 }
 
@@ -124,7 +137,7 @@ func (s *Server) setupJSONRPCHandlers() {
 	// Add middleware
 	s.rpcServer.AddMiddleware(jsonrpc.RequestIDMiddleware())
 	s.rpcServer.AddMiddleware(jsonrpc.LoggingMiddleware(s.logger))
-	s.rpcServer.AddMiddleware(jsonrpc.TimeoutMiddleware(30 * time.Second))
+	s.rpcServer.AddMiddleware(jsonrpc.TimeoutMiddleware(30*time.Second, s.logger))
 
 	// Register handlers based on mode
 	if s.config.Sharding.Mode.IsParent() {
@@ -169,6 +182,12 @@ func (s *Server) handleHealth(c *gin.Context) {
 	if err != nil {
 		s.logger.WithContext(ctx).Error("Failed to get health status", "error", err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	// Return 503 if unhealthy so load balancers can remove from rotation
+	if status.Status == "unhealthy" {
+		c.JSON(http.StatusServiceUnavailable, status)
 		return
 	}
 

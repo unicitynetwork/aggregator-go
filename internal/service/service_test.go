@@ -10,17 +10,19 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"net/url"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/mongodb"
-	"github.com/testcontainers/testcontainers-go/wait"
+	redisContainer "github.com/testcontainers/testcontainers-go/modules/redis"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/events"
@@ -31,7 +33,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
-	mongodbStorage "github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
+	"github.com/unicitynetwork/aggregator-go/internal/storage"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
@@ -62,9 +64,15 @@ func (suite *AggregatorTestSuite) TearDownTest() {
 func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func()) {
 	var mongoContainer *mongodb.MongoDBContainer
 
+	// Override osExit to prevent test process termination during teardown
+	restoreExit := round.SetExitFunc(func(code int) {
+		t.Logf("os.Exit(%d) called but suppressed in test", code)
+	})
+
 	// Ensure cleanup happens even if setup fails
 	defer func() {
 		if r := recover(); r != nil {
+			restoreExit()
 			if mongoContainer != nil {
 				mongoContainer.Terminate(context.Background())
 			}
@@ -72,22 +80,23 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 		}
 	}()
 
-	// Start MongoDB container
-	mongoContainer, err := mongodb.Run(ctx,
-		"mongo:7.0",
-		mongodb.WithUsername("admin"),
-		mongodb.WithPassword("password"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("Waiting for connections").WithStartupTimeout(30*time.Second),
-		),
-	)
+	// Start MongoDB container with replica set (required for transactions)
+	mongoContainer, err := mongodb.Run(ctx, "mongo:7.0", mongodb.WithReplicaSet("rs0"))
 	if err != nil {
 		t.Fatalf("Failed to start MongoDB container: %v", err)
 	}
-
-	// Get MongoDB connection string
 	mongoURI, err := mongoContainer.ConnectionString(ctx)
 	require.NoError(t, err)
+	mongoURI += "&directConnection=true"
+
+	// Start Redis container
+	redis, err := redisContainer.Run(ctx, "redis:7")
+	require.NoError(t, err)
+	redisURI, err := redis.ConnectionString(ctx)
+	require.NoError(t, err)
+	redisURL, _ := url.Parse(redisURI)
+	redisHost := redisURL.Hostname()
+	redisPort, _ := strconv.Atoi(redisURL.Port())
 
 	// Get a free port to avoid conflicts
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -98,12 +107,9 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	// Set environment variables for the aggregator
 	os.Setenv("MONGODB_URI", mongoURI)
 	os.Setenv("MONGODB_DATABASE", "aggregator_test")
-	os.Setenv("MONGODB_CONNECT_TIMEOUT", "30s")
-	os.Setenv("MONGODB_SERVER_SELECTION_TIMEOUT", "30s")
-	os.Setenv("MONGODB_SOCKET_TIMEOUT", "60s")
 	os.Setenv("PORT", strconv.Itoa(port))
 	os.Setenv("HOST", "127.0.0.1")
-	os.Setenv("LOG_LEVEL", "debug")
+	os.Setenv("LOG_LEVEL", "warn")
 	os.Setenv("DISABLE_HIGH_AVAILABILITY", "true")
 	os.Setenv("BFT_ENABLED", "false")
 
@@ -111,16 +117,23 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	cfg, err := config.Load()
 	require.NoError(t, err)
 
+	// Configure Redis for commitments
+	cfg.Redis = config.RedisConfig{Host: redisHost, Port: redisPort}
+	cfg.Storage.UseRedisForCommitments = true
+	cfg.Storage.RedisStreamName = "commitments:test"
+	cfg.Storage.RedisFlushInterval = 100 * time.Millisecond
+	cfg.Storage.RedisMaxBatchSize = 1000
+	cfg.Storage.RedisCleanupInterval = 1 * time.Minute
+	cfg.Storage.RedisMaxStreamLength = 100000
+
 	// Initialize logger
-	log, err := logger.New("info", "text", "stdout", false)
+	log, err := logger.New("warn", "text", "stdout", false)
 	require.NoError(t, err)
 
-	// Initialize storage
-	mongoStorage, err := mongodbStorage.NewStorage(ctx, *cfg)
+	// Initialize storage with Redis commitment queue
+	commitmentQueue, mongoStorage, err := storage.NewStorage(ctx, cfg, log)
 	require.NoError(t, err)
-
-	// Use MongoDB for both commitment queue and storage
-	commitmentQueue := mongoStorage.CommitmentQueue()
+	commitmentQueue.Initialize(ctx)
 
 	// Initialize round manager
 	rootAggregatorClient := sharding.NewRootAggregatorClientStub()
@@ -165,6 +178,9 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 
 	// Return the server address and cleanup function
 	return serverAddr, func() {
+		// Restore the original exit function at the end
+		defer restoreExit()
+
 		// Create shutdown context
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -181,17 +197,14 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 			roundManager.Stop(shutdownCtx)
 		}
 
-		// Stop MongoDB container with timeout
+		// Stop containers
+		termCtx, termCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer termCancel()
+		if redis != nil {
+			redis.Terminate(termCtx)
+		}
 		if mongoContainer != nil {
-			t.Logf("Stopping MongoDB container...")
-			termCtx, termCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer termCancel()
-
-			if err := mongoContainer.Terminate(termCtx); err != nil {
-				t.Logf("Failed to terminate MongoDB container: %v", err)
-				// Force kill if graceful termination fails
-				t.Logf("Attempting to force remove container...")
-			}
+			mongoContainer.Terminate(termCtx)
 		}
 	}
 }
@@ -231,7 +244,7 @@ func validateInclusionProof(t *testing.T, proof *api.InclusionProof, requestID a
 	assert.NotNil(t, proof.MerkleTreePath, "Should have merkle tree path")
 
 	// Validate unicity certificate field
-	if proof.UnicityCertificate != nil && len(proof.UnicityCertificate) > 0 {
+	if len(proof.UnicityCertificate) > 0 {
 		assert.NotEmpty(t, proof.UnicityCertificate, "Unicity certificate should not be empty")
 		// Verify it's valid hex-encoded data
 		_, err := hex.DecodeString(string(proof.UnicityCertificate))
@@ -313,6 +326,68 @@ func (suite *AggregatorTestSuite) TestInclusionProofMissingRecord() {
 	// Verify that UnicityCertificate is included in non-inclusion proof
 	suite.NotNil(inclusionProof.InclusionProof.UnicityCertificate, "Non-inclusion proof should include UnicityCertificate")
 	suite.NotEmpty(inclusionProof.InclusionProof.UnicityCertificate, "UnicityCertificate should not be empty")
+}
+
+func TestGetInclusionProofShardMismatch(t *testing.T) {
+	shardingCfg := config.ShardingConfig{
+		Mode: config.ShardingModeChild,
+		Child: config.ChildConfig{
+			ShardID: 4,
+		},
+	}
+	tree := smt.NewChildSparseMerkleTree(api.SHA256, 16+256, shardingCfg.Child.ShardID)
+	service := newAggregatorServiceForTest(t, shardingCfg, tree)
+
+	invalidShardID := api.RequestID(strings.Repeat("00", 33) + "01")
+	_, err := service.GetInclusionProof(context.Background(), &api.GetInclusionProofRequest{RequestID: invalidShardID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "request ID validation failed")
+}
+
+func TestGetInclusionProofInvalidRequestFormat(t *testing.T) {
+	shardingCfg := config.ShardingConfig{
+		Mode: config.ShardingModeChild,
+		Child: config.ChildConfig{
+			ShardID: 4,
+		},
+	}
+	tree := smt.NewChildSparseMerkleTree(api.SHA256, 16+256, shardingCfg.Child.ShardID)
+	service := newAggregatorServiceForTest(t, shardingCfg, tree)
+
+	_, err := service.GetInclusionProof(context.Background(), &api.GetInclusionProofRequest{RequestID: api.RequestID("zz")})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "request ID validation failed")
+}
+
+func TestGetInclusionProofSMTUnavailable(t *testing.T) {
+	shardingCfg := config.ShardingConfig{
+		Mode: config.ShardingModeChild,
+		Child: config.ChildConfig{
+			ShardID: 4,
+		},
+	}
+	service := newAggregatorServiceForTest(t, shardingCfg, nil)
+
+	validID := api.RequestID(strings.Repeat("00", 34))
+	_, err := service.GetInclusionProof(context.Background(), &api.GetInclusionProofRequest{RequestID: validID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "merkle tree not initialized")
+}
+
+func TestInclusionProofInvalidPathLength(t *testing.T) {
+	shardingCfg := config.ShardingConfig{
+		Mode: config.ShardingModeStandalone,
+	}
+	tree := smt.NewSparseMerkleTree(api.SHA256, 16+256)
+	service := newAggregatorServiceForTest(t, shardingCfg, tree)
+
+	validID := createTestCommitments(t, 1)[0].RequestID.String()
+	require.Greater(t, len(validID), 2)
+	badID := api.RequestID(validID[2:])
+
+	_, err := service.GetInclusionProof(context.Background(), &api.GetInclusionProofRequest{RequestID: badID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path length")
 }
 
 // TestInclusionProof tests the complete inclusion proof workflow
@@ -433,4 +508,35 @@ func createTestCommitments(t *testing.T, count int) []*api.SubmitCommitmentReque
 	}
 
 	return commitments
+}
+
+type stubRoundManager struct {
+	smt *smt.ThreadSafeSMT
+}
+
+func (s *stubRoundManager) Start(context.Context) error    { return nil }
+func (s *stubRoundManager) Stop(context.Context) error     { return nil }
+func (s *stubRoundManager) Activate(context.Context) error { return nil }
+func (s *stubRoundManager) Deactivate(context.Context) error {
+	return nil
+}
+func (s *stubRoundManager) GetSMT() *smt.ThreadSafeSMT              { return s.smt }
+func (s *stubRoundManager) CheckParentHealth(context.Context) error { return nil }
+
+func newAggregatorServiceForTest(t *testing.T, shardingCfg config.ShardingConfig, baseTree *smt.SparseMerkleTree) *AggregatorService {
+	t.Helper()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	var tsmt *smt.ThreadSafeSMT
+	if baseTree != nil {
+		tsmt = smt.NewThreadSafeSMT(baseTree)
+	}
+
+	return &AggregatorService{
+		config:              &config.Config{Sharding: shardingCfg},
+		logger:              log,
+		roundManager:        &stubRoundManager{smt: tsmt},
+		commitmentValidator: signing.NewCommitmentValidator(shardingCfg),
+	}
 }

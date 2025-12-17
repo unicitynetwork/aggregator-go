@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 // ContextKey type for context keys
@@ -21,13 +23,37 @@ const (
 // Logger wraps slog.Logger with additional functionality
 type Logger struct {
 	*slog.Logger
+	fileWriter io.Closer // holds reference to lumberjack for cleanup
+}
+
+// LogConfig holds the configuration for creating a logger
+type LogConfig struct {
+	Level           string
+	Format          string
+	Output          string
+	EnableJSON      bool
+	FilePath        string // Path to log file (empty = no file logging)
+	MaxSizeMB       int    // Max size in MB before rotation
+	MaxBackups      int    // Max number of old log files to retain
+	MaxAgeDays      int    // Max days to retain old log files
+	CompressBackups bool   // Compress rotated log files
 }
 
 // New creates a new logger instance
 func New(level, format, output string, enableJSON bool) (*Logger, error) {
+	return NewWithConfig(LogConfig{
+		Level:      level,
+		Format:     format,
+		Output:     output,
+		EnableJSON: enableJSON,
+	})
+}
+
+// NewWithConfig creates a new logger instance with full configuration including file rotation
+func NewWithConfig(cfg LogConfig) (*Logger, error) {
 	// Parse log level
 	var logLevel slog.Level
-	switch strings.ToLower(level) {
+	switch strings.ToLower(cfg.Level) {
 	case "debug":
 		logLevel = slog.LevelDebug
 	case "info":
@@ -40,19 +66,48 @@ func New(level, format, output string, enableJSON bool) (*Logger, error) {
 		logLevel = slog.LevelInfo
 	}
 
-	// Determine output writer
-	var writer io.Writer
-	switch output {
-	case "stdout", "":
-		writer = os.Stdout
+	// Determine console output writer
+	var consoleWriter io.Writer
+	switch cfg.Output {
 	case "stderr":
-		writer = os.Stderr
+		consoleWriter = os.Stderr
 	default:
-		file, err := os.OpenFile(output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-		if err != nil {
-			return nil, err
+		consoleWriter = os.Stdout
+	}
+
+	// Build the final writer (console only, or multi-writer with file)
+	var writer io.Writer
+	var fileWriter *lumberjack.Logger
+
+	if cfg.FilePath != "" {
+		// Set defaults if not provided
+		maxSize := cfg.MaxSizeMB
+		if maxSize <= 0 {
+			maxSize = 100 // 100 MB default
 		}
-		writer = file
+		maxBackups := cfg.MaxBackups
+		if maxBackups <= 0 {
+			maxBackups = 30
+		}
+		maxAge := cfg.MaxAgeDays
+		if maxAge <= 0 {
+			maxAge = 30
+		}
+
+		// Create lumberjack logger for file rotation
+		fileWriter = &lumberjack.Logger{
+			Filename:   cfg.FilePath,
+			MaxSize:    maxSize,    // megabytes
+			MaxBackups: maxBackups, // number of backups
+			MaxAge:     maxAge,     // days
+			Compress:   cfg.CompressBackups,
+			LocalTime:  true, // use local time for backup timestamps
+		}
+
+		// Combine console and file writers
+		writer = io.MultiWriter(consoleWriter, fileWriter)
+	} else {
+		writer = consoleWriter
 	}
 
 	// Create handler options
@@ -62,14 +117,22 @@ func New(level, format, output string, enableJSON bool) (*Logger, error) {
 
 	// Create handler based on format
 	var handler slog.Handler
-	if enableJSON || format == "json" {
+	if cfg.EnableJSON || cfg.Format == "json" {
 		handler = slog.NewJSONHandler(writer, opts)
 	} else {
 		handler = slog.NewTextHandler(writer, opts)
 	}
 
 	logger := slog.New(handler)
-	return &Logger{Logger: logger}, nil
+	return &Logger{Logger: logger, fileWriter: fileWriter}, nil
+}
+
+// Close closes any file writers (call on shutdown for clean log rotation)
+func (l *Logger) Close() error {
+	if l.fileWriter != nil {
+		return l.fileWriter.Close()
+	}
+	return nil
 }
 
 // WithContext creates a new logger with context values

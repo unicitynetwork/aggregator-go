@@ -39,6 +39,10 @@ type CommitmentQueue interface {
 	// CountUnprocessed returns the number of unprocessed commitments
 	CountUnprocessed(ctx context.Context) (int64, error)
 
+	// GetAllPending retrieves all pending (unacknowledged) commitments
+	// Used for crash recovery
+	GetAllPending(ctx context.Context) ([]*models.Commitment, error)
+
 	// Lifecycle methods
 	Initialize(ctx context.Context) error
 	Close(ctx context.Context) error
@@ -69,6 +73,9 @@ type AggregatorRecordStorage interface {
 
 	// GetLatest retrieves the most recent records
 	GetLatest(ctx context.Context, limit int) ([]*models.AggregatorRecord, error)
+
+	// GetExistingRequestIDs returns which of the given request IDs already exist
+	GetExistingRequestIDs(ctx context.Context, requestIDs []string) (map[string]bool, error)
 }
 
 // BlockStorage handles blockchain block storage
@@ -79,10 +86,10 @@ type BlockStorage interface {
 	// GetByNumber retrieves a block by number
 	GetByNumber(ctx context.Context, blockNumber *api.BigInt) (*models.Block, error)
 
-	// GetLatest retrieves the latest block
+	// GetLatest retrieves the latest finalized block
 	GetLatest(ctx context.Context) (*models.Block, error)
 
-	// GetLatestNumber retrieves the latest block number
+	// GetLatestNumber retrieves the latest finalized block number
 	GetLatestNumber(ctx context.Context) (*api.BigInt, error)
 
 	// GetLatestByRootHash retrieves the latest block with the given root hash
@@ -93,6 +100,12 @@ type BlockStorage interface {
 
 	// GetRange retrieves blocks in a range
 	GetRange(ctx context.Context, fromBlock, toBlock *api.BigInt) ([]*models.Block, error)
+
+	// SetFinalized marks a block as finalized or unfinalized
+	SetFinalized(ctx context.Context, blockNumber *api.BigInt, finalized bool) error
+
+	// GetUnfinalized returns all unfinalized blocks (should be at most 1)
+	GetUnfinalized(ctx context.Context) ([]*models.Block, error)
 }
 
 // SmtStorage handles Sparse Merkle Tree node storage
@@ -126,6 +139,9 @@ type SmtStorage interface {
 
 	// GetChunked retrieves SMT nodes in chunks for efficient loading
 	GetChunked(ctx context.Context, offset, limit int) ([]*models.SmtNode, error)
+
+	// GetExistingKeys returns which of the given keys already exist in the database
+	GetExistingKeys(ctx context.Context, keys []string) (map[string]bool, error)
 }
 
 // BlockRecordsStorage handles block to request ID mappings

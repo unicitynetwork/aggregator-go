@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,18 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
+
+// osExit is the function used to exit the process on fatal errors.
+// It can be overridden in tests to prevent actual process termination.
+var osExit = os.Exit
+
+// SetExitFunc allows tests to override the exit function to prevent actual process termination.
+// Returns a function to restore the original exit function.
+func SetExitFunc(f func(int)) func() {
+	original := osExit
+	osExit = f
+	return func() { osExit = original }
+}
 
 const (
 	idle status = iota
@@ -69,11 +82,13 @@ type (
 	BFTClient interface {
 		Start(ctx context.Context) error
 		Stop()
+		WaitForInitialized(ctx context.Context) error
 		CertificationRequest(ctx context.Context, block *models.Block) error
 	}
 
 	RoundManager interface {
 		FinalizeBlock(ctx context.Context, block *models.Block) error
+		FinalizeBlockWithRetry(ctx context.Context, block *models.Block) error
 		StartNewRound(ctx context.Context, roundNumber *api.BigInt) error
 	}
 
@@ -479,11 +494,12 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 	}
 	c.proposedBlock.UnicityCertificate = api.NewHexBytes(ucCbor)
 
-	if err := c.roundManager.FinalizeBlock(ctx, c.proposedBlock); err != nil {
-		c.logger.WithContext(ctx).Error("Failed to finalize block",
+	if err := c.roundManager.FinalizeBlockWithRetry(ctx, c.proposedBlock); err != nil {
+		// Fatal error - exit immediately, recovery will handle on restart
+		c.logger.WithContext(ctx).Error("FATAL: Failed to finalize block after retries, exiting",
 			"blockNumber", c.proposedBlock.Index.String(),
 			"error", err.Error())
-		return err
+		osExit(1)
 	}
 
 	// Clear the proposed block after finalization
@@ -507,7 +523,10 @@ func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 		return fmt.Errorf("failed to decode root hash: %w", err)
 	}
 
-	luc := c.luc.Load()
+	luc, err := c.waitForLatestUC(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to prepare certification request: %w", err)
+	}
 
 	var blockHash []byte
 	if !bytes.Equal(rootHashBytes, luc.InputRecord.Hash) {
@@ -555,6 +574,10 @@ func (c *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String(),
 		"lastRootRound", c.lastRootRound.Load())
+
+	if err := c.ensureInitialized(ctx); err != nil {
+		return err
+	}
 
 	// Always prefer the expected round number from root chain if available
 	expectedRound := c.nextExpectedRound.Load()
@@ -605,4 +628,61 @@ func (c *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.
 	c.logger.WithContext(ctx).Info("Certification request completed",
 		"blockNumber", block.Index.String())
 	return nil
+}
+
+func (c *BFTClientImpl) waitForLatestUC(ctx context.Context) (*types.UnicityCertificate, error) {
+	if luc := c.luc.Load(); luc != nil {
+		return luc, nil
+	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+			if luc := c.luc.Load(); luc != nil {
+				return luc, nil
+			}
+		}
+	}
+}
+
+func (c *BFTClientImpl) ensureInitialized(ctx context.Context) error {
+	if c.status.Load() == normal {
+		return nil
+	}
+	_, err := c.waitForLatestUC(ctx)
+	return err
+}
+
+// WaitForInitialized blocks until the BFT client has received its first UC and is ready.
+// This should be called after Start() and before attempting any certification requests.
+func (c *BFTClientImpl) WaitForInitialized(ctx context.Context) error {
+	if c.status.Load() == normal {
+		return nil
+	}
+
+	c.logger.WithContext(ctx).Info("Waiting for BFT client initialization (first UC from root chain)")
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded {
+				return fmt.Errorf("timeout waiting for BFT client initialization - no UC received from root chain within 30s")
+			}
+			return ctx.Err()
+		case <-ticker.C:
+			if c.status.Load() == normal {
+				c.logger.WithContext(ctx).Info("BFT client initialized successfully")
+				return nil
+			}
+		}
+	}
 }

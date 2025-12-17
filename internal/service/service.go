@@ -234,7 +234,16 @@ func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.Get
 	if err != nil {
 		return nil, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
 	}
-	merkleTreePath, err := as.roundManager.GetSMT().GetPath(path)
+
+	smtInstance := as.roundManager.GetSMT()
+	if smtInstance == nil {
+		return nil, fmt.Errorf("merkle tree not initialized")
+	}
+	if keyLen := smtInstance.GetKeyLength(); path.BitLen()-1 != keyLen {
+		return nil, fmt.Errorf("request path length %d does not match SMT key length %d", path.BitLen()-1, keyLen)
+	}
+
+	merkleTreePath, err := smtInstance.GetPath(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get inclusion proof for request ID %s: %w", req.RequestID, err)
 	}
@@ -409,6 +418,7 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 
 	// Add database connectivity check
 	if err := as.storage.Ping(ctx); err != nil {
+		status.Status = "unhealthy"
 		status.AddDetail("database", "disconnected")
 		as.logger.WithContext(ctx).Error("Database health check failed", "error", err.Error())
 	} else {
@@ -435,6 +445,17 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 				"count", unprocessedCount)
 		} else {
 			status.AddDetail("commitment_queue_status", "healthy")
+		}
+	}
+
+	if as.config.Sharding.Mode == config.ShardingModeChild {
+		if err := as.roundManager.CheckParentHealth(ctx); err != nil {
+			status.Status = "degraded"
+			status.AddDetail("parent", "unreachable")
+			status.AddDetail("parent_error", err.Error())
+			as.logger.WithContext(ctx).Warn("Parent aggregator health check failed", "error", err.Error())
+		} else {
+			status.AddDetail("parent", "connected")
 		}
 	}
 

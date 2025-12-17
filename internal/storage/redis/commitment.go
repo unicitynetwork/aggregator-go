@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	commitmentStream     = "commitments"
+	defaultStreamName    = "commitments"
 	consumerGroup        = "processors"
 	cleanupInterval      = 5 * time.Minute
 	maxStreamLength      = 1000000                // Keep last 1M messages
@@ -54,6 +54,7 @@ type pendingCommitment struct {
 // CommitmentStorage implements commitment storage using Redis streams with cursor support
 type CommitmentStorage struct {
 	client      *redis.Client
+	streamName  string
 	serverID    string
 	consumerID  string
 	stopChan    chan struct{}
@@ -73,9 +74,14 @@ type CommitmentStorage struct {
 }
 
 // NewCommitmentStorage creates a new Redis-based commitment storage instance with custom batching config
-func NewCommitmentStorage(client *redis.Client, serverID string, batchConfig *BatchConfig, log *logger.Logger) *CommitmentStorage {
+func NewCommitmentStorage(client *redis.Client, streamName string, serverID string, batchConfig *BatchConfig, log *logger.Logger) *CommitmentStorage {
+	if streamName == "" {
+		streamName = defaultStreamName
+	}
+
 	cs := &CommitmentStorage{
 		client:      client,
+		streamName:  streamName,
 		serverID:    serverID,
 		consumerID:  "processor",
 		stopChan:    make(chan struct{}),
@@ -124,7 +130,7 @@ func (cs *CommitmentStorage) Close(ctx context.Context) error {
 }
 
 func (cs *CommitmentStorage) ensureConsumerGroup(ctx context.Context) error {
-	err := cs.client.XGroupCreateMkStream(ctx, commitmentStream, consumerGroup, "0").Err()
+	err := cs.client.XGroupCreateMkStream(ctx, cs.streamName, consumerGroup, "0").Err()
 	if err != nil {
 		// Ignore "BUSYGROUP" error - group already exists
 		if strings.Contains(err.Error(), "BUSYGROUP") {
@@ -134,7 +140,7 @@ func (cs *CommitmentStorage) ensureConsumerGroup(ctx context.Context) error {
 	}
 
 	cs.logger.WithContext(ctx).Warn("Redis consumer group recreated",
-		"stream", commitmentStream,
+		"stream", cs.streamName,
 		"group", consumerGroup)
 	return nil
 }
@@ -239,7 +245,7 @@ func (cs *CommitmentStorage) storeBatchSync(ctx context.Context, commitments []*
 	// Add all to stream using pipeline
 	for i, commitment := range commitments {
 		pipe.XAdd(ctx, &redis.XAddArgs{
-			Stream: commitmentStream,
+			Stream: cs.streamName,
 			Values: map[string]interface{}{
 				"requestId": string(commitment.RequestID),
 				"data":      serializedCommitments[i],
@@ -308,7 +314,7 @@ func (cs *CommitmentStorage) StoreBatch(ctx context.Context, commitments []*mode
 	// Add all to stream using pipeline
 	for i, commitment := range commitments {
 		pipe.XAdd(ctx, &redis.XAddArgs{
-			Stream: commitmentStream,
+			Stream: cs.streamName,
 			Values: map[string]interface{}{
 				"requestId": string(commitment.RequestID),
 				"data":      serializedCommitments[i],
@@ -332,9 +338,45 @@ func (cs *CommitmentStorage) StoreBatch(ctx context.Context, commitments []*mode
 	return nil
 }
 
-// GetByRequestID is not implemented for Redis
+// GetByRequestID is not implemented for Redis - use GetAllPending and filter instead
 func (cs *CommitmentStorage) GetByRequestID(ctx context.Context, requestID api.RequestID) (*models.Commitment, error) {
 	return nil, fmt.Errorf("GetByRequestID not implemented for Redis")
+}
+
+// GetAllPending retrieves all pending (unacknowledged) commitments from the stream.
+// Used for crash recovery to get commitments that weren't processed.
+func (cs *CommitmentStorage) GetAllPending(ctx context.Context) ([]*models.Commitment, error) {
+	var commitments []*models.Commitment
+	lastID := "0"
+	const batchSize = 1000
+
+	for {
+		messages, err := cs.client.XRange(ctx, cs.streamName, lastID, "+").Result()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read Redis stream: %w", err)
+		}
+
+		if len(messages) == 0 {
+			break
+		}
+
+		for _, msg := range messages {
+			lastID = "(" + msg.ID // exclusive for next batch
+
+			commitment, err := cs.parseCommitment(msg)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse commitment: %w", err)
+			}
+			commitment.StreamID = msg.ID
+			commitments = append(commitments, commitment)
+		}
+
+		if len(messages) < batchSize {
+			break
+		}
+	}
+
+	return commitments, nil
 }
 
 // GetUnprocessedBatch is not implemented for Redis - use StreamCommitments instead
@@ -368,7 +410,7 @@ func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interf
 			end = len(streamIDs)
 		}
 
-		if err := cs.client.XAck(ctx, commitmentStream, consumerGroup, streamIDs[start:end]...).Err(); err != nil {
+		if err := cs.client.XAck(ctx, cs.streamName, consumerGroup, streamIDs[start:end]...).Err(); err != nil {
 			return fmt.Errorf("failed to acknowledge entries by stream ID: %w", err)
 		}
 	}
@@ -386,13 +428,13 @@ func (cs *CommitmentStorage) Delete(ctx context.Context, requestIDs []api.Reques
 // Cleanup removes all data for this storage instance (useful for testing)
 func (cs *CommitmentStorage) Cleanup(ctx context.Context) error {
 	// Delete the stream entirely
-	err := cs.client.Del(ctx, commitmentStream).Err()
+	err := cs.client.Del(ctx, cs.streamName).Err()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("failed to delete stream: %w", err)
 	}
 
 	// Delete the consumer group (will be recreated on next Initialize)
-	err = cs.client.XGroupDestroy(ctx, commitmentStream, consumerGroup).Err()
+	err = cs.client.XGroupDestroy(ctx, cs.streamName, consumerGroup).Err()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		// Ignore "NOGROUP" error - group doesn't exist
 		if !strings.Contains(err.Error(), "NOGROUP") {
@@ -405,7 +447,7 @@ func (cs *CommitmentStorage) Cleanup(ctx context.Context) error {
 
 // Count returns the total number of commitments in the stream
 func (cs *CommitmentStorage) Count(ctx context.Context) (int64, error) {
-	info := cs.client.XInfoStream(ctx, commitmentStream)
+	info := cs.client.XInfoStream(ctx, cs.streamName)
 	if err := info.Err(); err != nil {
 		if errors.Is(err, redis.Nil) {
 			return 0, nil
@@ -418,7 +460,7 @@ func (cs *CommitmentStorage) Count(ctx context.Context) (int64, error) {
 // CountUnprocessed returns the number of unprocessed commitments
 func (cs *CommitmentStorage) CountUnprocessed(ctx context.Context) (int64, error) {
 	// Get pending count for the entire consumer group - this represents unprocessed items
-	pendingInfo := cs.client.XPending(ctx, commitmentStream, consumerGroup)
+	pendingInfo := cs.client.XPending(ctx, cs.streamName, consumerGroup)
 	if err := pendingInfo.Err(); err != nil {
 		if errors.Is(err, redis.Nil) {
 			return 0, nil
@@ -427,7 +469,7 @@ func (cs *CommitmentStorage) CountUnprocessed(ctx context.Context) (int64, error
 			if ensureErr := cs.ensureConsumerGroup(ctx); ensureErr != nil {
 				return 0, fmt.Errorf("failed to ensure consumer group: %w", ensureErr)
 			}
-			pendingInfo = cs.client.XPending(ctx, commitmentStream, consumerGroup)
+			pendingInfo = cs.client.XPending(ctx, cs.streamName, consumerGroup)
 			if err := pendingInfo.Err(); err != nil {
 				if errors.Is(err, redis.Nil) {
 					return 0, nil
@@ -481,12 +523,12 @@ func (cs *CommitmentStorage) trimStream(ctx context.Context) {
 	countBefore, _ := cs.Count(ctx)
 
 	// Trim to keep only the last N messages
-	trimmed := cs.client.XTrimMaxLen(ctx, commitmentStream, cs.batchConfig.MaxStreamLength).Val()
+	trimmed := cs.client.XTrimMaxLen(ctx, cs.streamName, cs.batchConfig.MaxStreamLength).Val()
 
 	if trimmed > 0 {
 		countAfter := countBefore - trimmed
 		cs.logger.WithContext(ctx).Info("Redis stream trimmed",
-			"stream", commitmentStream,
+			"stream", cs.streamName,
 			"trimmed", trimmed,
 			"before", countBefore,
 			"after", countAfter,
@@ -497,6 +539,9 @@ func (cs *CommitmentStorage) trimStream(ctx context.Context) {
 // StreamCommitments continuously streams commitments using blocking Redis reads
 // This streams commitments directly to the provided channel as they arrive
 func (cs *CommitmentStorage) StreamCommitments(ctx context.Context, commitmentChan chan<- *models.Commitment) error {
+	windowStart := time.Now()
+	countThisWindow := 0
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -513,8 +558,8 @@ func (cs *CommitmentStorage) StreamCommitments(ctx context.Context, commitmentCh
 				pendingStreams := cs.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 					Group:    consumerGroup,
 					Consumer: cs.consumerID,
-					Streams:  []string{commitmentStream, "0"}, // "0" = read pending for this consumer
-					Count:    100,
+					Streams:  []string{cs.streamName, "0"}, // "0" = read pending for this consumer
+					Count:    1000,
 					Block:    0, // Don't block
 				})
 
@@ -541,8 +586,8 @@ func (cs *CommitmentStorage) StreamCommitments(ctx context.Context, commitmentCh
 				streams = cs.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 					Group:    consumerGroup,
 					Consumer: cs.consumerID,
-					Streams:  []string{commitmentStream, ">"}, // ">" = new messages only
-					Count:    100,
+					Streams:  []string{cs.streamName, ">"}, // ">" = new messages only
+					Count:    1000,
 					Block:    100 * time.Millisecond,
 				})
 			}
@@ -582,6 +627,17 @@ func (cs *CommitmentStorage) StreamCommitments(ctx context.Context, commitmentCh
 					// Stream commitment directly to channel
 					select {
 					case commitmentChan <- commitment:
+						countThisWindow++
+						elapsed := time.Since(windowStart)
+						if elapsed >= time.Second {
+							rate := float64(countThisWindow) / elapsed.Seconds()
+							cs.logger.Info("PERF: Redis stream throughput",
+								"serverID", cs.serverID,
+								"ratePerSec", fmt.Sprintf("%.0f", rate),
+								"windowMs", elapsed.Milliseconds())
+							windowStart = time.Now()
+							countThisWindow = 0
+						}
 					case <-ctx.Done():
 						return ctx.Err()
 					case <-cs.stopChan:

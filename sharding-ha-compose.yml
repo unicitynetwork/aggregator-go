@@ -287,6 +287,7 @@ services:
       - default
     volumes:
       - ./data/genesis:/app/bft-config
+      - ./logs/shard1-1:/app/logs
     depends_on:
       - mongo-setup-shard1
       - bft-aggregator-genesis-gen
@@ -295,7 +296,7 @@ services:
       MONGODB_URI: "mongodb://mongodb-shard1-1:27017,mongodb-shard1-2:27017,mongodb-shard1-3:27017/aggregator?replicaSet=rs1"
       PORT: "3000"
       HOST: "0.0.0.0"
-      CONCURRENCY_LIMIT: "1000"
+      CONCURRENCY_LIMIT: "5000"
       ENABLE_DOCS: "true"
       ENABLE_CORS: "true"
       MONGODB_DATABASE: "aggregator"
@@ -308,7 +309,9 @@ services:
       LOG_LEVEL: "debug"
       LOG_FORMAT: "json"
       LOG_ENABLE_JSON: "true"
+      LOG_FILE_PATH: "/app/logs/aggregator.log"
       BATCH_LIMIT: "1000"
+      COLLECT_PHASE_DURATION: "500ms"
       BFT_ENABLED: "false"
       BFT_KEY_CONF_FILE: "/app/bft-config/aggregator/keys.json"
       BFT_SHARD_CONF_FILE: "/app/bft-config/shard-conf-7_0.json"
@@ -319,7 +322,8 @@ services:
       REDIS_DB: "0"
       REDIS_POOL_SIZE: "100"
       REDIS_MIN_IDLE_CONNS: "10"
-      USE_REDIS_FOR_COMMITMENTS: "false"
+      USE_REDIS_FOR_COMMITMENTS: "true"
+      REDIS_STREAM_NAME: "commitments:shard:1"
       REDIS_FLUSH_INTERVAL: "50ms"
       REDIS_MAX_BATCH_SIZE: "2000"
 
@@ -359,6 +363,9 @@ services:
     container_name: aggregator-shard1-2
     ports:
       - "3012:3000"
+    volumes:
+      - ./data/genesis:/app/bft-config
+      - ./logs/shard1-2:/app/logs
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard1-1:27017,mongodb-shard1-2:27017,mongodb-shard1-3:27017/aggregator?replicaSet=rs1"
@@ -373,9 +380,13 @@ services:
     container_name: aggregator-shard2-1
     ports:
       - "3021:3000"
+    volumes:
+      - ./data/genesis:/app/bft-config
+      - ./logs/shard2-1:/app/logs
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard2-1:27017,mongodb-shard2-2:27017,mongodb-shard2-3:27017/aggregator?replicaSet=rs2"
+      REDIS_STREAM_NAME: "commitments:shard:2"
       SHARDING_MODE: "child"
       SHARDING_CHILD_SHARD_ID: 2 # 0b10
     depends_on:
@@ -387,9 +398,13 @@ services:
     container_name: aggregator-shard2-2
     ports:
       - "3022:3000"
+    volumes:
+      - ./data/genesis:/app/bft-config
+      - ./logs/shard2-2:/app/logs
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard2-1:27017,mongodb-shard2-2:27017,mongodb-shard2-3:27017/aggregator?replicaSet=rs2"
+      REDIS_STREAM_NAME: "commitments:shard:2"
       SHARDING_MODE: "child"
       SHARDING_CHILD_SHARD_ID: 2 # 0b10
     depends_on:
@@ -406,6 +421,9 @@ services:
     container_name: aggregator-root-1
     ports:
       - "3009:3000"
+    volumes:
+      - ./data/genesis:/app/bft-config
+      - ./logs/root-1:/app/logs
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-root-1:27017,mongodb-root-2:27017,mongodb-root-3:27017/aggregator?replicaSet=rs-root"

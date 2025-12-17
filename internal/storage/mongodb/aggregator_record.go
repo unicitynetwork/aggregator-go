@@ -39,30 +39,57 @@ func (ars *AggregatorRecordStorage) Store(ctx context.Context, record *models.Ag
 	return nil
 }
 
-// StoreBatch stores multiple aggregator records
+// StoreBatch stores multiple aggregator records using InsertMany.
+// Duplicate key errors are ignored (duplicates are simply skipped).
 func (ars *AggregatorRecordStorage) StoreBatch(ctx context.Context, records []*models.AggregatorRecord) error {
 	if len(records) == 0 {
 		return nil
 	}
 
-	var err error
-	documents := make([]interface{}, len(records))
+	docs := make([]interface{}, len(records))
 	for i, record := range records {
-		documents[i], err = record.ToBSON()
+		recordBSON, err := record.ToBSON()
 		if err != nil {
 			return fmt.Errorf("failed to marshal aggregator record to BSON: %w", err)
 		}
+		docs[i] = recordBSON
 	}
 
-	opts := options.InsertMany().SetOrdered(false)
-	_, err = ars.collection.InsertMany(ctx, documents, opts)
+	_, err := ars.collection.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
 	if err != nil {
+		// Ignore duplicate key errors - with SetOrdered(false), non-duplicates are still inserted
 		if mongo.IsDuplicateKeyError(err) {
 			return nil
 		}
 		return fmt.Errorf("failed to store aggregator records batch: %w", err)
 	}
 	return nil
+}
+
+// GetExistingRequestIDs returns which of the given request IDs already exist in the database.
+// Used to filter duplicates before inserting.
+func (ars *AggregatorRecordStorage) GetExistingRequestIDs(ctx context.Context, requestIDs []string) (map[string]bool, error) {
+	if len(requestIDs) == 0 {
+		return make(map[string]bool), nil
+	}
+
+	cursor, err := ars.collection.Find(ctx, bson.M{"requestId": bson.M{"$in": requestIDs}},
+		options.Find().SetProjection(bson.M{"requestId": 1}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query existing request IDs: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	existing := make(map[string]bool)
+	for cursor.Next(ctx) {
+		var doc bson.M
+		if err := cursor.Decode(&doc); err == nil {
+			if reqID, ok := doc["requestId"].(string); ok {
+				existing[reqID] = true
+			}
+		}
+	}
+	return existing, nil
 }
 
 // GetByRequestID retrieves an aggregator record by request ID

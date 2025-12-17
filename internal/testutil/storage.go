@@ -17,7 +17,7 @@ import (
 func SetupTestStorage(t *testing.T, conf config.Config) *mongodb.Storage {
 	ctx := context.Background()
 
-	container, err := mongoContainer.Run(ctx, "mongo:7.0")
+	container, err := mongoContainer.Run(ctx, "mongo:7.0", mongoContainer.WithReplicaSet("rs0"))
 	if err != nil {
 		t.Skipf("Skipping MongoDB tests - cannot start MongoDB container (Docker not available?): %v", err)
 		return nil
@@ -27,6 +27,7 @@ func SetupTestStorage(t *testing.T, conf config.Config) *mongodb.Storage {
 	if err != nil {
 		t.Fatalf("Failed to get MongoDB connection string: %v", err)
 	}
+	mongoURI += "&directConnection=true"
 
 	conf.Database.URI = mongoURI
 	if conf.Database.ConnectTimeout == 0 {
