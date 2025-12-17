@@ -85,6 +85,12 @@ type LoggingConfig struct {
 	EnableJSON      bool   `mapstructure:"enable_json"`
 	EnableAsync     bool   `mapstructure:"enable_async"`
 	AsyncBufferSize int    `mapstructure:"async_buffer_size"`
+	// File logging with rotation
+	FilePath        string `mapstructure:"file_path"`        // Path to log file (empty = no file logging)
+	MaxSizeMB       int    `mapstructure:"max_size_mb"`      // Max size in MB before rotation (default 100)
+	MaxBackups      int    `mapstructure:"max_backups"`      // Max number of old log files to retain (default 30)
+	MaxAgeDays      int    `mapstructure:"max_age_days"`     // Max days to retain old log files (default 30)
+	CompressBackups bool   `mapstructure:"compress_backups"` // Compress rotated log files (default true)
 }
 
 // ProcessingConfig holds batch processing configuration
@@ -283,6 +289,12 @@ func Load() (*Config, error) {
 			EnableJSON:      getEnvBoolOrDefault("LOG_ENABLE_JSON", true),
 			EnableAsync:     getEnvBoolOrDefault("LOG_ENABLE_ASYNC", true),
 			AsyncBufferSize: getEnvIntOrDefault("LOG_ASYNC_BUFFER_SIZE", 10000),
+			// File logging with rotation
+			FilePath:        getEnvOrDefault("LOG_FILE_PATH", ""),
+			MaxSizeMB:       getEnvIntOrDefault("LOG_MAX_SIZE_MB", 100),
+			MaxBackups:      getEnvIntOrDefault("LOG_MAX_BACKUPS", 30),
+			MaxAgeDays:      getEnvIntOrDefault("LOG_MAX_AGE_DAYS", 30),
+			CompressBackups: getEnvBoolOrDefault("LOG_COMPRESS_BACKUPS", true),
 		},
 		Processing: ProcessingConfig{
 			BatchLimit:             getEnvIntOrDefault("BATCH_LIMIT", 1000),

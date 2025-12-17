@@ -168,6 +168,7 @@ services:
       - default
     volumes:
       - ./data/genesis:/app/bft-config
+      - ./logs/shard1:/app/logs
       - ./certs:/app/certs:ro
     ulimits:
       nofile:
@@ -200,6 +201,7 @@ services:
       LOG_LEVEL: "debug"
       LOG_FORMAT: "json"
       LOG_ENABLE_JSON: "true"
+      LOG_FILE_PATH: "/app/logs/aggregator.log"
 
       # Processing Configuration
       BATCH_LIMIT: "1000"
@@ -273,6 +275,9 @@ services:
     container_name: aggregator-shard2
     ports:
       - "3002:3000"
+    volumes:
+      - ./data/genesis:/app/bft-config
+      - ./logs/shard2:/app/logs
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard2:27017/aggregator?replicaSet=rs-shard2&directConnection=true"
@@ -295,6 +300,9 @@ services:
     container_name: aggregator-root
     ports:
       - "3009:3000"
+    volumes:
+      - ./data/genesis:/app/bft-config
+      - ./logs/root:/app/logs
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-root:27017/aggregator?replicaSet=rs-root&directConnection=true"

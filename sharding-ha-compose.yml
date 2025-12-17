@@ -287,6 +287,7 @@ services:
       - default
     volumes:
       - ./data/genesis:/app/bft-config
+      - ./logs/shard1-1:/app/logs
     depends_on:
       - mongo-setup-shard1
       - bft-aggregator-genesis-gen
@@ -308,6 +309,7 @@ services:
       LOG_LEVEL: "debug"
       LOG_FORMAT: "json"
       LOG_ENABLE_JSON: "true"
+      LOG_FILE_PATH: "/app/logs/aggregator.log"
       BATCH_LIMIT: "1000"
       COLLECT_PHASE_DURATION: "500ms"
       BFT_ENABLED: "false"
@@ -361,6 +363,9 @@ services:
     container_name: aggregator-shard1-2
     ports:
       - "3012:3000"
+    volumes:
+      - ./data/genesis:/app/bft-config
+      - ./logs/shard1-2:/app/logs
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard1-1:27017,mongodb-shard1-2:27017,mongodb-shard1-3:27017/aggregator?replicaSet=rs1"
@@ -375,6 +380,9 @@ services:
     container_name: aggregator-shard2-1
     ports:
       - "3021:3000"
+    volumes:
+      - ./data/genesis:/app/bft-config
+      - ./logs/shard2-1:/app/logs
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard2-1:27017,mongodb-shard2-2:27017,mongodb-shard2-3:27017/aggregator?replicaSet=rs2"
@@ -390,6 +398,9 @@ services:
     container_name: aggregator-shard2-2
     ports:
       - "3022:3000"
+    volumes:
+      - ./data/genesis:/app/bft-config
+      - ./logs/shard2-2:/app/logs
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard2-1:27017,mongodb-shard2-2:27017,mongodb-shard2-3:27017/aggregator?replicaSet=rs2"
@@ -410,6 +421,9 @@ services:
     container_name: aggregator-root-1
     ports:
       - "3009:3000"
+    volumes:
+      - ./data/genesis:/app/bft-config
+      - ./logs/root-1:/app/logs
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-root-1:27017,mongodb-root-2:27017,mongodb-root-3:27017/aggregator?replicaSet=rs-root"

@@ -6,6 +6,7 @@ aggregator.log
 /performance-test
 bft-config
 /data/
+/logs/
 .cache/
 
 # Environment files with secrets

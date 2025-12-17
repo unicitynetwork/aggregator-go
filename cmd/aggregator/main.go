@@ -39,12 +39,17 @@ func main() {
 	}
 
 	// Initialize logger
-	baseLogger, err := logger.New(
-		cfg.Logging.Level,
-		cfg.Logging.Format,
-		cfg.Logging.Output,
-		cfg.Logging.EnableJSON,
-	)
+	baseLogger, err := logger.NewWithConfig(logger.LogConfig{
+		Level:           cfg.Logging.Level,
+		Format:          cfg.Logging.Format,
+		Output:          cfg.Logging.Output,
+		EnableJSON:      cfg.Logging.EnableJSON,
+		FilePath:        cfg.Logging.FilePath,
+		MaxSizeMB:       cfg.Logging.MaxSizeMB,
+		MaxBackups:      cfg.Logging.MaxBackups,
+		MaxAgeDays:      cfg.Logging.MaxAgeDays,
+		CompressBackups: cfg.Logging.CompressBackups,
+	})
 	if err != nil {
 		fmt.Printf("Failed to initialize logger: %v\n", err)
 		os.Exit(1)
@@ -64,6 +69,16 @@ func main() {
 			"bufferSize", bufferSize)
 	} else {
 		log = baseLogger
+	}
+
+	// Log file logging configuration if enabled
+	if cfg.Logging.FilePath != "" {
+		log.WithComponent("main").Info("File logging enabled",
+			"filePath", cfg.Logging.FilePath,
+			"maxSizeMB", cfg.Logging.MaxSizeMB,
+			"maxBackups", cfg.Logging.MaxBackups,
+			"maxAgeDays", cfg.Logging.MaxAgeDays,
+			"compress", cfg.Logging.CompressBackups)
 	}
 
 	log.WithComponent("main").Info("Starting Unicity Aggregator")
@@ -240,6 +255,11 @@ func main() {
 	// Stop async logger if enabled
 	if asyncLogger != nil {
 		asyncLogger.Stop()
+	}
+
+	// Close file logger if enabled
+	if err := baseLogger.Close(); err != nil {
+		fmt.Printf("Failed to close file logger: %v\n", err)
 	}
 }
 
