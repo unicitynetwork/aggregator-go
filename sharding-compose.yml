@@ -180,7 +180,7 @@ services:
       CONCURRENCY_LIMIT: "5000"
       ENABLE_DOCS: "true"
       ENABLE_CORS: "true"
-      ENABLE_TLS: "true"
+      ENABLE_TLS: "false"
       TLS_CERT_FILE: "/app/certs/cert.pem"
       TLS_KEY_FILE: "/app/certs/key.pem"
 

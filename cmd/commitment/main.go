@@ -43,7 +43,7 @@ type (
 )
 
 var (
-	flagURL          = flag.String("url", "https://localhost:3002", "Aggregator JSON-RPC endpoint")
+	flagURL          = flag.String("url", "http://localhost:3002", "Aggregator JSON-RPC endpoint")
 	flagAuth         = flag.String("auth", "", "Optional Authorization header value")
 	flagTimeout      = flag.Duration("timeout", 45*time.Second, "Maximum time to wait for inclusion proof")
 	flagPollInterval = flag.Duration("poll-interval", time.Second, "Polling interval for inclusion proof checks")
