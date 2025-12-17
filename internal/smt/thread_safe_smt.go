@@ -82,6 +82,13 @@ func (ts *ThreadSafeSMT) GetPath(path *big.Int) (*api.MerkleTreePath, error) {
 	return ts.smt.GetPath(path)
 }
 
+// GetKeyLength exposes the configured SMT key length.
+func (ts *ThreadSafeSMT) GetKeyLength() int {
+	ts.rwMux.RLock()
+	defer ts.rwMux.RUnlock()
+	return ts.smt.keyLength
+}
+
 // GetStats returns statistics about the SMT
 // This is a read operation that can be performed concurrently
 func (ts *ThreadSafeSMT) GetStats() map[string]interface{} {
