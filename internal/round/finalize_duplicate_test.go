@@ -268,7 +268,8 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(ctx, s.cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil)
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT)
 	require.NoError(t, err)
 
 	commitments := testutil.CreateTestCommitments(t, 3, "t4_req")
@@ -348,7 +349,8 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(ctx, s.cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil)
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT)
 	require.NoError(t, err)
 
 	commitments := testutil.CreateTestCommitments(t, 3, "t5_req")
