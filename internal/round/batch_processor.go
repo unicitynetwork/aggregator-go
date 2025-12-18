@@ -2,6 +2,7 @@ package round
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -359,7 +360,11 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 
 	block.Finalized = false
 	if err := rm.storeBlockAndRecords(ctx, block, requestIds); err != nil {
-		return fmt.Errorf("failed to store block and records: %w", err)
+		if !errors.Is(err, interfaces.ErrDuplicateKey) {
+			return fmt.Errorf("failed to store block and records: %w", err)
+		}
+		rm.logger.WithContext(ctx).Info("Block already exists, continuing with remaining steps",
+			"blockNumber", block.Index.String())
 	}
 
 	if err := rm.storeDataParallel(ctx, block.Index, smtNodes, records); err != nil {

@@ -428,7 +428,7 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 	// Add commitment queue status and warning if too high
 	unprocessedCount, err := as.commitmentQueue.CountUnprocessed(ctx)
 	if err != nil {
-		status.AddDetail("commitment_queue", "unknown")
+		status.Status = "unhealthy"
 		status.AddDetail("commitment_queue_status", "error")
 		as.logger.WithContext(ctx).Error("Commitment queue health check failed", "error", err.Error())
 	} else {

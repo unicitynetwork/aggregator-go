@@ -45,6 +45,13 @@ func RecoverUnfinalizedBlock(
 
 	if len(unfinalizedBlocks) == 0 {
 		log.WithContext(ctx).Info("No unfinalized blocks found")
+
+		// Cleanup pending commitments that are already processed
+		// (handles case where block was finalized but MarkProcessed failed)
+		if err := CleanupProcessedPendingCommitments(ctx, log, storage, commitmentQueue); err != nil {
+			return nil, fmt.Errorf("failed to cleanup pending commitments: %w", err)
+		}
+
 		return &RecoveryResult{Recovered: false}, nil
 	}
 
@@ -130,30 +137,22 @@ func recoverBlock(
 		return nil, fmt.Errorf("failed to set block as finalized: %w", err)
 	}
 
-	// Ack commitments in Redis
-	ackEntries := make([]interfaces.CommitmentAck, 0)
-	pendingCommitments, err := commitmentQueue.GetAllPending(ctx)
+	// Ack commitments in Redis - fetch only the ones we need by request ID
+	commitmentMap, err := commitmentQueue.GetByRequestIDs(ctx, requestIDs)
 	if err != nil {
-		log.WithContext(ctx).Warn("Failed to get pending commitments for acking, they may be re-processed", "error", err)
-	} else {
-		requestIDSet := make(map[string]bool)
-		for _, reqID := range requestIDs {
-			requestIDSet[string(reqID)] = true
+		log.WithContext(ctx).Warn("Failed to get commitments for acking, they may be re-processed", "error", err)
+	} else if len(commitmentMap) > 0 {
+		ackEntries := make([]interfaces.CommitmentAck, 0, len(commitmentMap))
+		for _, c := range commitmentMap {
+			ackEntries = append(ackEntries, interfaces.CommitmentAck{
+				RequestID: c.RequestID,
+				StreamID:  c.StreamID,
+			})
 		}
-		for _, c := range pendingCommitments {
-			if requestIDSet[string(c.RequestID)] {
-				ackEntries = append(ackEntries, interfaces.CommitmentAck{
-					RequestID: c.RequestID,
-					StreamID:  c.StreamID,
-				})
-			}
-		}
-		if len(ackEntries) > 0 {
-			if err := commitmentQueue.MarkProcessed(ctx, ackEntries); err != nil {
-				log.WithContext(ctx).Warn("Failed to ack commitments, they may be re-processed", "error", err)
-			} else {
-				log.WithContext(ctx).Info("Acked commitments", "count", len(ackEntries))
-			}
+		if err := commitmentQueue.MarkProcessed(ctx, ackEntries); err != nil {
+			log.WithContext(ctx).Warn("Failed to ack commitments, they may be re-processed", "error", err)
+		} else {
+			log.WithContext(ctx).Info("Acked commitments", "count", len(ackEntries))
 		}
 	}
 
@@ -169,14 +168,23 @@ func recoverMissingData(
 	missingRecords []indexedRequestID,
 	missingSmtKeys []api.RequestID,
 ) error {
-	pendingCommitments, err := commitmentQueue.GetAllPending(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get pending commitments: %w", err)
+	// Collect all needed request IDs
+	neededIDsMap := make(map[string]api.RequestID, len(missingRecords)+len(missingSmtKeys))
+	for _, missing := range missingRecords {
+		neededIDsMap[string(missing.reqID)] = missing.reqID
+	}
+	for _, reqID := range missingSmtKeys {
+		neededIDsMap[string(reqID)] = reqID
+	}
+	neededIDs := make([]api.RequestID, 0, len(neededIDsMap))
+	for _, reqID := range neededIDsMap {
+		neededIDs = append(neededIDs, reqID)
 	}
 
-	commitmentMap := make(map[string]*models.Commitment)
-	for _, c := range pendingCommitments {
-		commitmentMap[string(c.RequestID)] = c
+	// Fetch only the commitments we need (streams in batches internally)
+	commitmentMap, err := commitmentQueue.GetByRequestIDs(ctx, neededIDs)
+	if err != nil {
+		return fmt.Errorf("failed to get commitments: %w", err)
 	}
 
 	if len(missingRecords) > 0 {
@@ -276,6 +284,10 @@ func LoadRecoveredNodesIntoSMT(
 		return fmt.Errorf("failed to get SMT nodes: %w", err)
 	}
 
+	if len(nodes) != len(keys) {
+		return fmt.Errorf("FATAL: expected %d SMT nodes but found %d - data corruption", len(keys), len(nodes))
+	}
+
 	leaves := make([]*smt.Leaf, len(nodes))
 	for i, node := range nodes {
 		path := new(big.Int).SetBytes(node.Key)
@@ -298,4 +310,50 @@ func requestIDsToStrings(requestIDs []api.RequestID) []string {
 		result[i] = string(reqID)
 	}
 	return result
+}
+
+// CleanupProcessedPendingCommitments ACKs pending commitments that are already in AggregatorRecords.
+// This handles the case where a block was finalized but MarkProcessed failed (e.g., Redis was down).
+func CleanupProcessedPendingCommitments(
+	ctx context.Context,
+	log *logger.Logger,
+	storage interfaces.Storage,
+	commitmentQueue interfaces.CommitmentQueue,
+) error {
+	pendingCommitments, err := commitmentQueue.GetAllPending(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get pending commitments: %w", err)
+	}
+	if len(pendingCommitments) == 0 {
+		return nil
+	}
+
+	requestIDs := make([]string, len(pendingCommitments))
+	for i, c := range pendingCommitments {
+		requestIDs[i] = string(c.RequestID)
+	}
+
+	existingIDs, err := storage.AggregatorRecordStorage().GetExistingRequestIDs(ctx, requestIDs)
+	if err != nil {
+		return fmt.Errorf("failed to check existing records: %w", err)
+	}
+
+	var ackEntries []interfaces.CommitmentAck
+	for _, c := range pendingCommitments {
+		if existingIDs[string(c.RequestID)] {
+			ackEntries = append(ackEntries, interfaces.CommitmentAck{
+				RequestID: c.RequestID,
+				StreamID:  c.StreamID,
+			})
+		}
+	}
+
+	if len(ackEntries) > 0 {
+		if err := commitmentQueue.MarkProcessed(ctx, ackEntries); err != nil {
+			return fmt.Errorf("failed to ack processed commitments: %w", err)
+		}
+		log.WithContext(ctx).Info("Cleaned up already-processed pending commitments", "count", len(ackEntries))
+	}
+
+	return nil
 }

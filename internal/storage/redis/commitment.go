@@ -347,11 +347,82 @@ func (cs *CommitmentStorage) GetByRequestID(ctx context.Context, requestID api.R
 // Used for crash recovery to get commitments that weren't processed.
 func (cs *CommitmentStorage) GetAllPending(ctx context.Context) ([]*models.Commitment, error) {
 	var commitments []*models.Commitment
-	lastID := "0"
 	const batchSize = 1000
+	startID := "-"
 
 	for {
-		messages, err := cs.client.XRange(ctx, cs.streamName, lastID, "+").Result()
+		// Get pending message IDs from the consumer group
+		pendingEntries, err := cs.client.XPendingExt(ctx, &redis.XPendingExtArgs{
+			Stream: cs.streamName,
+			Group:  consumerGroup,
+			Start:  startID,
+			End:    "+",
+			Count:  batchSize,
+		}).Result()
+		if err != nil {
+			if errors.Is(err, redis.Nil) || isNoGroupError(err) {
+				return commitments, nil
+			}
+			return nil, fmt.Errorf("failed to get pending entries: %w", err)
+		}
+
+		if len(pendingEntries) == 0 {
+			break
+		}
+
+		// Collect message IDs
+		messageIDs := make([]string, len(pendingEntries))
+		for i, entry := range pendingEntries {
+			messageIDs[i] = entry.ID
+		}
+
+		// Fetch the actual messages by their IDs
+		for _, msgID := range messageIDs {
+			messages, err := cs.client.XRange(ctx, cs.streamName, msgID, msgID).Result()
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch message %s: %w", msgID, err)
+			}
+			if len(messages) == 0 {
+				continue // Message was trimmed from stream
+			}
+
+			commitment, err := cs.parseCommitment(messages[0])
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse commitment: %w", err)
+			}
+			commitment.StreamID = messages[0].ID
+			commitments = append(commitments, commitment)
+		}
+
+		// Move to next batch
+		if len(pendingEntries) < batchSize {
+			break
+		}
+		startID = "(" + pendingEntries[len(pendingEntries)-1].ID
+	}
+
+	return commitments, nil
+}
+
+// GetByRequestIDs retrieves commitments matching the given request IDs.
+// Streams through data in batches to avoid loading everything into memory.
+func (cs *CommitmentStorage) GetByRequestIDs(ctx context.Context, requestIDs []api.RequestID) (map[string]*models.Commitment, error) {
+	if len(requestIDs) == 0 {
+		return make(map[string]*models.Commitment), nil
+	}
+
+	// Build lookup set
+	needed := make(map[string]bool, len(requestIDs))
+	for _, reqID := range requestIDs {
+		needed[string(reqID)] = true
+	}
+
+	result := make(map[string]*models.Commitment, len(requestIDs))
+	lastID := "0"
+	const batchSize = 10000
+
+	for {
+		messages, err := cs.client.XRangeN(ctx, cs.streamName, lastID, "+", batchSize).Result()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read Redis stream: %w", err)
 		}
@@ -361,14 +432,23 @@ func (cs *CommitmentStorage) GetAllPending(ctx context.Context) ([]*models.Commi
 		}
 
 		for _, msg := range messages {
-			lastID = "(" + msg.ID // exclusive for next batch
+			lastID = "(" + msg.ID
 
 			commitment, err := cs.parseCommitment(msg)
 			if err != nil {
-				return nil, fmt.Errorf("failed to parse commitment: %w", err)
+				continue // Skip malformed messages
 			}
-			commitment.StreamID = msg.ID
-			commitments = append(commitments, commitment)
+
+			reqIDStr := string(commitment.RequestID)
+			if needed[reqIDStr] {
+				commitment.StreamID = msg.ID
+				result[reqIDStr] = commitment
+
+				// Early exit if we found all
+				if len(result) == len(needed) {
+					return result, nil
+				}
+			}
 		}
 
 		if len(messages) < batchSize {
@@ -376,7 +456,7 @@ func (cs *CommitmentStorage) GetAllPending(ctx context.Context) ([]*models.Commi
 		}
 	}
 
-	return commitments, nil
+	return result, nil
 }
 
 // GetUnprocessedBatch is not implemented for Redis - use StreamCommitments instead

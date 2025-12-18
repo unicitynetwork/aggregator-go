@@ -594,17 +594,31 @@ ProcessLoop:
 	return nil
 }
 
-// redisCommitmentStreamer uses StreamCommitments to continuously stream commitments
+// redisCommitmentStreamer uses StreamCommitments to continuously stream commitments.
+// If connection fails, it retries every 5 seconds until context is cancelled.
 func (rm *RoundManager) redisCommitmentStreamer(ctx context.Context) {
 	rm.logger.WithContext(ctx).Info("Redis commitment streamer started")
 
-	err := rm.commitmentQueue.StreamCommitments(ctx, rm.commitmentStream)
+	const retryInterval = 5 * time.Second
 
-	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		rm.logger.WithContext(ctx).Error("Redis commitment streamer ended with error",
-			"error", err.Error())
-	} else {
-		rm.logger.WithContext(ctx).Info("Redis commitment streamer stopped gracefully")
+	for {
+		err := rm.commitmentQueue.StreamCommitments(ctx, rm.commitmentStream)
+
+		if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			rm.logger.WithContext(ctx).Info("Redis commitment streamer stopped gracefully")
+			return
+		}
+
+		rm.logger.WithContext(ctx).Error("Redis commitment streamer error, will retry",
+			"error", err.Error(), "retryIn", retryInterval)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retryInterval):
+		}
+
+		rm.logger.WithContext(ctx).Info("Attempting to reconnect Redis commitment streamer")
 	}
 }
 
