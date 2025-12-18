@@ -10,6 +10,9 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
+// ErrDuplicateKey is returned when a storage operation fails due to a duplicate key.
+var ErrDuplicateKey = errors.New("duplicate key error")
+
 // CommitmentQueue handles commitment queue operations
 type CommitmentQueue interface {
 	// Store stores a new commitment
@@ -40,8 +43,12 @@ type CommitmentQueue interface {
 	CountUnprocessed(ctx context.Context) (int64, error)
 
 	// GetAllPending retrieves all pending (unacknowledged) commitments
-	// Used for crash recovery
+	// Used to cleanup already-processed pending commitments on startup
 	GetAllPending(ctx context.Context) ([]*models.Commitment, error)
+
+	// GetByRequestIDs retrieves commitments matching the given request IDs.
+	// Streams through data in batches to avoid loading everything into memory.
+	GetByRequestIDs(ctx context.Context, requestIDs []api.RequestID) (map[string]*models.Commitment, error)
 
 	// Lifecycle methods
 	Initialize(ctx context.Context) error

@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -39,6 +40,9 @@ func (brs *BlockRecordsStorage) Store(ctx context.Context, records *models.Block
 	}
 	_, err = brs.collection.InsertOne(ctx, recordsBSON)
 	if err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return fmt.Errorf("block records already exists: %w", interfaces.ErrDuplicateKey)
+		}
 		return fmt.Errorf("failed to store block records: %w", err)
 	}
 	return nil

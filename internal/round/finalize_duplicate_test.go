@@ -248,3 +248,157 @@ func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 
 	t.Log("✓ FinalizeBlock succeeded when all records were duplicates")
 }
+
+// Test4_DuplicateBlock tests that FinalizeBlock succeeds when the block itself
+// already exists (simulating a retry after MarkProcessed failed).
+func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
+	t := s.T()
+	ctx := context.Background()
+
+	testLogger, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil)
+	require.NoError(t, err)
+
+	commitments := testutil.CreateTestCommitments(t, 3, "t4_req")
+
+	rm.currentRound = &Round{
+		Number:      api.NewBigInt(big.NewInt(4)),
+		State:       RoundStateProcessing,
+		Commitments: commitments,
+		Snapshot:    rm.smt.CreateSnapshot(),
+	}
+
+	rm.roundMutex.Lock()
+	err = rm.processMiniBatch(ctx, commitments)
+	rm.roundMutex.Unlock()
+	require.NoError(t, err)
+
+	rootHash := rm.currentRound.Snapshot.GetRootHash()
+	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
+	require.NoError(t, err)
+
+	block := models.NewBlock(
+		api.NewBigInt(big.NewInt(4)),
+		"unicity",
+		0,
+		"1.0",
+		"mainnet",
+		rootHashBytes,
+		api.HexBytes{},
+		api.HexBytes{},
+		nil,
+	)
+
+	// Pre-store the block (simulating previous attempt that stored block but failed on MarkProcessed)
+	block.Finalized = false
+	err = s.storage.BlockStorage().Store(ctx, block)
+	require.NoError(t, err, "Pre-storing block should succeed")
+
+	// Also pre-store block records
+	requestIds := make([]api.RequestID, len(commitments))
+	for i, c := range commitments {
+		requestIds[i] = c.RequestID
+	}
+	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds))
+	require.NoError(t, err, "Pre-storing block records should succeed")
+
+	// Get counts before FinalizeBlock
+	smtCountBefore, _ := s.storage.SmtStorage().Count(ctx)
+	recordCountBefore, _ := s.storage.AggregatorRecordStorage().Count(ctx)
+
+	// FinalizeBlock should succeed despite duplicate block
+	// It should skip block storage and continue with remaining steps
+	err = rm.FinalizeBlock(ctx, block)
+	require.NoError(t, err, "FinalizeBlock should succeed with duplicate block")
+
+	// Verify SMT nodes and aggregator records were still stored
+	smtCountAfter, _ := s.storage.SmtStorage().Count(ctx)
+	require.Equal(t, smtCountBefore+3, smtCountAfter, "Should have stored 3 SMT nodes despite duplicate block")
+
+	recordCountAfter, _ := s.storage.AggregatorRecordStorage().Count(ctx)
+	require.Equal(t, recordCountBefore+3, recordCountAfter, "Should have stored 3 aggregator records despite duplicate block")
+
+	// Verify block was finalized
+	storedBlock, err := s.storage.BlockStorage().GetByNumber(ctx, block.Index)
+	require.NoError(t, err)
+	require.NotNil(t, storedBlock)
+	require.True(t, storedBlock.Finalized, "Block should be marked as finalized")
+
+	t.Log("✓ FinalizeBlock succeeded with duplicate block")
+}
+
+// Test5_DuplicateBlockAlreadyFinalized tests that FinalizeBlock succeeds when
+// the block already exists AND is already finalized (full retry scenario).
+func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
+	t := s.T()
+	ctx := context.Background()
+
+	testLogger, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil)
+	require.NoError(t, err)
+
+	commitments := testutil.CreateTestCommitments(t, 3, "t5_req")
+
+	rm.currentRound = &Round{
+		Number:      api.NewBigInt(big.NewInt(5)),
+		State:       RoundStateProcessing,
+		Commitments: commitments,
+		Snapshot:    rm.smt.CreateSnapshot(),
+	}
+
+	rm.roundMutex.Lock()
+	err = rm.processMiniBatch(ctx, commitments)
+	rm.roundMutex.Unlock()
+	require.NoError(t, err)
+
+	rootHash := rm.currentRound.Snapshot.GetRootHash()
+	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
+	require.NoError(t, err)
+
+	block := models.NewBlock(
+		api.NewBigInt(big.NewInt(5)),
+		"unicity",
+		0,
+		"1.0",
+		"mainnet",
+		rootHashBytes,
+		api.HexBytes{},
+		api.HexBytes{},
+		nil,
+	)
+
+	// Pre-store the block as FINALIZED (simulating previous successful attempt except MarkProcessed)
+	block.Finalized = true
+	err = s.storage.BlockStorage().Store(ctx, block)
+	require.NoError(t, err, "Pre-storing finalized block should succeed")
+
+	// Pre-store block records
+	requestIds := make([]api.RequestID, len(commitments))
+	for i, c := range commitments {
+		requestIds[i] = c.RequestID
+	}
+	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds))
+	require.NoError(t, err, "Pre-storing block records should succeed")
+
+	// Pre-store all SMT nodes and records (simulating full previous attempt)
+	allNodes := rm.convertLeavesToNodes(rm.currentRound.PendingLeaves)
+	err = s.storage.SmtStorage().StoreBatch(ctx, allNodes)
+	require.NoError(t, err)
+
+	allRecords := rm.convertCommitmentsToRecords(commitments, block.Index)
+	err = s.storage.AggregatorRecordStorage().StoreBatch(ctx, allRecords)
+	require.NoError(t, err)
+
+	// Reset block.Finalized to false for the FinalizeBlock call
+	block.Finalized = false
+
+	// FinalizeBlock should succeed - all steps are idempotent
+	err = rm.FinalizeBlock(ctx, block)
+	require.NoError(t, err, "FinalizeBlock should succeed when block is already finalized")
+
+	t.Log("✓ FinalizeBlock succeeded with already-finalized block")
+}

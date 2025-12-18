@@ -180,9 +180,38 @@ func (cs *CommitmentStorage) CountUnprocessed(ctx context.Context) (int64, error
 // GetAllPending retrieves all unprocessed commitments (for crash recovery)
 func (cs *CommitmentStorage) GetAllPending(ctx context.Context) ([]*models.Commitment, error) {
 	filter := bson.M{"processedAt": bson.M{"$exists": false}}
+	return cs.findCommitments(ctx, filter)
+}
+
+// GetByRequestIDs retrieves commitments matching the given request IDs.
+func (cs *CommitmentStorage) GetByRequestIDs(ctx context.Context, requestIDs []api.RequestID) (map[string]*models.Commitment, error) {
+	if len(requestIDs) == 0 {
+		return make(map[string]*models.Commitment), nil
+	}
+
+	// Convert to strings for query
+	reqIDStrings := make([]string, len(requestIDs))
+	for i, reqID := range requestIDs {
+		reqIDStrings[i] = string(reqID)
+	}
+
+	filter := bson.M{"requestId": bson.M{"$in": reqIDStrings}}
+	commitments, err := cs.findCommitments(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]*models.Commitment, len(commitments))
+	for _, c := range commitments {
+		result[string(c.RequestID)] = c
+	}
+	return result, nil
+}
+
+func (cs *CommitmentStorage) findCommitments(ctx context.Context, filter bson.M) ([]*models.Commitment, error) {
 	cursor, err := cs.collection.Find(ctx, filter)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get pending commitments: %w", err)
+		return nil, fmt.Errorf("failed to get commitments: %w", err)
 	}
 	defer cursor.Close(ctx)
 
