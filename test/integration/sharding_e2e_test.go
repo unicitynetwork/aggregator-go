@@ -17,11 +17,13 @@ import (
 	redisContainer "github.com/testcontainers/testcontainers-go/modules/redis"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/service"
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -156,7 +158,19 @@ func startAggregator(t *testing.T, ctx context.Context, name, port, mongoURI, re
 	queue, stor, _ := storage.NewStorage(aggCtx, cfg, log)
 	queue.Initialize(aggCtx)
 
-	mgr, _ := round.NewManager(aggCtx, cfg, log, queue, stor, state.NewSyncStateTracker(), nil)
+	eventBus := events.NewEventBus(log)
+
+	// Create SMT instance based on sharding mode
+	var smtInstance *smt.SparseMerkleTree
+	switch cfg.Sharding.Mode {
+	case config.ShardingModeStandalone, config.ShardingModeChild:
+		smtInstance = smt.NewSparseMerkleTree(api.SHA256, 16+256)
+	case config.ShardingModeParent:
+		smtInstance = smt.NewParentSparseMerkleTree(api.SHA256, cfg.Sharding.ShardIDLength)
+	}
+	threadSafeSmt := smt.NewThreadSafeSMT(smtInstance)
+
+	mgr, _ := round.NewManager(aggCtx, cfg, log, queue, stor, state.NewSyncStateTracker(), nil, eventBus, threadSafeSmt)
 	mgr.Start(aggCtx)
 	mgr.Activate(aggCtx)
 

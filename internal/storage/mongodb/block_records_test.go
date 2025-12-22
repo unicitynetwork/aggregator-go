@@ -374,9 +374,9 @@ func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
 	}
 
 	t.Run("should return nil when no block records exist", func(t *testing.T) {
-		num, err := storage.GetLatestBlock(ctx)
-		require.NoError(t, err, "GetLatestBlock should not return an error when empty")
-		assert.Nil(t, num, "GetLatestBlock should return nil when no records exist")
+		num, err := storage.GetLatestBlockNumber(ctx)
+		require.NoError(t, err, "GetLatestBlockNumber should not return an error when empty")
+		assert.Nil(t, num, "GetLatestBlockNumber should return nil when no records exist")
 	})
 
 	t.Run("should return latest block with single record", func(t *testing.T) {
@@ -387,7 +387,7 @@ func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
 		require.NoError(t, err)
 
 		// Get latest
-		latestNum, err := storage.GetLatestBlock(ctx)
+		latestNum, err := storage.GetLatestBlockNumber(ctx)
 		require.NoError(t, err, "GetLatestNumber should not return an error")
 		require.NotNil(t, latestNum, "Latest number should not be nil")
 
@@ -413,12 +413,12 @@ func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
 		}
 
 		// Get latest - should be block number 130
-		latestBlock, err := storage.GetLatestBlock(ctx)
+		latestBlock, err := storage.GetLatestBlockNumber(ctx)
 		require.NoError(t, err, "GetLatestNumber should not return an error")
 		require.NotNil(t, latestBlock, "Latest number should not be nil")
 
 		expectedLatest := api.NewBigInt(big.NewInt(130))
-		assert.Equal(t, 0, expectedLatest.Cmp(latestBlock.BlockNumber.Int), "Should get latest block number")
+		assert.Equal(t, 0, expectedLatest.Cmp(latestBlock.Int), "Should get latest block number")
 	})
 
 	t.Run("should handle decimal128 sorting correctly for large numbers", func(t *testing.T) {
@@ -447,11 +447,11 @@ func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
 		}
 
 		// Get latest
-		latestBlock, err := storage.GetLatestBlock(ctx)
+		latestBlock, err := storage.GetLatestBlockNumber(ctx)
 		require.NoError(t, err, "GetLatestNumber should not return an error")
 		require.NotNil(t, latestBlock, "Latest number should not be nil")
 
-		assert.Equal(t, 0, expectedLatest.Cmp(latestBlock.BlockNumber.Int), "Should get latest block number")
+		assert.Equal(t, 0, expectedLatest.Cmp(latestBlock.Int), "Should get latest block number")
 	})
 }
 

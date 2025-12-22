@@ -169,8 +169,8 @@ type BlockRecordsStorage interface {
 	// If blockNumber is nil then returns the very first block.
 	GetNextBlock(ctx context.Context, blockNumber *api.BigInt) (*models.BlockRecords, error)
 
-	// GetLatestBlock retrieves the latest block
-	GetLatestBlock(ctx context.Context) (*models.BlockRecords, error)
+	// GetLatestBlockNumber retrieves the latest block
+	GetLatestBlockNumber(ctx context.Context) (*api.BigInt, error)
 }
 
 // LeadershipStorage handles high availability leadership state
@@ -197,8 +197,6 @@ var ErrTrustBaseAlreadyExists = errors.New("trust base already exists")
 type TrustBaseStorage interface {
 	Store(ctx context.Context, trustBase types.RootTrustBase) error
 	GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error)
-	GetByRound(ctx context.Context, round uint64) (types.RootTrustBase, error)
-	GetAll(ctx context.Context) ([]types.RootTrustBase, error)
 }
 
 // Storage handles persistent data storage

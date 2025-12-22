@@ -34,23 +34,16 @@ func TestCachedTrustBaseStorage(t *testing.T) {
 	t.Run("initially empty", func(t *testing.T) {
 		ctx := t.Context()
 		require.NoError(t, cachedStorage.storage.collection.Drop(ctx))
-		require.NoError(t, cachedStorage.UpdateCache(ctx))
+		require.NoError(t, cachedStorage.ReloadCache(ctx))
 
 		_, err := cachedStorage.GetByEpoch(ctx, 0)
 		require.ErrorIs(t, err, interfaces.ErrTrustBaseNotFound)
-
-		_, err = cachedStorage.GetByRound(ctx, 0)
-		require.ErrorIs(t, err, interfaces.ErrTrustBaseNotFound)
-
-		all, err := cachedStorage.GetAll(ctx)
-		require.NoError(t, err)
-		require.Empty(t, all)
 	})
 
 	t.Run("store and retrieve", func(t *testing.T) {
 		ctx := t.Context()
 		require.NoError(t, cachedStorage.storage.collection.Drop(ctx))
-		require.NoError(t, cachedStorage.UpdateCache(ctx))
+		require.NoError(t, cachedStorage.ReloadCache(ctx))
 
 		// store epoch 0
 		require.NoError(t, cachedStorage.Store(ctx, trustBaseEpoch0))
@@ -60,16 +53,6 @@ func TestCachedTrustBaseStorage(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, trustBaseEpoch0, tb)
 
-		// GetByRound (any value) returns epoch 0
-		tb, err = cachedStorage.GetByRound(ctx, 9999)
-		require.NoError(t, err)
-		require.Equal(t, trustBaseEpoch0, tb)
-
-		// GetAll returns only epoch 0
-		all, err := cachedStorage.GetAll(ctx)
-		require.NoError(t, err)
-		require.Equal(t, []types.RootTrustBase{trustBaseEpoch0}, all)
-
 		// store epoch 1
 		require.NoError(t, cachedStorage.Store(ctx, trustBaseEpoch1))
 
@@ -77,20 +60,5 @@ func TestCachedTrustBaseStorage(t *testing.T) {
 		tb, err = cachedStorage.GetByEpoch(ctx, 1)
 		require.NoError(t, err)
 		require.Equal(t, trustBaseEpoch1, tb)
-
-		// GetByRound for round >= 1000 returns epoch 1
-		tb, err = cachedStorage.GetByRound(ctx, 1000)
-		require.NoError(t, err)
-		require.Equal(t, trustBaseEpoch1, tb)
-
-		// GetByRound for round < 1000 returns epoch 0
-		tb, err = cachedStorage.GetByRound(ctx, 999)
-		require.NoError(t, err)
-		require.Equal(t, trustBaseEpoch0, tb)
-
-		// GetAll returns both epochs
-		all, err = cachedStorage.GetAll(ctx)
-		require.NoError(t, err)
-		require.Equal(t, []types.RootTrustBase{trustBaseEpoch0, trustBaseEpoch1}, all)
 	})
 }

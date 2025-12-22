@@ -77,7 +77,7 @@ func NewStorage(ctx context.Context, config config.Config) (*Storage, error) {
 	storage.cachedTrustBaseStorage = NewCachedTrustBaseStorage(NewTrustBaseStorage(database))
 
 	// init trust base store cache
-	if err := storage.cachedTrustBaseStorage.UpdateCache(ctx); err != nil {
+	if err := storage.cachedTrustBaseStorage.ReloadCache(ctx); err != nil {
 		return nil, fmt.Errorf("failed to init cached trust base storage cache: %w", err)
 	}
 

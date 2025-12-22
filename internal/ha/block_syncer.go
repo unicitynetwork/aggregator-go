@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"sync"
+	"time"
 
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
@@ -13,33 +15,99 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-// blockSyncer helper struct to update the SMT with data from commited blocks.
-type blockSyncer struct {
-	logger       *logger.Logger
-	storage      interfaces.Storage
-	smt          *smt.ThreadSafeSMT
-	shardID      api.ShardID
-	stateTracker *state.Tracker
-}
+type (
+	LeaderSelector interface {
+		IsLeader(ctx context.Context) (bool, error)
+	}
 
-func newBlockSyncer(logger *logger.Logger, storage interfaces.Storage, smt *smt.ThreadSafeSMT, shardID api.ShardID, stateTracker *state.Tracker) *blockSyncer {
-	return &blockSyncer{
-		logger:       logger,
-		storage:      storage,
-		smt:          smt,
-		shardID:      shardID,
-		stateTracker: stateTracker,
+	// BlockSyncer updates the node's state tree using the blocks from storage, if in follower mode.
+	// Needs to be started with the Start method and stopped with the Stop method.
+	// Should not be started in standalone mode.
+	BlockSyncer struct {
+		logger         *logger.Logger
+		leaderSelector LeaderSelector
+		storage        interfaces.Storage
+		smt            *smt.ThreadSafeSMT
+		shardID        api.ShardID
+		syncInterval   time.Duration
+		stateTracker   *state.Tracker
+
+		wg     sync.WaitGroup
+		cancel context.CancelFunc
+	}
+)
+
+func NewBlockSyncer(
+	logger *logger.Logger,
+	leaderSelector LeaderSelector,
+	storage interfaces.Storage,
+	smt *smt.ThreadSafeSMT,
+	shardID api.ShardID,
+	syncInterval time.Duration,
+	stateTracker *state.Tracker,
+) *BlockSyncer {
+	return &BlockSyncer{
+		logger:         logger,
+		leaderSelector: leaderSelector,
+		storage:        storage,
+		smt:            smt,
+		shardID:        shardID,
+		syncInterval:   syncInterval,
+		stateTracker:   stateTracker,
 	}
 }
 
-func (bs *blockSyncer) syncToLatestBlock(ctx context.Context) error {
+func (bs *BlockSyncer) Start(ctx context.Context) {
+	ctx, bs.cancel = context.WithCancel(ctx)
+	bs.wg.Go(func() {
+		bs.runLoop(ctx)
+	})
+}
+
+func (bs *BlockSyncer) Stop() {
+	if bs.cancel != nil {
+		bs.cancel()
+		bs.cancel = nil
+	}
+	bs.wg.Wait()
+}
+
+func (bs *BlockSyncer) runLoop(ctx context.Context) {
+	ticker := time.NewTicker(bs.syncInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := bs.onTick(ctx); err != nil {
+				bs.logger.WithContext(ctx).Error("error on block sync tick", "error", err.Error())
+			}
+		}
+	}
+}
+
+func (bs *BlockSyncer) onTick(ctx context.Context) error {
+	isLeader, err := bs.leaderSelector.IsLeader(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to query leader status: %w", err)
+	}
+	if !isLeader {
+		if err := bs.SyncToLatestBlock(ctx); err != nil {
+			return fmt.Errorf("failed to sync smt to latest block: %w", err)
+		}
+	}
+	return nil
+}
+
+func (bs *BlockSyncer) SyncToLatestBlock(ctx context.Context) error {
 	// fetch last synced smt block number and last stored block number
 	currBlock := bs.stateTracker.GetLastSyncedBlock()
 	endBlock, err := bs.getLastStoredBlockRecordNumber(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to fetch last stored block number: %w", err)
 	}
-	bs.logger.WithContext(ctx).Debug("block sync", "from", currBlock, "to", endBlock)
 	for currBlock.Cmp(endBlock) < 0 {
 		// fetch the next block record
 		b, err := bs.storage.BlockRecordsStorage().GetNextBlock(ctx, api.NewBigInt(currBlock))
@@ -52,7 +120,7 @@ func (bs *blockSyncer) syncToLatestBlock(ctx context.Context) error {
 
 		// skip empty blocks
 		if len(b.RequestIDs) == 0 {
-			bs.logger.WithContext(ctx).Debug("skipping block sync (empty block)", "nextBlock", b.BlockNumber.String())
+			bs.logger.WithContext(ctx).Debug("skipping block sync (empty block)", "blockNumber", b.BlockNumber.String())
 			currBlock = b.BlockNumber.Int
 			bs.stateTracker.SetLastSyncedBlock(currBlock)
 			continue
@@ -71,7 +139,7 @@ func (bs *blockSyncer) syncToLatestBlock(ctx context.Context) error {
 	return nil
 }
 
-func (bs *blockSyncer) verifySMTForBlock(ctx context.Context, smtRootHash string, blockNumber *api.BigInt) error {
+func (bs *BlockSyncer) verifySMTForBlock(ctx context.Context, smtRootHash string, blockNumber *api.BigInt) error {
 	block, err := bs.storage.BlockStorage().GetByNumber(ctx, blockNumber)
 	if err != nil {
 		return fmt.Errorf("failed to fetch block: %w", err)
@@ -87,7 +155,7 @@ func (bs *blockSyncer) verifySMTForBlock(ctx context.Context, smtRootHash string
 	return nil
 }
 
-func (bs *blockSyncer) updateSMTForBlock(ctx context.Context, blockRecord *models.BlockRecords) error {
+func (bs *BlockSyncer) updateSMTForBlock(ctx context.Context, blockRecord *models.BlockRecords) error {
 	// build leaf ids while filtering duplicate blockRecord.RequestIDs
 	uniqueRequestIds := make(map[string]struct{}, len(blockRecord.RequestIDs))
 	leafIDs := make([]api.HexBytes, 0, len(blockRecord.RequestIDs))
@@ -132,7 +200,7 @@ func (bs *blockSyncer) updateSMTForBlock(ctx context.Context, blockRecord *model
 	return nil
 }
 
-func (bs *blockSyncer) getLastStoredBlockRecordNumber(ctx context.Context) (*big.Int, error) {
+func (bs *BlockSyncer) getLastStoredBlockRecordNumber(ctx context.Context) (*big.Int, error) {
 	// Use BlockStorage which filters on finalized=true
 	// This ensures we only sync up to the latest finalized block
 	latestNumber, err := bs.storage.BlockStorage().GetLatestNumber(ctx)

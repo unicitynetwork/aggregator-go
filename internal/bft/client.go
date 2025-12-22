@@ -20,6 +20,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -43,7 +44,7 @@ const (
 	normal
 )
 
-// BFTRootChainClient handles communication with the BFT root chain via P2P network
+// BFTClientImpl handles communication with the BFT root chain via P2P network
 type (
 	BFTClientImpl struct {
 		conf        *config.BFTConfig
@@ -51,6 +52,7 @@ type (
 		partitionID types.PartitionID
 		shardID     types.ShardID
 		logger      *logger.Logger
+		eventBus    *events.EventBus
 
 		// mutex for peer, network, signer TODO: there are readers without mutex
 		mu      sync.Mutex
@@ -97,7 +99,15 @@ type (
 	status int
 )
 
-func NewBFTClient(conf *config.BFTConfig, roundManager RoundManager, trustBaseStore TrustBaseStore, luc *types.UnicityCertificate, logger *logger.Logger) (*BFTClientImpl, error) {
+func NewBFTClient(
+	ctx context.Context,
+	conf *config.BFTConfig,
+	roundManager RoundManager,
+	trustBaseStore TrustBaseStore,
+	luc *types.UnicityCertificate,
+	logger *logger.Logger,
+	eventBus *events.EventBus,
+) (*BFTClientImpl, error) {
 	logger.Info("Creating BFT Client")
 	bftClient := &BFTClientImpl{
 		logger:         logger,
@@ -106,6 +116,7 @@ func NewBFTClient(conf *config.BFTConfig, roundManager RoundManager, trustBaseSt
 		roundManager:   roundManager,
 		trustBaseStore: trustBaseStore,
 		conf:           conf,
+		eventBus:       eventBus,
 	}
 	bftClient.status.Store(idle)
 	bftClient.luc.Store(luc)
@@ -136,6 +147,10 @@ func (c *BFTClientImpl) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.status.Load().(status) != idle {
+		c.logger.WithContext(ctx).Warn("BFT Client is not idle, skipping start")
+		return nil
+	}
 	c.status.Store(initializing)
 
 	peerConf, err := c.conf.PeerConf()
@@ -167,6 +182,7 @@ func (c *BFTClientImpl) Start(ctx context.Context) error {
 	msgLoopCtx, cancelFn := context.WithCancel(ctx)
 	c.msgLoopCancelFn = cancelFn
 	go func() {
+		c.logger.WithContext(ctx).Info("BFT client event loop started")
 		if err := c.loop(msgLoopCtx); err != nil {
 			c.logger.Error("BFT event loop thread exited with error", "error", err.Error())
 		} else {
@@ -182,10 +198,16 @@ func (c *BFTClientImpl) Stop() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.status.Load().(status) == idle {
+		c.logger.Warn("BFT Client is already idle, skipping stop")
+		return
+	}
+
 	c.status.Store(idle)
 
 	if c.msgLoopCancelFn != nil {
 		c.msgLoopCancelFn()
+		c.msgLoopCancelFn = nil
 	}
 	if c.peer != nil {
 		if err := c.peer.Close(); err != nil {

@@ -212,7 +212,7 @@ services:
       BFT_ENABLED: "true"
       BFT_KEY_CONF_FILE: "/app/bft-config/aggregator/keys.json"
       BFT_SHARD_CONF_FILE: "/app/bft-config/shard-conf-7_0.json"
-      BFT_TRUST_BASE_FILE: "/app/bft-config/trust-base.json"
+      BFT_TRUST_BASE_FILES: "/app/bft-config/trust-base.json"
       # BFT_BOOTSTRAP_ADDRESSES will be set dynamically by the entrypoint script
 
       # Redis Configuration
