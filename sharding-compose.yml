@@ -196,6 +196,7 @@ services:
       LOCK_TTL_SECONDS: "30"
       LEADER_HEARTBEAT_INTERVAL: "10s"
       LEADER_ELECTION_POLLING_INTERVAL: "5s"
+      ENABLE_PRE_COLLECTION: "true"
 
       # Logging Configuration
       LOG_LEVEL: "debug"
@@ -205,7 +206,7 @@ services:
 
       # Processing Configuration
       BATCH_LIMIT: "1000"
-      COLLECT_PHASE_DURATION: "500ms"
+      COLLECT_PHASE_DURATION: "0ms"
 
       # BFT Configuration
       # Enable BFT support and specify configuration file paths
@@ -278,6 +279,7 @@ services:
     volumes:
       - ./data/genesis:/app/bft-config
       - ./logs/shard2:/app/logs
+      - ./certs:/app/certs:ro
     environment:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-shard2:27017/aggregator?replicaSet=rs-shard2&directConnection=true"
@@ -307,6 +309,7 @@ services:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-root:27017/aggregator?replicaSet=rs-root&directConnection=true"
       SHARDING_MODE: "parent"
+      PARENT_COLLECT_PHASE_DURATION: "200ms"
       BFT_ENABLED: "true"
       ENABLE_TLS: "false"
     depends_on:

@@ -158,16 +158,26 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			"rootHash", rootHashRaw.String(),
 			"submissionDuration", submissionDuration)
 
-		// Initialize pre-collection: create chained snapshot for next round
-		rm.initPreCollection(ctx)
-
-		// Poll for proof while pre-collecting commitments for next round
+		var proof *api.RootShardInclusionProof
 		proofWaitStart := time.Now()
-		proof, err := rm.pollWithPreCollection(ctx, rootHashRaw.String())
-		if err != nil {
-			// Pre-collected commitments will be recovered from Redis on restart
-			rm.clearPreCollection()
-			return fmt.Errorf("failed to poll for parent shard inclusion proof: %w", err)
+
+		if rm.config.Processing.EnablePreCollection {
+			// Initialize pre-collection: create chained snapshot for next round
+			rm.initPreCollection(ctx)
+
+			// Poll for proof while pre-collecting commitments for next round
+			proof, err = rm.pollWithPreCollection(ctx, rootHashRaw.String())
+			if err != nil {
+				// Pre-collected commitments will be recovered from Redis on restart
+				rm.clearPreCollection()
+				return fmt.Errorf("failed to poll for parent shard inclusion proof: %w", err)
+			}
+		} else {
+			// Legacy flow: just poll without pre-collection
+			proof, err = rm.pollInclusionProof(ctx, rootHashRaw.String())
+			if err != nil {
+				return fmt.Errorf("failed to poll for parent shard inclusion proof: %w", err)
+			}
 		}
 		proofWait := time.Since(proofWaitStart)
 		rm.logger.WithContext(ctx).Info("Parent shard proof received",
@@ -194,42 +204,45 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		)
 		if err := rm.FinalizeBlockWithRetry(ctx, block); err != nil {
 			// Pre-collected commitments will be recovered from Redis on restart
-			rm.clearPreCollection()
+			if rm.config.Processing.EnablePreCollection {
+				rm.clearPreCollection()
+			}
 			return fmt.Errorf("failed to finalize block after retries: %w", err)
 		}
 
-		// Reparent pre-collection snapshot to main SMT (now that current round is committed)
-		// and start next round with pre-collected commitments
 		nextRoundNumber := big.NewInt(0).Add(blockNumber.Int, big.NewInt(1))
 
-		rm.preCollectionMutex.Lock()
-		preSnapshot := rm.preCollectionSnapshot
-		preCommitments := rm.preCollectedCommitments
-		preLeaves := rm.preCollectedLeaves
-		rm.preCollectionSnapshot = nil
-		rm.preCollectedCommitments = nil
-		rm.preCollectedLeaves = nil
-		rm.preCollectionMutex.Unlock()
+		if rm.config.Processing.EnablePreCollection {
+			// Reparent pre-collection snapshot to main SMT (now that current round is committed)
+			// and start next round with pre-collected commitments
+			rm.preCollectionMutex.Lock()
+			preSnapshot := rm.preCollectionSnapshot
+			preCommitments := rm.preCollectedCommitments
+			preLeaves := rm.preCollectedLeaves
+			rm.preCollectionSnapshot = nil
+			rm.preCollectedCommitments = nil
+			rm.preCollectedLeaves = nil
+			rm.preCollectionMutex.Unlock()
 
-		if preSnapshot != nil && len(preCommitments) > 0 {
-			// Reparent the pre-collection snapshot to commit to main SMT
-			preSnapshot.SetCommitTarget(rm.smt)
+			if preSnapshot != nil && len(preCommitments) > 0 {
+				// Reparent the pre-collection snapshot to commit to main SMT
+				preSnapshot.SetCommitTarget(rm.smt)
 
-			rm.logger.WithContext(ctx).Info("Starting pipelined round with pre-collected snapshot",
-				"nextRound", nextRoundNumber.String(),
-				"preCollectedCommitments", len(preCommitments))
-
-			if err := rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(nextRoundNumber), preSnapshot, preCommitments, preLeaves); err != nil {
-				rm.logger.WithContext(ctx).Error("Failed to start pipelined round, falling back to normal round", "error", err.Error())
-				// Fall back to normal round if pipelined start fails
+				if err := rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(nextRoundNumber), preSnapshot, preCommitments, preLeaves); err != nil {
+					rm.logger.WithContext(ctx).Error("Failed to start pipelined round, falling back to normal round", "error", err.Error())
+					// Fall back to normal round if pipelined start fails
+					if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); err != nil {
+						rm.logger.WithContext(ctx).Error("Failed to start new round after finalization.", "error", err.Error())
+					}
+				}
+			} else {
+				// No pre-collected commitments, start normal round (first round or empty pre-collection)
 				if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); err != nil {
 					rm.logger.WithContext(ctx).Error("Failed to start new round after finalization.", "error", err.Error())
 				}
 			}
 		} else {
-			// No pre-collected commitments, start normal round (first round or empty pre-collection)
-			rm.logger.WithContext(ctx).Info("No pre-collected commitments, starting normal round",
-				"nextRound", nextRoundNumber.String())
+			// Pre-collection disabled, start normal round
 			if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); err != nil {
 				rm.logger.WithContext(ctx).Error("Failed to start new round after finalization.", "error", err.Error())
 			}
@@ -284,12 +297,14 @@ func (rm *RoundManager) pollWithPreCollection(ctx context.Context, rootHash stri
 		maxPreCollect = 10000 // Default cap
 	}
 
+	pollStart := time.Now()
+
 	for {
 		select {
 		case <-pollingCtx.Done():
 			rm.logger.WithContext(ctx).Warn("Poll with pre-collection timed out",
 				"rootHash", rootHash,
-				"preCollectedCount", preCollectCount)
+				"pollDuration", time.Since(pollStart))
 			return nil, fmt.Errorf("timed out waiting for parent shard inclusion proof %s", rootHash)
 
 		case <-ticker.C:
@@ -299,13 +314,8 @@ func (rm *RoundManager) pollWithPreCollection(ctx context.Context, rootHash stri
 				return nil, fmt.Errorf("failed to fetch parent shard inclusion proof: %w", err)
 			}
 			if proof == nil || !proof.IsValid(rootHash) {
-				rm.logger.WithContext(ctx).Debug("Parent shard inclusion proof not found, retrying...",
-					"preCollectedCount", preCollectCount)
 				continue
 			}
-			rm.logger.WithContext(ctx).Info("Parent proof received during pre-collection",
-				"rootHash", rootHash,
-				"preCollectedCount", preCollectCount)
 			return proof, nil
 
 		case commitment := <-rm.commitmentStream:
@@ -382,8 +392,6 @@ func (rm *RoundManager) initPreCollection(ctx context.Context) {
 	rm.preCollectionSnapshot = currentSnapshot.CreateSnapshot()
 	rm.preCollectedCommitments = make([]*models.Commitment, 0)
 	rm.preCollectedLeaves = make([]*smt.Leaf, 0)
-
-	rm.logger.WithContext(ctx).Info("Pre-collection initialized with chained snapshot")
 }
 
 // clearPreCollection clears the pre-collection state
