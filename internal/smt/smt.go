@@ -121,6 +121,20 @@ func (snapshot *SmtSnapshot) Commit() {
 	}
 }
 
+// SetCommitTarget changes the target tree that this snapshot will commit to.
+// This is used for snapshot chaining where a child snapshot needs to commit
+// to the main tree after its parent snapshot has been committed.
+func (snapshot *SmtSnapshot) SetCommitTarget(target *SparseMerkleTree) {
+	snapshot.original = target
+}
+
+// CreateSnapshot creates a child snapshot from this snapshot.
+// The child snapshot shares the current state and can accumulate its own changes.
+// This enables snapshot chaining for pipelined processing.
+func (snapshot *SmtSnapshot) CreateSnapshot() *SmtSnapshot {
+	return snapshot.SparseMerkleTree.CreateSnapshot()
+}
+
 // AddLeaf adds a single leaf to the snapshot
 // In regular and child mode, only new leaves can be added and any attempt
 // to overwrite an existing leaf is an error; in parent mode, updates are allowed
