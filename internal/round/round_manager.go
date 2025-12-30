@@ -128,10 +128,10 @@ type RoundManager struct {
 	// Pre-collection pipeline (child mode optimization)
 	// During proof wait, we pre-collect commitments into a chained snapshot
 	// so the next round can start immediately without a collect phase
-	preCollectionSnapshot    *smt.ThreadSafeSmtSnapshot // Next round's snapshot (chained from current)
-	preCollectedCommitments  []*models.Commitment       // Commitments added to pre-collection snapshot
-	preCollectedLeaves       []*smt.Leaf                // Leaves added to pre-collection snapshot
-	preCollectionMutex       sync.Mutex                 // Protects pre-collection state
+	preCollectionSnapshot   *smt.ThreadSafeSmtSnapshot // Next round's snapshot (chained from current)
+	preCollectedCommitments []*models.Commitment       // Commitments added to pre-collection snapshot
+	preCollectedLeaves      []*smt.Leaf                // Leaves added to pre-collection snapshot
+	preCollectionMutex      sync.Mutex                 // Protects pre-collection state
 
 	// Metrics
 	totalRounds      int64
@@ -290,9 +290,8 @@ func (rm *RoundManager) GetStreamingMetrics() map[string]interface{} {
 		"channelCapacity":         cap(rm.commitmentStream),
 		"channelUtilization":      fmt.Sprintf("%.2f%%", channelUtilization),
 		"adaptiveTiming": map[string]interface{}{
-			"collectPhaseDuration": rm.config.Processing.CollectPhaseDuration.String(),
-			"avgFinalizationTime":  rm.avgFinalizationTime.String(),
-			"avgSMTUpdateTime":     rm.avgSMTUpdateTime.String(),
+			"avgFinalizationTime": rm.avgFinalizationTime.String(),
+			"avgSMTUpdateTime":    rm.avgSMTUpdateTime.String(),
 		},
 		"lastRound": map[string]interface{}{
 			"number":               rm.lastRoundMetrics.RoundNumber,
@@ -332,9 +331,25 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 	return stats
 }
 
-// StartNewRound initializes a new round
+// StartNewRound starts a new round for processing commitments (delegates to unified function)
 func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
-	rm.logger.WithContext(ctx).Info("StartNewRound called", "roundNumber", roundNumber.String())
+	return rm.StartNewRoundWithSnapshot(ctx, roundNumber, nil, nil, nil)
+}
+
+// StartNewRoundWithSnapshot starts a new round, optionally with pre-collected data.
+// If snapshot/commitments are nil (first round), an empty snapshot is created.
+// All rounds are processed the same way - no separate collect phase.
+func (rm *RoundManager) StartNewRoundWithSnapshot(
+	ctx context.Context,
+	roundNumber *api.BigInt,
+	snapshot *smt.ThreadSafeSmtSnapshot,
+	commitments []*models.Commitment,
+	leaves []*smt.Leaf,
+) error {
+	rm.logger.WithContext(ctx).Info("StartNewRound called",
+		"roundNumber", roundNumber.String(),
+		"commitments", len(commitments))
+
 	rm.roundMutex.Lock()
 
 	// Log previous round state if exists
@@ -343,43 +358,42 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 			"previousRoundNumber", rm.currentRound.Number.String(),
 			"previousRoundState", rm.currentRound.State.String(),
 			"previousRoundAge", time.Since(rm.currentRound.StartTime).String())
+	}
 
-		// Check if we're skipping rounds (root chain timeout scenario)
-		if rm.currentRound.Number != nil && roundNumber.Cmp(rm.currentRound.Number.Int) > 1 {
-			skippedRounds := new(big.Int).Sub(roundNumber.Int, rm.currentRound.Number.Int)
-			skippedRounds.Sub(skippedRounds, big.NewInt(1))
-			rm.logger.WithContext(ctx).Warn("Skipping rounds due to root chain timeout",
-				"currentRound", rm.currentRound.Number.String(),
-				"newRound", roundNumber.String(),
-				"skippedRounds", skippedRounds.String())
-		}
+	// Use provided snapshot/commitments, or create empty ones for first round
+	if snapshot == nil {
+		snapshot = rm.smt.CreateSnapshot()
+	}
+	if commitments == nil {
+		commitments = make([]*models.Commitment, 0)
+	}
+	if leaves == nil {
+		leaves = make([]*smt.Leaf, 0)
 	}
 
 	rm.currentRound = &Round{
-		Number:      roundNumber,
-		StartTime:   time.Now(),
-		State:       RoundStateCollecting,
-		Commitments: make([]*models.Commitment, 0),
-		Snapshot:    rm.smt.CreateSnapshot(), // Create snapshot for this round
+		Number:         roundNumber,
+		StartTime:      time.Now(),
+		State:          RoundStateProcessing,
+		Commitments:    commitments,
+		Snapshot:       snapshot,
+		PendingLeaves:  leaves,
+		PendingRecords: make([]*models.AggregatorRecord, 0, len(commitments)),
 	}
 
 	rm.roundMutex.Unlock()
 
 	rm.logger.WithContext(ctx).Info("Started new round",
 		"roundNumber", roundNumber.String(),
-		"duration", rm.roundDuration.String())
+		"commitments", len(commitments))
 
 	rm.wg.Go(func() {
-		if err := rm.processCurrentRound(ctx); err != nil {
-			// Context.Canceled = graceful shutdown, exit cleanly
+		if err := rm.processRound(ctx); err != nil {
 			if errors.Is(err, context.Canceled) {
 				rm.logger.WithContext(ctx).Info("Round processing stopped due to shutdown",
 					"roundNumber", roundNumber.String())
 				return
 			}
-
-			// ANY other error means server is broken - exit immediately
-			// Continuing would accept commitments but not process them
 			rm.logger.WithContext(ctx).Error("FATAL: Round processing failed, exiting",
 				"roundNumber", roundNumber.String(),
 				"error", err.Error())
@@ -390,108 +404,68 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 	return nil
 }
 
-// StartNewRoundWithSnapshot starts a new round using a pre-collected snapshot.
-// This is used in child mode pipelining where commitments were pre-collected
-// during the previous round's proof wait. The round starts directly in Processing
-// state, skipping the collect phase.
-func (rm *RoundManager) StartNewRoundWithSnapshot(
-	ctx context.Context,
-	roundNumber *api.BigInt,
-	snapshot *smt.ThreadSafeSmtSnapshot,
-	commitments []*models.Commitment,
-	leaves []*smt.Leaf,
-) error {
-	rm.logger.WithContext(ctx).Info("StartNewRoundWithSnapshot called",
-		"roundNumber", roundNumber.String(),
-		"preCollectedCommitments", len(commitments))
-
-	rm.roundMutex.Lock()
-
-	// Log previous round state if exists
-	if rm.currentRound != nil {
-		rm.logger.WithContext(ctx).Info("Previous round state",
-			"previousRoundNumber", rm.currentRound.Number.String(),
-			"previousRoundState", rm.currentRound.State.String(),
-			"previousRoundAge", time.Since(rm.currentRound.StartTime).String())
-	}
-
-	// Create new round with pre-collected snapshot
-	rm.currentRound = &Round{
-		Number:         roundNumber,
-		StartTime:      time.Now(),
-		State:          RoundStateProcessing, // Skip collecting state!
-		Commitments:    commitments,          // Use pre-collected commitments
-		Snapshot:       snapshot,             // Use pre-collected snapshot
-		PendingLeaves:  leaves,               // Use pre-collected leaves
-		PendingRecords: make([]*models.AggregatorRecord, 0, len(commitments)),
-	}
-
-	rm.roundMutex.Unlock()
-
-	rm.logger.WithContext(ctx).Info("Started new round with pre-collected snapshot (pipelined)",
-		"roundNumber", roundNumber.String(),
-		"commitments", len(commitments))
-
-	rm.wg.Go(func() {
-		if err := rm.processPreCollectedRound(ctx); err != nil {
-			// Context.Canceled = graceful shutdown, exit cleanly
-			if errors.Is(err, context.Canceled) {
-				rm.logger.WithContext(ctx).Info("Round processing stopped due to shutdown",
-					"roundNumber", roundNumber.String())
-				return
-			}
-
-			// ANY other error means server is broken - exit immediately
-			rm.logger.WithContext(ctx).Error("FATAL: Pre-collected round processing failed, exiting",
-				"roundNumber", roundNumber.String(),
-				"error", err.Error())
-			osExit(1)
-		}
-	})
-
-	return nil
-}
-
-// processPreCollectedRound processes a round that was started with a pre-collected snapshot.
-// Unlike processCurrentRound, this skips the collect phase and immediately proceeds to
-// finalization since the commitments were already added to the snapshot during pre-collection.
-func (rm *RoundManager) processPreCollectedRound(ctx context.Context) error {
-	rm.logger.WithContext(ctx).Info("processPreCollectedRound called (pipelined mode)")
-
+// processRound processes the current round by proposing its block.
+// Child mode: commitments already collected via pollWithPreCollection
+// Standalone mode: collects from channel before proposing
+func (rm *RoundManager) processRound(ctx context.Context) error {
 	rm.roundMutex.Lock()
 	if rm.currentRound == nil {
 		rm.roundMutex.Unlock()
-		rm.logger.WithContext(ctx).Error("No current round to process")
 		return fmt.Errorf("no current round to process")
 	}
-
 	roundNumber := rm.currentRound.Number
+	rm.roundMutex.Unlock()
+
+	// Standalone mode: collect from channel since there's no pollWithPreCollection
+	if !rm.config.Sharding.Mode.IsChild() {
+		collectDuration := 200 * time.Millisecond
+		deadline := time.Now().Add(collectDuration)
+
+		for time.Now().Before(deadline) {
+			select {
+			case commitment := <-rm.commitmentStream:
+				rm.roundMutex.Lock()
+				rm.currentRound.Commitments = append(rm.currentRound.Commitments, commitment)
+				if len(rm.currentRound.Commitments)%100 == 0 {
+					batch := rm.currentRound.Commitments[len(rm.currentRound.Commitments)-100:]
+					rm.processMiniBatch(ctx, batch)
+				}
+				rm.roundMutex.Unlock()
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+
+		// Process any remaining commitments
+		rm.roundMutex.Lock()
+		remaining := len(rm.currentRound.Commitments) % 100
+		if remaining > 0 {
+			batch := rm.currentRound.Commitments[len(rm.currentRound.Commitments)-remaining:]
+			rm.processMiniBatch(ctx, batch)
+		}
+		rm.roundMutex.Unlock()
+	}
+
+	// Get root hash from snapshot
+	rm.roundMutex.Lock()
 	commitmentCount := len(rm.currentRound.Commitments)
-
-	rm.logger.WithContext(ctx).Info("Processing pre-collected round",
-		"roundNumber", roundNumber.String(),
-		"commitmentCount", commitmentCount)
-
-	// Get the root hash from the pre-collected snapshot
 	var rootHash string
 	if rm.currentRound.Snapshot != nil {
 		rootHash = rm.currentRound.Snapshot.GetRootHash()
 	}
 	rm.currentRound.PendingRootHash = rootHash
 	rm.currentRound.ProposalTime = time.Now()
-
 	rm.roundMutex.Unlock()
 
-	rm.logger.WithContext(ctx).Info("Pre-collected round ready for proposal",
+	rm.logger.WithContext(ctx).Info("processRound called",
 		"roundNumber", roundNumber.String(),
-		"commitmentCount", commitmentCount,
+		"commitments", commitmentCount,
 		"rootHash", rootHash)
 
-	// Propose block (this will handle the mode-specific flow)
+	// Propose block
 	if err := rm.proposeBlock(ctx, roundNumber, rootHash); err != nil {
-		rm.logger.WithContext(ctx).Error("Failed to propose block",
-			"roundNumber", roundNumber.String(),
-			"error", err.Error())
 		return fmt.Errorf("failed to propose block: %w", err)
 	}
 
@@ -499,223 +473,9 @@ func (rm *RoundManager) processPreCollectedRound(ctx context.Context) error {
 	rm.totalRounds++
 	rm.totalCommitments += int64(commitmentCount)
 
-	roundTotalTime := time.Since(rm.currentRound.StartTime)
-	rm.logger.WithContext(ctx).Info("Pre-collected round completed successfully",
+	rm.logger.WithContext(ctx).Info("Round completed",
 		"roundNumber", roundNumber.String(),
-		"commitments", commitmentCount,
-		"roundTotalTime", roundTotalTime)
-
-	return nil
-}
-
-// processCurrentRound processes the current round using streaming approach with time bounds
-func (rm *RoundManager) processCurrentRound(ctx context.Context) error {
-	rm.logger.WithContext(ctx).Info("processCurrentRound called (streaming mode)")
-
-	rm.roundMutex.Lock()
-	if rm.currentRound == nil {
-		rm.roundMutex.Unlock()
-		rm.logger.WithContext(ctx).Error("No current round to process")
-		return fmt.Errorf("no current round to process")
-	}
-
-	// Log current round state
-	rm.logger.WithContext(ctx).Info("Current round state before processing",
-		"roundNumber", rm.currentRound.Number.String(),
-		"state", rm.currentRound.State.String(),
-		"age", time.Since(rm.currentRound.StartTime).String())
-
-	// Check if round is already being processed
-	if rm.currentRound.State != RoundStateCollecting {
-		rm.roundMutex.Unlock()
-		rm.logger.WithContext(ctx).Warn("Round already being processed, skipping",
-			"roundNumber", rm.currentRound.Number.String(),
-			"state", rm.currentRound.State.String())
-		return nil
-	}
-
-	// Change state to processing
-	rm.currentRound.State = RoundStateProcessing
-	roundNumber := rm.currentRound.Number
-	rm.logger.WithContext(ctx).Info("Changed round state to processing",
-		"roundNumber", roundNumber.String())
-
-	// Initialize commitments slice for this round
-	// Note: Any commitments consumed from the channel MUST be processed in this round
-	capacity := 10000 // Default capacity
-	if rm.config.Processing.MaxCommitmentsPerRound > 0 {
-		capacity = rm.config.Processing.MaxCommitmentsPerRound
-	}
-	rm.currentRound.Commitments = make([]*models.Commitment, 0, capacity)
-
-	processingDuration := rm.config.Processing.CollectPhaseDuration
-	if processingDuration <= 0 {
-		processingDuration = 500 * time.Millisecond
-	}
-	rm.logger.WithContext(ctx).Debug("Using fixed collect phase duration",
-		"processingDuration", processingDuration)
-
-	rm.roundMutex.Unlock()
-
-	// Process commitments with streaming until adaptive deadline
-	processingDeadline := time.Now().Add(processingDuration)
-	commitmentsProcessed := 0
-	processingStart := time.Now()
-	smtUpdateTime := time.Duration(0)
-
-	// Stream and process commitments until deadline or cap reached
-ProcessLoop:
-	for time.Now().Before(processingDeadline) {
-		select {
-		case commitment := <-rm.commitmentStream:
-			// Add commitment to current round
-			rm.roundMutex.Lock()
-			rm.currentRound.Commitments = append(rm.currentRound.Commitments, commitment)
-			commitmentsProcessed++
-			currentLen := len(rm.currentRound.Commitments)
-
-			// Process in mini-batches for SMT efficiency
-			if currentLen%miniBatchSize == 0 {
-				batchStart := time.Now()
-				batchSlice := rm.currentRound.Commitments[len(rm.currentRound.Commitments)-miniBatchSize:]
-				if err := rm.processMiniBatch(ctx, batchSlice); err != nil {
-					rm.logger.WithContext(ctx).Error("Failed to process mini-batch",
-						"error", err.Error(),
-						"roundNumber", roundNumber.String())
-				}
-				smtUpdateTime += time.Since(batchStart)
-			}
-
-			// Check if we've reached the configured cap
-			if rm.config.Processing.MaxCommitmentsPerRound > 0 && commitmentsProcessed >= rm.config.Processing.MaxCommitmentsPerRound {
-				rm.logger.WithContext(ctx).Info("Reached max commitments per round, stopping early",
-					"roundNumber", roundNumber.String(),
-					"commitmentsProcessed", commitmentsProcessed,
-					"maxCommitments", rm.config.Processing.MaxCommitmentsPerRound)
-				rm.roundMutex.Unlock()
-				break ProcessLoop
-			}
-
-			rm.roundMutex.Unlock()
-
-		case <-ctx.Done():
-			return ctx.Err()
-
-		default:
-			// No commitment immediately available
-			remainingTime := time.Until(processingDeadline)
-			if remainingTime < 50*time.Millisecond {
-				// Not enough time to wait for more
-				break ProcessLoop
-			}
-			// Wait a bit for more commitments
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-
-	// Process any remaining commitments not in a full mini-batch
-	rm.roundMutex.Lock()
-	lastBatchStart := (commitmentsProcessed / miniBatchSize) * miniBatchSize
-	if lastBatchStart < len(rm.currentRound.Commitments) {
-		batchStart := time.Now()
-		if err := rm.processMiniBatch(ctx, rm.currentRound.Commitments[lastBatchStart:]); err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to process final mini-batch",
-				"error", err.Error(),
-				"roundNumber", roundNumber.String())
-		}
-		smtUpdateTime += time.Since(batchStart)
-	}
-
-	// Calculate and track metrics
-	processingTime := time.Since(processingStart)
-	if processingTime.Milliseconds() > 0 {
-		rm.avgProcessingRate = float64(commitmentsProcessed) / float64(processingTime.Milliseconds())
-	}
-
-	// Update average SMT update time (exponential moving average)
-	if commitmentsProcessed > 0 {
-		numBatches := (commitmentsProcessed + miniBatchSize - 1) / miniBatchSize // Round up
-		avgBatchTime := smtUpdateTime / time.Duration(numBatches)
-		rm.avgSMTUpdateTime = (rm.avgSMTUpdateTime*4 + avgBatchTime) / 5 // Weight towards recent: 80/20
-	}
-
-	rm.lastRoundMetrics = RoundMetrics{
-		CommitmentsProcessed: commitmentsProcessed,
-		ProcessingTime:       processingTime,
-		RoundNumber:          roundNumber,
-		Timestamp:            time.Now(),
-	}
-
-	rm.logger.WithContext(ctx).Info("Streaming round processing complete",
-		"roundNumber", roundNumber.String(),
-		"commitmentsProcessed", commitmentsProcessed,
-		"processingTime", processingTime,
-		"smtUpdateTime", smtUpdateTime,
-		"rate", fmt.Sprintf("%.2f commitments/ms", rm.avgProcessingRate),
-		"targetRPS", int(rm.avgProcessingRate*1000))
-	rm.roundMutex.Unlock()
-
-	// Finalize SMT processing and get root hash
-	var rootHash string
-	if len(rm.currentRound.Commitments) > 0 {
-		// Get the root hash from the snapshot (already processed via streaming)
-		rm.roundMutex.RLock()
-		if rm.currentRound.Snapshot != nil {
-			rootHash = rm.currentRound.Snapshot.GetRootHash()
-		}
-		rm.roundMutex.RUnlock()
-
-		// Store pending data in the round for later finalization
-		rm.roundMutex.Lock()
-		rm.currentRound.PendingRootHash = rootHash
-		rm.roundMutex.Unlock()
-
-		rm.logger.WithContext(ctx).Info("Round streaming complete, awaiting finalization",
-			"roundNumber", roundNumber.String(),
-			"commitmentCount", len(rm.currentRound.Commitments),
-			"rootHash", rootHash)
-	} else {
-		// Empty round - use previous root hash or empty hash
-		rootHash = rm.smt.GetRootHash()
-		rm.logger.WithContext(ctx).Info("Empty round, using existing root hash",
-			"roundNumber", roundNumber.String(),
-			"rootHash", rootHash)
-	}
-
-	// Store processing time and proposal time for this round
-	rm.roundMutex.Lock()
-	if rm.currentRound != nil {
-		rm.currentRound.ProcessingTime = processingTime
-		rm.currentRound.ProposalTime = time.Now()
-	}
-	rm.roundMutex.Unlock()
-
-	// Create and propose block
-	rm.logger.WithContext(ctx).Info("Proposing block",
-		"roundNumber", roundNumber.String(),
-		"rootHash", rootHash)
-
-	if err := rm.proposeBlock(ctx, roundNumber, rootHash); err != nil {
-		rm.logger.WithContext(ctx).Error("Failed to propose block",
-			"roundNumber", roundNumber.String(),
-			"error", err.Error())
-		return fmt.Errorf("failed to propose block: %w", err)
-	}
-
-	// Note: Actual finalization time will be tracked in FinalizeBlock when UC arrives
-	// For now, we use the average finalization time for adaptive calculations
-	rm.adjustProcessingRatio(ctx, processingTime, rm.avgFinalizationTime)
-
-	// Update stats
-	rm.totalRounds++
-	rm.totalCommitments += int64(len(rm.currentRound.Commitments))
-
-	roundTotalTime := time.Since(rm.currentRound.StartTime)
-	rm.logger.WithContext(ctx).Info("Round processing completed successfully",
-		"roundNumber", roundNumber.String(),
-		"commitments", len(rm.currentRound.Commitments),
-		"roundTotalTime", roundTotalTime,
-		"processingTime", processingTime)
+		"commitments", commitmentCount)
 
 	return nil
 }
@@ -836,10 +596,6 @@ func (rm *RoundManager) commitmentPrefetcher(ctx context.Context) {
 			}
 		}
 	}
-}
-
-// adjustProcessingRatio dynamically adjusts the processing ratio based on actual performance
-func (rm *RoundManager) adjustProcessingRatio(ctx context.Context, processingTime, expectedFinalizationTime time.Duration) {
 }
 
 // restoreSmtFromStorage restores the SMT tree from persisted nodes in storage

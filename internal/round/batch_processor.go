@@ -161,23 +161,14 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		var proof *api.RootShardInclusionProof
 		proofWaitStart := time.Now()
 
-		if rm.config.Processing.EnablePreCollection {
-			// Initialize pre-collection: create chained snapshot for next round
-			rm.initPreCollection(ctx)
+		// Initialize pre-collection: create chained snapshot for next round
+		rm.initPreCollection(ctx)
 
-			// Poll for proof while pre-collecting commitments for next round
-			proof, err = rm.pollWithPreCollection(ctx, rootHashRaw.String())
-			if err != nil {
-				// Pre-collected commitments will be recovered from Redis on restart
-				rm.clearPreCollection()
-				return fmt.Errorf("failed to poll for parent shard inclusion proof: %w", err)
-			}
-		} else {
-			// Legacy flow: just poll without pre-collection
-			proof, err = rm.pollInclusionProof(ctx, rootHashRaw.String())
-			if err != nil {
-				return fmt.Errorf("failed to poll for parent shard inclusion proof: %w", err)
-			}
+		// Poll for proof while pre-collecting commitments for next round
+		proof, err = rm.pollWithPreCollection(ctx, rootHashRaw.String())
+		if err != nil {
+			rm.clearPreCollection()
+			return fmt.Errorf("failed to poll for parent shard inclusion proof: %w", err)
 		}
 		proofWait := time.Since(proofWaitStart)
 		rm.logger.WithContext(ctx).Info("Parent shard proof received",
@@ -203,46 +194,29 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			proof.MerkleTreePath,
 		)
 		if err := rm.FinalizeBlockWithRetry(ctx, block); err != nil {
-			// Pre-collected commitments will be recovered from Redis on restart
-			if rm.config.Processing.EnablePreCollection {
-				rm.clearPreCollection()
-			}
+			rm.clearPreCollection()
 			return fmt.Errorf("failed to finalize block after retries: %w", err)
 		}
 
 		nextRoundNumber := big.NewInt(0).Add(blockNumber.Int, big.NewInt(1))
 
-		if rm.config.Processing.EnablePreCollection {
-			// Reparent pre-collection snapshot to main SMT (now that current round is committed)
-			// and start next round with pre-collected commitments
-			rm.preCollectionMutex.Lock()
-			preSnapshot := rm.preCollectionSnapshot
-			preCommitments := rm.preCollectedCommitments
-			preLeaves := rm.preCollectedLeaves
-			rm.preCollectionSnapshot = nil
-			rm.preCollectedCommitments = nil
-			rm.preCollectedLeaves = nil
-			rm.preCollectionMutex.Unlock()
+		// Get pre-collected data for next round
+		rm.preCollectionMutex.Lock()
+		preSnapshot := rm.preCollectionSnapshot
+		preCommitments := rm.preCollectedCommitments
+		preLeaves := rm.preCollectedLeaves
+		rm.preCollectionSnapshot = nil
+		rm.preCollectedCommitments = nil
+		rm.preCollectedLeaves = nil
+		rm.preCollectionMutex.Unlock()
 
-			if preSnapshot != nil && len(preCommitments) > 0 {
-				// Reparent the pre-collection snapshot to commit to main SMT
-				preSnapshot.SetCommitTarget(rm.smt)
-
-				if err := rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(nextRoundNumber), preSnapshot, preCommitments, preLeaves); err != nil {
-					rm.logger.WithContext(ctx).Error("Failed to start pipelined round, falling back to normal round", "error", err.Error())
-					// Fall back to normal round if pipelined start fails
-					if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); err != nil {
-						rm.logger.WithContext(ctx).Error("Failed to start new round after finalization.", "error", err.Error())
-					}
-				}
-			} else {
-				// No pre-collected commitments, start normal round (first round or empty pre-collection)
-				if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); err != nil {
-					rm.logger.WithContext(ctx).Error("Failed to start new round after finalization.", "error", err.Error())
-				}
-			}
+		if preSnapshot != nil && len(preCommitments) > 0 {
+			// Reparent the pre-collection snapshot to commit to main SMT
+			preSnapshot.SetCommitTarget(rm.smt)
+			// Start next round with pre-collected data (skips collect phase)
+			_ = rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(nextRoundNumber), preSnapshot, preCommitments, preLeaves)
 		} else {
-			// Pre-collection disabled, start normal round
+			// No pre-collected commitments, start normal round (first round or empty pre-collection)
 			if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); err != nil {
 				rm.logger.WithContext(ctx).Error("Failed to start new round after finalization.", "error", err.Error())
 			}
@@ -252,32 +226,6 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		return nil
 	default:
 		return fmt.Errorf("invalid sharding mode: %s", rm.config.Sharding.Mode)
-	}
-}
-
-func (rm *RoundManager) pollInclusionProof(ctx context.Context, rootHash string) (*api.RootShardInclusionProof, error) {
-	pollingCtx, cancel := context.WithTimeout(ctx, rm.config.Sharding.Child.ParentPollTimeout)
-	defer cancel()
-
-	ticker := time.NewTicker(rm.config.Sharding.Child.ParentPollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-pollingCtx.Done():
-			return nil, fmt.Errorf("timed out waiting for parent shard inclusion proof %s", rootHash)
-		case <-ticker.C:
-			request := &api.GetShardProofRequest{ShardID: rm.config.Sharding.Child.ShardID}
-			proof, err := rm.rootClient.GetShardProof(pollingCtx, request)
-			if err != nil {
-				return nil, fmt.Errorf("failed to fetch parent shard inclusion proof: %w", err)
-			}
-			if proof == nil || !proof.IsValid(rootHash) {
-				rm.logger.WithContext(ctx).Debug("Parent shard inclusion proof not found, retrying...")
-				continue
-			}
-			return proof, nil
-		}
 	}
 }
 
@@ -302,6 +250,10 @@ func (rm *RoundManager) pollWithPreCollection(ctx context.Context, rootHash stri
 	for {
 		select {
 		case <-pollingCtx.Done():
+			// Check if parent context was canceled (shutdown) vs actual timeout
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			rm.logger.WithContext(ctx).Warn("Poll with pre-collection timed out",
 				"rootHash", rootHash,
 				"pollDuration", time.Since(pollStart))

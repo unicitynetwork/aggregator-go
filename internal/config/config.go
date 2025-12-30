@@ -95,11 +95,9 @@ type LoggingConfig struct {
 
 // ProcessingConfig holds batch processing configuration
 type ProcessingConfig struct {
-	BatchLimit               int           `mapstructure:"batch_limit"`
-	RoundDuration            time.Duration `mapstructure:"round_duration"`
-	MaxCommitmentsPerRound   int           `mapstructure:"max_commitments_per_round"` // Stop waiting once this many commitments collected
-	CollectPhaseDuration     time.Duration `mapstructure:"collect_phase_duration"`
-	EnablePreCollection      bool          `mapstructure:"enable_pre_collection"` // Enable pipelined pre-collection (child mode optimization)
+	BatchLimit             int           `mapstructure:"batch_limit"`
+	RoundDuration          time.Duration `mapstructure:"round_duration"`
+	MaxCommitmentsPerRound int           `mapstructure:"max_commitments_per_round"` // Stop waiting once this many commitments collected
 }
 
 // RedisConfig holds Redis connection configuration
@@ -302,8 +300,6 @@ func Load() (*Config, error) {
 			BatchLimit:             getEnvIntOrDefault("BATCH_LIMIT", 1000),
 			RoundDuration:          getEnvDurationOrDefault("ROUND_DURATION", "1s"),
 			MaxCommitmentsPerRound: getEnvIntOrDefault("MAX_COMMITMENTS_PER_ROUND", 10000), // Default 10k to keep rounds under 2s
-			CollectPhaseDuration:   getEnvDurationOrDefault("COLLECT_PHASE_DURATION", "200ms"),
-			EnablePreCollection:    getEnvBoolOrDefault("ENABLE_PRE_COLLECTION", true), // Pipelined pre-collection for child mode
 		},
 		Redis: RedisConfig{
 			Host:         getEnvOrDefault("REDIS_HOST", "localhost"),

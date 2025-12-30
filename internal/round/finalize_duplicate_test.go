@@ -56,7 +56,8 @@ func (s *FinalizeDuplicateTestSuite) SetupSuite() {
 // some SMT nodes and aggregator records already exist (simulating crash recovery).
 func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 	t := s.T()
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
@@ -140,7 +141,8 @@ func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 // Test2_NoDuplicates tests when there are no duplicates (normal flow)
 func (s *FinalizeDuplicateTestSuite) Test2_NoDuplicates() {
 	t := s.T()
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
@@ -191,7 +193,8 @@ func (s *FinalizeDuplicateTestSuite) Test2_NoDuplicates() {
 // Test3_AllDuplicates tests when all records already exist
 func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 	t := s.T()
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
@@ -263,7 +266,8 @@ func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 // already exists (simulating a retry after MarkProcessed failed).
 func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 	t := s.T()
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
@@ -344,7 +348,8 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 // the block already exists AND is already finalized (full retry scenario).
 func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	t := s.T()
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
