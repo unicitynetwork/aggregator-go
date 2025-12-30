@@ -125,13 +125,11 @@ type RoundManager struct {
 	avgFinalizationTime time.Duration // Running average of finalization time
 	avgSMTUpdateTime    time.Duration // Running average of SMT update time per batch
 
-	// Pre-collection pipeline (child mode optimization)
-	// During proof wait, we pre-collect commitments into a chained snapshot
-	// so the next round can start immediately without a collect phase
-	preCollectionSnapshot   *smt.ThreadSafeSmtSnapshot // Next round's snapshot (chained from current)
-	preCollectedCommitments []*models.Commitment       // Commitments added to pre-collection snapshot
-	preCollectedLeaves      []*smt.Leaf                // Leaves added to pre-collection snapshot
-	preCollectionMutex      sync.Mutex                 // Protects pre-collection state
+	// Pre-collection: collect commitments for next round while waiting for parent proof
+	preCollectionSnapshot   *smt.ThreadSafeSmtSnapshot
+	preCollectedCommitments []*models.Commitment
+	preCollectedLeaves      []*smt.Leaf
+	preCollectionMutex      sync.Mutex
 
 	// Metrics
 	totalRounds      int64
@@ -352,7 +350,6 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 
 	rm.roundMutex.Lock()
 
-	// Log previous round state if exists
 	if rm.currentRound != nil {
 		rm.logger.WithContext(ctx).Info("Previous round state",
 			"previousRoundNumber", rm.currentRound.Number.String(),
@@ -360,7 +357,6 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 			"previousRoundAge", time.Since(rm.currentRound.StartTime).String())
 	}
 
-	// Use provided snapshot/commitments, or create empty ones for first round
 	if snapshot == nil {
 		snapshot = rm.smt.CreateSnapshot()
 	}
@@ -404,9 +400,6 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 	return nil
 }
 
-// processRound processes the current round by proposing its block.
-// Child mode: commitments already collected via pollWithPreCollection
-// Standalone mode: collects from channel before proposing
 func (rm *RoundManager) processRound(ctx context.Context) error {
 	rm.roundMutex.Lock()
 	if rm.currentRound == nil {
@@ -416,7 +409,6 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 	roundNumber := rm.currentRound.Number
 	rm.roundMutex.Unlock()
 
-	// Standalone mode: collect from channel since there's no pollWithPreCollection
 	if !rm.config.Sharding.Mode.IsChild() {
 		collectDuration := 200 * time.Millisecond
 		deadline := time.Now().Add(collectDuration)
@@ -438,7 +430,6 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 			}
 		}
 
-		// Process any remaining commitments
 		rm.roundMutex.Lock()
 		remaining := len(rm.currentRound.Commitments) % 100
 		if remaining > 0 {
@@ -447,8 +438,6 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 		}
 		rm.roundMutex.Unlock()
 	}
-
-	// Get root hash from snapshot
 	rm.roundMutex.Lock()
 	commitmentCount := len(rm.currentRound.Commitments)
 	var rootHash string
@@ -464,12 +453,10 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 		"commitments", commitmentCount,
 		"rootHash", rootHash)
 
-	// Propose block
 	if err := rm.proposeBlock(ctx, roundNumber, rootHash); err != nil {
 		return fmt.Errorf("failed to propose block: %w", err)
 	}
 
-	// Update stats
 	rm.totalRounds++
 	rm.totalCommitments += int64(commitmentCount)
 

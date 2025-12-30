@@ -205,7 +205,6 @@ func (prm *ParentRoundManager) startNewRound(ctx context.Context, roundNumber *a
 		"roundNumber", roundNumber.String(),
 		"collectPhaseDuration", collectPhaseDuration.String())
 
-	// Wait for collection phase to allow child shards to submit pre-collected roots
 	if collectPhaseDuration > 0 {
 		select {
 		case <-ctx.Done():
