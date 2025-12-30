@@ -4,7 +4,7 @@ services:
     platform: linux/amd64
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
     # https://github.com/unicitynetwork/bft-core/pkgs/container/bft-core
-    image: ghcr.io/unicitynetwork/bft-core:ff28a5da20d4eb3f664264a136303a4e79a88e4c
+    image: ghcr.io/unicitynetwork/bft-core:8e6f2507b8b69fc6d2d66c33fb7c4cb9dc61e8b0
   bft-root:
     <<: *bft-base
     volumes:
