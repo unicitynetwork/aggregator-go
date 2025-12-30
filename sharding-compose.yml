@@ -196,7 +196,6 @@ services:
       LOCK_TTL_SECONDS: "30"
       LEADER_HEARTBEAT_INTERVAL: "10s"
       LEADER_ELECTION_POLLING_INTERVAL: "5s"
-      ENABLE_PRE_COLLECTION: "true"
 
       # Logging Configuration
       LOG_LEVEL: "debug"
@@ -206,7 +205,6 @@ services:
 
       # Processing Configuration
       BATCH_LIMIT: "1000"
-      COLLECT_PHASE_DURATION: "0ms"
 
       # BFT Configuration
       # Enable BFT support and specify configuration file paths
