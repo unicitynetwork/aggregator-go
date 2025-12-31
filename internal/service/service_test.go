@@ -26,6 +26,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/predicates"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
@@ -238,8 +239,8 @@ func validateInclusionProof(t *testing.T, proof *api.InclusionProof, stateID api
 
 	// Validate certification data encoding
 	if proof.CertificationData != nil {
-		assert.NotEmpty(t, proof.CertificationData.PublicKey, "CertificationData should have public key")
-		assert.NotEmpty(t, proof.CertificationData.Signature, "CertificationData should have signature")
+		assert.NotEmpty(t, proof.CertificationData.OwnerPredicate, "CertificationData should have owner predicate")
+		assert.NotEmpty(t, proof.CertificationData.Witness, "CertificationData should have signature")
 		assert.NotEmpty(t, proof.CertificationData.SourceStateHash, "CertificationData should have source state hash")
 		assert.NotEmpty(t, proof.CertificationData.TransactionHash, "CertificationData should have transaction hash")
 
@@ -389,6 +390,8 @@ func createTestCertificationRequests(t *testing.T, count int) []*api.Certificati
 		privateKey, err := btcec.NewPrivateKey()
 		require.NoError(t, err, "Failed to generate private key")
 		publicKeyBytes := privateKey.PubKey().SerializeCompressed()
+		ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKeyBytes)
+		require.NoError(t, err)
 
 		stateData := make([]byte, 32)
 		for j := range stateData {
@@ -396,7 +399,7 @@ func createTestCertificationRequests(t *testing.T, count int) []*api.Certificati
 		}
 		sourceStateHashImprint := signing.CreateDataHashImprint(stateData)
 
-		stateID, err := api.CreateStateID(publicKeyBytes, sourceStateHashImprint)
+		stateID, err := api.CreateStateID(ownerPredicateBytes, sourceStateHashImprint)
 		require.NoError(t, err, "Failed to create state ID")
 
 		transactionData := make([]byte, 32)
@@ -408,7 +411,7 @@ func createTestCertificationRequests(t *testing.T, count int) []*api.Certificati
 		// Sign the transaction
 		signingService := signing.NewSigningService()
 		certData := &api.CertificationData{
-			PublicKey:       publicKeyBytes,
+			OwnerPredicate:  ownerPredicateBytes,
 			SourceStateHash: sourceStateHashImprint,
 			TransactionHash: transactionHashImprint,
 		}

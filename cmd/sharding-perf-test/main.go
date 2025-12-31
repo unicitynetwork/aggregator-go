@@ -14,6 +14,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 
+	"github.com/unicitynetwork/aggregator-go/internal/predicates"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -33,6 +34,10 @@ func generateCommitmentRequest() *api.CertificationRequest {
 		panic(fmt.Sprintf("Failed to generate private key: %v", err))
 	}
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
+	ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKeyBytes)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to create owner predicate: %v", err))
+	}
 
 	// Generate random state data and create DataHash imprint
 	stateData := make([]byte, 32)
@@ -40,7 +45,7 @@ func generateCommitmentRequest() *api.CertificationRequest {
 	sourceStateHashImprint := signing.CreateDataHashImprint(stateData)
 
 	// Create StateID deterministically
-	stateID, err := api.CreateStateID(publicKeyBytes, sourceStateHashImprint)
+	stateID, err := api.CreateStateID(ownerPredicateBytes, sourceStateHashImprint)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create state ID: %v", err))
 	}
@@ -53,7 +58,7 @@ func generateCommitmentRequest() *api.CertificationRequest {
 	// Sign the transaction
 	signingService := signing.NewSigningService()
 	certData := &api.CertificationData{
-		PublicKey:       publicKeyBytes,
+		OwnerPredicate:  ownerPredicateBytes,
 		SourceStateHash: sourceStateHashImprint,
 		TransactionHash: transactionHashImprint,
 	}

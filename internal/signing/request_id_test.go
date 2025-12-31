@@ -141,10 +141,10 @@ func TestStateIDGenerator_EmptyInputs(t *testing.T) {
 	}
 
 	// Test with empty state hash
-	publicKey := []byte{0x03, 0xd8}
+	ownerPredicate := []byte{0x03, 0xd8}
 	emptyStateHash := api.SourceStateHash([]byte{})
 
-	stateID, err = api.CreateStateID(publicKey, emptyStateHash)
+	stateID, err = api.CreateStateID(ownerPredicate, emptyStateHash)
 	if err != nil {
 		t.Fatalf("Failed to create state ID with empty state hash: %v", err)
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/predicates"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
@@ -358,6 +359,8 @@ func createTestCommitment(t *testing.T, baseData string) *models.CertificationRe
 	privateKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err, "Failed to generate private key")
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
+	ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKeyBytes)
+	require.NoError(t, err)
 
 	stateData := make([]byte, 32)
 	copy(stateData, baseData)
@@ -389,10 +392,10 @@ func createTestCommitment(t *testing.T, baseData string) *models.CertificationRe
 	require.NoError(t, err, "Failed to sign transaction")
 
 	certData := models.CertificationData{
-		PublicKey:       publicKeyBytes,
+		OwnerPredicate:  ownerPredicateBytes,
 		SourceStateHash: sourceStateHash,
 		TransactionHash: transactionHash,
-		Signature:       signatureBytes,
+		Witness:         signatureBytes,
 	}
 	return models.NewCertificationRequest(stateID, certData)
 }

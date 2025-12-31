@@ -21,10 +21,10 @@ func TestBackwardCompatibility(t *testing.T) {
 		bsonRecord := &AggregatorRecordBSON{
 			StateID: "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
 			CertificationData: CertificationDataBSON{
-				PublicKey:       "02345678",
+				OwnerPredicate:  "02345678",
 				SourceStateHash: "0000cd60",
 				TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
-				Signature:       "abcdef12",
+				Witness:         "abcdef12",
 			},
 			// AggregateRequestCount is intentionally not set (will be 0)
 			BlockNumber: blockNumber,
@@ -46,10 +46,10 @@ func TestBackwardCompatibility(t *testing.T) {
 		bsonRecord := &AggregatorRecordBSON{
 			StateID: "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
 			CertificationData: CertificationDataBSON{
-				PublicKey:       "02345678",
+				OwnerPredicate:  "02345678",
 				SourceStateHash: "0000cd60",
 				TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
-				Signature:       "abcdef12",
+				Witness:         "abcdef12",
 			},
 			AggregateRequestCount: 500,
 			BlockNumber:           blockNumber,
@@ -101,10 +101,10 @@ func TestAggregatorRecordSerialization(t *testing.T) {
 	record := &AggregatorRecord{
 		StateID: originalStateID,
 		CertificationData: CertificationData{
-			PublicKey:       api.HexBytes("02345678"),
+			OwnerPredicate:  api.HexBytes("02345678"),
 			SourceStateHash: api.SourceStateHash("0000cd60"),
 			TransactionHash: originalTransactionHash,
-			Signature:       api.HexBytes("abcdef12"),
+			Witness:         api.HexBytes("abcdef12"),
 		},
 		AggregateRequestCount: 1,
 		BlockNumber:           originalBlockNumber,

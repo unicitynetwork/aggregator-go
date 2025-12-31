@@ -12,8 +12,8 @@ import (
 
 func TestStateID_CreateAndSerialize(t *testing.T) {
 	t.Run("should create StateID with exact TypeScript compatibility", func(t *testing.T) {
-		// Create 20-byte public key (all zeros)
-		publicKey := make([]byte, 20)
+		// Create 20-byte owner predicate (all zeros)
+		ownerPredicate := make([]byte, 20)
 
 		// Create 34-byte state hash (DataHash.fromImprint with all zeros)
 		sourceStateHashBytes := make([]byte, 34)
@@ -21,7 +21,7 @@ func TestStateID_CreateAndSerialize(t *testing.T) {
 		require.NoError(t, err)
 
 		// Create StateID
-		stateID, err := CreateStateID(publicKey, sourceStateHash)
+		stateID, err := CreateStateID(ownerPredicate, sourceStateHash)
 		require.NoError(t, err)
 
 		// Test JSON serialization matches TypeScript

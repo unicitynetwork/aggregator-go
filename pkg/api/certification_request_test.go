@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/unicitynetwork/aggregator-go/internal/predicates"
 )
 
 func TestCertificationData_SerializeAndValidate(t *testing.T) {
@@ -18,13 +20,15 @@ func TestCertificationData_SerializeAndValidate(t *testing.T) {
 
 		publicKey, err := hex.DecodeString(publicKeyHex)
 		require.NoError(t, err)
+		ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKey)
+		require.NoError(t, err)
 
 		signature, err := hex.DecodeString(signatureHex)
 		require.NoError(t, err)
 
 		certData := &CertificationData{
-			PublicKey:       NewHexBytes(publicKey),
-			Signature:       NewHexBytes(signature),
+			OwnerPredicate:  NewHexBytes(ownerPredicateBytes),
+			Witness:         NewHexBytes(signature),
 			SourceStateHash: sourceStateHashHex,
 			TransactionHash: transactionHashHex,
 		}
@@ -37,16 +41,16 @@ func TestCertificationData_SerializeAndValidate(t *testing.T) {
 		err = json.Unmarshal(jsonBytes, &deserializedCertData)
 		require.NoError(t, err)
 
-		assert.Equal(t, certData.PublicKey.String(), deserializedCertData.PublicKey.String())
-		assert.Equal(t, certData.Signature.String(), deserializedCertData.Signature.String())
+		assert.Equal(t, certData.OwnerPredicate.String(), deserializedCertData.OwnerPredicate.String())
+		assert.Equal(t, certData.Witness.String(), deserializedCertData.Witness.String())
 		assert.Equal(t, certData.SourceStateHash.String(), deserializedCertData.SourceStateHash.String())
 		assert.Equal(t, certData.TransactionHash.String(), deserializedCertData.TransactionHash.String())
 	})
 
 	t.Run("should validate JSON structure", func(t *testing.T) {
 		validJSON := `{
-			"publicKey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-			"signature": "a0b37f8fba683cc68f6574cd43b39f0343a50008bf6ccea9d13231d9e7e2e1e411edc8d307254296264aebfc3dc76cd8b668373a072fd64665b50000e9fcce5201",
+			"ownerPredicate": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+			"witness": "a0b37f8fba683cc68f6574cd43b39f0343a50008bf6ccea9d13231d9e7e2e1e411edc8d307254296264aebfc3dc76cd8b668373a072fd64665b50000e9fcce5201",
 			"sourceStateHash": "00000000000000000000000000000000000000000000000000000000000000000001",
 			"transactionHash": "00000000000000000000000000000000000000000000000000000000000000000002"
 		}`
@@ -55,8 +59,8 @@ func TestCertificationData_SerializeAndValidate(t *testing.T) {
 		err := json.Unmarshal([]byte(validJSON), &certData)
 		require.NoError(t, err)
 
-		assert.NotEmpty(t, certData.PublicKey)
-		assert.NotEmpty(t, certData.Signature)
+		assert.NotEmpty(t, certData.OwnerPredicate)
+		assert.NotEmpty(t, certData.Witness)
 		assert.NotEmpty(t, certData.SourceStateHash)
 		assert.NotEmpty(t, certData.TransactionHash)
 
@@ -75,10 +79,9 @@ func TestCertificationData_SerializeAndValidate(t *testing.T) {
 func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
 	t.Run("should encode and decode JSON to exactly same object", func(t *testing.T) {
 		// Create StateID
-		publicKey := make([]byte, 20) // matches new Uint8Array(20)
-
+		ownerPredicate := make([]byte, 20) // matches new Uint8Array(20)
 		sourceStateHash := ImprintHexString("00000000000000000000000000000000000000000000000000000000000000000000")
-		stateID, err := CreateStateID(publicKey, sourceStateHash)
+		stateID, err := CreateStateID(ownerPredicate, sourceStateHash)
 		require.NoError(t, err)
 
 		// Create transaction hash (matches new Uint8Array([0x01, ...new Uint8Array(33)]))
@@ -87,20 +90,15 @@ func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
 		transactionHash := ImprintHexString("01000000000000000000000000000000000000000000000000000000000000000000")
 
 		// Create certification request with test signature
-		publicKeyHex := "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 		signatureHex := "a0b37f8fba683cc68f6574cd43b39f0343a50008bf6ccea9d13231d9e7e2e1e411edc8d307254296264aebfc3dc76cd8b668373a072fd64665b50000e9fcce5201"
-
-		publicKeyBytes, err := hex.DecodeString(publicKeyHex)
-		require.NoError(t, err)
-
 		signatureBytes, err := hex.DecodeString(signatureHex)
 		require.NoError(t, err)
 
 		certificationData := CertificationData{
-			PublicKey:       NewHexBytes(publicKeyBytes),
+			OwnerPredicate:  NewHexBytes(ownerPredicate),
 			SourceStateHash: sourceStateHash,
 			TransactionHash: transactionHash,
-			Signature:       NewHexBytes(signatureBytes),
+			Witness:         NewHexBytes(signatureBytes),
 		}
 
 		// Test without receipt
@@ -112,8 +110,8 @@ func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
 		expectedJSON1 := map[string]interface{}{
 			"stateId": stateID.String(),
 			"certificationData": map[string]interface{}{
-				"publicKey":       publicKeyHex,
-				"signature":       signatureHex,
+				"ownerPredicate":  hex.EncodeToString(ownerPredicate),
+				"witness":         signatureHex,
 				"sourceStateHash": "00000000000000000000000000000000000000000000000000000000000000000000",
 				"transactionHash": transactionHash.String(),
 			},
@@ -135,10 +133,10 @@ func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Equal(t, request1.StateID, decodedRequest1.StateID)
-		assert.Equal(t, request1.CertificationData.PublicKey, decodedRequest1.CertificationData.PublicKey)
+		assert.Equal(t, request1.CertificationData.OwnerPredicate, decodedRequest1.CertificationData.OwnerPredicate)
 		assert.Equal(t, request1.CertificationData.SourceStateHash, decodedRequest1.CertificationData.SourceStateHash)
 		assert.Equal(t, request1.CertificationData.TransactionHash, decodedRequest1.CertificationData.TransactionHash)
-		assert.Equal(t, request1.CertificationData.Signature, decodedRequest1.CertificationData.Signature)
+		assert.Equal(t, request1.CertificationData.Witness, decodedRequest1.CertificationData.Witness)
 
 		// Test with receipt = true
 		receiptTrue := true
@@ -151,8 +149,8 @@ func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
 		expectedJSON2 := map[string]interface{}{
 			"stateId": stateID.String(),
 			"certificationData": map[string]interface{}{
-				"publicKey":       publicKeyHex,
-				"signature":       signatureHex,
+				"ownerPredicate":  hex.EncodeToString(ownerPredicate),
+				"witness":         signatureHex,
 				"sourceStateHash": "00000000000000000000000000000000000000000000000000000000000000000000",
 				"transactionHash": transactionHash.String(),
 			},
@@ -179,8 +177,8 @@ func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
 		expectedJSON3 := map[string]interface{}{
 			"stateId": stateID.String(),
 			"certificationData": map[string]interface{}{
-				"publicKey":       publicKeyHex,
-				"signature":       signatureHex,
+				"ownerPredicate":  hex.EncodeToString(ownerPredicate),
+				"witness":         signatureHex,
 				"sourceStateHash": "00000000000000000000000000000000000000000000000000000000000000000000",
 				"transactionHash": transactionHash.String(),
 			},
@@ -200,8 +198,8 @@ func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
 	t.Run("should validate JSON structure correctly", func(t *testing.T) {
 		validJSON := `{
 			"certificationData": {
-				"publicKey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-				"signature": "a0b37f8fba683cc68f6574cd43b39f0343a50008bf6ccea9d13231d9e7e2e1e411edc8d307254296264aebfc3dc76cd8b668373a072fd64665b50000e9fcce5201",
+				"ownerPredicate": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+				"witness": "a0b37f8fba683cc68f6574cd43b39f0343a50008bf6ccea9d13231d9e7e2e1e411edc8d307254296264aebfc3dc76cd8b668373a072fd64665b50000e9fcce5201",
 				"sourceStateHash": "00000000000000000000000000000000000000000000000000000000000000000000",
 				"transactionHash": "00010000000000000000000000000000000000000000000000000000000000000000"
 			},
@@ -359,7 +357,7 @@ func TestCertificationResponse_SerializeAndValidate(t *testing.T) {
 			"status": "CERTIFICATION_DATA_VERIFICATION_FAILED",
 			"receipt": {
 				"publicKey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-				"signature": "a0b37f8fba683cc68f6574cd43b39f0343a50008bf6ccea9d13231d9e7e2e1e411edc8d307254296264aebfc3dc76cd8b668373a072fd64665b50000e9fcce5201",
+				"witness": "a0b37f8fba683cc68f6574cd43b39f0343a50008bf6ccea9d13231d9e7e2e1e411edc8d307254296264aebfc3dc76cd8b668373a072fd64665b50000e9fcce5201",
 				"request": {
 					"service": "aggregator",
 					"method": "certification_request",
@@ -475,10 +473,10 @@ func TestCertificationRequestJSON(t *testing.T) {
 	req := &CertificationRequest{
 		StateID: "0000cfe84a1828e2edd0a7d9533b23e519f746069a938d549a150e07e14dc0f9cf00",
 		CertificationData: CertificationData{
-			PublicKey:       HexBytes{0x03, 0x20, 0x44, 0xf2},
+			OwnerPredicate:  HexBytes{0x03, 0x20, 0x44, 0xf2},
 			SourceStateHash: ImprintHexString("0000cd60"),
 			TransactionHash: "00008a51b5b84171e6c7c345bf3610cc18fa1b61bad33908e1522520c001b0e7fd1d",
-			Signature:       HexBytes{0x41, 0x67, 0x51, 0xe8},
+			Witness:         HexBytes{0x41, 0x67, 0x51, 0xe8},
 		},
 	}
 

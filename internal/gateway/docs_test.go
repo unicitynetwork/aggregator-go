@@ -6,9 +6,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/predicates"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -19,13 +21,14 @@ func TestDocumentationExamplePayload(t *testing.T) {
 	// Extract the example payload from the documentation
 	// This is the exact payload shown in the docs
 	exampleJSON := `{
-  	"stateId": "00008b21e56c7240474646033765f7768966f8265c673f35a42f42557b67b9ff353f",
-  	"certificationData": {
-    	"publicKey": "03fdf2cad258e66f01ed8d0265e0b69c95de62ece8c29a1114c3b291a15f2b410e",
-    	"sourceStateHash": "0000fc30e421e001d3c6a846749847b6a8e514d8d90dead42d6f245f1a4d74a24085",
-    	"transactionHash": "000050a6635ff03e99d297b0802a14f0723f5246c555740d683ab0466b079ee421a5",
-    	"signature": "cd7ea4da76def516b100da2478769a73458c53d9b5564bd282f77d4b4150f49a0e05f4cd2cd91b6bc64529095b6b7614bef739ecef9b250b964f5e0fba4dce3501"
-  	}
+  "stateId": "0000ea8412d69949eb70b7597b990b744661fcc3e9a209643309e703554baab55941",
+  "certificationData": {
+    "ownerPredicate": "830141015821036d8d8083dc71afded4453392aa45a29b65b9bc56287c8cefb246902282dca299",
+    "sourceStateHash": "0000a973ad8c4813422205e833ede9a2762b4a8ee7a70274193a984bf3143f1b69f1",
+    "transactionHash": "00009a64be27e8a92b42dc2ce33c8aecb62c2d364b15080cc6a61ed3e0d7836580a9",
+    "witness": "d04617557ee8562b28b04ea8c7b53566f886d53d1fd0ed953342031292e94bf204c6596b66f19fe6a5f681ebe129d139222b14547578b4e4bf930270ac54aaa401"
+  },
+  "receipt": true
 }`
 
 	// Parse the JSON
@@ -37,16 +40,16 @@ func TestDocumentationExamplePayload(t *testing.T) {
 	stateID := api.StateID(payload["stateId"].(string))
 	certData := payload["certificationData"].(map[string]interface{})
 
-	publicKeyHex := certData["publicKey"].(string)
-	signatureHex := certData["signature"].(string)
+	ownerPredicateHex := certData["ownerPredicate"].(string)
+	witnessHex := certData["witness"].(string)
 	sourceStateHashHex := certData["sourceStateHash"].(string)
 	transactionHashHex := certData["transactionHash"].(string)
 
 	// Decode hex values
-	publicKey, err := hex.DecodeString(publicKeyHex)
-	require.NoError(t, err, "Failed to decode public key")
+	ownerPredicate, err := hex.DecodeString(ownerPredicateHex)
+	require.NoError(t, err, "Failed to decode owner predicate")
 
-	signature, err := hex.DecodeString(signatureHex)
+	signature, err := hex.DecodeString(witnessHex)
 	require.NoError(t, err, "Failed to decode signature")
 
 	sourceStateHashImprint, err := hex.DecodeString(sourceStateHashHex)
@@ -68,14 +71,16 @@ func TestDocumentationExamplePayload(t *testing.T) {
 	signingService := signing.NewSigningService()
 
 	// 1. Verify public key format
-	err = signingService.ValidatePublicKey(publicKey)
+	var pred predicates.Predicate
+	require.NoError(t, types.Cbor.Unmarshal(ownerPredicate, &pred))
+	err = signingService.ValidatePublicKey(pred.Params)
 	require.NoError(t, err, "Invalid public key format")
 
 	// 2. Verify signature format
 	require.Equal(t, 65, len(signature), "Expected signature length 65")
 
 	// 3. Verify state ID
-	expectedStateID, err := api.CreateStateIDFromImprint(publicKey, sourceStateHashImprint)
+	expectedStateID, err := api.CreateStateIDFromImprint(ownerPredicate, sourceStateHashImprint)
 	require.NoError(t, err, "Failed to create expected state ID")
 
 	require.Equal(t, string(expectedStateID), string(stateID), "State ID mismatch")
@@ -83,9 +88,9 @@ func TestDocumentationExamplePayload(t *testing.T) {
 	// 4. Verify signature
 	// The signature is over the raw transaction hash bytes (no additional hashing)
 	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionHashImprint)
-	isValid, err := signingService.VerifyDataHashWithPublicKey(sigDataHash, signature, publicKey)
+	isValid, err := signingService.VerifyDataHashWithPublicKey(sigDataHash, signature, pred.Params)
 	require.NoError(t, err, "Failed to verify signature")
-	require.True(t, isValid, "Signature verification failed - the documentation example has an invalid signature!")
+	require.True(t, isValid, "Witness verification failed - the documentation example has an invalid signature!")
 
 	// 5. Test with certification request validator (end-to-end validation)
 	// Create certification request by unmarshaling the JSON directly to simulate real usage

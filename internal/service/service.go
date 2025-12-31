@@ -80,8 +80,8 @@ func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.Aggre
 	return &api.AggregatorRecord{
 		StateID: modelRecord.StateID,
 		CertificationData: api.CertificationData{
-			PublicKey:       modelRecord.CertificationData.PublicKey,
-			Signature:       modelRecord.CertificationData.Signature,
+			OwnerPredicate:  modelRecord.CertificationData.OwnerPredicate,
+			Witness:         modelRecord.CertificationData.Witness,
 			SourceStateHash: modelRecord.CertificationData.SourceStateHash,
 			TransactionHash: modelRecord.CertificationData.TransactionHash,
 		},
@@ -99,8 +99,8 @@ func modelToAPIAggregatorRecordV1(modelRecord *models.AggregatorRecord) *api.Agg
 		TransactionHash: modelRecord.CertificationData.TransactionHash,
 		Authenticator: api.Authenticator{
 			Algorithm: "secp256k1",
-			PublicKey: modelRecord.CertificationData.PublicKey,
-			Signature: modelRecord.CertificationData.Signature,
+			PublicKey: modelRecord.CertificationData.OwnerPredicate,
+			Signature: modelRecord.CertificationData.Witness,
 			StateHash: modelRecord.CertificationData.SourceStateHash,
 		},
 		AggregateRequestCount: modelRecord.AggregateRequestCount,
@@ -205,10 +205,10 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 		Version: 1,
 		StateID: commitment.RequestID,
 		CertificationData: models.CertificationData{
-			PublicKey:       commitment.Authenticator.PublicKey,
+			OwnerPredicate:  commitment.Authenticator.PublicKey,
 			SourceStateHash: commitment.Authenticator.StateHash,
 			TransactionHash: commitment.TransactionHash,
-			Signature:       commitment.Authenticator.Signature,
+			Witness:         commitment.Authenticator.Signature,
 		},
 		AggregateRequestCount: commitment.AggregateRequestCount,
 		CreatedAt:             commitment.CreatedAt,
@@ -258,10 +258,10 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 	}
 
 	certificationRequest := models.NewCertificationRequestWithAggregate(req.StateID, models.CertificationData{
-		PublicKey:       req.CertificationData.PublicKey,
+		OwnerPredicate:  req.CertificationData.OwnerPredicate,
 		SourceStateHash: req.CertificationData.SourceStateHash,
 		TransactionHash: req.CertificationData.TransactionHash,
-		Signature:       req.CertificationData.Signature,
+		Witness:         req.CertificationData.Witness,
 	}, aggregateCount)
 
 	// Validate certificationRequest signature and state ID
@@ -383,8 +383,8 @@ func (as *AggregatorService) GetInclusionProofV1(ctx context.Context, req *api.G
 		InclusionProof: &api.InclusionProofV1{
 			Authenticator: &api.Authenticator{
 				Algorithm: "secp256k1",
-				PublicKey: record.CertificationData.PublicKey,
-				Signature: record.CertificationData.Signature,
+				PublicKey: record.CertificationData.OwnerPredicate,
+				Signature: record.CertificationData.Witness,
 				StateHash: record.CertificationData.SourceStateHash,
 			},
 			MerkleTreePath:     merkleTreePath,

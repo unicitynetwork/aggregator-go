@@ -61,7 +61,7 @@ func TestSigningService_SignAndVerify(t *testing.T) {
 	}
 
 	if !isValid {
-		t.Error("Signature verification failed")
+		t.Error("Witness verification failed")
 	}
 }
 
@@ -91,7 +91,7 @@ func TestSigningService_VerifyWithWrongData(t *testing.T) {
 	}
 
 	if isValid {
-		t.Error("Signature verification should have failed with different data")
+		t.Error("Witness verification should have failed with different data")
 	}
 }
 

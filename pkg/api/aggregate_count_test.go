@@ -12,10 +12,10 @@ func TestAggregateRequestCountSerialization(t *testing.T) {
 		req := &CertificationRequest{
 			StateID: "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
 			CertificationData: CertificationData{
-				PublicKey:       HexBytes{0x01, 0x02, 0x03},
+				OwnerPredicate:  HexBytes{0x01, 0x02, 0x03},
 				SourceStateHash: "0000abcd",
 				TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
-				Signature:       HexBytes{0x04, 0x05, 0x06},
+				Witness:         HexBytes{0x04, 0x05, 0x06},
 			},
 			AggregateRequestCount: 100,
 		}
@@ -80,8 +80,8 @@ func TestAggregateRequestCountSerialization(t *testing.T) {
 		record := &AggregatorRecord{
 			StateID: "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
 			CertificationData: CertificationData{
-				PublicKey:       HexBytes{0x01, 0x02, 0x03},
-				Signature:       HexBytes{0x04, 0x05, 0x06},
+				OwnerPredicate:  HexBytes{0x01, 0x02, 0x03},
+				Witness:         HexBytes{0x04, 0x05, 0x06},
 				SourceStateHash: "0000abcd",
 				TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
 			},

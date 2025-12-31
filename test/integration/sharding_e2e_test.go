@@ -343,8 +343,8 @@ func (suite *ShardingE2ETestSuite) createCommitmentForShard(shardID api.ShardID,
 			apiCommitment := &api.CertificationRequest{
 				StateID: commitment.StateID,
 				CertificationData: api.CertificationData{
-					PublicKey:       commitment.CertificationData.PublicKey,
-					Signature:       commitment.CertificationData.Signature,
+					OwnerPredicate:  commitment.CertificationData.OwnerPredicate,
+					Witness:         commitment.CertificationData.Witness,
 					SourceStateHash: commitment.CertificationData.SourceStateHash,
 					TransactionHash: commitment.CertificationData.TransactionHash,
 				},

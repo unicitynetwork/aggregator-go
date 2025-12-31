@@ -9,52 +9,52 @@ import (
 // CertificationData represents the certification data of a state transition certification request
 type CertificationData struct {
 	_               struct{}            `cbor:",toarray"`
-	PublicKey       api.HexBytes        `json:"publicKey" bson:"publicKey"`
-	SourceStateHash api.SourceStateHash `json:"sourceStateHash" bson:"sourceStateHash"`
-	TransactionHash api.TransactionHash `json:"transactionHash" bson:"transactionHash"`
-	Signature       api.HexBytes        `json:"signature" bson:"signature"`
+	OwnerPredicate  api.HexBytes        `json:"ownerPredicate"`
+	SourceStateHash api.SourceStateHash `json:"sourceStateHash"`
+	TransactionHash api.TransactionHash `json:"transactionHash"`
+	Witness         api.HexBytes        `json:"witness"`
 }
 
 type CertificationDataBSON struct {
-	PublicKey       string `bson:"publicKey"`
+	OwnerPredicate  string `bson:"ownerPredicate"`
 	SourceStateHash string `bson:"sourceStateHash"`
 	TransactionHash string `bson:"transactionHash"`
-	Signature       string `bson:"signature"`
+	Witness         string `bson:"witness"`
 }
 
 func (a *CertificationData) ToAPI() *api.CertificationData {
 	return &api.CertificationData{
-		PublicKey:       a.PublicKey,
+		OwnerPredicate:  a.OwnerPredicate,
 		SourceStateHash: a.SourceStateHash,
 		TransactionHash: a.TransactionHash,
-		Signature:       a.Signature,
+		Witness:         a.Witness,
 	}
 }
 
 func (a *CertificationData) ToBSON() CertificationDataBSON {
 	return CertificationDataBSON{
-		PublicKey:       a.PublicKey.String(),
+		OwnerPredicate:  a.OwnerPredicate.String(),
 		SourceStateHash: a.SourceStateHash.String(),
 		TransactionHash: a.TransactionHash.String(),
-		Signature:       a.Signature.String(),
+		Witness:         a.Witness.String(),
 	}
 }
 
 func (ab *CertificationDataBSON) FromBSON() (*CertificationData, error) {
-	publicKey, err := api.NewHexBytesFromString(ab.PublicKey)
+	ownerPredicate, err := api.NewHexBytesFromString(ab.OwnerPredicate)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse publicKey: %w", err)
+		return nil, fmt.Errorf("failed to parse owner predicate: %w", err)
 	}
 
-	signature, err := api.NewHexBytesFromString(ab.Signature)
+	signature, err := api.NewHexBytesFromString(ab.Witness)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse signature: %w", err)
 	}
 
 	return &CertificationData{
-		PublicKey:       publicKey,
+		OwnerPredicate:  ownerPredicate,
 		SourceStateHash: api.SourceStateHash(ab.SourceStateHash),
 		TransactionHash: api.TransactionHash(ab.TransactionHash),
-		Signature:       signature,
+		Witness:         signature,
 	}, nil
 }

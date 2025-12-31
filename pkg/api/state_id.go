@@ -91,31 +91,31 @@ func (r *ImprintHexString) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// CreateStateID creates a StateID from source state hash and public key
-func CreateStateID(publicKey HexBytes, sourceStateHash SourceStateHash) (StateID, error) {
+// CreateStateID creates a StateID from source state hash and owner predicate
+func CreateStateID(ownerPredicate HexBytes, sourceStateHash SourceStateHash) (StateID, error) {
 	sourceStateHashImprint, err := sourceStateHash.Imprint()
 	if err != nil {
 		return "", fmt.Errorf("failed to convert source state hash imprint to bytes: %w", err)
 	}
-	return CreateStateIDFromImprint(publicKey, sourceStateHashImprint)
+	return CreateStateIDFromImprint(ownerPredicate, sourceStateHashImprint)
 }
 
-// CreateStateIDFromImprint creates a StateID from source state hash imprint and public key bytes
-func CreateStateIDFromImprint(publicKey []byte, sourceStateHashImprint []byte) (StateID, error) {
-	dataHash := StateIDDataHash(publicKey, sourceStateHashImprint)
+// CreateStateIDFromImprint creates a StateID from source state hash imprint and owner predicate bytes
+func CreateStateIDFromImprint(ownerPredicate []byte, sourceStateHashImprint []byte) (StateID, error) {
+	dataHash := StateIDDataHash(ownerPredicate, sourceStateHashImprint)
 	return NewImprintHexString(dataHash.ToHex())
 }
 
-func StateIDDataHash(publicKey []byte, sourceStateHashImprint []byte) *DataHash {
+func StateIDDataHash(ownerPredicate []byte, sourceStateHashImprint []byte) *DataHash {
 	return NewDataHasher(SHA256).
 		AddData(CborArray(2)).
-		AddCborBytes(publicKey).
+		AddCborBytes(ownerPredicate).
 		AddCborBytes(sourceStateHashImprint).
 		GetHash()
 }
 
-func ValidateStateID(stateID StateID, sourceStateHashImprint []byte, publicKey []byte) (bool, error) {
-	expectedStateID, err := CreateStateIDFromImprint(publicKey, sourceStateHashImprint)
+func ValidateStateID(stateID StateID, sourceStateHashImprint []byte, ownerPredicate []byte) (bool, error) {
+	expectedStateID, err := CreateStateIDFromImprint(ownerPredicate, sourceStateHashImprint)
 	if err != nil {
 		return false, err
 	}

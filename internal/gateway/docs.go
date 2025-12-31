@@ -176,12 +176,12 @@ func GenerateDocsHTML() string {
                     <div class="params-section">
                         <h3>Request Parameters</h3>
                         <textarea id="certification_request_params">{
-  "stateId": "00008b21e56c7240474646033765f7768966f8265c673f35a42f42557b67b9ff353f",
+  "stateId": "0000ea8412d69949eb70b7597b990b744661fcc3e9a209643309e703554baab55941",
   "certificationData": {
-    "publicKey": "03fdf2cad258e66f01ed8d0265e0b69c95de62ece8c29a1114c3b291a15f2b410e",
-    "sourceStateHash": "0000fc30e421e001d3c6a846749847b6a8e514d8d90dead42d6f245f1a4d74a24085",
-    "transactionHash": "000050a6635ff03e99d297b0802a14f0723f5246c555740d683ab0466b079ee421a5",
-    "signature": "cd7ea4da76def516b100da2478769a73458c53d9b5564bd282f77d4b4150f49a0e05f4cd2cd91b6bc64529095b6b7614bef739ecef9b250b964f5e0fba4dce3501"
+    "ownerPredicate": "830141015821036d8d8083dc71afded4453392aa45a29b65b9bc56287c8cefb246902282dca299",
+    "sourceStateHash": "0000a973ad8c4813422205e833ede9a2762b4a8ee7a70274193a984bf3143f1b69f1",
+    "transactionHash": "00009a64be27e8a92b42dc2ce33c8aecb62c2d364b15080cc6a61ed3e0d7836580a9",
+    "witness": "d04617557ee8562b28b04ea8c7b53566f886d53d1fd0ed953342031292e94bf204c6596b66f19fe6a5f681ebe129d139222b14547578b4e4bf930270ac54aaa401"
   },
   "receipt": true
 }</textarea>

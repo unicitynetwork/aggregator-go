@@ -19,10 +19,10 @@ func BenchmarkCreateLeafValue(b *testing.B) {
 	transactionHash, _ := api.NewImprintHexString("0000feedcafe")
 
 	certData := CertificationData{
-		PublicKey:       api.NewHexBytes(publicKey),
+		OwnerPredicate:  api.NewHexBytes(publicKey),
 		SourceStateHash: sourceStateHash,
 		TransactionHash: transactionHash,
-		Signature:       api.NewHexBytes(signature),
+		Witness:         api.NewHexBytes(signature),
 	}
 
 	b.ResetTimer()
@@ -36,8 +36,8 @@ func BenchmarkCreateLeafValue(b *testing.B) {
 
 func TestCreateLeafValue(t *testing.T) {
 	jsonStr := `{
-		"publicKey": "03d791430260906e5f87525f8816012defb3325b91595d277b7f5e15d4ee4e1138", 
-		"signature": "fc208c58e9f92d8ce06ec51b333a9c04f771728b7aa227ec52f897f2e59ab44274d72e6412f23ee9a994bf0149042d286d3bdf87598b696613c30e155233384c01", 
+		"ownerPredicate": "03d791430260906e5f87525f8816012defb3325b91595d277b7f5e15d4ee4e1138", 
+		"witness": "fc208c58e9f92d8ce06ec51b333a9c04f771728b7aa227ec52f897f2e59ab44274d72e6412f23ee9a994bf0149042d286d3bdf87598b696613c30e155233384c01", 
 		"sourceStateHash": "0000fc0bc026fd9119b8c143888d952bf256561c9f378e709d4b373ab4bdc46f22c6", 
 		"transactionHash": "0000924b7b556def13f556bc813119921cefc62617e71e4471c637c4ae2cc43ee40b"
 	}`

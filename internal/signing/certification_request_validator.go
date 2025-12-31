@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/unicitynetwork/bft-go-base/types"
+
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/predicates"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -23,6 +26,7 @@ const (
 	ValidationStatusInvalidSourceStateHashFormat
 	ValidationStatusInvalidTransactionHashFormat
 	ValidationStatusShardMismatch
+	ValidationStatusInvalidOwnerPredicateCbor
 )
 
 func (s ValidationStatus) String() string {
@@ -71,8 +75,14 @@ func NewCertificationRequestValidator(shardConfig config.ShardingConfig) *Certif
 // Validate performs complete validation of a commitment
 // This mirrors the TypeScript validateCommitment function in AggregatorService
 func (v *CertificationRequestValidator) Validate(commitment *models.CertificationRequest) ValidationResult {
-	// Parse and validate public key
-	publicKeyBytes := commitment.CertificationData.PublicKey
+	// Parse and validate owner predicate
+	publicKeyBytes, err := v.decodePayToPublicKeyPredicate(commitment.CertificationData.OwnerPredicate)
+	if err != nil {
+		return ValidationResult{
+			Status: ValidationStatusInvalidOwnerPredicateCbor,
+			Error:  fmt.Errorf("invalid owner predicate: %w", err),
+		}
+	}
 	if err := v.signingService.ValidatePublicKey(publicKeyBytes); err != nil {
 		return ValidationResult{
 			Status: ValidationStatusInvalidPublicKeyFormat,
@@ -108,11 +118,11 @@ func (v *CertificationRequestValidator) Validate(commitment *models.Certificatio
 	}
 
 	// Validate State ID matches expected value
-	// StateID should be SHA256(CBOR[sourceStateHash, publicKey])
+	// StateID should be SHA256(CBOR[sourceStateHash, ownerPredicate])
 	isValidStateID, err := api.ValidateStateID(
 		commitment.StateID,
 		sourceStateHashImprint,
-		publicKeyBytes,
+		commitment.CertificationData.OwnerPredicate,
 	)
 	if err != nil {
 		return ValidationResult{
@@ -166,7 +176,7 @@ func (v *CertificationRequestValidator) Validate(commitment *models.Certificatio
 
 	// Verify signature
 	// Validate signature format (must be 65 bytes for secp256k1)
-	signatureBytes := commitment.CertificationData.Signature
+	signatureBytes := commitment.CertificationData.Witness
 	if len(signatureBytes) != 65 {
 		return ValidationResult{
 			Status: ValidationStatusInvalidSignatureFormat,
@@ -199,6 +209,20 @@ func (v *CertificationRequestValidator) Validate(commitment *models.Certificatio
 		Status: ValidationStatusSuccess,
 		Error:  nil,
 	}
+}
+
+func (v *CertificationRequestValidator) decodePayToPublicKeyPredicate(ownerPredicate api.HexBytes) ([]byte, error) {
+	var pred predicates.Predicate
+	if err := types.Cbor.Unmarshal(ownerPredicate, &pred); err != nil {
+		return nil, fmt.Errorf("failed to decode owner predicate cbor: %w", err)
+	}
+	if pred.Engine != 1 {
+		return nil, fmt.Errorf("invalid engine type: got %d, expected 1", pred.Engine)
+	}
+	if len(pred.Code) != 1 && pred.Code[0] != 1 {
+		return nil, fmt.Errorf("invalid predicate code, got %x, expected %x", pred.Code, 1)
+	}
+	return pred.Params, nil
 }
 
 // ValidateShardID verifies if the state id belongs to the configured shard

@@ -110,10 +110,10 @@ func AggregatorRecordFromV1(v1 *AggregatorRecordV1) (*models.AggregatorRecord, e
 		Version: 1,
 		StateID: v1.RequestID,
 		CertificationData: models.CertificationData{
-			PublicKey:       v1.Authenticator.PublicKey,
+			OwnerPredicate:  v1.Authenticator.PublicKey,
 			SourceStateHash: v1.Authenticator.StateHash,
 			TransactionHash: v1.TransactionHash,
-			Signature:       v1.Authenticator.Signature,
+			Witness:         v1.Authenticator.Signature,
 		},
 		AggregateRequestCount: v1.AggregateRequestCount,
 		BlockNumber:           v1.BlockNumber,

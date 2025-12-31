@@ -58,7 +58,7 @@ func convertUnicityToBtcec(signature []byte) []byte {
 	return compactSig
 }
 
-// SignCertData signs the given certification request data and stores the signature to the Signature field.
+// SignCertData signs the given certification request data and stores the signature to the Witness field.
 func (s *SigningService) SignCertData(certData *api.CertificationData, privateKey []byte) error {
 	if certData == nil {
 		return errors.New("certification data is nil")
@@ -71,7 +71,7 @@ func (s *SigningService) SignCertData(certData *api.CertificationData, privateKe
 	if err != nil {
 		return fmt.Errorf("error generating signature: %w", err)
 	}
-	certData.Signature = sig
+	certData.Witness = sig
 	return nil
 }
 
@@ -135,7 +135,7 @@ func (s *SigningService) VerifyHashWithPublicKey(dataHash []byte, signature []by
 
 	// Check if the recovered public key matches the provided public key
 	if !recoveredPubKey.IsEqual(pubKey) {
-		return false, nil // Signature doesn't match the public key
+		return false, nil // Witness doesn't match the public key
 	}
 
 	return true, nil

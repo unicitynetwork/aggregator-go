@@ -225,10 +225,10 @@ func TestSMTUpdateTimeTracking(t *testing.T) {
 			commitments[j] = &models.CertificationRequest{
 				StateID: api.ImprintHexString("0000" + hex.EncodeToString(stateIDBytes)),
 				CertificationData: models.CertificationData{
-					PublicKey:       append([]byte{0x02}, make([]byte, 32)...),
+					OwnerPredicate:  append([]byte{0x02}, make([]byte, 32)...),
 					SourceStateHash: api.ImprintHexString("0000" + hex.EncodeToString(make([]byte, 32))),
 					TransactionHash: api.ImprintHexString("0000" + hex.EncodeToString(txHashBytes)),
-					Signature:       make([]byte, 65),
+					Witness:         make([]byte, 65),
 				},
 			}
 		}
