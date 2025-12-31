@@ -26,7 +26,7 @@ func (t *TrustBaseValidator) Verify(ctx context.Context, trustBase *types.RootTr
 	// verify trust base extends previous trust base
 	var previousTrustBaseV1 *types.RootTrustBaseV1
 	epoch := trustBase.GetEpoch()
-	if epoch > 0 {
+	if epoch > 1 {
 		previousTrustBase, err := t.storage.GetByEpoch(ctx, epoch-1)
 		if err != nil {
 			return fmt.Errorf("previous trust base not found for epoch %d: %w", epoch-1, err)
