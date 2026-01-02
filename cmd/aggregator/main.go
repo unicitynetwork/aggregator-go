@@ -157,6 +157,8 @@ func main() {
 			log.WithComponent("main").Error("Failed to decode unicity certificate", "error", err.Error())
 			gracefulExit(asyncLogger, 1)
 		}
+		log.WithComponent("main").Info("Loaded last unicity certificate",
+			"root epoch:", luc.GetRootEpoch())
 	}
 
 	// Create SMT instance based on sharding mode
