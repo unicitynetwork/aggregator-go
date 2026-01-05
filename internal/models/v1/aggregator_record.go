@@ -110,7 +110,7 @@ func AggregatorRecordFromV1(v1 *AggregatorRecordV1) (*models.AggregatorRecord, e
 		Version: 1,
 		StateID: v1.RequestID,
 		CertificationData: models.CertificationData{
-			OwnerPredicate:  v1.Authenticator.PublicKey,
+			OwnerPredicate:  api.NewPayToPublicKeyPredicate(v1.Authenticator.PublicKey),
 			SourceStateHash: v1.Authenticator.StateHash,
 			TransactionHash: v1.TransactionHash,
 			Witness:         v1.Authenticator.Signature,

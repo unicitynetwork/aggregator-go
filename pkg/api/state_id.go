@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 type StateID = ImprintHexString
@@ -91,8 +93,29 @@ func (r *ImprintHexString) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (r ImprintHexString) MarshalCBOR() ([]byte, error) {
+	imprintBytes, err := r.Imprint()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal ImprintHexString: %w", err)
+	}
+	return types.Cbor.Marshal(imprintBytes)
+}
+
+func (r *ImprintHexString) UnmarshalCBOR(cborBytes []byte) error {
+	var imprintBytes []byte
+	if err := types.Cbor.Unmarshal(cborBytes, &imprintBytes); err != nil {
+		return fmt.Errorf("failed to unmarshal ImprintHexString: %w", err)
+	}
+	res, err := NewImprintHexStringFromBytes(imprintBytes)
+	if err != nil {
+		return fmt.Errorf("failed to create ImprintHexString from bytes: %w", err)
+	}
+	*r = res
+	return nil
+}
+
 // CreateStateID creates a StateID from source state hash and owner predicate
-func CreateStateID(ownerPredicate HexBytes, sourceStateHash SourceStateHash) (StateID, error) {
+func CreateStateID(ownerPredicate Predicate, sourceStateHash SourceStateHash) (StateID, error) {
 	sourceStateHashImprint, err := sourceStateHash.Imprint()
 	if err != nil {
 		return "", fmt.Errorf("failed to convert source state hash imprint to bytes: %w", err)
@@ -101,20 +124,28 @@ func CreateStateID(ownerPredicate HexBytes, sourceStateHash SourceStateHash) (St
 }
 
 // CreateStateIDFromImprint creates a StateID from source state hash imprint and owner predicate bytes
-func CreateStateIDFromImprint(ownerPredicate []byte, sourceStateHashImprint []byte) (StateID, error) {
-	dataHash := StateIDDataHash(ownerPredicate, sourceStateHashImprint)
+func CreateStateIDFromImprint(ownerPredicate Predicate, sourceStateHashImprint []byte) (StateID, error) {
+	dataHash, err := StateIDDataHash(ownerPredicate, sourceStateHashImprint)
+	if err != nil {
+		return "", err
+	}
 	return NewImprintHexString(dataHash.ToHex())
 }
 
-func StateIDDataHash(ownerPredicate []byte, sourceStateHashImprint []byte) *DataHash {
+func StateIDDataHash(ownerPredicate Predicate, sourceStateHashImprint []byte) (*DataHash, error) {
+	predicateBytes, err := types.Cbor.Marshal(ownerPredicate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal owner predicate: %w", err)
+	}
+
 	return NewDataHasher(SHA256).
 		AddData(CborArray(2)).
-		AddCborBytes(ownerPredicate).
+		AddData(predicateBytes).
 		AddCborBytes(sourceStateHashImprint).
-		GetHash()
+		GetHash(), nil
 }
 
-func ValidateStateID(stateID StateID, sourceStateHashImprint []byte, ownerPredicate []byte) (bool, error) {
+func ValidateStateID(stateID StateID, sourceStateHashImprint []byte, ownerPredicate Predicate) (bool, error) {
 	expectedStateID, err := CreateStateIDFromImprint(ownerPredicate, sourceStateHashImprint)
 	if err != nil {
 		return false, err

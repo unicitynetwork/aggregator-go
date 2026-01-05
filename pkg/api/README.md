@@ -50,12 +50,12 @@ import (
 func main() {
 	// Create a certification request
 	req := &api.CertificationRequest{
-		StateID: "0000cfe84a1828e2edd0a7d9533b23e519f746069a938d549a150e07e14dc0f9cf00",
+		StateID: "0000b1333daf3261d9bfa9d6dd98f170c0e756c26dbe284b5f90b27df900f6a77c04",
 		CertificationData: api.CertificationData{
-			PublicKey:       api.HexBytes{0x03, 0x20, 0x44, 0xf2},
-			Signature:       api.HexBytes{0x41, 0x67, 0x51, 0xe8},
-			SourceStateHash: api.SourceStateHash(api.HexBytes{0x00, 0x00, 0xcd, 0x60}),
-			TransactionHash: api.TransactionHash(api.HexBytes{0x00, 0x00, 0xcd, 0x61})},
+			OwnerPredicate:  api.NewPayToPublicKeyPredicate([]byte{0x03, 0x20, 0x44, 0xf2}),
+			SourceStateHash: api.SourceStateHash(hex.EncodeToString([]byte{0x00, 0x00, 0xcd, 0x60})),
+			TransactionHash: api.TransactionHash(hex.EncodeToString([]byte{0x00, 0x00, 0xcd, 0x61})),
+			Witness:         []byte{0x41, 0x67, 0x51, 0xe8}},
 	}
 
 	// Serialize to JSON

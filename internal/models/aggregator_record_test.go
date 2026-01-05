@@ -21,7 +21,7 @@ func TestBackwardCompatibility(t *testing.T) {
 		bsonRecord := &AggregatorRecordBSON{
 			StateID: "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
 			CertificationData: CertificationDataBSON{
-				OwnerPredicate:  "02345678",
+				OwnerPredicate:  PredicateBSON{},
 				SourceStateHash: "0000cd60",
 				TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
 				Witness:         "abcdef12",
@@ -46,7 +46,7 @@ func TestBackwardCompatibility(t *testing.T) {
 		bsonRecord := &AggregatorRecordBSON{
 			StateID: "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
 			CertificationData: CertificationDataBSON{
-				OwnerPredicate:  "02345678",
+				OwnerPredicate:  PredicateBSON{},
 				SourceStateHash: "0000cd60",
 				TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
 				Witness:         "abcdef12",
@@ -101,7 +101,7 @@ func TestAggregatorRecordSerialization(t *testing.T) {
 	record := &AggregatorRecord{
 		StateID: originalStateID,
 		CertificationData: CertificationData{
-			OwnerPredicate:  api.HexBytes("02345678"),
+			OwnerPredicate:  api.Predicate{},
 			SourceStateHash: api.SourceStateHash("0000cd60"),
 			TransactionHash: originalTransactionHash,
 			Witness:         api.HexBytes("abcdef12"),

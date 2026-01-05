@@ -16,7 +16,6 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
-	"github.com/unicitynetwork/aggregator-go/internal/predicates"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
@@ -359,8 +358,7 @@ func createTestCommitment(t *testing.T, baseData string) *models.CertificationRe
 	privateKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err, "Failed to generate private key")
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
-	ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKeyBytes)
-	require.NoError(t, err)
+	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
 	stateData := make([]byte, 32)
 	copy(stateData, baseData)
@@ -372,7 +370,7 @@ func createTestCommitment(t *testing.T, baseData string) *models.CertificationRe
 	sourceStateHashImprint, err := sourceStateHash.Imprint()
 	require.NoError(t, err)
 
-	stateID, err := api.CreateStateIDFromImprint(publicKeyBytes, sourceStateHashImprint)
+	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHash)
 	require.NoError(t, err, "Failed to create state ID")
 
 	transactionData := make([]byte, 32)
@@ -392,7 +390,7 @@ func createTestCommitment(t *testing.T, baseData string) *models.CertificationRe
 	require.NoError(t, err, "Failed to sign transaction")
 
 	certData := models.CertificationData{
-		OwnerPredicate:  ownerPredicateBytes,
+		OwnerPredicate:  ownerPredicate,
 		SourceStateHash: sourceStateHash,
 		TransactionHash: transactionHash,
 		Witness:         signatureBytes,

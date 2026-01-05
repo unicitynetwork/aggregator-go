@@ -99,7 +99,7 @@ func modelToAPIAggregatorRecordV1(modelRecord *models.AggregatorRecord) *api.Agg
 		TransactionHash: modelRecord.CertificationData.TransactionHash,
 		Authenticator: api.Authenticator{
 			Algorithm: "secp256k1",
-			PublicKey: modelRecord.CertificationData.OwnerPredicate,
+			PublicKey: modelRecord.CertificationData.OwnerPredicate.Params,
 			Signature: modelRecord.CertificationData.Witness,
 			StateHash: modelRecord.CertificationData.SourceStateHash,
 		},
@@ -205,7 +205,7 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 		Version: 1,
 		StateID: commitment.RequestID,
 		CertificationData: models.CertificationData{
-			OwnerPredicate:  commitment.Authenticator.PublicKey,
+			OwnerPredicate:  api.NewPayToPublicKeyPredicate(commitment.Authenticator.PublicKey),
 			SourceStateHash: commitment.Authenticator.StateHash,
 			TransactionHash: commitment.TransactionHash,
 			Witness:         commitment.Authenticator.Signature,
@@ -305,7 +305,7 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 	}
 
 	// Generate receipt if requested
-	if req.Receipt != nil && *req.Receipt {
+	if req.Receipt {
 		// TODO: Implement receipt generation with actual signing
 		//receipt := api.NewReceipt(
 		//	certificationRequest.,
@@ -383,7 +383,7 @@ func (as *AggregatorService) GetInclusionProofV1(ctx context.Context, req *api.G
 		InclusionProof: &api.InclusionProofV1{
 			Authenticator: &api.Authenticator{
 				Algorithm: "secp256k1",
-				PublicKey: record.CertificationData.OwnerPredicate,
+				PublicKey: record.CertificationData.OwnerPredicate.Params,
 				Signature: record.CertificationData.Witness,
 				StateHash: record.CertificationData.SourceStateHash,
 			},

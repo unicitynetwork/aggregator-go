@@ -5,14 +5,15 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 func TestAggregateRequestCountSerialization(t *testing.T) {
-	t.Run("CertificationRequest JSON serialization", func(t *testing.T) {
+	t.Run("CertificationRequest CBOR serialization", func(t *testing.T) {
 		req := &CertificationRequest{
 			StateID: "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
 			CertificationData: CertificationData{
-				OwnerPredicate:  HexBytes{0x01, 0x02, 0x03},
+				OwnerPredicate:  NewPayToPublicKeyPredicate([]byte{0x01, 0x02, 0x03}),
 				SourceStateHash: "0000abcd",
 				TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
 				Witness:         HexBytes{0x04, 0x05, 0x06},
@@ -20,23 +21,14 @@ func TestAggregateRequestCountSerialization(t *testing.T) {
 			AggregateRequestCount: 100,
 		}
 
-		// Marshal to JSON
-		data, err := json.Marshal(req)
+		// Marshal to CBOR
+		data, err := types.Cbor.Marshal(req)
 		require.NoError(t, err)
-
-		// Check that aggregateRequestCount is serialized as string
-		var jsonMap map[string]interface{}
-		err = json.Unmarshal(data, &jsonMap)
-		require.NoError(t, err)
-
-		aggregateCount, exists := jsonMap["aggregateRequestCount"]
-		require.True(t, exists, "aggregateRequestCount should exist in JSON")
-		require.Equal(t, "100", aggregateCount, "aggregateRequestCount should be serialized as string")
 
 		// Unmarshal back
 		var decoded CertificationRequest
-		err = json.Unmarshal(data, &decoded)
-		require.NoError(t, err)
+		require.NoError(t, types.Cbor.Unmarshal(data, &decoded))
+		require.Equal(t, req.StateID, decoded.StateID)
 		require.Equal(t, uint64(100), decoded.AggregateRequestCount)
 	})
 
@@ -80,7 +72,7 @@ func TestAggregateRequestCountSerialization(t *testing.T) {
 		record := &AggregatorRecord{
 			StateID: "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
 			CertificationData: CertificationData{
-				OwnerPredicate:  HexBytes{0x01, 0x02, 0x03},
+				OwnerPredicate:  NewPayToPublicKeyPredicate([]byte{0x01, 0x02, 0x03}),
 				Witness:         HexBytes{0x04, 0x05, 0x06},
 				SourceStateHash: "0000abcd",
 				TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
@@ -110,5 +102,6 @@ func TestAggregateRequestCountSerialization(t *testing.T) {
 		err = json.Unmarshal(data, &decoded)
 		require.NoError(t, err)
 		require.Equal(t, uint64(500), decoded.AggregateRequestCount)
+		require.Equal(t, record.StateID, decoded.StateID)
 	})
 }

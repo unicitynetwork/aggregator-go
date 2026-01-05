@@ -69,7 +69,7 @@ func createTestAggregatorRecord(stateID string, blockNumber int64, leafIndex int
 	sourceStateHash, _ := api.NewImprintHexString("0x0000abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
 
 	certData := models.CertificationData{
-		OwnerPredicate:  api.HexBytes("test_public_key_1234567890abcdef"),
+		OwnerPredicate:  api.NewPayToPublicKeyPredicate([]byte("test_public_key_1234567890abcdef")),
 		SourceStateHash: sourceStateHash,
 		TransactionHash: transactionHash,
 		Witness:         api.HexBytes("test_signature_1234567890abcdef"),

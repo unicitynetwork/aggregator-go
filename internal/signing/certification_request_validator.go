@@ -6,11 +6,8 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/unicitynetwork/bft-go-base/types"
-
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
-	"github.com/unicitynetwork/aggregator-go/internal/predicates"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -26,7 +23,7 @@ const (
 	ValidationStatusInvalidSourceStateHashFormat
 	ValidationStatusInvalidTransactionHashFormat
 	ValidationStatusShardMismatch
-	ValidationStatusInvalidOwnerPredicateCbor
+	ValidationStatusInvalidOwnerPredicate
 )
 
 func (s ValidationStatus) String() string {
@@ -76,10 +73,10 @@ func NewCertificationRequestValidator(shardConfig config.ShardingConfig) *Certif
 // This mirrors the TypeScript validateCommitment function in AggregatorService
 func (v *CertificationRequestValidator) Validate(commitment *models.CertificationRequest) ValidationResult {
 	// Parse and validate owner predicate
-	publicKeyBytes, err := v.decodePayToPublicKeyPredicate(commitment.CertificationData.OwnerPredicate)
+	publicKeyBytes, err := v.verifyPayToPublicKeyPredicate(commitment.CertificationData.OwnerPredicate)
 	if err != nil {
 		return ValidationResult{
-			Status: ValidationStatusInvalidOwnerPredicateCbor,
+			Status: ValidationStatusInvalidOwnerPredicate,
 			Error:  fmt.Errorf("invalid owner predicate: %w", err),
 		}
 	}
@@ -211,15 +208,11 @@ func (v *CertificationRequestValidator) Validate(commitment *models.Certificatio
 	}
 }
 
-func (v *CertificationRequestValidator) decodePayToPublicKeyPredicate(ownerPredicate api.HexBytes) ([]byte, error) {
-	var pred predicates.Predicate
-	if err := types.Cbor.Unmarshal(ownerPredicate, &pred); err != nil {
-		return nil, fmt.Errorf("failed to decode owner predicate cbor: %w", err)
-	}
+func (v *CertificationRequestValidator) verifyPayToPublicKeyPredicate(pred api.Predicate) ([]byte, error) {
 	if pred.Engine != 1 {
 		return nil, fmt.Errorf("invalid engine type: got %d, expected 1", pred.Engine)
 	}
-	if len(pred.Code) != 1 && pred.Code[0] != 1 {
+	if len(pred.Code) != 1 || pred.Code[0] != 1 {
 		return nil, fmt.Errorf("invalid predicate code, got %x, expected %x", pred.Code, 1)
 	}
 	return pred.Params, nil

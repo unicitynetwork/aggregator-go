@@ -1,4 +1,4 @@
-package predicates
+package api
 
 import "github.com/unicitynetwork/bft-go-base/types"
 

@@ -3,6 +3,9 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
@@ -12,9 +15,15 @@ import (
 
 // handleCertificationRequest handles the certification_request method
 func (s *Server) handleCertificationRequest(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
+	var cborBytes api.HexBytes
+	if err := json.Unmarshal(params, &cborBytes); err != nil {
+		return nil, jsonrpc.NewValidationError("Invalid hex parameters: " + err.Error())
+	}
+
 	var req api.CertificationRequest
-	if err := json.Unmarshal(params, &req); err != nil {
-		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
+	if err := types.Cbor.Unmarshal(cborBytes, &req); err != nil {
+		fmt.Println(string(params))
+		return nil, jsonrpc.NewValidationError("Invalid cbor parameters: " + err.Error())
 	}
 
 	// Validate required fields

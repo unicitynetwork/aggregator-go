@@ -11,7 +11,6 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
-	"github.com/unicitynetwork/aggregator-go/internal/predicates"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -22,8 +21,7 @@ func TestValidator_Success(t *testing.T) {
 	privateKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err, "Failed to generate private key")
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
-	ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKeyBytes)
-	require.NoError(t, err)
+	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
 	// Create test state hash
 	sourceStateHashData := []byte("test-state-hash")
@@ -32,7 +30,7 @@ func TestValidator_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create state ID using the full imprint bytes (same as what validator will use)
-	stateID, err := api.CreateStateIDFromImprint(ownerPredicateBytes, sourceStateHashImprint)
+	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHash)
 	require.NoError(t, err, "Failed to create state ID")
 
 	// Create transaction data and sign it
@@ -51,7 +49,7 @@ func TestValidator_Success(t *testing.T) {
 	commitment := &models.CertificationRequest{
 		StateID: stateID,
 		CertificationData: models.CertificationData{
-			OwnerPredicate:  api.HexBytes(ownerPredicateBytes),
+			OwnerPredicate:  ownerPredicate,
 			SourceStateHash: sourceStateHash,
 			TransactionHash: transactionDataHash,
 			Witness:         api.HexBytes(signatureBytes),
@@ -71,11 +69,18 @@ func TestValidator_Success(t *testing.T) {
 
 func TestValidator_InvalidOwnerPredicateFormat(t *testing.T) {
 	validator := newDefaultCertificationRequestValidator()
+	privateKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err, "Failed to generate private key")
+	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 
 	commitment := &models.CertificationRequest{
 		StateID: api.StateID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
 		CertificationData: models.CertificationData{
-			OwnerPredicate:  api.HexBytes("invalid-owner-predicate"), // Invalid hex
+			OwnerPredicate: api.Predicate{
+				Engine: 1,
+				Code:   []byte{2}, // invalid code
+				Params: publicKeyBytes,
+			},
 			SourceStateHash: CreateDataHashImprint([]byte("test-state")),
 			TransactionHash: CreateDataHashImprint([]byte("hello")),
 			Witness:         api.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
@@ -84,7 +89,7 @@ func TestValidator_InvalidOwnerPredicateFormat(t *testing.T) {
 
 	result := validator.Validate(commitment)
 
-	require.Equal(t, ValidationStatusInvalidOwnerPredicateCbor, result.Status, "Expected invalid owner predicate format status: %v", result.Error)
+	require.Equal(t, ValidationStatusInvalidOwnerPredicate, result.Status, "Expected invalid owner predicate format status: %v", result.Error)
 	if result.Error == nil {
 		t.Error("Expected error for invalid owner predicate format")
 	}
@@ -96,13 +101,12 @@ func TestValidator_InvalidStateHashFormat(t *testing.T) {
 	// Create valid public key
 	privateKey, _ := btcec.NewPrivateKey()
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
-	ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKeyBytes)
-	require.NoError(t, err)
+	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
 	commitment := &models.CertificationRequest{
 		StateID: api.StateID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
 		CertificationData: models.CertificationData{
-			OwnerPredicate:  api.HexBytes(ownerPredicateBytes),
+			OwnerPredicate:  ownerPredicate,
 			SourceStateHash: api.ImprintHexString("invalid-hex-state-hash"), // Invalid hex
 			TransactionHash: CreateDataHashImprint([]byte("hello")),
 			Witness:         api.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
@@ -124,8 +128,7 @@ func TestValidator_StateIDMismatch(t *testing.T) {
 	privateKey, _ := btcec.NewPrivateKey()
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 	stateHashBytes := []byte("test-state-hash")
-	ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKeyBytes)
-	require.NoError(t, err)
+	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
 	// Create a wrong state ID (not matching the public key + state hash)
 	wrongStateID := api.StateID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
@@ -133,7 +136,7 @@ func TestValidator_StateIDMismatch(t *testing.T) {
 	commitment := &models.CertificationRequest{
 		StateID: wrongStateID,
 		CertificationData: models.CertificationData{
-			OwnerPredicate:  api.HexBytes(ownerPredicateBytes),
+			OwnerPredicate:  ownerPredicate,
 			SourceStateHash: CreateDataHashImprint(stateHashBytes),
 			TransactionHash: CreateDataHashImprint([]byte("hello")),
 			Witness:         api.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
@@ -233,17 +236,16 @@ func TestValidator_InvalidSignatureFormat(t *testing.T) {
 	// Create valid data except signature
 	privateKey, _ := btcec.NewPrivateKey()
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
-	ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKeyBytes)
-	require.NoError(t, err)
+	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 	stateHashData := []byte("test-state-hash")
 	sourceStateHashImprint := CreateDataHashImprint(stateHashData)
-	stateID, err := api.CreateStateID(ownerPredicateBytes, sourceStateHashImprint)
+	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHashImprint)
 	require.NoError(t, err)
 
 	commitment := &models.CertificationRequest{
 		StateID: stateID,
 		CertificationData: models.CertificationData{
-			OwnerPredicate:  api.HexBytes(ownerPredicateBytes),
+			OwnerPredicate:  ownerPredicate,
 			SourceStateHash: sourceStateHashImprint,
 			TransactionHash: CreateDataHashImprint([]byte("hello")),
 			Witness:         api.HexBytes(make([]byte, 32)), // Invalid length - should be 65 bytes
@@ -265,17 +267,16 @@ func TestValidator_InvalidTransactionHashFormat(t *testing.T) {
 	privateKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
-	ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKeyBytes)
-	require.NoError(t, err)
+	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 	stateHashData := []byte("test-state-hash")
 	sourceStateHashImprint := CreateDataHashImprint(stateHashData)
-	stateID, err := api.CreateStateID(ownerPredicateBytes, sourceStateHashImprint)
+	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHashImprint)
 	require.NoError(t, err)
 
 	commitment := &models.CertificationRequest{
 		StateID: stateID,
 		CertificationData: models.CertificationData{
-			OwnerPredicate:  api.HexBytes(ownerPredicateBytes),
+			OwnerPredicate:  ownerPredicate,
 			SourceStateHash: sourceStateHashImprint,
 			TransactionHash: api.TransactionHash("invalid-hex-transaction-hash-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"), // Invalid hex but 68 chars
 			Witness:         api.HexBytes(make([]byte, 65)),                                                         // Valid length signature
@@ -296,11 +297,10 @@ func TestValidator_SignatureVerificationFailed(t *testing.T) {
 	// Generate a test key pair
 	privateKey, _ := btcec.NewPrivateKey()
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
-	ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKeyBytes)
-	require.NoError(t, err)
+	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 	stateHashData := []byte("test-state-hash")
 	sourceStateHashImprint := CreateDataHashImprint(stateHashData)
-	stateID, err := api.CreateStateID(ownerPredicateBytes, sourceStateHashImprint)
+	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHashImprint)
 	require.NoError(t, err)
 
 	// Create transaction data
@@ -314,7 +314,7 @@ func TestValidator_SignatureVerificationFailed(t *testing.T) {
 	commitment := &models.CertificationRequest{
 		StateID: stateID,
 		CertificationData: models.CertificationData{
-			OwnerPredicate:  api.HexBytes(ownerPredicateBytes),
+			OwnerPredicate:  ownerPredicate,
 			SourceStateHash: sourceStateHashImprint,
 			TransactionHash: CreateDataHashImprint(transactionData), // Different from signed data
 			Witness:         api.HexBytes(signatureBytes),
@@ -340,8 +340,7 @@ func TestValidator_RealSecp256k1Data(t *testing.T) {
 	// Create private key and derive public key
 	privKey, _ := btcec.PrivKeyFromBytes(privateKeyBytes)
 	publicKeyBytes := privKey.PubKey().SerializeCompressed()
-	ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKeyBytes)
-	require.NoError(t, err)
+	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
 	// Create state hash
 	sourceStateData := []byte("real-state-hash-test")
@@ -350,7 +349,7 @@ func TestValidator_RealSecp256k1Data(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create proper state ID
-	stateID, err := api.CreateStateIDFromImprint(ownerPredicateBytes, sourceStateHashImprintBytes)
+	stateID, err := api.CreateStateIDFromImprint(ownerPredicate, sourceStateHashImprintBytes)
 	require.NoError(t, err)
 
 	// Create transaction data
@@ -371,7 +370,7 @@ func TestValidator_RealSecp256k1Data(t *testing.T) {
 	certificationRequest := &models.CertificationRequest{
 		StateID: stateID,
 		CertificationData: models.CertificationData{
-			OwnerPredicate:  api.HexBytes(ownerPredicateBytes),
+			OwnerPredicate:  ownerPredicate,
 			SourceStateHash: sourceStateHashImprint,
 			TransactionHash: transactionHashImprint,
 			Witness:         api.HexBytes(signatureBytes),

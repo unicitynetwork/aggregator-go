@@ -339,7 +339,6 @@ func (suite *ShardingE2ETestSuite) createCommitmentForShard(shardID api.ShardID,
 		stateIDLSBs := new(big.Int).And(stateIDBigInt, compareMask)
 
 		if stateIDLSBs.Cmp(expectedLSBs) == 0 {
-			receipt := true
 			apiCommitment := &api.CertificationRequest{
 				StateID: commitment.StateID,
 				CertificationData: api.CertificationData{
@@ -348,7 +347,7 @@ func (suite *ShardingE2ETestSuite) createCommitmentForShard(shardID api.ShardID,
 					SourceStateHash: commitment.CertificationData.SourceStateHash,
 					TransactionHash: commitment.CertificationData.TransactionHash,
 				},
-				Receipt: &receipt,
+				Receipt: true,
 			}
 
 			return apiCommitment, commitment.StateID.String()

@@ -10,7 +10,6 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	v1 "github.com/unicitynetwork/aggregator-go/internal/models/v1"
-	"github.com/unicitynetwork/aggregator-go/internal/predicates"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -20,8 +19,7 @@ func CreateTestCertificationRequest(t *testing.T, baseData string) *models.Certi
 	privateKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err, "Failed to generate private key")
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
-	ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKeyBytes)
-	require.NoError(t, err)
+	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
 	stateData := make([]byte, 32)
 	copy(stateData, baseData)
@@ -33,7 +31,7 @@ func CreateTestCertificationRequest(t *testing.T, baseData string) *models.Certi
 	sourceStateHashImprint, err := sourceStateHash.Imprint()
 	require.NoError(t, err)
 
-	stateID, err := api.CreateStateID(ownerPredicateBytes, sourceStateHash)
+	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHash)
 	require.NoError(t, err, "Failed to create state ID")
 
 	transactionData := make([]byte, 32)
@@ -53,7 +51,7 @@ func CreateTestCertificationRequest(t *testing.T, baseData string) *models.Certi
 	require.NoError(t, err, "Failed to sign transaction")
 
 	certData := models.CertificationData{
-		OwnerPredicate:  ownerPredicateBytes,
+		OwnerPredicate:  ownerPredicate,
 		SourceStateHash: sourceStateHash,
 		TransactionHash: transactionHash,
 		Witness:         signatureBytes,

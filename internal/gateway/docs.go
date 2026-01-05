@@ -175,16 +175,7 @@ func GenerateDocsHTML() string {
                 <div class="params-container">
                     <div class="params-section">
                         <h3>Request Parameters</h3>
-                        <textarea id="certification_request_params">{
-  "stateId": "0000ea8412d69949eb70b7597b990b744661fcc3e9a209643309e703554baab55941",
-  "certificationData": {
-    "ownerPredicate": "830141015821036d8d8083dc71afded4453392aa45a29b65b9bc56287c8cefb246902282dca299",
-    "sourceStateHash": "0000a973ad8c4813422205e833ede9a2762b4a8ee7a70274193a984bf3143f1b69f1",
-    "transactionHash": "00009a64be27e8a92b42dc2ce33c8aecb62c2d364b15080cc6a61ed3e0d7836580a9",
-    "witness": "d04617557ee8562b28b04ea8c7b53566f886d53d1fd0ed953342031292e94bf204c6596b66f19fe6a5f681ebe129d139222b14547578b4e4bf930270ac54aaa401"
-  },
-  "receipt": true
-}</textarea>
+                        <textarea id="certification_request_params">"8458220000b1333daf3261d9bfa9d6dd98f170c0e756c26dbe284b5f90b27df900f6a77c04848301410158210299de0a2414a39fc981694b40bcb7006c6a3c70da7097a9a02877469fe1d2a62b582200002dc34763859638857585ce6aa30a43d3d7a342b51e6caee408888f3ab1c9e84b582200004c3b2c6fce3a19589cb219a0c18281696fedcbab1f28afd8aecc830cff55dacb584103ce4ef0fe3b4f53f5264daee6930c5e7a3b60f4dfd102b4d8f2420d8bbba17e446b0f855ad402437f14d00c1f27752e9aa802301ca42a57a80cb1f6f57e03eb00f500"</textarea>
                         <div class="button-group">
                             <button onclick="sendRequest('certification_request')">🚀 Send Request</button>
                             <button onclick="clearResponse('certification_request')">🗑️ Clear</button>

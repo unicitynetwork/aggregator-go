@@ -81,19 +81,24 @@ func NewValidationError(message string) *Error {
 
 // NewRequest creates a new JSON-RPC request
 func NewRequest(method string, params interface{}, id interface{}) (*Request, error) {
-	var paramsBytes json.RawMessage
+	var rawParams json.RawMessage
+
 	if params != nil {
-		bytes, err := json.Marshal(params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal params: %w", err)
+		if raw, ok := params.(json.RawMessage); ok {
+			rawParams = raw
+		} else {
+			bytes, err := json.Marshal(params)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal params: %w", err)
+			}
+			rawParams = bytes
 		}
-		paramsBytes = bytes
 	}
 
 	return &Request{
 		JSONRPC: Version,
 		Method:  method,
-		Params:  paramsBytes,
+		Params:  rawParams,
 		ID:      id,
 	}, nil
 }

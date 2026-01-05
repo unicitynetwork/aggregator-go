@@ -10,7 +10,6 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 
-	"github.com/unicitynetwork/aggregator-go/internal/predicates"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -44,7 +43,7 @@ func main() {
 	fmt.Println("1. Creating a valid certification request...")
 	req := createValidCertificationRequest()
 	fmt.Printf("   State ID: %s\n", req.StateID)
-	fmt.Printf("   Owner predicate: %x\n", req.CertificationData.OwnerPredicate)
+	fmt.Printf("   Owner predicate: %+v\n", req.CertificationData.OwnerPredicate)
 	fmt.Printf("   Witness: %x\n", req.CertificationData.Witness)
 
 	// Example 2: Submit the certification request (commented out since server might not be running)
@@ -78,10 +77,7 @@ func createValidCertificationRequest() *api.CertificationRequest {
 		panic(fmt.Sprintf("Failed to generate private key: %v", err))
 	}
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
-	ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKeyBytes)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to create owner predicate: %v", err))
-	}
+	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
 	// Generate random state data and create DataHash imprint
 	stateData := make([]byte, 32)
@@ -89,7 +85,7 @@ func createValidCertificationRequest() *api.CertificationRequest {
 
 	stateHashImprint := signing.CreateDataHashImprint(stateData)
 	// Create StateID deterministically
-	stateID, err := api.CreateStateID(ownerPredicateBytes, stateHashImprint)
+	stateID, err := api.CreateStateID(ownerPredicate, stateHashImprint)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create state ID: %v", err))
 	}
@@ -102,7 +98,7 @@ func createValidCertificationRequest() *api.CertificationRequest {
 	// Sign the transaction
 	signingService := signing.NewSigningService()
 	certData := &api.CertificationData{
-		OwnerPredicate:  ownerPredicateBytes,
+		OwnerPredicate:  ownerPredicate,
 		SourceStateHash: stateHashImprint,
 		TransactionHash: transactionHashImprint,
 	}
@@ -110,13 +106,10 @@ func createValidCertificationRequest() *api.CertificationRequest {
 		panic(fmt.Sprintf("Failed to sign certification request data: %v", err))
 	}
 
-	// Create receipt flag
-	receipt := true
-
 	return &api.CertificationRequest{
 		StateID:           stateID,
 		CertificationData: *certData,
-		Receipt:           &receipt,
+		Receipt:           true,
 	}
 }
 

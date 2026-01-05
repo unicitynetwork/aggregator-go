@@ -26,7 +26,6 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
-	"github.com/unicitynetwork/aggregator-go/internal/predicates"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
@@ -197,7 +196,7 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 }
 
 // Helper function to make JSON-RPC requests and unmarshal responses
-func makeJSONRPCRequest[T any](t *testing.T, serverAddr, method, requestID string, params any) T {
+func makeJSONRPCRequest[T any](t *testing.T, serverAddr, method, requestID string, params interface{}) T {
 	request, err := jsonrpc.NewRequest(method, params, requestID)
 	require.NoError(t, err)
 
@@ -287,8 +286,9 @@ func validateInclusionProof(t *testing.T, proof *api.InclusionProof, stateID api
 func (suite *AggregatorTestSuite) TestInclusionProofMissingRecord() {
 	// First, submit some commitments and wait for block processing to ensure we have blocks
 	testCommitments := createTestCertificationRequests(suite.T(), 1)
-	submitResponse := makeJSONRPCRequest[api.CertificationResponse](
-		suite.T(), suite.serverAddr, "certification_request", "submit-setup", testCommitments[0])
+	submitResponse := makeJSONRPCRequest[api.CertificationResponse](suite.T(),
+		suite.serverAddr, "certification_request", "submit-setup", testCommitments[0],
+	)
 	suite.Equal("SUCCESS", submitResponse.Status)
 
 	// Wait for block processing
@@ -299,9 +299,12 @@ func (suite *AggregatorTestSuite) TestInclusionProofMissingRecord() {
 	for i := 0; i < 2+32; i++ {
 		stateId = stateId + "00"
 	}
-	inclusionProof := makeJSONRPCRequest[api.GetInclusionProofResponseV2](
-		suite.T(), suite.serverAddr, "get_inclusion_proof.v2", "test-request-id",
-		&api.GetInclusionProofRequestV2{StateID: api.StateID(stateId)})
+	inclusionProof := makeJSONRPCRequest[api.GetInclusionProofResponseV2](suite.T(),
+		suite.serverAddr,
+		"get_inclusion_proof.v2",
+		"test-request-id",
+		&api.GetInclusionProofRequestV2{StateID: api.StateID(stateId)},
+	)
 
 	// Validate non-inclusion proof structure
 	suite.Nil(inclusionProof.InclusionProof.CertificationData)
@@ -390,8 +393,7 @@ func createTestCertificationRequests(t *testing.T, count int) []*api.Certificati
 		privateKey, err := btcec.NewPrivateKey()
 		require.NoError(t, err, "Failed to generate private key")
 		publicKeyBytes := privateKey.PubKey().SerializeCompressed()
-		ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKeyBytes)
-		require.NoError(t, err)
+		ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
 		stateData := make([]byte, 32)
 		for j := range stateData {
@@ -399,7 +401,7 @@ func createTestCertificationRequests(t *testing.T, count int) []*api.Certificati
 		}
 		sourceStateHashImprint := signing.CreateDataHashImprint(stateData)
 
-		stateID, err := api.CreateStateID(ownerPredicateBytes, sourceStateHashImprint)
+		stateID, err := api.CreateStateID(ownerPredicate, sourceStateHashImprint)
 		require.NoError(t, err, "Failed to create state ID")
 
 		transactionData := make([]byte, 32)
@@ -411,18 +413,16 @@ func createTestCertificationRequests(t *testing.T, count int) []*api.Certificati
 		// Sign the transaction
 		signingService := signing.NewSigningService()
 		certData := &api.CertificationData{
-			OwnerPredicate:  ownerPredicateBytes,
+			OwnerPredicate:  ownerPredicate,
 			SourceStateHash: sourceStateHashImprint,
 			TransactionHash: transactionHashImprint,
 		}
 		require.NoError(t, signingService.SignCertData(certData, privateKey.Serialize()))
 
-		receipt := false
-
 		requests[i] = &api.CertificationRequest{
 			StateID:           stateID,
 			CertificationData: *certData,
-			Receipt:           &receipt,
+			Receipt:           false,
 		}
 	}
 

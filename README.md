@@ -174,26 +174,93 @@ Submit a state transition request to the aggregation layer with cryptographic va
 {
   "jsonrpc": "2.0",
   "method": "certification_request",
-  "params": {
-    "stateId": "0000c7aa6962316c0eeb1469dc3d7793e39e140c005e6eea0e188dcc73035d765937",
-    "certificationData": {
-      "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
-      "signature": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
-      "sourceStateHash": "0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647",
-      "transactionHash": "0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297"
-    },
-    "receipt": true
-  },
+  "params": "8458220000b1333daf3261d9bfa9d6dd98f170c0e756c26dbe284b5f90b27df900f6a77c04848301410158210299de0a2414a39fc981694b40bcb7006c6a3c70da7097a9a02877469fe1d2a62b582200002dc34763859638857585ce6aa30a43d3d7a342b51e6caee408888f3ab1c9e84b582200004c3b2c6fce3a19589cb219a0c18281696fedcbab1f28afd8aecc830cff55dacb584103ce4ef0fe3b4f53f5264daee6930c5e7a3b60f4dfd102b4d8f2420d8bbba17e446b0f855ad402437f14d00c1f27752e9aa802301ca42a57a80cb1f6f57e03eb00f500",
   "id": 1
 }
 ```
 
-**Field Specifications:**
-- `stateId`: 68-character hex string with "0000" SHA256 algorithm prefix (derived from publicKey + sourceStateHash)
-- `certificationData.publicKey`: 66-character hex string (33-byte compressed secp256k1 public key)
-- `certificationData.signature`: 130-character hex string (65-byte secp256k1 signature: 64 bytes + 1 recovery byte)
-- `certificationData.sourceStateHash`: 68-character hex string with "0000" SHA256 algorithm prefix (DataHash imprint)
-- `certificationData.transactionHash`: 68-character hex string with "0000" SHA256 algorithm prefix (DataHash imprint)
+Params is hex encoded string of CertificationRequest CBOR bytes.
+
+**Decoded params:**
+```
+84                                           # array(4)
+   58 22                                     #   bytes(34)
+      0000b1333daf3261d9bfa9d6dd98f170       #     "\x00\x00\xb13=\xaf2a\xd9\xbf\xa9\xd6\xdd\x98\xf1p"
+      c0e756c26dbe284b5f90b27df900f6a7       #     "\xc0\xe7V\xc2m\xbe(K_\x90\xb2}\xf9\x00\xf6\xa7"
+      7c04                                   #     "|\x04"
+   84                                        #   array(4)
+      83                                     #     array(3)
+         01                                  #       unsigned(1)
+         41                                  #       bytes(1)
+            01                               #         "\x01"
+         58 21                               #       bytes(33)
+            0299de0a2414a39fc981694b40bcb700 #         "\x02\x99\xde\n$\x14\xa3\x9f\xc9\x81iK@\xbc\xb7\x00"
+            6c6a3c70da7097a9a02877469fe1d2a6 #         "lj<p\xdap\x97\xa9\xa0(wF\x9f\xe1\xd2\xa6"
+            2b                               #         "+"
+      58 22                                  #     bytes(34)
+         00002dc34763859638857585ce6aa30a    #       "\x00\x00-\xc3Gc\x85\x968\x85u\x85\xcej\xa3\n"
+         43d3d7a342b51e6caee408888f3ab1c9    #       "C\xd3\xd7\xa3B\xb5\x1el\xae\xe4\x08\x88\x8f:\xb1\xc9"
+         e84b                                #       "\xe8K"
+      58 22                                  #     bytes(34)
+         00004c3b2c6fce3a19589cb219a0c182    #       "\x00\x00L;,o\xce:\x19X\x9c\xb2\x19\xa0\xc1\x82"
+         81696fedcbab1f28afd8aecc830cff55    #       "\x81io\xed\xcb\xab\x1f(\xaf\xd8\xae\xcc\x83\x0c\xffU"
+         dacb                                #       "\xda\xcb"
+      58 41                                  #     bytes(65)
+         03ce4ef0fe3b4f53f5264daee6930c5e    #       "\x03\xceN\xf0\xfe;OS\xf5&M\xae\xe6\x93\x0c^"
+         7a3b60f4dfd102b4d8f2420d8bbba17e    #       "z;`\xf4\xdf\xd1\x02\xb4\xd8\xf2B\r\x8b\xbb\xa1~"
+         446b0f855ad402437f14d00c1f27752e    #       "Dk\x0f\x85Z\xd4\x02C\x7f\x14\xd0\x0c\x1f\'u."
+         9aa802301ca42a57a80cb1f6f57e03eb    #       "\x9a\xa8\x020\x1c\xa4*W\xa8\x0c\xb1\xf6\xf5~\x03\xeb"
+         00                                  #       "\x00"
+   f5                                        #   true, simple(21)
+   00                                        #   unsigned(0)
+```
+
+Which corresponds to Go data structures:
+```
+// CertificationRequest represents the certification_request JSON-RPC request,
+// sometimes also referred to as StateTransitionCertificationRequest, Commitment or UnicityServiceRequest.
+type CertificationRequest struct {
+    _ struct{} `cbor:",toarray"`
+    
+    // StateID is the unique identifier of the certification request, used as a key in the state tree.
+    // Calculated as hash of CBOR array [CertificationData.OwnerPredicate, CertificationData.SourceStateHashImprint],
+    // prefixed by two bytes that define the hashing algorithm (two zero bytes in case of SHA2_256).
+    StateID StateID
+    
+    // CertificationData contains the necessary cryptographic data needed for the CertificationRequest.
+    CertificationData CertificationData
+    
+    // Receipt optional flag that if set to true includes the receipt data in the CertificationResponse.
+    Receipt bool
+    
+    AggregateRequestCount uint64
+}
+
+// CertificationData represents the necessary cryptographic data needed for a state transition CertificationRequest.
+type CertificationData struct {
+    _ struct{} `cbor:",toarray"`
+    
+    // OwnerPredicate is the owner predicate in format: CBOR[engine: uint, code: byte[], params: byte[]]
+    // In case of standard PayToPublicKey predicate the values must be:
+    // engine = 01 (plain CBOR uint value of 1)
+    // code = 4101 (byte array of length 1 containing the CBOR encoding of uint value 1)
+    // params = 5821 000102..20 (byte array of length 33 containing the raw bytes of the public key value)
+    OwnerPredicate Predicate
+    
+    // SourceStateHash is the source data (token) hash,
+    // prefixed by two bytes that define the hashing algorithm (two zero bytes in case of SHA2_256).
+    SourceStateHash SourceStateHash
+    
+    // TransactionHash is the entire transaction data hash (including the source data),
+    // prefixed by two bytes that define the hashing algorithm (two zero bytes in case of SHA2_256).
+    TransactionHash TransactionHash
+    
+    // Witness is the "unlocking part" of owner predicate. In case of PayToPublicKey owner predicate the witness must be
+    // a signature created on the hash of CBOR array[SourceStateHashImprint, TransactionHash],
+    // in Unicity's [R || S || V] format (65 bytes).
+    Witness HexBytes
+}
+```
 
 **Response:**
 ```json

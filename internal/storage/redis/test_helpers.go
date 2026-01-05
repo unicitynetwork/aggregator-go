@@ -7,7 +7,6 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
-	"github.com/unicitynetwork/aggregator-go/internal/predicates"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -21,10 +20,7 @@ func createTestCommitment() *models.CertificationRequest {
 		panic(fmt.Sprintf("Failed to generate private key: %v", err))
 	}
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
-	ownerPredicateBytes, err := predicates.NewPayToPublicKeyPredicateBytes(publicKeyBytes)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to create owner predicate: %v", err))
-	}
+	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
 	// Generate random state data
 	stateData := make([]byte, 32)
@@ -36,7 +32,7 @@ func createTestCommitment() *models.CertificationRequest {
 	}
 
 	// Create StateID deterministically like the performance test
-	stateID, err := api.CreateStateID(ownerPredicateBytes, sourceStateHash)
+	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHash)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create state ID: %v", err))
 	}
@@ -61,7 +57,7 @@ func createTestCommitment() *models.CertificationRequest {
 	return &models.CertificationRequest{
 		StateID: stateID,
 		CertificationData: models.CertificationData{
-			OwnerPredicate:  api.NewHexBytes(ownerPredicateBytes),
+			OwnerPredicate:  ownerPredicate,
 			SourceStateHash: sourceStateHash,
 			TransactionHash: transactionHash,
 			Witness:         api.NewHexBytes(signatureBytes),
