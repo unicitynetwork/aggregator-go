@@ -16,6 +16,8 @@ type ContextKey string
 const (
 	// RequestIDKey is the context key for request ID
 	RequestIDKey ContextKey = "request_id"
+	// JSONRPCIDKey is the context key for client-provided JSON-RPC id
+	JSONRPCIDKey ContextKey = "jsonrpc_id"
 	// ComponentKey is the context key for component name
 	ComponentKey ContextKey = "component"
 )
@@ -144,6 +146,11 @@ func (l *Logger) WithContext(ctx context.Context) *slog.Logger {
 		if rid, ok := requestID.(string); ok {
 			args = append(args, slog.String("request_id", rid))
 		}
+	}
+
+	// Add JSON-RPC client ID if available
+	if jsonrpcID := ctx.Value(JSONRPCIDKey); jsonrpcID != nil {
+		args = append(args, slog.Any("jsonrpc_id", jsonrpcID))
 	}
 
 	// Add component if available

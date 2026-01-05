@@ -77,7 +77,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Add request ID to context
-	ctx := context.WithValue(r.Context(), "request_id", uuid.New().String())
+	ctx := context.WithValue(r.Context(), logger.RequestIDKey, uuid.New().String())
 
 	// Parse request
 	var req Request
@@ -93,6 +93,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, ErrInvalidRequest, req.ID)
 		return
 	}
+
+	// Add client's JSON-RPC ID to context for end-to-end tracing
+	ctx = context.WithValue(ctx, logger.JSONRPCIDKey, req.ID)
 
 	// Process request
 	response := s.processRequest(ctx, &req)
@@ -171,7 +174,7 @@ func (s *Server) writeErrorResponse(w http.ResponseWriter, rpcErr *Error, id int
 func RequestIDMiddleware() MiddlewareFunc {
 	return func(ctx context.Context, req *Request, next func(context.Context, *Request) *Response) *Response {
 		requestID := uuid.New().String()
-		ctx = context.WithValue(ctx, "request_id", requestID)
+		ctx = context.WithValue(ctx, logger.RequestIDKey, requestID)
 		return next(ctx, req)
 	}
 }
