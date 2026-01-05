@@ -407,7 +407,7 @@ func commitmentWorker(ctx context.Context, client *JSONRPCClient, metrics *Metri
 // 2. SMT snapshot must be committed to the main tree
 //
 // There's a small window between these stages where:
-// - get_inclusion_proof returns an inclusion proof (has CertificationData)
+// - get_inclusion_proof.v2 returns an inclusion proof (has CertificationData)
 // - But verification fails with PathIncluded=false (commitment not in main tree yet)
 //
 // The retry logic handles this by waiting for the snapshot to be committed.
@@ -432,7 +432,7 @@ func proofVerificationWorker(ctx context.Context, client *JSONRPCClient, metrics
 						StateID: stateID,
 					}
 
-					resp, err := client.call("get_inclusion_proof", proofReq)
+					resp, err := client.call("get_inclusion_proof.v2", proofReq)
 					if err != nil {
 						// Network error, retry
 						time.Sleep(retryDelay)
