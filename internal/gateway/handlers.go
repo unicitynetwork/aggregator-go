@@ -15,15 +15,9 @@ import (
 
 // handleCertificationRequest handles the certification_request method
 func (s *Server) handleCertificationRequest(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
-	var cborBytes api.HexBytes
-	if err := json.Unmarshal(params, &cborBytes); err != nil {
-		return nil, jsonrpc.NewValidationError("Invalid hex parameters: " + err.Error())
-	}
-
-	var req api.CertificationRequest
-	if err := types.Cbor.Unmarshal(cborBytes, &req); err != nil {
-		fmt.Println(string(params))
-		return nil, jsonrpc.NewValidationError("Invalid cbor parameters: " + err.Error())
+	req, err := s.parseCertificationRequest(params)
+	if err != nil {
+		return nil, jsonrpc.NewValidationError("Invalid certification request: " + err.Error())
 	}
 
 	// Validate required fields
@@ -35,13 +29,25 @@ func (s *Server) handleCertificationRequest(ctx context.Context, params json.Raw
 	}
 
 	// Call service
-	response, err := s.service.CertificationRequest(ctx, &req)
+	response, err := s.service.CertificationRequest(ctx, req)
 	if err != nil {
 		s.logger.WithContext(ctx).Error("Failed to submit certification request", "error", err.Error())
 		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to submit certification request", err.Error())
 	}
 
 	return response, nil
+}
+
+func (s *Server) parseCertificationRequest(params json.RawMessage) (*api.CertificationRequest, error) {
+	var cborBytes api.HexBytes
+	if err := json.Unmarshal(params, &cborBytes); err != nil {
+		return nil, fmt.Errorf("failed to parse params: %w", err)
+	}
+	var req *api.CertificationRequest
+	if err := types.Cbor.Unmarshal(cborBytes, &req); err != nil {
+		return nil, fmt.Errorf("failed to parse request: %w", err)
+	}
+	return req, nil
 }
 
 // handleGetInclusionProofV2 handles the get_inclusion_proof.v2 method
