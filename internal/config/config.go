@@ -30,6 +30,14 @@ type Config struct {
 	Processing ProcessingConfig `mapstructure:"processing"`
 	Sharding   ShardingConfig   `mapstructure:"sharding"`
 	Chain      ChainConfig      `mapstructure:"chain"`
+	Signing    SigningConfig    `mapstructure:"signing"`
+}
+
+// SigningConfig holds the aggregator's signing key configuration
+// This is loaded independently of BFT so child shards can sign receipts
+type SigningConfig struct {
+	KeyFile string             `mapstructure:"key_file"` // Path to keys.json file
+	KeyConf *partition.KeyConf `mapstructure:"key_conf"` // Loaded key configuration
 }
 
 // ChainConfig holds metadata about the current chain configuration
@@ -333,6 +341,15 @@ func Load() (*Config, error) {
 			},
 		},
 	}
+	// Load signing key configuration - always loaded regardless of BFT mode
+	// This allows child shards (which don't use BFT) to sign commitment receipts
+	config.Signing = SigningConfig{
+		KeyFile: getEnvOrDefault("SIGNING_KEY_FILE", "keys.json"),
+	}
+	if err := loadConf(config.Signing.KeyFile, &config.Signing.KeyConf); err != nil {
+		return nil, fmt.Errorf("failed to load signing key configuration from %s: %w", config.Signing.KeyFile, err)
+	}
+
 	config.BFT = BFTConfig{
 		Enabled:                    getEnvBoolOrDefault("BFT_ENABLED", true),
 		Address:                    getEnvOrDefault("BFT_ADDRESS", "/ip4/0.0.0.0/tcp/9000"),
@@ -344,9 +361,8 @@ func Load() (*Config, error) {
 		InactivityTimeout:          getEnvDurationOrDefault("BFT_INACTIVITY_TIMEOUT", "5s"),
 	}
 	if config.BFT.Enabled {
-		if err := loadConf(getEnvOrDefault("BFT_KEY_CONF_FILE", "bft-config/keys.json"), &config.BFT.KeyConf); err != nil {
-			return nil, fmt.Errorf("failed to load key configuration: %w", err)
-		}
+		// BFT uses the same key configuration as signing
+		config.BFT.KeyConf = config.Signing.KeyConf
 		if err := loadConf(getEnvOrDefault("BFT_SHARD_CONF_FILE", "bft-config/shard-conf-7_0.json"), &config.BFT.ShardConf); err != nil {
 			return nil, fmt.Errorf("failed to load shard configuration: %w", err)
 		}

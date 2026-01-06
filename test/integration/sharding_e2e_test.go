@@ -174,7 +174,7 @@ func startAggregator(t *testing.T, ctx context.Context, name, port, mongoURI, re
 	mgr.Start(aggCtx)
 	mgr.Activate(aggCtx)
 
-	svc, _ := service.NewService(aggCtx, cfg, log, mgr, queue, stor, nil)
+	svc, _ := service.NewService(aggCtx, cfg, log, mgr, queue, stor, nil, nil)
 	srv := gateway.NewServer(cfg, log, svc)
 	go srv.Start()
 	time.Sleep(100 * time.Millisecond)

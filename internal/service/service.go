@@ -35,14 +35,14 @@ type Service interface {
 }
 
 // NewService creates the appropriate service based on sharding mode
-func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, roundManager round.Manager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) (Service, error) {
+func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, roundManager round.Manager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector, receiptSigner *signing.ReceiptSigner) (Service, error) {
 	switch cfg.Sharding.Mode {
 	case config.ShardingModeStandalone:
 		rm, ok := roundManager.(*round.RoundManager)
 		if !ok {
 			return nil, fmt.Errorf("invalid round manager type for standalone mode")
 		}
-		return NewAggregatorService(cfg, logger, rm, commitmentQueue, storage, leaderSelector), nil
+		return NewAggregatorService(cfg, logger, rm, commitmentQueue, storage, leaderSelector, receiptSigner), nil
 	case config.ShardingModeParent:
 		prm, ok := roundManager.(*round.ParentRoundManager)
 		if !ok {
@@ -50,7 +50,7 @@ func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, 
 		}
 		return NewParentAggregatorService(cfg, logger, prm, storage, leaderSelector), nil
 	case config.ShardingModeChild:
-		return NewAggregatorService(cfg, logger, roundManager, commitmentQueue, storage, leaderSelector), nil
+		return NewAggregatorService(cfg, logger, roundManager, commitmentQueue, storage, leaderSelector, receiptSigner), nil
 	default:
 		return nil, fmt.Errorf("unsupported sharding mode: %s", cfg.Sharding.Mode)
 	}
@@ -66,6 +66,7 @@ type AggregatorService struct {
 	leaderSelector      LeaderSelector
 	commitmentValidator *signing.CommitmentValidator
 	trustBaseValidator  *TrustBaseValidator
+	receiptSigner       *signing.ReceiptSigner
 }
 
 type LeaderSelector interface {
@@ -125,6 +126,7 @@ func NewAggregatorService(cfg *config.Config,
 	commitmentQueue interfaces.CommitmentQueue,
 	storage interfaces.Storage,
 	leaderSelector LeaderSelector,
+	receiptSigner *signing.ReceiptSigner,
 ) *AggregatorService {
 	return &AggregatorService{
 		config:              cfg,
@@ -135,6 +137,7 @@ func NewAggregatorService(cfg *config.Config,
 		leaderSelector:      leaderSelector,
 		commitmentValidator: signing.NewCommitmentValidator(cfg.Sharding),
 		trustBaseValidator:  NewTrustBaseValidator(storage.TrustBaseStorage()),
+		receiptSigner:       receiptSigner,
 	}
 }
 
@@ -200,23 +203,19 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 
 	// Generate receipt if requested
 	if req.Receipt != nil && *req.Receipt {
-		// TODO: Implement receipt generation with actual signing
-		//receipt := api.NewReceipt(
-		//	commitment.,
-		//	"secp256k1",
-		//	api.HexBytes("mock_public_key"),
-		//	api.HexBytes("mock_signature"),
-		//)
-		// Convert to API receipt
-		response.Receipt = &api.Receipt{
-			Algorithm: "secp256k1",
-			PublicKey: api.HexBytes("mock_public_key"),
-			Signature: api.HexBytes("mock_signature"),
-			Request: api.ReceiptRequest{
-				RequestID:       commitment.RequestID,
-				TransactionHash: commitment.TransactionHash,
-				StateHash:       commitment.Authenticator.StateHash,
-			},
+		if as.receiptSigner == nil {
+			as.logger.WithContext(ctx).Warn("Receipt requested but receipt signer not configured", "requestId", req.RequestID)
+		} else {
+			receipt, err := as.receiptSigner.SignReceipt(
+				commitment.RequestID,
+				commitment.TransactionHash,
+				commitment.Authenticator.StateHash,
+			)
+			if err != nil {
+				as.logger.WithContext(ctx).Error("Failed to sign receipt", "requestId", req.RequestID, "error", err.Error())
+			} else {
+				response.Receipt = receipt
+			}
 		}
 	}
 
