@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/unicitynetwork/bft-go-base/types"
+
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -38,8 +40,13 @@ func (n *BFTClientStub) Stop() {
 
 func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.Block) error {
 	if len(block.UnicityCertificate) == 0 {
-		blockNumHex := fmt.Sprintf("%032x", block.Index.Int64())
-		block.UnicityCertificate = api.HexBytes("1234abcd" + blockNumHex)
+		// need to return valid format for CBOR
+		uc := types.UnicityCertificate{}
+		ucBytes, err := types.Cbor.Marshal(uc)
+		if err != nil {
+			return err
+		}
+		block.UnicityCertificate = ucBytes
 	}
 
 	if err := n.roundManager.FinalizeBlock(ctx, block); err != nil {

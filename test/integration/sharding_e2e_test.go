@@ -294,7 +294,7 @@ func (suite *ShardingE2ETestSuite) certificationRequest(url string, commitment *
 	return &response, nil
 }
 
-func (suite *ShardingE2ETestSuite) getInclusionProof(url string, stateID string) (*api.GetInclusionProofResponseV2, error) {
+func (suite *ShardingE2ETestSuite) getInclusionProofV2(url string, stateID string) (*api.GetInclusionProofResponseV2, error) {
 	params := map[string]string{"stateId": stateID}
 	result, err := suite.rpcCall(url, "get_inclusion_proof.v2", params)
 	if err != nil {
@@ -370,16 +370,16 @@ func (suite *ShardingE2ETestSuite) waitForBlock(url string, blockNumber int64, t
 	suite.FailNow(fmt.Sprintf("Timeout waiting for block %d at %s", blockNumber, url))
 }
 
-// waitForProofAvailable waits for a VALID inclusion proof to become available
+// waitForProofAvailableV2 waits for a VALID inclusion proof to become available
 // This includes waiting for the parent proof to be received and joined
-func (suite *ShardingE2ETestSuite) waitForProofAvailable(url, stateIDStr string, timeout time.Duration) *api.GetInclusionProofResponseV2 {
+func (suite *ShardingE2ETestSuite) waitForProofAvailableV2(url, stateIDStr string, timeout time.Duration) *api.GetInclusionProofResponseV2 {
 	deadline := time.Now().Add(timeout)
 	stateID := api.StateID(stateIDStr)
 	stateIDPath, err := stateID.GetPath()
 	suite.Require().NoError(err)
 
 	for time.Now().Before(deadline) {
-		resp, err := suite.getInclusionProof(url, stateIDStr)
+		resp, err := suite.getInclusionProofV2(url, stateIDStr)
 		if err == nil && resp.InclusionProof != nil && resp.InclusionProof.MerkleTreePath != nil {
 			// Also verify that the proof is valid (includes parent proof)
 			result, verifyErr := resp.InclusionProof.MerkleTreePath.Verify(stateIDPath)
@@ -470,7 +470,7 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 
 	for _, tc := range testCases {
 		proofAvailableStart := time.Now()
-		childProofResp := suite.waitForProofAvailable(tc.childURL, tc.stateID, 500*time.Millisecond)
+		childProofResp := suite.waitForProofAvailableV2(tc.childURL, tc.stateID, 500*time.Millisecond)
 		totalLatency := time.Since(tc.submitTime)
 		suite.T().Logf("%s: proof available after %v (total from submit: %v)",
 			tc.name, time.Since(proofAvailableStart), totalLatency)
@@ -509,7 +509,7 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 
 	suite.T().Log("Verifying old commitments still work...")
 	for _, tc := range testCases {
-		childProofResp, err := suite.getInclusionProof(tc.childURL, tc.stateID)
+		childProofResp, err := suite.getInclusionProofV2(tc.childURL, tc.stateID)
 		suite.Require().NoError(err, "Failed to get proof for old %s", tc.name)
 		suite.Require().NotNil(childProofResp.InclusionProof)
 
@@ -536,7 +536,7 @@ func (suite *ShardingE2ETestSuite) TestShardingE2E() {
 
 	for _, tc := range newTestCases {
 		proofAvailableStart := time.Now()
-		childProofResp := suite.waitForProofAvailable(tc.childURL, tc.stateID, 10*time.Second)
+		childProofResp := suite.waitForProofAvailableV2(tc.childURL, tc.stateID, 10*time.Second)
 		totalLatency := time.Since(tc.submitTime)
 		suite.T().Logf("%s: proof available after %v (total from submit: %v)",
 			tc.name, time.Since(proofAvailableStart), totalLatency)

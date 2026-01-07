@@ -11,7 +11,7 @@ import (
 
 // AggregatorRecord represents a finalized state transition certification request with proof data
 type AggregatorRecord struct {
-	Version               int               `json:"version"`
+	Version               uint32            `json:"version"`
 	StateID               api.StateID       `json:"stateId"`
 	CertificationData     CertificationData `json:"certificationData"`
 	AggregateRequestCount uint64            `json:"aggregateRequestCount"`
@@ -23,7 +23,7 @@ type AggregatorRecord struct {
 
 // AggregatorRecordBSON represents the BSON version of AggregatorRecord for MongoDB storage
 type AggregatorRecordBSON struct {
-	Version               int                   `bson:"version"`
+	Version               uint32                `bson:"version"`
 	StateID               string                `bson:"requestId"` // keep requestId in BSON to match V1
 	CertificationData     CertificationDataBSON `bson:"certificationData"`
 	AggregateRequestCount uint64                `bson:"aggregateRequestCount"`

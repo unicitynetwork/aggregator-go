@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/unicitynetwork/bft-go-base/types"
+
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -439,10 +441,10 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 	if record == nil {
 		// Non-inclusion proof
 		return &api.GetInclusionProofResponseV2{
-			InclusionProof: &api.InclusionProof{
+			InclusionProof: &api.InclusionProofV2{
 				CertificationData:  nil,
 				MerkleTreePath:     merkleTreePath,
-				UnicityCertificate: block.UnicityCertificate,
+				UnicityCertificate: types.RawCBOR(block.UnicityCertificate),
 			},
 		}, nil
 	}
@@ -450,12 +452,11 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		return nil, fmt.Errorf("invalid aggregator record version got %d expected 2", record.Version)
 	}
 	return &api.GetInclusionProofResponseV2{
-		BlockNumber: record.BlockNumber,
-		InclusionProof: &api.InclusionProof{
-			Version:            record.Version,
+		BlockNumber: record.BlockNumber.Uint64(),
+		InclusionProof: &api.InclusionProofV2{
 			CertificationData:  record.CertificationData.ToAPI(),
 			MerkleTreePath:     merkleTreePath,
-			UnicityCertificate: block.UnicityCertificate,
+			UnicityCertificate: types.RawCBOR(block.UnicityCertificate),
 		},
 	}, nil
 }

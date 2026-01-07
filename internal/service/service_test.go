@@ -3,7 +3,6 @@ package service
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -224,16 +223,13 @@ func makeJSONRPCRequest[T any](t *testing.T, serverAddr, method, requestID strin
 }
 
 // Helper function to validate inclusion proof structure and encoding
-func validateInclusionProof(t *testing.T, proof *api.InclusionProof, stateID api.StateID) {
+func validateInclusionProof(t *testing.T, proof *api.InclusionProofV2, stateID api.StateID) {
 	assert.NotNil(t, proof.CertificationData, "Should have certification data")
 	assert.NotNil(t, proof.MerkleTreePath, "Should have merkle tree path")
 
 	// Validate unicity certificate field
 	if proof.UnicityCertificate != nil && len(proof.UnicityCertificate) > 0 {
 		assert.NotEmpty(t, proof.UnicityCertificate, "Unicity certificate should not be empty")
-		// Verify it's valid hex-encoded data
-		_, err := hex.DecodeString(string(proof.UnicityCertificate))
-		assert.NoError(t, err, "Unicity certificate should be valid hex")
 	}
 
 	// Validate certification data encoding

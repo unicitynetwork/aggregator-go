@@ -49,7 +49,7 @@ func (suite *ShardingE2ETestSuite) TestCompatibilityV2() {
 	suite.T().Log("Phase 2: Verifying proofs...")
 	v1ProofResp := suite.waitForProofAvailableV1(url, v1.RequestID.String(), 500*time.Millisecond)
 	suite.verifyProofV1(v1ProofResp, v1)
-	v2ProofResp := suite.waitForProofAvailable(url, v2.StateID.String(), 500*time.Millisecond)
+	v2ProofResp := suite.waitForProofAvailableV2(url, v2.StateID.String(), 500*time.Millisecond)
 	suite.verifyProofV2(v2ProofResp, v2)
 	suite.T().Logf("Proofs verified successfully")
 
@@ -58,18 +58,26 @@ func (suite *ShardingE2ETestSuite) TestCompatibilityV2() {
 	suite.Require().Nil(invalidProofV1)
 	suite.Require().ErrorContains(err, "Failed to get inclusion proof")
 
-	invalidProofV2, err := suite.getInclusionProof(url, v1.RequestID.String()) // fetch proof from v2 api
+	invalidProofV2, err := suite.getInclusionProofV2(url, v1.RequestID.String()) // fetch proof from v2 api
 	suite.Require().Nil(invalidProofV2)
 	suite.Require().ErrorContains(err, "Failed to get inclusion proof")
 
 	suite.T().Log("Phase 4: Verifying block records endpoint...")
-	blockRecordsResponseJSON, err := suite.rpcCall(url, "get_block_records", api.GetBlockCommitmentsRequest{BlockNumber: v2ProofResp.BlockNumber})
+	blockRecordsResponseJSON, err := suite.rpcCall(
+		url,
+		"get_block_records",
+		api.GetBlockCommitmentsRequest{BlockNumber: api.NewBigIntFromUint64(v2ProofResp.BlockNumber)},
+	)
 	suite.Require().NoError(err)
 	var blockRecordsResponse api.GetBlockRecordsResponse
 	suite.Require().NoError(json.Unmarshal(blockRecordsResponseJSON, &blockRecordsResponse))
 	suite.Require().Len(blockRecordsResponse.AggregatorRecords, 2)
 
-	blockCommitmentsResponseJSON, err := suite.rpcCall(url, "get_block_commitments", api.GetBlockCommitmentsRequest{BlockNumber: v2ProofResp.BlockNumber})
+	blockCommitmentsResponseJSON, err := suite.rpcCall(
+		url,
+		"get_block_commitments",
+		api.GetBlockCommitmentsRequest{BlockNumber: api.NewBigIntFromUint64(v2ProofResp.BlockNumber)},
+	)
 	suite.Require().NoError(err)
 	var blockCommitmentsResponse api.GetBlockCommitmentsResponse
 	suite.Require().NoError(json.Unmarshal(blockCommitmentsResponseJSON, &blockCommitmentsResponse))

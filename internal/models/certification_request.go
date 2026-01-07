@@ -11,7 +11,7 @@ import (
 // CertificationRequest represents a state transition certification request
 type CertificationRequest struct {
 	ID                    primitive.ObjectID `json:"-"`
-	Version               int                `json:"version"`
+	Version               uint32             `json:"version"`
 	StateID               api.StateID        `json:"stateId"`
 	CertificationData     CertificationData  `json:"certificationData"`
 	AggregateRequestCount uint64             `json:"aggregateRequestCount"`
@@ -23,7 +23,7 @@ type CertificationRequest struct {
 // CertificationRequestBSON represents the BSON version of CertificationRequest for MongoDB storage
 type CertificationRequestBSON struct {
 	ID                    primitive.ObjectID    `bson:"_id,omitempty"`
-	Version               int                   `json:"version"`
+	Version               uint32                `json:"version"`
 	StateID               string                `bson:"requestId"` // keep stateID stored as "requestId"
 	TransactionHash       string                `bson:"transactionHash"`
 	CertificationData     CertificationDataBSON `bson:"certificationData"`

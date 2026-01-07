@@ -60,20 +60,20 @@ type CertificationData struct {
 	//  - engine = 01 (plain CBOR uint value of 1)
 	//  - code = 4101 (byte array of length 1 containing the CBOR encoding of uint value 1)
 	//  - params = 5821 000102..20 (byte array of length 33 containing the raw bytes of the public key value)
-	OwnerPredicate Predicate
+	OwnerPredicate Predicate `json:"ownerPredicate"`
 
 	// SourceStateHash is the source data (token) hash,
 	// prefixed by two bytes that define the hashing algorithm (two zero bytes in case of SHA2_256).
-	SourceStateHash SourceStateHash
+	SourceStateHash SourceStateHash `json:"sourceStateHash"`
 
 	// TransactionHash is the entire transaction data hash (including the source data),
 	// prefixed by two bytes that define the hashing algorithm (two zero bytes in case of SHA2_256).
-	TransactionHash TransactionHash
+	TransactionHash TransactionHash `json:"transactionHash"`
 
 	// Witness is the "unlocking part" of owner predicate. In case of PayToPublicKey owner predicate the witness must be
 	// a signature created on the hash of CBOR array[SourceStateHashImprint, TransactionHash],
 	// in Unicity's [R || S || V] format (65 bytes).
-	Witness HexBytes
+	Witness HexBytes `json:"witness"`
 }
 
 // SigDataHash returns the data hash used for signature generation.

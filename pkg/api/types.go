@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 type SourceStateHash = ImprintHexString
@@ -106,15 +108,16 @@ type GetInclusionProofRequestV2 struct {
 
 // GetInclusionProofResponseV2 represents the get_inclusion_proof JSON-RPC response
 type GetInclusionProofResponseV2 struct {
-	BlockNumber    *BigInt         `json:"blockNumber"`
-	InclusionProof *InclusionProof `json:"inclusionProof"`
+	_              struct{}          `cbor:",toarray"`
+	BlockNumber    uint64            `json:"blockNumber"`
+	InclusionProof *InclusionProofV2 `json:"inclusionProof"`
 }
 
-type InclusionProof struct {
-	Version            int                `json:"version"`
+type InclusionProofV2 struct {
+	_                  struct{}           `cbor:",toarray"`
 	CertificationData  *CertificationData `json:"certificationData"`
 	MerkleTreePath     *MerkleTreePath    `json:"merkleTreePath"`
-	UnicityCertificate HexBytes           `json:"unicityCertificate"`
+	UnicityCertificate types.RawCBOR      `json:"unicityCertificate"`
 }
 
 type RootShardInclusionProof struct {
@@ -219,4 +222,22 @@ type Sharding struct {
 	Mode       string `json:"mode"`
 	ShardIDLen int    `json:"shardIdLen"`
 	ShardID    int    `json:"shardId"`
+}
+
+// MarshalJSON marshals the request to CBOR and then hex encodes it, returning the result as a JSON string.
+func (c *GetInclusionProofResponseV2) MarshalJSON() ([]byte, error) {
+	cborBytes, err := types.Cbor.Marshal(c)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal to CBOR: %w", err)
+	}
+	return HexBytes(cborBytes).MarshalJSON()
+}
+
+// UnmarshalJSON expects a hex-encoded CBOR string, decodes it, and then unmarshals the CBOR data.
+func (c *GetInclusionProofResponseV2) UnmarshalJSON(data []byte) error {
+	var hb HexBytes
+	if err := json.Unmarshal(data, &hb); err != nil {
+		return fmt.Errorf("failed to unmarshal JSON to HexBytes: %w", err)
+	}
+	return types.Cbor.Unmarshal(hb, c)
 }

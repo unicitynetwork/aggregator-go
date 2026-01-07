@@ -1,12 +1,10 @@
 package api
 
-import "github.com/unicitynetwork/bft-go-base/types"
-
 type Predicate struct {
 	_      struct{} `cbor:",toarray"`
-	Engine uint
-	Code   []byte
-	Params []byte
+	Engine uint     `json:"engine"`
+	Code   []byte   `json:"code"`
+	Params []byte   `json:"params"`
 }
 
 func NewPayToPublicKeyPredicate(publicKey []byte) Predicate {
@@ -15,8 +13,4 @@ func NewPayToPublicKeyPredicate(publicKey []byte) Predicate {
 		Code:   []byte{1},
 		Params: publicKey,
 	}
-}
-
-func NewPayToPublicKeyPredicateBytes(publicKey []byte) ([]byte, error) {
-	return types.Cbor.Marshal(NewPayToPublicKeyPredicate(publicKey))
 }

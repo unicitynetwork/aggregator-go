@@ -109,7 +109,7 @@ func (ars *AggregatorRecordStorage) GetByBlockNumber(ctx context.Context, blockN
 }
 
 type versionProbe struct {
-	Version int `bson:"version"`
+	Version uint32 `bson:"version"`
 }
 
 func (ars *AggregatorRecordStorage) decodeRecord(raw bson.Raw) (*models.AggregatorRecord, error) {
