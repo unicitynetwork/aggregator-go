@@ -341,10 +341,13 @@ func Load() (*Config, error) {
 		},
 	}
 	config.Signing = SigningConfig{
-		KeyFile: getEnvOrDefault("SIGNING_KEY_FILE", "keys.json"),
+		KeyFile: getEnvOrDefault("SIGNING_KEY_FILE", ""),
 	}
-	if err := loadConf(config.Signing.KeyFile, &config.Signing.KeyConf); err != nil {
-		return nil, fmt.Errorf("failed to load signing key configuration from %s: %w", config.Signing.KeyFile, err)
+	// Only load signing key if a file is specified
+	if config.Signing.KeyFile != "" {
+		if err := loadConf(config.Signing.KeyFile, &config.Signing.KeyConf); err != nil {
+			return nil, fmt.Errorf("failed to load signing key configuration from %s: %w", config.Signing.KeyFile, err)
+		}
 	}
 
 	config.BFT = BFTConfig{
