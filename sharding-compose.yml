@@ -207,10 +207,12 @@ services:
       BATCH_LIMIT: "1000"
       COLLECT_PHASE_DURATION: "500ms"
 
+      # Signing Key Configuration (used for commitment receipts)
+      SIGNING_KEY_FILE: "/app/bft-config/aggregator/keys.json"
+
       # BFT Configuration
       # Enable BFT support and specify configuration file paths
       BFT_ENABLED: "true"
-      BFT_KEY_CONF_FILE: "/app/bft-config/aggregator/keys.json"
       BFT_SHARD_CONF_FILE: "/app/bft-config/shard-conf-7_0.json"
       BFT_TRUST_BASE_FILES: "/app/bft-config/trust-base.json"
       # BFT_BOOTSTRAP_ADDRESSES will be set dynamically by the entrypoint script

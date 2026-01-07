@@ -34,10 +34,9 @@ type Config struct {
 }
 
 // SigningConfig holds the aggregator's signing key configuration
-// This is loaded independently of BFT so child shards can sign receipts
 type SigningConfig struct {
-	KeyFile string             `mapstructure:"key_file"` // Path to keys.json file
-	KeyConf *partition.KeyConf `mapstructure:"key_conf"` // Loaded key configuration
+	KeyFile string             `mapstructure:"key_file"`
+	KeyConf *partition.KeyConf `mapstructure:"key_conf"`
 }
 
 // ChainConfig holds metadata about the current chain configuration
@@ -341,8 +340,6 @@ func Load() (*Config, error) {
 			},
 		},
 	}
-	// Load signing key configuration - always loaded regardless of BFT mode
-	// This allows child shards (which don't use BFT) to sign commitment receipts
 	config.Signing = SigningConfig{
 		KeyFile: getEnvOrDefault("SIGNING_KEY_FILE", "keys.json"),
 	}
@@ -361,7 +358,6 @@ func Load() (*Config, error) {
 		InactivityTimeout:          getEnvDurationOrDefault("BFT_INACTIVITY_TIMEOUT", "5s"),
 	}
 	if config.BFT.Enabled {
-		// BFT uses the same key configuration as signing
 		config.BFT.KeyConf = config.Signing.KeyConf
 		if err := loadConf(getEnvOrDefault("BFT_SHARD_CONF_FILE", "bft-config/shard-conf-7_0.json"), &config.BFT.ShardConf); err != nil {
 			return nil, fmt.Errorf("failed to load shard configuration: %w", err)
