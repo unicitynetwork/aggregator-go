@@ -197,6 +197,8 @@ var ErrTrustBaseAlreadyExists = errors.New("trust base already exists")
 type TrustBaseStorage interface {
 	Store(ctx context.Context, trustBase types.RootTrustBase) error
 	GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error)
+	// GetAll retrieves all trust bases from storage
+	GetAll(ctx context.Context) ([]types.RootTrustBase, error)
 }
 
 // Storage handles persistent data storage

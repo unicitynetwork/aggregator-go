@@ -2,10 +2,14 @@ package mongodb
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
 // CachedTrustBaseStorage is a cached decorator of TrustBaseStorage.
@@ -33,6 +37,7 @@ func (s *CachedTrustBaseStorage) Store(ctx context.Context, trustBase types.Root
 }
 
 // GetByEpoch retrieves a trust base by epoch.
+// Falls back to the only available trust base if the requested epoch is not found.
 func (s *CachedTrustBaseStorage) GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error) {
 	tbFromCache := s.getByEpoch(epoch)
 	if tbFromCache != nil {
@@ -42,12 +47,31 @@ func (s *CachedTrustBaseStorage) GetByEpoch(ctx context.Context, epoch uint64) (
 	// in HA mode another node may have updated the trust base,
 	// so we must check storage
 	tbFromStorage, err := s.storage.GetByEpoch(ctx, epoch)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch trust base from storage: %w", err)
+	if err == nil {
+		s.updateCache(tbFromStorage)
+		return tbFromStorage, nil
 	}
-	s.updateCache(tbFromStorage)
 
-	return tbFromStorage, nil
+	if errors.Is(err, interfaces.ErrTrustBaseNotFound) {
+		if fallbackTB := s.tryFallbackToSingleTrustBase(ctx, epoch); fallbackTB != nil {
+			return fallbackTB, nil
+		}
+	}
+
+	return nil, fmt.Errorf("failed to fetch trust base from storage: %w", err)
+}
+
+// tryFallbackToSingleTrustBase returns the only trust base if exactly one exists.
+func (s *CachedTrustBaseStorage) tryFallbackToSingleTrustBase(ctx context.Context, requestedEpoch uint64) types.RootTrustBase {
+	allTrustBases, err := s.storage.GetAll(ctx)
+	if err != nil || len(allTrustBases) != 1 {
+		return nil
+	}
+
+	tb := allTrustBases[0]
+	slog.Warn("Using fallback trust base", "requestedEpoch", requestedEpoch, "actualEpoch", tb.GetEpoch())
+	s.updateCache(tb)
+	return tb
 }
 
 func (s *CachedTrustBaseStorage) getByEpoch(epoch uint64) types.RootTrustBase {
@@ -84,4 +108,9 @@ func (s *CachedTrustBaseStorage) updateCache(trustBase types.RootTrustBase) {
 	defer s.mu.Unlock()
 
 	s.trustBaseByEpoch[trustBase.GetEpoch()] = trustBase
+}
+
+// GetAll retrieves all trust bases from storage.
+func (s *CachedTrustBaseStorage) GetAll(ctx context.Context) ([]types.RootTrustBase, error) {
+	return s.storage.GetAll(ctx)
 }
