@@ -10,14 +10,12 @@ import (
 type (
 	// MerkleTreeStep represents a single step in a Merkle tree path
 	MerkleTreeStep struct {
-		_    struct{} `cbor:",toarray"`
-		Path string   `json:"path"`
-		Data *string  `json:"data"`
+		Path string  `json:"path"`
+		Data *string `json:"data"`
 	}
 
 	// MerkleTreePath represents the path to verify inclusion in a Merkle tree
 	MerkleTreePath struct {
-		_     struct{}         `cbor:",toarray"`
 		Root  string           `json:"root"`
 		Steps []MerkleTreeStep `json:"steps"`
 	}
