@@ -1,9 +1,12 @@
-.PHONY: build test clean run lint fmt vet performance-test
+.PHONY: build test clean run lint fmt vet performance-test docker-run-clean-haproxy
 
 # Build variables
 BINARY_NAME=aggregator
 BUILD_DIR=bin
 MAIN_PATH=./cmd/aggregator
+
+# HAProxy SSL domain (override with: SSL_DOMAIN=your-domain.com make ...)
+SSL_DOMAIN ?= dev-aggregator.dyndns.org
 
 # Build the application
 build:
@@ -79,12 +82,16 @@ deps:
 	@go mod tidy
 
 docker-run-clean:
+ifeq ($(HAPROXY),1)
+	@$(MAKE) docker-run-clean-haproxy
+else
 	@echo "Rebuilding services with clean state as current user..."
 	@docker compose down
 	@rm -rf ./data
 	@mkdir -p ./data/genesis/root ./data/genesis-root ./data/mongodb_data ./data/redis_data && chmod -R 777 ./data
 	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose up --force-recreate -d --build
 	@echo "Services rebuilt with user UID=$$(id -u):$$(id -g)"
+endif
 
 docker-run-clean-keep-tb:
 	@echo "Rebuilding services with clean state but preserving BFT config as current user..."
@@ -93,6 +100,44 @@ docker-run-clean-keep-tb:
 	@mkdir -p ./data/genesis/root ./data/genesis-root ./data/mongodb_data ./data/redis_data && chmod -R 777 ./data
 	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose up --force-recreate -d --build
 	@echo "Services rebuilt with user UID=$$(id -u):$$(id -g)"
+
+# HAProxy-enabled clean rebuild
+# Routes aggregator through HAProxy with TLS passthrough
+# All container ports are hidden - access only via HAProxy
+# Prerequisites: TLS certs at /etc/letsencrypt/live/$(SSL_DOMAIN)/
+# Usage: SSL_DOMAIN=your-domain.com HAPROXY=1 make docker-run-clean
+docker-run-clean-haproxy:
+	@echo "Rebuilding services with clean state for HAProxy mode..."
+	@echo "Using SSL domain: $(SSL_DOMAIN)"
+	@echo "Checking prerequisites..."
+	@if [ ! -d "/etc/letsencrypt/live/$(SSL_DOMAIN)" ]; then \
+		echo "ERROR: TLS certificates not found at /etc/letsencrypt/live/$(SSL_DOMAIN)/"; \
+		echo "Please run: sudo certbot certonly --standalone -d $(SSL_DOMAIN)"; \
+		exit 1; \
+	fi
+	@if ! docker network ls | grep -q haproxy-net; then \
+		echo "ERROR: Docker network 'haproxy-net' does not exist."; \
+		echo "Please create it: docker network create haproxy-net"; \
+		exit 1; \
+	fi
+	@echo "Prerequisites OK. Starting deployment..."
+	@docker compose -f docker-compose.yml -f docker-compose.haproxy.yml down
+	@rm -rf ./data
+	@mkdir -p ./data/genesis/root ./data/genesis-root ./data/mongodb_data ./data/redis_data ./data/certs && chmod -R 777 ./data
+	@echo "Copying SSL certificates (dereferencing symlinks)..."
+	@sudo cat /etc/letsencrypt/live/$(SSL_DOMAIN)/fullchain.pem > ./data/certs/fullchain.pem
+	@sudo cat /etc/letsencrypt/live/$(SSL_DOMAIN)/privkey.pem > ./data/certs/privkey.pem
+	@chown $${SUDO_UID:-$$(id -u)}:$${SUDO_GID:-$$(id -g)} ./data/certs/fullchain.pem ./data/certs/privkey.pem
+	@chmod 644 ./data/certs/fullchain.pem
+	@chmod 644 ./data/certs/privkey.pem
+	@echo "SSL certificates copied successfully"
+	@USER_UID=$${SUDO_UID:-$$(id -u)} USER_GID=$${SUDO_GID:-$$(id -g)} LOG_LEVEL=debug docker compose -f docker-compose.yml -f docker-compose.haproxy.yml up --force-recreate -d --build
+	@echo "Services rebuilt for HAProxy mode with user UID=$${SUDO_UID:-$$(id -u)}:$${SUDO_GID:-$$(id -g)}"
+	@echo ""
+	@echo "=== HAProxy Mode Deployment Complete ==="
+	@echo "Container 'dev-aggregator' is now running on haproxy-net with TLS on port 443"
+	@echo "NOTE: You must manually configure HAProxy to route traffic to this container"
+	@echo "No ports exposed to host - all traffic routed through HAProxy"
 
 docker-restart-aggregator:
 	@echo "Rebuilding and restarting aggregator service..."

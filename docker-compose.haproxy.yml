@@ -1,0 +1,95 @@
+# Docker Compose override for HAProxy integration mode
+# Removes all host port exposures and routes traffic through HAProxy
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.haproxy.yml up -d
+# Or via Makefile: sudo HAPROXY=1 make docker-run-clean
+
+services:
+  # Override redis - remove host port exposure
+  redis:
+    ports: !reset []
+
+  # Override mongodb - remove host port exposure
+  mongodb:
+    ports: !reset []
+
+  # Override bft-aggregator-genesis-gen - remove host port exposure
+  bft-aggregator-genesis-gen:
+    ports: !reset []
+
+  # Override aggregator for HAProxy mode with TLS
+  aggregator:
+    container_name: dev-aggregator
+    # Remove host port exposure - HAProxy handles external access
+    ports: !reset []
+    # Add external HAProxy network alongside default network
+    networks:
+      - default
+      - haproxy-net
+    # Mount TLS certificates (copied to ./data/certs by Makefile)
+    volumes:
+      - ./data/genesis:/app/bft-config
+      - ./data/certs:/app/certs:ro
+    environment:
+      # Server Configuration - TLS enabled on port 443
+      PORT: "443"
+      HOST: "0.0.0.0"
+      CONCURRENCY_LIMIT: "1000"
+      ENABLE_DOCS: "true"
+      ENABLE_CORS: "true"
+      ENABLE_TLS: "true"
+      TLS_CERT_FILE: "/app/certs/fullchain.pem"
+      TLS_KEY_FILE: "/app/certs/privkey.pem"
+
+      # Database Configuration
+      MONGODB_URI: "mongodb://admin:password@mongodb:27017/aggregator?authSource=admin"
+      MONGODB_DATABASE: "aggregator"
+      MONGODB_CONNECT_TIMEOUT: "10s"
+      MONGODB_SERVER_SELECTION_TIMEOUT: "5s"
+
+      # Redis Configuration
+      REDIS_HOST: "redis"
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ""
+      REDIS_DB: "0"
+      REDIS_POOL_SIZE: "100"
+      REDIS_MIN_IDLE_CONNS: "10"
+
+      # Storage Configuration
+      USE_REDIS_FOR_COMMITMENTS: "true"
+      REDIS_FLUSH_INTERVAL: "50ms"
+      REDIS_MAX_BATCH_SIZE: "2000"
+
+      # High Availability Configuration
+      DISABLE_HIGH_AVAILABILITY: "false"
+      LOCK_TTL_SECONDS: "30"
+      LEADER_HEARTBEAT_INTERVAL: "10s"
+      LEADER_ELECTION_POLLING_INTERVAL: "5s"
+
+      # Logging Configuration
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_FORMAT: "json"
+      LOG_ENABLE_JSON: "true"
+
+      # Processing Configuration
+      BATCH_LIMIT: "1000"
+      MAX_COMMITMENTS_PER_ROUND: "10000"
+
+      # BFT Configuration
+      BFT_ENABLED: "true"
+      BFT_KEY_CONF_FILE: "/app/bft-config/aggregator/keys.json"
+      BFT_SHARD_CONF_FILE: "/app/bft-config/shard-conf-7_0.json"
+      BFT_TRUST_BASE_FILES: "/app/bft-config/trust-base.json"
+
+    # Update healthcheck for HTTPS
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "--no-check-certificate", "https://127.0.0.1:443/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# Declare networks - default is implicit, haproxy-net is external
+networks:
+  default:
+  haproxy-net:
+    external: true

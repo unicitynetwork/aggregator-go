@@ -4,227 +4,171 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Go rewrite of the TypeScript aggregator service located in the `aggregator-ts/` folder. The goal is to create a more scalable and performant implementation while preserving all functional requirements.
+This is a high-performance Go aggregator service for the Unicity blockchain platform. It provides JSON-RPC 2.0 API endpoints for state transition aggregation with MongoDB persistence, optional Redis for the commitment queue, and high availability support. The service implements cryptographic validation (secp256k1), Sparse Merkle Tree operations, and supports horizontal scaling via sharding.
 
 ## Development Commands
 
-### TypeScript Reference Implementation
 ```bash
-# Navigate to TypeScript implementation
-cd aggregator-ts/
-
-# Install dependencies
-npm install
-
-# Build the project
-npm run build
-
-# Start the service
-npm run start
+# Build the binary
+make build
 
 # Run tests
-npm run test
-
-# Run tests without Docker dependencies
-npm run test:no-docker
-
-# Run linting
-npm run lint
-
-# Run benchmarks
-npm run benchmark
-
-# Start MongoDB for testing
-npm run docker:mongo
-
-# Start Alphabill for integration tests
-npm run docker:alphabill
-```
-
-### Go Implementation
-```bash
-# Build the Go service
-go build -o aggregator ./cmd/aggregator
-
-# Run tests
-go test ./...
+make test
 
 # Run tests with race detection
-go test -race ./...
+make test-race
 
 # Run benchmarks
-go test -bench=. ./...
+make benchmark
 
 # Format code
-go fmt ./...
+make fmt
 
-# Run the service and connect to MongoDB running on localhost
+# Run linter (requires golangci-lint)
+make lint
+
+# Run the service (requires MongoDB)
 MONGODB_URI=mongodb://admin:password@localhost:27017/aggregator?authSource=admin make run
 
-# Run the performance test (IMPORTANT: Always use make, not direct binary)
+# Run performance test (IMPORTANT: Always use make, not direct binary)
 make performance-test
+
+# Docker: Clean rebuild with fresh state
+make docker-run-clean
+
+# Docker: Rebuild keeping BFT trust base config
+make docker-run-clean-keep-tb
+
+# Docker: HA mode with clean state
+make docker-run-ha-clean
+
+# Docker: Sharding mode
+make docker-run-sh-clean-keep-tb
+
+# Docker: Sharding + HA mode
+make docker-run-sh-ha-clean-keep-tb
 ```
 
 ## Architecture Overview
 
+### Entry Point and Initialization (`cmd/aggregator/main.go`)
+The main function orchestrates startup:
+1. Load config from environment variables
+2. Initialize logger (with optional async wrapper)
+3. Connect to storage (MongoDB + optional Redis)
+4. Load and validate trust bases
+5. Create SMT instance (based on sharding mode)
+6. Start RoundManager (handles block creation)
+7. Initialize HA leader election (if enabled)
+8. Create AggregatorService (business logic)
+9. Start HTTP gateway server
+
 ### Core Components
-- **AggregatorGateway**: Main service orchestrator handling HTTP server lifecycle and subsystem coordination
-- **AggregatorService**: Business logic layer for commitment validation and proof generation
-- **RoundManager**: Block creation orchestrator that batches commitments and coordinates with consensus
-- **Storage Layer**: Interface-based abstraction with MongoDB implementations for various data types
-- **High Availability**: Leader election system for distributed processing with automatic failover
-- **Consensus Integration**: Alphabill blockchain integration for finality
+
+**Gateway Layer** (`internal/gateway/`)
+- `Server`: Gin-based HTTP server with JSON-RPC 2.0 handler
+- Routes: POST `/` (JSON-RPC), GET `/health`, GET `/docs`, PUT `/api/v1/trustbases`
+- Uses `pkg/jsonrpc` for request/response handling
+
+**Service Layer** (`internal/service/`)
+- `AggregatorService`: Business logic for standalone and child modes
+- `ParentAggregatorService`: Handles parent aggregator in sharded setup
+- Validates commitments via `CommitmentValidator` (secp256k1 signatures)
+- Factory function `NewService()` creates appropriate service based on sharding mode
+
+**Round Management** (`internal/round/`)
+- `RoundManager`: Orchestrates block creation for standalone/child modes
+- `ParentRoundManager`: Block creation for parent aggregator
+- Lifecycle: `Start()` → `Activate()`/`Deactivate()` (HA transitions) → `Stop()`
+- Batches commitments every round (default 1 second)
+- Updates SMT with commitment leaves, creates blocks
+
+**Sparse Merkle Tree** (`internal/smt/`)
+- `SparseMerkleTree`: Core implementation with copy-on-write snapshots
+- `ThreadSafeSMT`: Thread-safe wrapper with mutex locking
+- Supports three modes: standalone, child (with shard prefix), parent (aggregates shard roots)
+
+**Storage Layer** (`internal/storage/`)
+- `interfaces/`: Storage interface definitions
+- `mongodb/`: MongoDB implementations for all storage types
+- `redis/`: Redis-based commitment queue (optional, higher throughput)
+- Key interfaces: `CommitmentQueue`, `AggregatorRecordStorage`, `BlockStorage`, `SmtStorage`
+
+**High Availability** (`internal/ha/`)
+- MongoDB-based leader election with TTL locks
+- `BlockSyncer`: Syncs SMT state when becoming leader
+- `state.SyncStateTracker`: Tracks block sync progress
+
+**BFT Integration** (`internal/bft/`)
+- `Client`: Communicates with BFT root nodes for consensus
+- Submits root hashes and receives unicity certificates
 
 ### Key Data Flow
-1. Client submits commitment via JSON-RPC API
-2. Commitment validated and stored temporarily
-3. RoundManager batches commitments (1000 per batch) every second
-4. SMT updated with new commitments in parallel
-5. Root hash submitted to Alphabill consensus
-6. Block created with transaction proof and stored
-7. Inclusion proofs generated from SMT for queries
+```
+Client → Gateway (JSON-RPC) → Service → CommitmentQueue
+                                           ↓
+RoundManager ← (batches commitments every 1s)
+     ↓
+SMT update → BFT submission → Block creation → AggregatorRecordStorage
+```
 
-### Storage Abstractions
-- **IBlockStorage**: Blockchain blocks with transaction proofs
-- **IAggregatorRecordStorage**: Finalized commitment records
-- **ICommitmentStorage**: Temporary commitments with cursor-based processing
-- **ISmtStorage**: Sparse Merkle Tree nodes
-- **IBlockRecordsStorage**: Block number to request ID mappings
-- **ILeadershipStorage**: High availability leader election state
+### Sharding Modes
+Configured via `SHARDING_MODE` environment variable:
+- **standalone**: Single aggregator (default)
+- **parent**: Root aggregator that accepts shard roots from children
+- **child**: Shard aggregator that submits roots to parent
 
-### High Availability System
-- MongoDB-based leader election with TTL locks
-- Only leader processes blocks while all servers handle API requests
-- Heartbeat mechanism with automatic failover
-- Configurable via environment variables (DISABLE_HIGH_AVAILABILITY, LOCK_TTL_SECONDS, etc.)
+Shard assignment uses least significant bits of request ID. Child aggregators validate that commitments belong to their shard.
 
-## Key Dependencies
+## API Types (`pkg/api/`)
 
-### TypeScript Implementation
-- `@alphabill/alphabill-js-sdk`: Blockchain consensus integration
-- `@unicitylabs/commons`: Core cryptographic and data structures
-- `mongodb/mongoose`: Primary data persistence
-- `express.js`: HTTP API server
-- `winston`: Structured logging
+Common types used across the codebase:
+- `RequestID`: 68-char hex string with "0000" SHA256 prefix
+- `DataHash`: Algorithm imprint format (4-byte prefix + 32-byte hash)
+- `BigInt`: JSON-serializable big.Int wrapper
+- `ShardID`: Shard identifier with MSB prefix bit
+- `Authenticator`: secp256k1 signature with public key
 
-### Go Implementation Dependencies (To be selected)
-- MongoDB driver (official Go MongoDB driver)
-- HTTP router (gin, echo, or standard library)
-- Structured logging (logrus, zap, or slog)
-- Cryptographic libraries for SMT and signature verification
-- gRPC/HTTP client for Alphabill integration
+## Testing
 
-## Critical Implementation Notes
+Tests use testcontainers for MongoDB/Redis dependencies:
+```bash
+# Run specific test file
+go test -v ./internal/round/round_manager_test.go
 
-### Concurrency Patterns
-- TypeScript uses async/await extensively - translate to goroutines and channels
-- SMT operations require locking mechanism for thread safety
-- Cursor-based commitment processing needs careful state management
-- Block creation process must be atomic and coordinated
+# Run tests matching pattern
+go test -v ./... -run TestRoundManager
 
-### Error Handling
-- Comprehensive error wrapping and structured error responses
-- JSON-RPC 2.0 error code compliance
-- Graceful degradation patterns for consensus failures
-- Proper context cancellation for HTTP requests
+# Integration tests (requires Docker)
+go test -v ./test/integration/...
+```
 
-### Performance Considerations
-- Batch operations for database efficiency
-- Parallel SMT updates during block creation
-- Configurable concurrency limits for API requests
-- Memory-efficient cursor-based processing
+## Configuration
 
-### Configuration Management
-- Environment variable based configuration with validation
-- Default values and validation for all settings
-- Structured configuration objects
-- High availability settings (leader election, heartbeat intervals)
+All configuration via environment variables. Key settings:
+- `PORT`, `HOST`: HTTP server binding
+- `MONGODB_URI`, `MONGODB_DATABASE`: Database connection
+- `USE_REDIS_FOR_COMMITMENTS`: Enable Redis queue (default false)
+- `SHARDING_MODE`: standalone/parent/child
+- `BFT_ENABLED`, `BFT_*`: BFT consensus settings
+- `DISABLE_HIGH_AVAILABILITY`: Disable HA mode
 
-## Testing Strategy
+See README.md for complete configuration reference.
 
-### Test Organization
-- Unit tests for individual components with proper mocking
-- Integration tests with real MongoDB (use testcontainers)
-- High availability tests for leader election scenarios
-- Benchmark tests for performance-critical paths
-- API tests for JSON-RPC compliance
-
-### Test Infrastructure
-- Use testcontainers for MongoDB and Alphabill dependencies
-- Mock implementations for external services
-- Comprehensive error scenario testing
-- Performance regression testing
-
-## JSON-RPC API Specification
-
-All endpoints follow JSON-RPC 2.0 specification:
-
-### Core Methods
-- `submit_commitment`: Submit state transition request
-- `get_inclusion_proof`: Retrieve merkle proof for commitment
-- `get_no_deletion_proof`: Get global no-deletion proof (not implemented)
-- `get_block_height`: Current block number
-- `get_block`: Block data by number or "latest"
-- `get_block_commitments`: All commitments in specific block
-
-### Infrastructure Endpoints
-- `GET /health`: Service health and leader status
-- `GET /docs`: API documentation
-
-## MongoDB Schema Design
-
-### Critical Collections
-- **blocks**: Chain metadata with transaction proofs
-- **aggregator_records**: Finalized commitments with authenticators
-- **commitments**: Temporary storage with cursor state
-- **smt_nodes**: Sparse merkle tree leaf nodes
-- **block_records**: Block number to request ID mappings
-- **leadership**: High availability leader election state
-
-### Schema Patterns
-- Custom BigInt and Uint8Array serialization
-- Indexed fields for efficient queries
-- Unique constraints for data integrity
-- Atomic operations for critical state changes
-
----
-
-# Development Guidelines & Reminders
-
-## Documentation Best Practices
-**CRITICAL REMINDER**: Always keep README.md synchronized with code changes!
-
-### When making ANY changes to the codebase:
-1. **Update README immediately** after implementing features
-2. **Document new API endpoints** as soon as they're created
-3. **Update architecture diagrams** when adding/modifying files
-4. **Add new environment variables** to configuration section
-5. **Include new dependencies** in setup instructions
-
-### Documentation workflow:
-- Add README updates to todo lists when planning features
-- Document endpoints, types, and components concurrently with implementation
-- Keep usage examples current with actual functionality
-- Update limitations and known issues as they're discovered
-- **ALWAYS append changelog entries to changes.txt with human-readable timestamps**
-
-### Changelog Requirements:
-- After completing any significant changes, append to `changes.txt`
-- Include timestamp in format: "CHANGELOG ENTRY - Day Month Year at Time CET"
-- Document what was changed, why, and any important technical details
-- Keep entries clear and concise for future reference
-
-This ensures documentation stays accurate and useful for future development sessions.
-
-## Important Development Reminders
+## Important Development Notes
 
 ### Performance Testing
-- **ALWAYS use `make performance-test`** to run the performance test, not the direct binary
-- The make target ensures proper environment setup and consistent execution
-- Performance test tracks only commitments submitted in the current run for accurate metrics
+Always use `make performance-test` instead of running the binary directly. The make target ensures proper environment setup.
 
-### Docker Compose Management
-- **Clean rebuild**: `make docker-run-clean`
-- This stops containers, removes data, and rebuilds everything fresh
+### Documentation Sync
+Keep README.md synchronized with code changes. Document new API endpoints, environment variables, and architecture changes immediately.
 
-This ensures documentation stays accurate and useful for future development sessions.
+### Changelog
+Append significant changes to `changes.txt` with timestamp: "CHANGELOG ENTRY - Day Month Year at Time CET"
+
+### Code Patterns
+- Context propagation for cancellation
+- Structured logging with component tags
+- Interface-based storage for testability
+- Thread-safe SMT operations via snapshots
+- Graceful shutdown with proper cleanup order
