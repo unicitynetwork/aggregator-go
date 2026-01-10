@@ -27,11 +27,17 @@ make fmt
 # Run linter (requires golangci-lint)
 make lint
 
+# Run vet
+make vet
+
 # Run the service (requires MongoDB)
 MONGODB_URI=mongodb://admin:password@localhost:27017/aggregator?authSource=admin make run
 
 # Run performance test (IMPORTANT: Always use make, not direct binary)
 make performance-test
+
+# Run performance test with custom URL and auth
+make performance-test-auth URL=http://localhost:8080 AUTH='Bearer token'
 
 # Docker: Clean rebuild with fresh state
 make docker-run-clean
@@ -47,11 +53,35 @@ make docker-run-sh-clean-keep-tb
 
 # Docker: Sharding + HA mode
 make docker-run-sh-ha-clean-keep-tb
+
+# Docker: HAProxy mode (requires external haproxy-net network and TLS certs)
+HAPROXY=1 make docker-run-clean
+# Or with custom SSL domain:
+SSL_DOMAIN=your-domain.com HAPROXY=1 make docker-run-clean
+
+# Restart just the aggregator container
+make docker-restart-aggregator
+```
+
+## Running a Single Test
+
+```bash
+# Run specific test file
+go test -v ./internal/round/round_manager_test.go
+
+# Run tests matching pattern
+go test -v ./... -run TestRoundManager
+
+# Run tests in specific package
+go test -v ./internal/smt/...
+
+# Integration tests (requires Docker for testcontainers)
+go test -v ./test/integration/...
 ```
 
 ## Architecture Overview
 
-### Entry Point and Initialization (`cmd/aggregator/main.go`)
+### Entry Point (`cmd/aggregator/main.go`)
 The main function orchestrates startup:
 1. Load config from environment variables
 2. Initialize logger (with optional async wrapper)
@@ -63,7 +93,7 @@ The main function orchestrates startup:
 8. Create AggregatorService (business logic)
 9. Start HTTP gateway server
 
-### Core Components
+### Core Packages
 
 **Gateway Layer** (`internal/gateway/`)
 - `Server`: Gin-based HTTP server with JSON-RPC 2.0 handler
@@ -86,7 +116,7 @@ The main function orchestrates startup:
 **Sparse Merkle Tree** (`internal/smt/`)
 - `SparseMerkleTree`: Core implementation with copy-on-write snapshots
 - `ThreadSafeSMT`: Thread-safe wrapper with mutex locking
-- Supports three modes: standalone, child (with shard prefix), parent (aggregates shard roots)
+- Three modes: standalone, child (with shard prefix), parent (aggregates shard roots)
 
 **Storage Layer** (`internal/storage/`)
 - `interfaces/`: Storage interface definitions
@@ -102,6 +132,12 @@ The main function orchestrates startup:
 **BFT Integration** (`internal/bft/`)
 - `Client`: Communicates with BFT root nodes for consensus
 - Submits root hashes and receives unicity certificates
+- Handles repeat UC detection and round synchronization
+
+**Sharding** (`internal/sharding/`)
+- Shard assignment using least significant bits of request ID
+- Child aggregators validate commitments belong to their shard
+- Parent aggregator combines shard roots into global SMT
 
 ### Key Data Flow
 ```
@@ -118,9 +154,7 @@ Configured via `SHARDING_MODE` environment variable:
 - **parent**: Root aggregator that accepts shard roots from children
 - **child**: Shard aggregator that submits roots to parent
 
-Shard assignment uses least significant bits of request ID. Child aggregators validate that commitments belong to their shard.
-
-## API Types (`pkg/api/`)
+### API Types (`pkg/api/`)
 
 Common types used across the codebase:
 - `RequestID`: 68-char hex string with "0000" SHA256 prefix
@@ -128,20 +162,6 @@ Common types used across the codebase:
 - `BigInt`: JSON-serializable big.Int wrapper
 - `ShardID`: Shard identifier with MSB prefix bit
 - `Authenticator`: secp256k1 signature with public key
-
-## Testing
-
-Tests use testcontainers for MongoDB/Redis dependencies:
-```bash
-# Run specific test file
-go test -v ./internal/round/round_manager_test.go
-
-# Run tests matching pattern
-go test -v ./... -run TestRoundManager
-
-# Integration tests (requires Docker)
-go test -v ./test/integration/...
-```
 
 ## Configuration
 
@@ -152,6 +172,9 @@ All configuration via environment variables. Key settings:
 - `SHARDING_MODE`: standalone/parent/child
 - `BFT_ENABLED`, `BFT_*`: BFT consensus settings
 - `DISABLE_HIGH_AVAILABILITY`: Disable HA mode
+- `ROUND_DURATION`: Block creation interval (default 1s)
+- `LOG_ENABLE_ASYNC`: Enable async logging (default true)
+- `LOG_ASYNC_BUFFER_SIZE`: Async log buffer size (default 10000)
 
 See README.md for complete configuration reference.
 
@@ -172,3 +195,18 @@ Append significant changes to `changes.txt` with timestamp: "CHANGELOG ENTRY - D
 - Interface-based storage for testability
 - Thread-safe SMT operations via snapshots
 - Graceful shutdown with proper cleanup order
+- Deferred commitment finalization: commitments only marked processed after block is stored
+
+### Block Finalization Order
+Critical ordering in `FinalizeBlock` to prevent race conditions:
+1. Store aggregator records first
+2. Mark commitments as processed
+3. Store block last (makes it visible to API)
+
+This ensures blocks are never exposed via API before all commitment data is stored.
+
+### BFT Synchronization
+- Root chain has 2.5-second timeout for certification requests
+- Aggregator detects repeat UCs using InputRecord comparison
+- Sequential UC processing via mutex prevents race conditions
+- Block numbers automatically adjust to root chain expectations
