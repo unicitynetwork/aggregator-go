@@ -49,6 +49,7 @@ type ServerConfig struct {
 	ConcurrencyLimit          int           `mapstructure:"concurrency_limit"`
 	EnableDocs                bool          `mapstructure:"enable_docs"`
 	EnableCORS                bool          `mapstructure:"enable_cors"`
+	CORSAllowedHeaders        string        `mapstructure:"cors_allowed_headers"`
 	TLSCertFile               string        `mapstructure:"tls_cert_file"`
 	TLSKeyFile                string        `mapstructure:"tls_key_file"`
 	EnableTLS                 bool          `mapstructure:"enable_tls"`
@@ -259,6 +260,7 @@ func Load() (*Config, error) {
 			ConcurrencyLimit:          getEnvIntOrDefault("CONCURRENCY_LIMIT", 1000),
 			EnableDocs:                getEnvBoolOrDefault("ENABLE_DOCS", true),
 			EnableCORS:                getEnvBoolOrDefault("ENABLE_CORS", true),
+			CORSAllowedHeaders:        getEnvOrDefault("CORS_ALLOWED_HEADERS", "Content-Type"),
 			TLSCertFile:               getEnvOrDefault("TLS_CERT_FILE", ""),
 			TLSKeyFile:                getEnvOrDefault("TLS_KEY_FILE", ""),
 			EnableTLS:                 getEnvBoolOrDefault("ENABLE_TLS", false),

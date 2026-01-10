@@ -37,12 +37,13 @@ services:
       CONCURRENCY_LIMIT: "1000"
       ENABLE_DOCS: "true"
       ENABLE_CORS: "true"
+      CORS_ALLOWED_HEADERS: "Content-Type, X-API-Key"
       ENABLE_TLS: "true"
       TLS_CERT_FILE: "/app/certs/fullchain.pem"
       TLS_KEY_FILE: "/app/certs/privkey.pem"
 
       # Database Configuration
-      MONGODB_URI: "mongodb://admin:password@mongodb:27017/aggregator?authSource=admin"
+      MONGODB_URI: "mongodb://mongodb:27017/aggregator?replicaSet=rs0"
       MONGODB_DATABASE: "aggregator"
       MONGODB_CONNECT_TIMEOUT: "10s"
       MONGODB_SERVER_SELECTION_TIMEOUT: "5s"
@@ -61,7 +62,8 @@ services:
       REDIS_MAX_BATCH_SIZE: "2000"
 
       # High Availability Configuration
-      DISABLE_HIGH_AVAILABILITY: "false"
+      # For single-node dev setup, disable HA so round manager activates immediately
+      DISABLE_HIGH_AVAILABILITY: "true"
       LOCK_TTL_SECONDS: "30"
       LEADER_HEARTBEAT_INTERVAL: "10s"
       LEADER_ELECTION_POLLING_INTERVAL: "5s"
