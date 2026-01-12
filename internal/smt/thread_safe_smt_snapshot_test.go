@@ -173,4 +173,162 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 		assert.NotEmpty(t, merkleTreePath.Root, "Root should not be empty")
 		assert.NotEmpty(t, merkleTreePath.Steps, "Steps should not be empty")
 	})
+
+	t.Run("SnapshotChaining", func(t *testing.T) {
+		// Test the snapshot chaining feature used in pipelined pre-collection
+		// Scenario: Main SMT -> Snapshot A (Round N) -> Snapshot B (pre-collection)
+
+		// Create main ThreadSafeSMT
+		smtInstance := NewSparseMerkleTree(api.SHA256, 2)
+		threadSafeSMT := NewThreadSafeSMT(smtInstance)
+
+		// Add initial data (simulating previous rounds)
+		initialSnapshot := threadSafeSMT.CreateSnapshot()
+		err := initialSnapshot.AddLeaf(big.NewInt(0b100), []byte{1, 2, 3})
+		require.NoError(t, err)
+		initialSnapshot.Commit(threadSafeSMT)
+		mainRootHash := threadSafeSMT.GetRootHash()
+
+		// Create Snapshot A for Round N
+		snapshotA := threadSafeSMT.CreateSnapshot()
+		err = snapshotA.AddLeaf(big.NewInt(0b101), []byte{4, 5, 6})
+		require.NoError(t, err)
+		rootHashA := snapshotA.GetRootHash()
+
+		// Main SMT should still be unchanged
+		assert.Equal(t, mainRootHash, threadSafeSMT.GetRootHash())
+		assert.NotEqual(t, mainRootHash, rootHashA)
+
+		// Create Snapshot B from Snapshot A (for pre-collection)
+		snapshotB := snapshotA.CreateSnapshot()
+
+		// Initially, Snapshot B should have same hash as Snapshot A
+		assert.Equal(t, rootHashA, snapshotB.GetRootHash())
+
+		// Add pre-collected commitments to Snapshot B
+		err = snapshotB.AddLeaf(big.NewInt(0b110), []byte{7, 8, 9})
+		require.NoError(t, err)
+		rootHashB := snapshotB.GetRootHash()
+
+		// All three should now have different hashes
+		assert.NotEqual(t, mainRootHash, rootHashA)
+		assert.NotEqual(t, mainRootHash, rootHashB)
+		assert.NotEqual(t, rootHashA, rootHashB)
+
+		// Main SMT is still unchanged
+		assert.Equal(t, mainRootHash, threadSafeSMT.GetRootHash())
+
+		// Now simulate Round N finalization: Commit Snapshot A to Main SMT
+		snapshotA.Commit(threadSafeSMT)
+		assert.Equal(t, rootHashA, threadSafeSMT.GetRootHash())
+
+		// Reparent Snapshot B to commit directly to Main SMT (key feature!)
+		snapshotB.SetCommitTarget(threadSafeSMT)
+
+		// Now commit Snapshot B - it should update Main SMT directly
+		snapshotB.Commit(threadSafeSMT)
+		assert.Equal(t, rootHashB, threadSafeSMT.GetRootHash())
+
+		// Verify all leaves are retrievable from main SMT
+		leaf, err := threadSafeSMT.GetLeaf(big.NewInt(0b100))
+		require.NoError(t, err)
+		assert.Equal(t, []byte{1, 2, 3}, leaf.Value)
+
+		leaf, err = threadSafeSMT.GetLeaf(big.NewInt(0b101))
+		require.NoError(t, err)
+		assert.Equal(t, []byte{4, 5, 6}, leaf.Value)
+
+		leaf, err = threadSafeSMT.GetLeaf(big.NewInt(0b110))
+		require.NoError(t, err)
+		assert.Equal(t, []byte{7, 8, 9}, leaf.Value)
+	})
+
+	t.Run("SnapshotChainingDeep", func(t *testing.T) {
+		// Test deeper snapshot chaining: Main -> A -> B -> C
+		// Use key length 3 - paths need BitLen() == 4, so valid paths are 0b1000-0b1111
+		smtInstance := NewSparseMerkleTree(api.SHA256, 3)
+		threadSafeSMT := NewThreadSafeSMT(smtInstance)
+
+		// Create chain: Main -> A -> B -> C
+		// For keyLength=3, path.BitLen()-1 must equal 3, so path.BitLen()=4
+		// Valid paths: 0b1000 to 0b1111 (8 to 15)
+		snapshotA := threadSafeSMT.CreateSnapshot()
+		err := snapshotA.AddLeaf(big.NewInt(0b1000), []byte{1})
+		require.NoError(t, err)
+
+		snapshotB := snapshotA.CreateSnapshot()
+		err = snapshotB.AddLeaf(big.NewInt(0b1010), []byte{2})
+		require.NoError(t, err)
+
+		snapshotC := snapshotB.CreateSnapshot()
+		err = snapshotC.AddLeaf(big.NewInt(0b1111), []byte{3})
+		require.NoError(t, err)
+
+		// All have different hashes
+		rootA := snapshotA.GetRootHash()
+		rootB := snapshotB.GetRootHash()
+		rootC := snapshotC.GetRootHash()
+		assert.NotEqual(t, rootA, rootB)
+		assert.NotEqual(t, rootB, rootC)
+
+		// Commit A to main
+		snapshotA.Commit(threadSafeSMT)
+		assert.Equal(t, rootA, threadSafeSMT.GetRootHash())
+
+		// Reparent B to main and commit
+		snapshotB.SetCommitTarget(threadSafeSMT)
+		snapshotB.Commit(threadSafeSMT)
+		assert.Equal(t, rootB, threadSafeSMT.GetRootHash())
+
+		// Reparent C to main and commit
+		snapshotC.SetCommitTarget(threadSafeSMT)
+		snapshotC.Commit(threadSafeSMT)
+		assert.Equal(t, rootC, threadSafeSMT.GetRootHash())
+
+		// Verify all leaves are present
+		_, err = threadSafeSMT.GetLeaf(big.NewInt(0b1000))
+		require.NoError(t, err, "Should find leaf 0b1000")
+		_, err = threadSafeSMT.GetLeaf(big.NewInt(0b1010))
+		require.NoError(t, err, "Should find leaf 0b1010")
+		_, err = threadSafeSMT.GetLeaf(big.NewInt(0b1111))
+		require.NoError(t, err, "Should find leaf 0b1111")
+	})
+
+	t.Run("SetCommitTargetBeforeModification", func(t *testing.T) {
+		// Test that SetCommitTarget works when called before adding data
+		smtInstance := NewSparseMerkleTree(api.SHA256, 2)
+		mainSMT := NewThreadSafeSMT(smtInstance)
+
+		// Create separate "original" that snapshot initially points to
+		otherSMTInstance := NewSparseMerkleTree(api.SHA256, 2)
+		otherSMT := NewThreadSafeSMT(otherSMTInstance)
+
+		// Add data to other SMT
+		otherSnapshot := otherSMT.CreateSnapshot()
+		err := otherSnapshot.AddLeaf(big.NewInt(0b100), []byte{1})
+		require.NoError(t, err)
+		otherSnapshot.Commit(otherSMT)
+
+		// Create snapshot from other SMT
+		snapshot := otherSMT.CreateSnapshot()
+
+		// Reparent to main SMT before adding data
+		snapshot.SetCommitTarget(mainSMT)
+
+		// Add data
+		err = snapshot.AddLeaf(big.NewInt(0b101), []byte{2})
+		require.NoError(t, err)
+
+		// Commit to main SMT
+		snapshot.Commit(mainSMT)
+
+		// Main SMT should have the new leaf
+		leaf, err := mainSMT.GetLeaf(big.NewInt(0b101))
+		require.NoError(t, err)
+		assert.Equal(t, []byte{2}, leaf.Value)
+
+		// Note: Main SMT won't have the data from other SMT (0b100)
+		// because snapshot was created after that data was added
+		// and we're only committing the snapshot's changes
+	})
 }

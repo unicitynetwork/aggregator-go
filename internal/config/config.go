@@ -98,7 +98,6 @@ type ProcessingConfig struct {
 	BatchLimit             int           `mapstructure:"batch_limit"`
 	RoundDuration          time.Duration `mapstructure:"round_duration"`
 	MaxCommitmentsPerRound int           `mapstructure:"max_commitments_per_round"` // Stop waiting once this many commitments collected
-	CollectPhaseDuration   time.Duration `mapstructure:"collect_phase_duration"`
 }
 
 // RedisConfig holds Redis connection configuration
@@ -166,9 +165,10 @@ func (sm ShardingMode) IsChild() bool {
 
 // ShardingConfig holds sharding configuration
 type ShardingConfig struct {
-	Mode          ShardingMode `mapstructure:"mode"`            // Operating mode: standalone, parent, or child
-	ShardIDLength int          `mapstructure:"shard_id_length"` // Bit length for shard IDs (e.g., 4 bits = 16 shards)
-	Child         ChildConfig  `mapstructure:"child"`           // child aggregator config
+	Mode                        ShardingMode  `mapstructure:"mode"`                           // Operating mode: standalone, parent, or child
+	ShardIDLength               int           `mapstructure:"shard_id_length"`                // Bit length for shard IDs (e.g., 4 bits = 16 shards)
+	ParentCollectPhaseDuration  time.Duration `mapstructure:"parent_collect_phase_duration"`  // Collection window for parent mode before sending to BFT
+	Child                       ChildConfig   `mapstructure:"child"`                          // child aggregator config
 }
 
 type ChildConfig struct {
@@ -300,7 +300,6 @@ func Load() (*Config, error) {
 			BatchLimit:             getEnvIntOrDefault("BATCH_LIMIT", 1000),
 			RoundDuration:          getEnvDurationOrDefault("ROUND_DURATION", "1s"),
 			MaxCommitmentsPerRound: getEnvIntOrDefault("MAX_COMMITMENTS_PER_ROUND", 10000), // Default 10k to keep rounds under 2s
-			CollectPhaseDuration:   getEnvDurationOrDefault("COLLECT_PHASE_DURATION", "200ms"),
 		},
 		Redis: RedisConfig{
 			Host:         getEnvOrDefault("REDIS_HOST", "localhost"),
@@ -323,8 +322,9 @@ func Load() (*Config, error) {
 			RedisMaxStreamLength:   int64(getEnvIntOrDefault("REDIS_MAX_STREAM_LENGTH", 1000000)),
 		},
 		Sharding: ShardingConfig{
-			Mode:          ShardingMode(getEnvOrDefault("SHARDING_MODE", "standalone")),
-			ShardIDLength: getEnvIntOrDefault("SHARD_ID_LENGTH", 4),
+			Mode:                       ShardingMode(getEnvOrDefault("SHARDING_MODE", "standalone")),
+			ShardIDLength:              getEnvIntOrDefault("SHARD_ID_LENGTH", 4),
+			ParentCollectPhaseDuration: getEnvDurationOrDefault("PARENT_COLLECT_PHASE_DURATION", "200ms"),
 			Child: ChildConfig{
 				ParentRpcAddr:      getEnvOrDefault("SHARDING_CHILD_PARENT_RPC_ADDR", "http://localhost:3009"),
 				ShardID:            getEnvIntOrDefault("SHARDING_CHILD_SHARD_ID", 0),

@@ -311,7 +311,6 @@ services:
       LOG_ENABLE_JSON: "true"
       LOG_FILE_PATH: "/app/logs/aggregator.log"
       BATCH_LIMIT: "1000"
-      COLLECT_PHASE_DURATION: "500ms"
       BFT_ENABLED: "false"
       BFT_KEY_CONF_FILE: "/app/bft-config/aggregator/keys.json"
       BFT_SHARD_CONF_FILE: "/app/bft-config/shard-conf-7_0.json"

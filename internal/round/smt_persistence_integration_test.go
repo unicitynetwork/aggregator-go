@@ -16,6 +16,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -32,11 +33,25 @@ var conf = config.Config{
 	},
 }
 
+// cleanStorage cleans all collections and reinitializes indexes
+func cleanStorage(t *testing.T, storage *mongodb.Storage) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := storage.CleanAllCollections(ctx); err != nil {
+		t.Logf("Warning: failed to clean collections: %v", err)
+	}
+	if err := storage.Initialize(ctx); err != nil {
+		t.Logf("Warning: failed to reinitialize storage: %v", err)
+	}
+}
+
 // TestSmtPersistenceAndRestoration tests SMT persistence and restoration with consistent root hashes
 func TestSmtPersistenceAndRestoration(t *testing.T) {
 	storage := testutil.SetupTestStorage(t, conf)
+	t.Cleanup(func() { cleanStorage(t, storage) })
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Create test data
 	testLeaves := []*smt.Leaf{
@@ -100,8 +115,10 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 // TestLargeSmtRestoration tests multi-chunk restoration with large dataset
 func TestLargeSmtRestoration(t *testing.T) {
 	storage := testutil.SetupTestStorage(t, conf)
+	t.Cleanup(func() { cleanStorage(t, storage) })
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
@@ -157,8 +174,10 @@ func TestLargeSmtRestoration(t *testing.T) {
 // TestCompleteWorkflowWithRestart tests end-to-end workflow including service restart simulation
 func TestCompleteWorkflowWithRestart(t *testing.T) {
 	storage := testutil.SetupTestStorage(t, conf)
+	t.Cleanup(func() { cleanStorage(t, storage) })
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Create test commitments
 	testCommitments := testutil.CreateTestCommitments(t, 3, "request")
@@ -252,8 +271,10 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 // TestSmtRestorationWithBlockVerification tests that SMT restoration verifies against existing blocks
 func TestSmtRestorationWithBlockVerification(t *testing.T) {
 	storage := testutil.SetupTestStorage(t, conf)
+	t.Cleanup(func() { cleanStorage(t, storage) })
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
