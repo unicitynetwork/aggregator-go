@@ -77,7 +77,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Add request ID to context
-	ctx := context.WithValue(r.Context(), "request_id", uuid.New().String())
+	ctx := context.WithValue(r.Context(), logger.RequestIDKey, uuid.New().String())
 
 	// Parse request
 	var req Request
@@ -93,6 +93,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, ErrInvalidRequest, req.ID)
 		return
 	}
+
+	// Add client's JSON-RPC ID to context for end-to-end tracing
+	ctx = context.WithValue(ctx, logger.JSONRPCIDKey, req.ID)
 
 	// Process request
 	response := s.processRequest(ctx, &req)
@@ -130,24 +133,12 @@ func (s *Server) handleRequest(ctx context.Context, req *Request) *Response {
 		return NewErrorResponse(ErrMethodNotFound, req.ID)
 	}
 
-	start := time.Now()
 	result, rpcErr := handler(ctx, req.Params)
-	duration := time.Since(start)
 
-	// Log request
 	if rpcErr != nil {
-		s.logger.WithContext(ctx).Error("JSON-RPC request failed",
-			"method", req.Method,
-			"duration_ms", duration.Milliseconds(),
-			"request_id", ctx.Value("request_id"),
-			"error_code", rpcErr.Code)
 		return NewErrorResponse(rpcErr, req.ID)
 	}
 
-	s.logger.WithContext(ctx).Debug("JSON-RPC request completed",
-		"method", req.Method,
-		"duration_ms", duration.Milliseconds(),
-		"request_id", ctx.Value("request_id"))
 	return NewResponse(result, req.ID)
 }
 
@@ -171,19 +162,19 @@ func (s *Server) writeErrorResponse(w http.ResponseWriter, rpcErr *Error, id int
 func RequestIDMiddleware() MiddlewareFunc {
 	return func(ctx context.Context, req *Request, next func(context.Context, *Request) *Response) *Response {
 		requestID := uuid.New().String()
-		ctx = context.WithValue(ctx, "request_id", requestID)
+		ctx = context.WithValue(ctx, logger.RequestIDKey, requestID)
 		return next(ctx, req)
 	}
 }
 
 // LoggingMiddleware logs JSON-RPC requests
+// Note: WithContext adds request_id and jsonrpc_id automatically
 func LoggingMiddleware(logger *logger.Logger) MiddlewareFunc {
 	return func(ctx context.Context, req *Request, next func(context.Context, *Request) *Response) *Response {
 		start := time.Now()
 
 		logger.WithContext(ctx).Info("Processing JSON-RPC request",
-			"method", req.Method,
-			"request_id", ctx.Value("request_id"))
+			"method", req.Method)
 
 		response := next(ctx, req)
 
@@ -192,13 +183,11 @@ func LoggingMiddleware(logger *logger.Logger) MiddlewareFunc {
 		if response.Error != nil {
 			logger.WithContext(ctx).Error("JSON-RPC request failed",
 				"method", req.Method,
-				"request_id", ctx.Value("request_id"),
 				"duration_ms", duration.Milliseconds(),
 				"error_code", response.Error.Code)
 		} else {
 			logger.WithContext(ctx).Debug("JSON-RPC request completed",
 				"method", req.Method,
-				"request_id", ctx.Value("request_id"),
 				"duration_ms", duration.Milliseconds())
 		}
 
