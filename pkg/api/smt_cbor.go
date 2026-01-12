@@ -10,15 +10,15 @@ import (
 
 type (
 	merkleTreePathCBOR struct {
-		_     struct{}             `cbor:",toarray"`
-		Root  []byte               `json:"root"` // hex string
-		Steps []merkleTreeStepCBOR `json:"steps"`
+		_     struct{} `cbor:",toarray"`
+		Root  []byte   // hex string
+		Steps []merkleTreeStepCBOR
 	}
 
 	merkleTreeStepCBOR struct {
 		_    struct{} `cbor:",toarray"`
-		Path []byte   `json:"path"` // base-10 BigInt
-		Data []byte   `json:"data"` // hex string
+		Path []byte   // base-10 BigInt
+		Data []byte   // hex string
 	}
 )
 
