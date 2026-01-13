@@ -2,7 +2,7 @@ services:
   x-bft: &bft-base
     platform: linux/amd64
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
-    image: ghcr.io/unicitynetwork/bft-core:ff28a5da20d4eb3f664264a136303a4e79a88e4c
+    image: ghcr.io/unicitynetwork/bft-core:8e6f2507b8b69fc6d2d66c33fb7c4cb9dc61e8b0
   bft-root:
     <<: *bft-base
     volumes:
@@ -311,7 +311,6 @@ services:
       LOG_ENABLE_JSON: "true"
       LOG_FILE_PATH: "/app/logs/aggregator.log"
       BATCH_LIMIT: "1000"
-      COLLECT_PHASE_DURATION: "500ms"
       SIGNING_KEY_FILE: "/app/bft-config/aggregator/keys.json"
       BFT_ENABLED: "false"
       BFT_SHARD_CONF_FILE: "/app/bft-config/shard-conf-7_0.json"
@@ -428,6 +427,7 @@ services:
       <<: *environment-base
       MONGODB_URI: "mongodb://mongodb-root-1:27017,mongodb-root-2:27017,mongodb-root-3:27017/aggregator?replicaSet=rs-root"
       SHARDING_MODE: "parent"
+      PARENT_COLLECT_PHASE_DURATION: "200ms"
       BFT_ENABLED: "true"
     depends_on:
       - mongo-setup-root

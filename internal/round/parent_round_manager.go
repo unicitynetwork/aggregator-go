@@ -50,11 +50,10 @@ type ParentRoundManager struct {
 	eventBus  *events.EventBus
 
 	// Round management
-	currentRound  *ParentRound
-	roundMutex    sync.RWMutex
-	stopChan      chan struct{}
-	wg            sync.WaitGroup
-	roundDuration time.Duration
+	currentRound *ParentRound
+	roundMutex   sync.RWMutex
+	stopChan     chan struct{}
+	wg           sync.WaitGroup
 
 	// Metrics
 	totalRounds       int64
@@ -74,13 +73,12 @@ func NewParentRoundManager(
 	threadSafeSmt *smt.ThreadSafeSMT,
 ) (*ParentRoundManager, error) {
 	prm := &ParentRoundManager{
-		config:        cfg,
-		logger:        logger,
-		storage:       storage,
-		parentSMT:     threadSafeSmt,
-		stopChan:      make(chan struct{}),
-		roundDuration: cfg.Processing.RoundDuration,
-		eventBus:      eventBus,
+		config:    cfg,
+		logger:    logger,
+		storage:   storage,
+		parentSMT: threadSafeSmt,
+		stopChan:  make(chan struct{}),
+		eventBus:  eventBus,
 	}
 
 	// Create BFT client (same logic as regular RoundManager)
@@ -115,7 +113,7 @@ func NewParentRoundManager(
 // Note: SMT reconstruction is done in Activate() when the node becomes leader
 func (prm *ParentRoundManager) Start(ctx context.Context) error {
 	prm.logger.WithContext(ctx).Info("Starting Parent Round Manager",
-		"roundDuration", prm.roundDuration.String())
+		"collectPhaseDuration", prm.config.Sharding.ParentCollectPhaseDuration.String())
 
 	prm.logger.WithContext(ctx).Info("Parent Round Manager started successfully")
 	return nil
@@ -202,15 +200,17 @@ func (prm *ParentRoundManager) startNewRound(ctx context.Context, roundNumber *a
 	}
 	prm.roundMutex.Unlock()
 
+	collectPhaseDuration := prm.config.Sharding.ParentCollectPhaseDuration
 	prm.logger.WithContext(ctx).Info("Parent round started",
 		"roundNumber", roundNumber.String(),
-		"duration", prm.roundDuration.String())
+		"collectPhaseDuration", collectPhaseDuration.String())
 
-	// Wait for round duration to collect shard updates
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(prm.roundDuration):
+	if collectPhaseDuration > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(collectPhaseDuration):
+		}
 	}
 
 	if err := prm.processCurrentRound(ctx); err != nil {
