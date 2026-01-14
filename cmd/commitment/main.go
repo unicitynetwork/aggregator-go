@@ -98,6 +98,35 @@ func main() {
 		logger.Fatalf("submit_commitment status was %q", submitResult.Status)
 	}
 
+	// Verify and display the receipt if present
+	if submitResult.Receipt != nil {
+		logger.Printf("Receipt received:")
+		logger.Printf("  Algorithm: %s", submitResult.Receipt.Algorithm)
+		logger.Printf("  PublicKey: %s", submitResult.Receipt.PublicKey)
+		logger.Printf("  Signature: %s", submitResult.Receipt.Signature)
+		logger.Printf("  Request.Service: %s", submitResult.Receipt.Request.Service)
+		logger.Printf("  Request.Method: %s", submitResult.Receipt.Request.Method)
+		logger.Printf("  Request.RequestID: %s", submitResult.Receipt.Request.RequestID)
+
+		// Verify the receipt signature
+		requestBytes, err := json.Marshal(submitResult.Receipt.Request)
+		if err != nil {
+			logger.Printf("Warning: failed to marshal receipt request for verification: %v", err)
+		} else {
+			signingService := signing.NewSigningService()
+			valid, err := signingService.VerifyWithPublicKey(requestBytes, submitResult.Receipt.Signature, submitResult.Receipt.PublicKey)
+			if err != nil {
+				logger.Printf("Warning: receipt signature verification error: %v", err)
+			} else if valid {
+				logger.Printf("Receipt signature VERIFIED successfully!")
+			} else {
+				logger.Printf("Warning: receipt signature verification FAILED!")
+			}
+		}
+	} else {
+		logger.Printf("No receipt received (receipt was requested: %v)", *commitReq.Receipt)
+	}
+
 	logger.Printf("Commitment %s accepted. Polling for inclusion proof...", commitReq.RequestID)
 
 	path, err := commitReq.RequestID.GetPath()
@@ -162,7 +191,7 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 		panic(fmt.Sprintf("failed to sign transaction hash: %v", err))
 	}
 
-	receipt := false
+	receipt := true
 	return &api.SubmitCommitmentRequest{
 		RequestID:       api.RequestID(requestID),
 		TransactionHash: api.TransactionHash(transactionHashImprint),

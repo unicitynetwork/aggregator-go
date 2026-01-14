@@ -147,7 +147,7 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	require.NoError(t, err)
 
 	// Initialize aggregator service
-	aggregatorService := NewAggregatorService(cfg, log, roundManager, commitmentQueue, mongoStorage, nil)
+	aggregatorService := NewAggregatorService(cfg, log, roundManager, commitmentQueue, mongoStorage, nil, nil)
 
 	// Initialize gateway server
 	server := gateway.NewServer(cfg, log, aggregatorService)

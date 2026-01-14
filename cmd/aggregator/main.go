@@ -19,6 +19,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/service"
+	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
@@ -220,7 +221,20 @@ func main() {
 		}
 	}
 
-	aggregatorService, err := service.NewService(ctx, cfg, log, roundManager, commitmentQueue, storageInstance, ls)
+	// Create receipt signer for signing commitment receipts
+	var receiptSigner *signing.ReceiptSigner
+	if cfg.Signing.KeyConf != nil {
+		receiptSigner, err = signing.NewReceiptSigner(cfg.Signing.KeyConf.SigKey.PrivateKey)
+		if err != nil {
+			log.WithComponent("main").Error("Failed to create receipt signer", "error", err.Error())
+			gracefulExit(asyncLogger, 1)
+		}
+		log.WithComponent("main").Info("Receipt signer initialized")
+	} else {
+		log.WithComponent("main").Warn("No signing key configured, receipt signing disabled")
+	}
+
+	aggregatorService, err := service.NewService(ctx, cfg, log, roundManager, commitmentQueue, storageInstance, ls, receiptSigner)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to create service", "error", err.Error())
 		gracefulExit(asyncLogger, 1)
