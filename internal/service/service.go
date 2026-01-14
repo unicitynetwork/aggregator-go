@@ -63,16 +63,16 @@ func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, 
 
 // AggregatorService implements the business logic for the aggregator
 type AggregatorService struct {
-	config              *config.Config
-	logger              *logger.Logger
-	commitmentQueue     interfaces.CommitmentQueue
-	storage             interfaces.Storage
-	roundManager        round.Manager
-	leaderSelector      LeaderSelector
+	config                        *config.Config
+	logger                        *logger.Logger
+	commitmentQueue               interfaces.CommitmentQueue
+	storage                       interfaces.Storage
+	roundManager                  round.Manager
+	leaderSelector                LeaderSelector
 	certificationRequestValidator *signing.CertificationRequestValidator
-	commitmentValidator *signing.CommitmentValidator
-	trustBaseValidator  *TrustBaseValidator
-	receiptSigner       *signing.ReceiptSigner
+	commitmentValidator           *signingV1.CommitmentValidator
+	trustBaseValidator            *TrustBaseValidator
+	receiptSigner                 *signing.ReceiptSigner
 }
 
 type LeaderSelector interface {
@@ -152,16 +152,16 @@ func NewAggregatorService(cfg *config.Config,
 	receiptSigner *signing.ReceiptSigner,
 ) *AggregatorService {
 	return &AggregatorService{
-		config:              cfg,
-		logger:              logger,
-		commitmentQueue:     commitmentQueue,
-		storage:             storage,
-		roundManager:        roundManager,
-		leaderSelector:      leaderSelector,
-		commitmentValidator: signingV1.NewCommitmentValidator(cfg.Sharding),
+		config:                        cfg,
+		logger:                        logger,
+		commitmentQueue:               commitmentQueue,
+		storage:                       storage,
+		roundManager:                  roundManager,
+		leaderSelector:                leaderSelector,
+		commitmentValidator:           signingV1.NewCommitmentValidator(cfg.Sharding),
 		certificationRequestValidator: signing.NewCertificationRequestValidator(cfg.Sharding),
-		trustBaseValidator:  NewTrustBaseValidator(storage.TrustBaseStorage()),
-		receiptSigner:       receiptSigner,
+		trustBaseValidator:            NewTrustBaseValidator(storage.TrustBaseStorage()),
+		receiptSigner:                 receiptSigner,
 	}
 }
 
@@ -243,7 +243,7 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 		if as.receiptSigner == nil {
 			as.logger.WithContext(ctx).Warn("Receipt requested but receipt signer not configured", "requestId", req.RequestID)
 		} else {
-			receipt, err := as.receiptSigner.SignReceipt(
+			receipt, err := as.receiptSigner.SignReceiptV1(
 				commitment.RequestID,
 				commitment.TransactionHash,
 				commitment.Authenticator.StateHash,
@@ -319,11 +319,7 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 		if as.receiptSigner == nil {
 			as.logger.WithContext(ctx).Warn("Receipt requested but receipt signer not configured", "stateId", req.StateID)
 		} else {
-			receipt, err := as.receiptSigner.SignReceipt(
-				req.StateID,
-				req.CertificationData.TransactionHash,
-				req.CertificationData.SourceStateHash,
-			)
+			receipt, err := as.receiptSigner.SignReceiptV2(req.CertificationData)
 			if err != nil {
 				as.logger.WithContext(ctx).Error("Failed to sign receipt", "requestId", req.StateID, "error", err.Error())
 			} else {

@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -19,7 +20,7 @@ func TestNewReceiptSigner(t *testing.T) {
 		signer, err := NewReceiptSigner(privKey)
 		require.NoError(t, err)
 		assert.NotNil(t, signer)
-		assert.Equal(t, AlgorithmSecp256k1, signer.Algorithm())
+		assert.Equal(t, "secp256k1", signer.Algorithm())
 		assert.Equal(t, pubKey, signer.PublicKey())
 	})
 
@@ -32,7 +33,7 @@ func TestNewReceiptSigner(t *testing.T) {
 	})
 }
 
-func TestReceiptSigner_SignReceipt(t *testing.T) {
+func TestReceiptSigner_SignReceiptV1(t *testing.T) {
 	// Generate a key pair for testing
 	signingService := NewSigningService()
 	privKey, pubKey, err := signingService.GenerateKeyPair()
@@ -44,15 +45,15 @@ func TestReceiptSigner_SignReceipt(t *testing.T) {
 	// Create test data
 	requestID := api.RequestID("0x0001abcdef1234567890abcdef1234567890abcdef1234567890abcdef12345678")
 	transactionHash := api.TransactionHash("0x0001fedcba0987654321fedcba0987654321fedcba0987654321fedcba09876543")
-	stateHash := api.StateHash("0x0001123456789abcdef123456789abcdef123456789abcdef123456789abcdef12")
+	stateHash := api.SourceStateHash("0x0001123456789abcdef123456789abcdef123456789abcdef123456789abcdef12")
 
 	t.Run("sign receipt successfully", func(t *testing.T) {
-		receipt, err := signer.SignReceipt(requestID, transactionHash, stateHash)
+		receipt, err := signer.SignReceiptV1(requestID, transactionHash, stateHash)
 		require.NoError(t, err)
 		assert.NotNil(t, receipt)
 
 		// Verify receipt fields
-		assert.Equal(t, AlgorithmSecp256k1, receipt.Algorithm)
+		assert.Equal(t, "secp256k1", receipt.Algorithm)
 		assert.Equal(t, pubKey, []byte(receipt.PublicKey))
 		assert.Len(t, receipt.Signature, 65) // secp256k1 signature length
 
@@ -65,7 +66,7 @@ func TestReceiptSigner_SignReceipt(t *testing.T) {
 	})
 
 	t.Run("signature is verifiable", func(t *testing.T) {
-		receipt, err := signer.SignReceipt(requestID, transactionHash, stateHash)
+		receipt, err := signer.SignReceiptV1(requestID, transactionHash, stateHash)
 		require.NoError(t, err)
 
 		// Serialize the request data the same way as during signing
@@ -79,12 +80,12 @@ func TestReceiptSigner_SignReceipt(t *testing.T) {
 	})
 
 	t.Run("different inputs produce different signatures", func(t *testing.T) {
-		receipt1, err := signer.SignReceipt(requestID, transactionHash, stateHash)
+		receipt1, err := signer.SignReceiptV1(requestID, transactionHash, stateHash)
 		require.NoError(t, err)
 
 		// Use a different request ID
 		differentRequestID := api.RequestID("0x0001111111111111111111111111111111111111111111111111111111111111")
-		receipt2, err := signer.SignReceipt(differentRequestID, transactionHash, stateHash)
+		receipt2, err := signer.SignReceiptV1(differentRequestID, transactionHash, stateHash)
 		require.NoError(t, err)
 
 		// Signatures should be different
@@ -92,10 +93,10 @@ func TestReceiptSigner_SignReceipt(t *testing.T) {
 	})
 
 	t.Run("receipts are deterministic for same input", func(t *testing.T) {
-		receipt1, err := signer.SignReceipt(requestID, transactionHash, stateHash)
+		receipt1, err := signer.SignReceiptV1(requestID, transactionHash, stateHash)
 		require.NoError(t, err)
 
-		receipt2, err := signer.SignReceipt(requestID, transactionHash, stateHash)
+		receipt2, err := signer.SignReceiptV1(requestID, transactionHash, stateHash)
 		require.NoError(t, err)
 
 		// Request data should be identical
@@ -115,6 +116,47 @@ func TestReceiptSigner_SignReceipt(t *testing.T) {
 	})
 }
 
+func TestReceiptSigner_SignReceiptV2(t *testing.T) {
+	// Generate a key pair for testing
+	signingService := NewSigningService()
+	privKey, pubKey, err := signingService.GenerateKeyPair()
+	require.NoError(t, err)
+
+	signer, err := NewReceiptSigner(privKey)
+	require.NoError(t, err)
+
+	// Create test data
+	certData := api.CertificationData{
+		OwnerPredicate:  api.Predicate{},
+		SourceStateHash: "01",
+		TransactionHash: "02",
+		Witness:         nil,
+	}
+
+	t.Run("sign receipt successfully", func(t *testing.T) {
+		receipt, err := signer.SignReceiptV2(certData)
+		require.NoError(t, err)
+		require.NotNil(t, receipt)
+
+		require.Equal(t, pubKey, []byte(receipt.PublicKey))
+		require.Len(t, receipt.Signature, 65) // secp256k1 signature length
+	})
+
+	t.Run("signature is verifiable", func(t *testing.T) {
+		receipt, err := signer.SignReceiptV2(certData)
+		require.NoError(t, err)
+
+		// Serialize the request data the same way as during signing
+		requestBytes, err := types.Cbor.Marshal(certData)
+		require.NoError(t, err)
+
+		// Verify the signature
+		valid, err := signingService.VerifyWithPublicKey(requestBytes, receipt.Signature, receipt.PublicKey)
+		require.NoError(t, err)
+		assert.True(t, valid, "Receipt signature should be valid")
+	})
+}
+
 func TestReceiptSigner_PublicKeyAndAlgorithm(t *testing.T) {
 	signingService := NewSigningService()
 	privKey, expectedPubKey, err := signingService.GenerateKeyPair()
@@ -128,6 +170,6 @@ func TestReceiptSigner_PublicKeyAndAlgorithm(t *testing.T) {
 	})
 
 	t.Run("Algorithm returns secp256k1", func(t *testing.T) {
-		assert.Equal(t, AlgorithmSecp256k1, signer.Algorithm())
+		assert.Equal(t, "secp256k1", signer.Algorithm())
 	})
 }

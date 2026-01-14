@@ -262,7 +262,7 @@ func TestSubmitCommitmentResponse_SerializeAndValidate(t *testing.T) {
 			Algorithm: "secp256k1",
 			PublicKey: NewHexBytes(publicKeyBytes),
 			Signature: NewHexBytes(signatureBytes),
-			Request: ReceiptRequest{
+			Request: ReceiptRequestV1{
 				RequestID:       "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40",
 				TransactionHash: "00010000000000000000000000000000000000000000000000000000000000000000",
 				StateHash:       ImprintHexString("00000000000000000000000000000000000000000000000000000000000000000000"),
@@ -401,7 +401,7 @@ func TestSubmitCommitmentResponse_SerializeAndValidate(t *testing.T) {
 			Algorithm: "secp256k1",
 			PublicKey: NewHexBytes([]byte{0x02, 0x79}), // shortened for test
 			Signature: NewHexBytes([]byte{0xa0, 0xb3}), // shortened for test
-			Request: ReceiptRequest{
+			Request: ReceiptRequestV1{
 				RequestID:       "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40",
 				TransactionHash: "00010000000000000000000000000000000000000000000000000000000000000000",
 				StateHash:       ImprintHexString("000000"), // shortened for test, minimum 3 bytes

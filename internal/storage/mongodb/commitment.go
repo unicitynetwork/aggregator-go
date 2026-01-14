@@ -268,7 +268,7 @@ func (cs *CommitmentStorage) CreateIndexes(ctx context.Context) error {
 
 	_, err := cs.collection.Indexes().CreateMany(ctx, indexes)
 	if err != nil {
-		return fmt.Errorf("failed to create certification request indexes: %w", err)
+		return fmt.Errorf("failed to create indexes: %w", err)
 	}
 
 	return nil

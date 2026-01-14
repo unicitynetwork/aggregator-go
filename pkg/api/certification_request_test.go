@@ -178,7 +178,7 @@ func TestCertificationResponse_SerializeAndValidate(t *testing.T) {
 		signatureBytes, err := hex.DecodeString(signatureHex)
 		require.NoError(t, err)
 
-		receipt := &Receipt{
+		receipt := &ReceiptV2{
 			PublicKey: NewHexBytes(publicKeyBytes),
 			Signature: NewHexBytes(signatureBytes),
 		}
@@ -304,7 +304,7 @@ func TestCertificationResponse_SerializeAndValidate(t *testing.T) {
 
 	t.Run("should handle receipt serialization", func(t *testing.T) {
 		// Test receipt with all fields
-		receipt := &Receipt{
+		receipt := &ReceiptV2{
 			PublicKey: NewHexBytes([]byte{0x02, 0x79}), // shortened for test
 			Signature: NewHexBytes([]byte{0xa0, 0xb3}), // shortened for test
 		}

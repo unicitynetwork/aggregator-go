@@ -46,8 +46,8 @@ func (c *CertificationRequest) UnmarshalJSON(data []byte) error {
 
 // CertificationResponse represents the certification_request JSON-RPC response.
 type CertificationResponse struct {
-	Status  string   `json:"status"`
-	Receipt *Receipt `json:"receipt,omitempty"`
+	Status  string     `json:"status"`
+	Receipt *ReceiptV2 `json:"receipt,omitempty"`
 }
 
 // CertificationData represents the necessary cryptographic data needed for a state transition CertificationRequest.

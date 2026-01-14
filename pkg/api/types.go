@@ -93,8 +93,8 @@ func NewNoDeletionProof(proof HexBytes) *NoDeletionProof {
 	}
 }
 
-// Receipt represents a signed receipt for a certification request submission
-type Receipt struct {
+// ReceiptV2 represents a signed receipt for a certification request submission
+type ReceiptV2 struct {
 	PublicKey HexBytes `json:"publicKey"`
 	Signature HexBytes `json:"signature"`
 }

@@ -49,30 +49,30 @@ func NewCommitmentWithAggregate(requestID RequestID, transactionHash Transaction
 
 // ReceiptV1 represents a signed receipt for a commitment submission
 type ReceiptV1 struct {
-	Algorithm string         `json:"algorithm"`
-	PublicKey HexBytes       `json:"publicKey"`
-	Signature HexBytes       `json:"signature"`
-	Request   ReceiptRequest `json:"request"`
+	Algorithm string           `json:"algorithm"`
+	PublicKey HexBytes         `json:"publicKey"`
+	Signature HexBytes         `json:"signature"`
+	Request   ReceiptRequestV1 `json:"request"`
 }
 
-// ReceiptRequest represents the request data in a receipt
-type ReceiptRequest struct {
-	//Service         string          `json:"service"`
-	//Method          string          `json:"method"`
+// ReceiptRequestV1 represents the request data in a receipt
+type ReceiptRequestV1 struct {
+	Service         string          `json:"service"`
+	Method          string          `json:"method"`
 	RequestID       RequestID       `json:"requestId"`
 	TransactionHash TransactionHash `json:"transactionHash"`
 	StateHash       SourceStateHash `json:"stateHash"`
 }
 
-// NewReceipt creates a new receipt for a commitment
-func NewReceipt(commitment *Commitment, algorithm string, publicKey, signature HexBytes) *ReceiptV1 {
+// NewReceiptV1 creates a new receipt for a commitment
+func NewReceiptV1(commitment *Commitment, algorithm string, publicKey, signature HexBytes) *ReceiptV1 {
 	return &ReceiptV1{
 		Algorithm: algorithm,
 		PublicKey: publicKey,
 		Signature: signature,
-		Request: ReceiptRequest{
-			//Service:         "aggregator",
-			//Method:          "submit_commitment",
+		Request: ReceiptRequestV1{
+			Service:         "aggregator",
+			Method:          "submit_commitment",
 			RequestID:       commitment.RequestID,
 			TransactionHash: commitment.TransactionHash,
 			StateHash:       commitment.Authenticator.StateHash,
