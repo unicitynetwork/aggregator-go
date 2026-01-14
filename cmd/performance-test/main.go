@@ -285,26 +285,6 @@ func generateCommitmentRequest() *api.CertificationRequest {
 		sourceStateHashImprint = signing.CreateDataHashImprint(stateData)
 	}
 
-	for {
-		calculated, err := api.CreateStateID(ownerPredicate, sourceStateHashImprint)
-		if err != nil {
-			panic(fmt.Sprintf("Failed to create state ID: %v", err))
-		}
-		// If no shard masks configured, accept any request ID
-		if !hasShardMasks {
-			stateID = calculated
-			break
-		}
-		// Check if the request ID matches any of the configured shard targets
-		if matchesAnyShardTarget(string(calculated)) {
-			stateID = calculated
-			break
-		}
-		// Regenerate state hash and try again
-		rand.Read(stateData)
-		sourceStateHashImprint = signing.CreateDataHashImprint(stateData)
-	}
-
 	// Generate random transaction data and create DataHash imprint
 	transactionData := make([]byte, 32)
 	rand.Read(transactionData)
