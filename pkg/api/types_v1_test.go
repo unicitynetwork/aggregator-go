@@ -14,7 +14,7 @@ func TestSubmitCommitmentRequest_SerializeAndValidate(t *testing.T) {
 		// Create test data matching TypeScript test
 		// From SubmitCommitmentRequestTest.ts
 
-		// Create RequestID
+		// Create StateID
 		publicKey := make([]byte, 20) // matches new Uint8Array(20)
 
 		stateHash := ImprintHexString("00000000000000000000000000000000000000000000000000000000000000000000")
@@ -478,11 +478,11 @@ func TestAuthenticator_SerializeAndValidate(t *testing.T) {
 		// Use 20 bytes for public key (matches RequestIdTest.ts which uses new Uint8Array(20))
 		publicKey := make([]byte, 20)
 
-		// Create RequestID using the same public key and state hash
+		// Create StateID using the same public key and state hash
 		requestID, err := CreateRequestID(publicKey, ImprintHexString("00000000000000000000000000000000000000000000000000000000000000000000"))
 		require.NoError(t, err)
 
-		// Expected result from RequestIdTest.ts (matches our RequestID test)
+		// Expected result from RequestIdTest.ts (matches our StateID test)
 		expectedRequestID := "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"
 		assert.Equal(t, expectedRequestID, requestID.String())
 	})

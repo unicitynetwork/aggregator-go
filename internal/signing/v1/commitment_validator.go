@@ -134,7 +134,7 @@ func (v *CommitmentValidator) ValidateCommitment(commitment *v1.Commitment) Vali
 	}
 
 	// 4. Validate Request ID matches expected value
-	// RequestID should be SHA256(publicKey || stateHash)
+	// StateID should be SHA256(publicKey || stateHash)
 	isValidRequestID, err := api.ValidateRequestID(
 		commitment.RequestID,
 		publicKeyBytes,

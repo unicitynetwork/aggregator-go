@@ -32,6 +32,7 @@ type Service interface {
 	GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error)
 	GetBlockRecords(ctx context.Context, req *api.GetBlockRecords) (*api.GetBlockRecordsResponse, error)
 	GetHealthStatus(ctx context.Context) (*api.HealthStatus, error)
+	PutTrustBase(ctx context.Context, req *types.RootTrustBaseV1) error
 
 	// Parent mode specific methods
 	SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) (*api.SubmitShardRootResponse, error)
@@ -70,6 +71,7 @@ type AggregatorService struct {
 	leaderSelector                LeaderSelector
 	certificationRequestValidator *signing.CertificationRequestValidator
 	commitmentValidator           *signingV1.CommitmentValidator
+	trustBaseValidator            *TrustBaseValidator
 }
 
 type LeaderSelector interface {
@@ -140,7 +142,13 @@ func modelToAPIHealthStatus(modelHealth *models.HealthStatus) *api.HealthStatus 
 }
 
 // NewAggregatorService creates a new aggregator service
-func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManager round.Manager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) *AggregatorService {
+func NewAggregatorService(cfg *config.Config,
+	logger *logger.Logger,
+	roundManager round.Manager,
+	commitmentQueue interfaces.CommitmentQueue,
+	storage interfaces.Storage,
+	leaderSelector LeaderSelector,
+) *AggregatorService {
 	return &AggregatorService{
 		config:                        cfg,
 		logger:                        logger,
@@ -150,6 +158,7 @@ func NewAggregatorService(cfg *config.Config, logger *logger.Logger, roundManage
 		leaderSelector:                leaderSelector,
 		commitmentValidator:           signingV1.NewCommitmentValidator(cfg.Sharding),
 		certificationRequestValidator: signing.NewCertificationRequestValidator(cfg.Sharding),
+		trustBaseValidator:            NewTrustBaseValidator(storage.TrustBaseStorage()),
 	}
 }
 
@@ -336,7 +345,16 @@ func (as *AggregatorService) GetInclusionProofV1(ctx context.Context, req *api.G
 	if err != nil {
 		return nil, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
 	}
-	merkleTreePath, err := as.roundManager.GetSMT().GetPath(path)
+
+	smtInstance := as.roundManager.GetSMT()
+	if smtInstance == nil {
+		return nil, fmt.Errorf("merkle tree not initialized")
+	}
+	if keyLen := smtInstance.GetKeyLength(); path.BitLen()-1 != keyLen {
+		return nil, fmt.Errorf("request path length %d does not match SMT key length %d", path.BitLen()-1, keyLen)
+	}
+
+	merkleTreePath, err := smtInstance.GetPath(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get inclusion proof for request ID %s: %w", req.RequestID, err)
 	}
@@ -407,6 +425,15 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 	if err != nil {
 		return nil, fmt.Errorf("failed to get path for state ID %s: %w", req.StateID, err)
 	}
+
+	smtInstance := as.roundManager.GetSMT()
+	if smtInstance == nil {
+		return nil, fmt.Errorf("merkle tree not initialized")
+	}
+	if keyLen := smtInstance.GetKeyLength(); path.BitLen()-1 != keyLen {
+		return nil, fmt.Errorf("request path length %d does not match SMT key length %d", path.BitLen()-1, keyLen)
+	}
+
 	merkleTreePath, err := as.roundManager.GetSMT().GetPath(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get inclusion proof for state ID %s: %w", req.StateID, err)
@@ -602,6 +629,7 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 
 	// Add database connectivity check
 	if err := as.storage.Ping(ctx); err != nil {
+		status.Status = "unhealthy"
 		status.AddDetail("database", "disconnected")
 		as.logger.WithContext(ctx).Error("Database health check failed", "error", err.Error())
 	} else {
@@ -611,23 +639,34 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 	// Add commitment queue status and warning if too high
 	unprocessedCount, err := as.commitmentQueue.CountUnprocessed(ctx)
 	if err != nil {
-		status.AddDetail("commitment_queue", "unknown")
+		status.Status = "unhealthy"
 		status.AddDetail("commitment_queue_status", "error")
-		as.logger.WithContext(ctx).Error("CertificationData queue health check failed", "error", err.Error())
+		as.logger.WithContext(ctx).Error("Commitment queue health check failed", "error", err.Error())
 	} else {
 		status.AddDetail("commitment_queue", strconv.FormatInt(unprocessedCount, 10))
 
 		// Add warning if unprocessed count is concerning
 		if unprocessedCount > 10000 {
 			status.AddDetail("commitment_queue_status", "critical")
-			as.logger.WithContext(ctx).Error("Critical: High unprocessed certification request count",
+			as.logger.WithContext(ctx).Error("Critical: High unprocessed commitment count",
 				"count", unprocessedCount)
 		} else if unprocessedCount > 5000 {
 			status.AddDetail("commitment_queue_status", "warning")
-			as.logger.WithContext(ctx).Warn("Warning: Elevated unprocessed certification request count",
+			as.logger.WithContext(ctx).Warn("Warning: Elevated unprocessed commitment count",
 				"count", unprocessedCount)
 		} else {
 			status.AddDetail("commitment_queue_status", "healthy")
+		}
+	}
+
+	if as.config.Sharding.Mode == config.ShardingModeChild {
+		if err := as.roundManager.CheckParentHealth(ctx); err != nil {
+			status.Status = "degraded"
+			status.AddDetail("parent", "unreachable")
+			status.AddDetail("parent_error", err.Error())
+			as.logger.WithContext(ctx).Warn("Parent aggregator health check failed", "error", err.Error())
+		} else {
+			status.AddDetail("parent", "connected")
 		}
 	}
 
@@ -642,4 +681,12 @@ func (as *AggregatorService) SubmitShardRoot(ctx context.Context, req *api.Submi
 // GetShardProof - not supported in standalone mode
 func (as *AggregatorService) GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.GetShardProofResponse, error) {
 	return nil, fmt.Errorf("get_shard_proof is not supported in standalone mode")
+}
+
+// PutTrustBase verifies and stores the trust base.
+func (as *AggregatorService) PutTrustBase(ctx context.Context, trustBase *types.RootTrustBaseV1) error {
+	if err := as.trustBaseValidator.Verify(ctx, trustBase); err != nil {
+		return fmt.Errorf("failed to verify trust base: %w", err)
+	}
+	return as.storage.TrustBaseStorage().Store(ctx, trustBase)
 }

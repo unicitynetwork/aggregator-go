@@ -2,6 +2,7 @@ package logger
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -20,10 +21,9 @@ type AsyncLogger struct {
 }
 
 type logEntry struct {
-	ctx   context.Context
-	level slog.Level
-	msg   string
-	args  []any
+	ctx     context.Context
+	record  slog.Record
+	handler slog.Handler
 }
 
 // AsyncLoggerWrapper wraps both the Logger interface and the AsyncLogger functionality
@@ -122,16 +122,8 @@ func (al *AsyncLogger) worker() {
 // flushBatch writes all entries in the batch
 func (al *AsyncLogger) flushBatch(batch []logEntry) {
 	for _, entry := range batch {
-		// Use the underlying synchronous logger
-		switch entry.level {
-		case slog.LevelDebug:
-			al.logger.WithContext(entry.ctx).Debug(entry.msg, entry.args...)
-		case slog.LevelInfo:
-			al.logger.WithContext(entry.ctx).Info(entry.msg, entry.args...)
-		case slog.LevelWarn:
-			al.logger.WithContext(entry.ctx).Warn(entry.msg, entry.args...)
-		case slog.LevelError:
-			al.logger.WithContext(entry.ctx).Error(entry.msg, entry.args...)
+		if err := entry.handler.Handle(entry.ctx, entry.record); err != nil {
+			al.logger.WithContext(entry.ctx).Warn("Async handler failed to write log entry", "error", err.Error())
 		}
 	}
 }
@@ -187,10 +179,9 @@ func (acl *AsyncContextLogger) log(level slog.Level, msg string, args ...any) {
 	// Try to send to channel, drop if full to prevent blocking
 	select {
 	case acl.AsyncLogger.entries <- logEntry{
-		ctx:   acl.ctx,
-		level: level,
-		msg:   msg,
-		args:  args,
+		ctx:     acl.ctx,
+		record:  newRecord(level, msg, args...),
+		handler: acl.AsyncLogger.logger.WithContext(acl.ctx).Handler(),
 	}:
 		// Successfully queued
 	default:
@@ -221,6 +212,40 @@ func (acl *AsyncContextLogger) Error(msg string, args ...any) {
 	acl.log(slog.LevelError, msg, args...)
 }
 
+func newRecord(level slog.Level, msg string, args ...any) slog.Record {
+	r := slog.NewRecord(time.Now(), level, msg, 0)
+	r.AddAttrs(argsToAttrs(args)...)
+	return r
+}
+
+func argsToAttrs(args []any) []slog.Attr {
+	attrs := make([]slog.Attr, 0, len(args))
+	for len(args) > 0 {
+		switch v := args[0].(type) {
+		case slog.Attr:
+			attrs = append(attrs, v)
+			args = args[1:]
+		case string:
+			if len(args) >= 2 {
+				attrs = append(attrs, slog.Any(v, args[1]))
+				args = args[2:]
+			} else {
+				attrs = append(attrs, slog.Any(v, nil))
+				args = args[1:]
+			}
+		default:
+			if len(args) >= 2 {
+				attrs = append(attrs, slog.Any(fmt.Sprint(v), args[1]))
+				args = args[2:]
+			} else {
+				attrs = append(attrs, slog.Any("!BADKEY", v))
+				args = args[1:]
+			}
+		}
+	}
+	return attrs
+}
+
 // asyncHandler implements slog.Handler for async logging
 type asyncHandler struct {
 	asyncLogger *AsyncLogger
@@ -239,20 +264,15 @@ func (h *asyncHandler) Handle(ctx context.Context, record slog.Record) error {
 		return h.baseHandler.Handle(ctx, record)
 	}
 
-	// Convert record to our log entry format
-	args := make([]any, 0, record.NumAttrs()*2)
-	record.Attrs(func(attr slog.Attr) bool {
-		args = append(args, attr.Key, attr.Value.Any())
-		return true
-	})
+	// Clone the record since slog may reuse it after Handle returns
+	cloned := record.Clone()
 
 	// Try to send to channel, drop if full to prevent blocking
 	select {
 	case h.asyncLogger.entries <- logEntry{
-		ctx:   ctx,
-		level: record.Level,
-		msg:   record.Message,
-		args:  args,
+		ctx:     ctx,
+		record:  cloned,
+		handler: h.baseHandler,
 	}:
 		// Successfully queued
 		return nil

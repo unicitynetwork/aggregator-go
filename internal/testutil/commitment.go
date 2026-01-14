@@ -59,6 +59,15 @@ func CreateTestCertificationRequest(t *testing.T, baseData string) *models.Certi
 	return models.NewCertificationRequest(stateID, certData)
 }
 
+// CreateTestCertificationRequests creates multiple test commitments with unique IDs.
+func CreateTestCertificationRequests(t *testing.T, count int, prefix string) []*models.CertificationRequest {
+	commitments := make([]*models.CertificationRequest, count)
+	for i := 0; i < count; i++ {
+		commitments[i] = CreateTestCertificationRequest(t, fmt.Sprintf("%s_%d", prefix, i))
+	}
+	return commitments
+}
+
 // CreateTestCommitment creates a valid, signed commitment for testing
 func CreateTestCommitment(t *testing.T, baseData string) *v1.Commitment {
 	privateKey, err := btcec.NewPrivateKey()

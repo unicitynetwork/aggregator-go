@@ -121,7 +121,7 @@ func TestAggregatorRecordV1Serialization(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, bsonRecord)
 
-	// Verify RequestID and TransactionHash in BSON format
+	// Verify StateID and TransactionHash in BSON format
 	require.Equal(t, string(originalRequestID), bsonRecord.RequestID)
 	require.Equal(t, string(originalTransactionHash), bsonRecord.TransactionHash)
 
@@ -130,7 +130,7 @@ func TestAggregatorRecordV1Serialization(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, unmarshaledRecord)
 
-	// Verify RequestID and TransactionHash are preserved
+	// Verify StateID and TransactionHash are preserved
 	require.Equal(t, originalRequestID, unmarshaledRecord.RequestID)
 	require.Equal(t, originalTransactionHash, unmarshaledRecord.TransactionHash)
 	require.Equal(t, originalBlockNumber.String(), unmarshaledRecord.BlockNumber.String())

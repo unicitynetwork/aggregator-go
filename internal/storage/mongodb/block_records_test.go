@@ -35,6 +35,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -45,8 +46,8 @@ const (
 )
 
 // setupTestDB creates a test database connection using Testcontainers
-func setupTestDB(t *testing.T) (*mongo.Database, func()) {
-	ctx := context.Background()
+func setupTestDB(t *testing.T) *mongo.Database {
+	ctx := t.Context()
 
 	// Create MongoDB container
 	mongoContainer, err := mongodb.Run(ctx, "mongo:7.0")
@@ -97,8 +98,9 @@ func setupTestDB(t *testing.T) (*mongo.Database, func()) {
 			t.Logf("Failed to terminate MongoDB container: %v", err)
 		}
 	}
+	t.Cleanup(cleanup)
 
-	return db, cleanup
+	return db
 }
 
 // createTestBlockRecords creates a test BlockRecords instance
@@ -111,9 +113,7 @@ func createTestBlockRecords(blockNumber *api.BigInt, stateIDs []api.StateID) *mo
 }
 
 func TestBlockRecordsStorage_Store(t *testing.T) {
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
-
+	db := setupTestDB(t)
 	storage := NewBlockRecordsStorage(db)
 	ctx := context.Background()
 
@@ -362,9 +362,7 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 }
 
 func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
-
+	db := setupTestDB(t)
 	storage := NewBlockRecordsStorage(db)
 	ctx := context.Background()
 
@@ -376,9 +374,9 @@ func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
 	}
 
 	t.Run("should return nil when no block records exist", func(t *testing.T) {
-		num, err := storage.GetLatestBlock(ctx)
-		require.NoError(t, err, "GetLatestBlock should not return an error when empty")
-		assert.Nil(t, num, "GetLatestBlock should return nil when no records exist")
+		num, err := storage.GetLatestBlockNumber(ctx)
+		require.NoError(t, err, "GetLatestBlockNumber should not return an error when empty")
+		assert.Nil(t, num, "GetLatestBlockNumber should return nil when no records exist")
 	})
 
 	t.Run("should return latest block with single record", func(t *testing.T) {
@@ -389,7 +387,7 @@ func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
 		require.NoError(t, err)
 
 		// Get latest
-		latestNum, err := storage.GetLatestBlock(ctx)
+		latestNum, err := storage.GetLatestBlockNumber(ctx)
 		require.NoError(t, err, "GetLatestNumber should not return an error")
 		require.NotNil(t, latestNum, "Latest number should not be nil")
 
@@ -415,12 +413,12 @@ func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
 		}
 
 		// Get latest - should be block number 130
-		latestBlock, err := storage.GetLatestBlock(ctx)
+		latestBlock, err := storage.GetLatestBlockNumber(ctx)
 		require.NoError(t, err, "GetLatestNumber should not return an error")
 		require.NotNil(t, latestBlock, "Latest number should not be nil")
 
 		expectedLatest := api.NewBigInt(big.NewInt(130))
-		assert.Equal(t, 0, expectedLatest.Cmp(latestBlock.BlockNumber.Int), "Should get latest block number")
+		assert.Equal(t, 0, expectedLatest.Cmp(latestBlock.Int), "Should get latest block number")
 	})
 
 	t.Run("should handle decimal128 sorting correctly for large numbers", func(t *testing.T) {
@@ -449,17 +447,16 @@ func TestBlockRecordsStorage_GetLatestBlock(t *testing.T) {
 		}
 
 		// Get latest
-		latestBlock, err := storage.GetLatestBlock(ctx)
+		latestBlock, err := storage.GetLatestBlockNumber(ctx)
 		require.NoError(t, err, "GetLatestNumber should not return an error")
 		require.NotNil(t, latestBlock, "Latest number should not be nil")
 
-		assert.Equal(t, 0, expectedLatest.Cmp(latestBlock.BlockNumber.Int), "Should get latest block number")
+		assert.Equal(t, 0, expectedLatest.Cmp(latestBlock.Int), "Should get latest block number")
 	})
 }
 
 func TestBlockRecordsStorage_GetNextBlock(t *testing.T) {
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
+	db := setupTestDB(t)
 
 	storage := NewBlockRecordsStorage(db)
 	ctx := context.Background()
@@ -568,8 +565,7 @@ func TestBlockRecordsStorage_GetNextBlock(t *testing.T) {
 }
 
 func TestBlockRecordsStorage_Store_Integration(t *testing.T) {
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
+	db := setupTestDB(t)
 
 	storage := NewBlockRecordsStorage(db)
 	ctx := context.Background()
@@ -626,7 +622,7 @@ func TestBlockRecordsStorage_Store_Integration(t *testing.T) {
 		// Attempt to store the second record with the same block number
 		err = storage.Store(ctx, records2)
 		assert.Error(t, err, "Second store should return an error due to unique index")
-		assert.Contains(t, err.Error(), "failed to store block records")
+		assert.ErrorIs(t, err, interfaces.ErrDuplicateKey, "Error should wrap ErrDuplicateKey")
 	})
 }
 

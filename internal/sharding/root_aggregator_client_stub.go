@@ -10,6 +10,7 @@ import (
 type RootAggregatorClientStub struct {
 	mu                 sync.Mutex
 	submissionCount    int
+	submissionAttempts int
 	returnedProofCount int
 	submissions        map[int]*api.SubmitShardRootRequest // shardID => last request
 	submittedRootHash  api.HexBytes
@@ -26,6 +27,7 @@ func (m *RootAggregatorClientStub) SubmitShardRoot(ctx context.Context, request 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.submissionAttempts++
 	if m.submissionError != nil {
 		return m.submissionError
 	}
@@ -52,11 +54,20 @@ func (m *RootAggregatorClientStub) GetShardProof(ctx context.Context, request *a
 	return nil, nil
 }
 
+func (m *RootAggregatorClientStub) CheckHealth(ctx context.Context) error {
+	return nil
+}
+
 func (m *RootAggregatorClientStub) SubmissionCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	return m.submissionCount
+}
+
+func (m *RootAggregatorClientStub) SubmissionAttempts() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.submissionAttempts
 }
 
 func (m *RootAggregatorClientStub) ProofCount() int {

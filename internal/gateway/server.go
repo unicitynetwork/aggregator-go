@@ -2,11 +2,15 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/unicitynetwork/bft-go-base/types"
+	"golang.org/x/net/http2"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
@@ -36,6 +40,7 @@ type Service interface {
 	GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error)
 	GetBlockRecords(ctx context.Context, req *api.GetBlockRecords) (*api.GetBlockRecordsResponse, error)
 	GetHealthStatus(ctx context.Context) (*api.HealthStatus, error)
+	PutTrustBase(ctx context.Context, req *types.RootTrustBaseV1) error
 
 	// Parent mode specific methods (will return errors in standalone mode)
 	SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) (*api.SubmitShardRootResponse, error)
@@ -84,6 +89,18 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 		MaxHeaderBytes: 1 << 20, // 1MB
 	}
 
+	if cfg.Server.EnableTLS {
+		gatewayLogger := logger.WithComponent("gateway")
+		h2Config := &http2.Server{
+			MaxConcurrentStreams: uint32(cfg.Server.HTTP2MaxConcurrentStreams),
+		}
+		if err := http2.ConfigureServer(server.httpServer, h2Config); err != nil {
+			gatewayLogger.Warn("Failed to configure HTTP/2 server", "error", err.Error())
+		} else {
+			gatewayLogger.Info("Configured HTTP/2 server", "maxConcurrentStreams", cfg.Server.HTTP2MaxConcurrentStreams)
+		}
+	}
+
 	return server
 }
 
@@ -91,6 +108,7 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 func (s *Server) setupRoutes() {
 	// Health endpoint
 	s.router.GET("/health", s.handleHealth)
+	s.router.PUT("/api/v1/trustbases", s.handlePutTrustBase)
 
 	// JSON-RPC endpoint
 	s.router.POST("/", gin.WrapH(s.rpcServer))
@@ -122,7 +140,7 @@ func (s *Server) setupJSONRPCHandlers() {
 	// Add middleware
 	s.rpcServer.AddMiddleware(jsonrpc.RequestIDMiddleware())
 	s.rpcServer.AddMiddleware(jsonrpc.LoggingMiddleware(s.logger))
-	s.rpcServer.AddMiddleware(jsonrpc.TimeoutMiddleware(30 * time.Second))
+	s.rpcServer.AddMiddleware(jsonrpc.TimeoutMiddleware(30*time.Second, s.logger))
 
 	// Register handlers based on mode
 	if s.config.Sharding.Mode.IsParent() {
@@ -175,7 +193,39 @@ func (s *Server) handleHealth(c *gin.Context) {
 		return
 	}
 
+	// Return 503 if unhealthy so load balancers can remove from rotation
+	if status.Status == "unhealthy" {
+		c.JSON(http.StatusServiceUnavailable, status)
+		return
+	}
+
 	c.JSON(http.StatusOK, status)
+}
+
+func (s *Server) handlePutTrustBase(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	jsonData, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		s.logger.WithContext(ctx).Error("Failed to read request body", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	var trustBase *types.RootTrustBaseV1
+	if err := json.Unmarshal(jsonData, &trustBase); err != nil {
+		s.logger.WithContext(ctx).Warn("Failed to parse trust base from request body", "error", err.Error())
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to parse trust base from request body"})
+		return
+	}
+
+	if err := s.service.PutTrustBase(ctx, trustBase); err != nil {
+		s.logger.WithContext(ctx).Warn("Failed to store trust base", "error", err.Error())
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}) // make the actual error visible to client
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{})
 }
 
 // handleDocs handles the API documentation endpoint

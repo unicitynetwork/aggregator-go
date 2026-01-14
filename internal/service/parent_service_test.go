@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
@@ -21,12 +22,13 @@ import (
 // ParentServiceTestSuite is the test suite for parent aggregator service
 type ParentServiceTestSuite struct {
 	suite.Suite
-	cfg     *config.Config
-	logger  *logger.Logger
-	storage *mongodb.Storage
-	cleanup func()
-	service *ParentAggregatorService
-	prm     *round.ParentRoundManager
+	cfg      *config.Config
+	logger   *logger.Logger
+	storage  *mongodb.Storage
+	cleanup  func()
+	service  *ParentAggregatorService
+	prm      *round.ParentRoundManager
+	eventBus *events.EventBus
 }
 
 type staticLeaderSelector struct {
@@ -46,6 +48,8 @@ func (suite *ParentServiceTestSuite) SetupSuite() {
 	var err error
 	suite.logger, err = logger.New("info", "text", "stdout", false)
 	require.NoError(suite.T(), err, "Should create logger")
+
+	suite.eventBus = events.NewEventBus(suite.logger)
 
 	suite.cfg = &config.Config{
 		Sharding: config.ShardingConfig{
@@ -80,7 +84,8 @@ func (suite *ParentServiceTestSuite) SetupTest() {
 
 	// Create parent round manager
 	var err error
-	suite.prm, err = round.NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage)
+	parentSMT := smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength))
+	suite.prm, err = round.NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, parentSMT)
 	require.NoError(suite.T(), err, "Should create parent round manager")
 	require.NotNil(suite.T(), suite.prm, "Parent round manager should not be nil")
 

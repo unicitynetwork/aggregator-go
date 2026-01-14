@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -37,7 +38,11 @@ func (brs *BlockRecordsStorage) Store(ctx context.Context, records *models.Block
 	if err != nil {
 		return fmt.Errorf("failed to convert block records to BSON: %w", err)
 	}
-	if _, err = brs.collection.InsertOne(ctx, recordsBSON); err != nil {
+	_, err = brs.collection.InsertOne(ctx, recordsBSON)
+	if err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return fmt.Errorf("block records already exists: %w", interfaces.ErrDuplicateKey)
+		}
 		return fmt.Errorf("failed to store block records: %w", err)
 	}
 	return nil
@@ -122,24 +127,28 @@ func (brs *BlockRecordsStorage) GetNextBlock(ctx context.Context, blockNumber *a
 	return blockRecord, nil
 }
 
-// GetLatestBlock retrieves the latest block
-func (brs *BlockRecordsStorage) GetLatestBlock(ctx context.Context) (*models.BlockRecords, error) {
-	opts := options.FindOne().SetSort(bson.D{{Key: "blockNumber", Value: -1}})
+// GetLatestBlockNumber retrieves the latest block number
+func (brs *BlockRecordsStorage) GetLatestBlockNumber(ctx context.Context) (*api.BigInt, error) {
+	opts := options.FindOne().
+		SetProjection(bson.M{"blockNumber": 1}).
+		SetSort(bson.D{{Key: "blockNumber", Value: -1}})
 
-	var result models.BlockRecordsBSON
-	err := brs.collection.FindOne(ctx, bson.M{}, opts).Decode(&result)
-	if err != nil {
+	var result struct {
+		BlockNumber primitive.Decimal128 `bson:"blockNumber"`
+	}
+
+	if err := brs.collection.FindOne(ctx, bson.M{}, opts).Decode(&result); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("failed to get latest block record: %w", err)
+		return nil, fmt.Errorf("failed to get latest block record number: %w", err)
 	}
 
-	blockRecord, err := result.FromBSON()
+	blockNumber, _, err := result.BlockNumber.BigInt()
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+		return nil, fmt.Errorf("failed to parse blockNumber: %w", err)
 	}
-	return blockRecord, nil
+	return api.NewBigInt(blockNumber), nil
 }
 
 // CreateIndexes creates necessary indexes for the block records collection

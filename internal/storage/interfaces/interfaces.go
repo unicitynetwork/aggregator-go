@@ -2,10 +2,16 @@ package interfaces
 
 import (
 	"context"
+	"errors"
+
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
+
+// ErrDuplicateKey is returned when a storage operation fails due to a duplicate key.
+var ErrDuplicateKey = errors.New("duplicate key error")
 
 // CommitmentQueue handles commitment queue operations
 type CommitmentQueue interface {
@@ -36,6 +42,14 @@ type CommitmentQueue interface {
 	// CountUnprocessed returns the number of unprocessed certification requests
 	CountUnprocessed(ctx context.Context) (int64, error)
 
+	// GetAllPending retrieves all pending (unacknowledged) commitments
+	// Used to cleanup already-processed pending commitments on startup
+	GetAllPending(ctx context.Context) ([]*models.CertificationRequest, error)
+
+	// GetByRequestIDs retrieves commitments matching the given request IDs.
+	// Streams through data in batches to avoid loading everything into memory.
+	GetByRequestIDs(ctx context.Context, requestIDs []api.StateID) (map[string]*models.CertificationRequest, error)
+
 	// Lifecycle methods
 	Initialize(ctx context.Context) error
 	Close(ctx context.Context) error
@@ -43,8 +57,8 @@ type CommitmentQueue interface {
 
 // CertificationRequestAck represents the metadata required to acknowledge a commitment.
 type CertificationRequestAck struct {
-	RequestID api.RequestID
-	StreamID  string
+	StateID  api.StateID
+	StreamID string
 }
 
 // AggregatorRecordStorage handles finalized aggregator records
@@ -63,6 +77,9 @@ type AggregatorRecordStorage interface {
 
 	// Count returns the total number of records
 	Count(ctx context.Context) (int64, error)
+
+	// GetExistingRequestIDs returns which of the given request IDs already exist
+	GetExistingRequestIDs(ctx context.Context, requestIDs []string) (map[string]bool, error)
 }
 
 // BlockStorage handles blockchain block storage
@@ -73,10 +90,10 @@ type BlockStorage interface {
 	// GetByNumber retrieves a block by number
 	GetByNumber(ctx context.Context, blockNumber *api.BigInt) (*models.Block, error)
 
-	// GetLatest retrieves the latest block
+	// GetLatest retrieves the latest finalized block
 	GetLatest(ctx context.Context) (*models.Block, error)
 
-	// GetLatestNumber retrieves the latest block number
+	// GetLatestNumber retrieves the latest finalized block number
 	GetLatestNumber(ctx context.Context) (*api.BigInt, error)
 
 	// GetLatestByRootHash retrieves the latest block with the given root hash
@@ -87,6 +104,12 @@ type BlockStorage interface {
 
 	// GetRange retrieves blocks in a range
 	GetRange(ctx context.Context, fromBlock, toBlock *api.BigInt) ([]*models.Block, error)
+
+	// SetFinalized marks a block as finalized or unfinalized
+	SetFinalized(ctx context.Context, blockNumber *api.BigInt, finalized bool) error
+
+	// GetUnfinalized returns all unfinalized blocks (should be at most 1)
+	GetUnfinalized(ctx context.Context) ([]*models.Block, error)
 }
 
 // SmtStorage handles Sparse Merkle Tree node storage
@@ -120,6 +143,9 @@ type SmtStorage interface {
 
 	// GetChunked retrieves SMT nodes in chunks for efficient loading
 	GetChunked(ctx context.Context, offset, limit int) ([]*models.SmtNode, error)
+
+	// GetExistingKeys returns which of the given keys already exist in the database
+	GetExistingKeys(ctx context.Context, keys []string) (map[string]bool, error)
 }
 
 // BlockRecordsStorage handles block to state ID mappings
@@ -140,8 +166,8 @@ type BlockRecordsStorage interface {
 	// If blockNumber is nil then returns the very first block.
 	GetNextBlock(ctx context.Context, blockNumber *api.BigInt) (*models.BlockRecords, error)
 
-	// GetLatestBlock retrieves the latest block
-	GetLatestBlock(ctx context.Context) (*models.BlockRecords, error)
+	// GetLatestBlockNumber retrieves the latest block
+	GetLatestBlockNumber(ctx context.Context) (*api.BigInt, error)
 }
 
 // LeadershipStorage handles high availability leadership state
@@ -162,6 +188,14 @@ type LeadershipStorage interface {
 	IsLeader(ctx context.Context, lockID string, serverID string) (bool, error)
 }
 
+var ErrTrustBaseNotFound = errors.New("trust base not found")
+var ErrTrustBaseAlreadyExists = errors.New("trust base already exists")
+
+type TrustBaseStorage interface {
+	Store(ctx context.Context, trustBase types.RootTrustBase) error
+	GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error)
+}
+
 // Storage handles persistent data storage
 type Storage interface {
 	AggregatorRecordStorage() AggregatorRecordStorage
@@ -169,6 +203,7 @@ type Storage interface {
 	SmtStorage() SmtStorage
 	BlockRecordsStorage() BlockRecordsStorage
 	LeadershipStorage() LeadershipStorage
+	TrustBaseStorage() TrustBaseStorage
 
 	Initialize(ctx context.Context) error
 	Ping(ctx context.Context) error

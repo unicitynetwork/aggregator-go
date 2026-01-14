@@ -41,17 +41,18 @@ type ChainConfig struct {
 
 // ServerConfig holds HTTP server configuration
 type ServerConfig struct {
-	Port             string        `mapstructure:"port"`
-	Host             string        `mapstructure:"host"`
-	ReadTimeout      time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout     time.Duration `mapstructure:"write_timeout"`
-	IdleTimeout      time.Duration `mapstructure:"idle_timeout"`
-	ConcurrencyLimit int           `mapstructure:"concurrency_limit"`
-	EnableDocs       bool          `mapstructure:"enable_docs"`
-	EnableCORS       bool          `mapstructure:"enable_cors"`
-	TLSCertFile      string        `mapstructure:"tls_cert_file"`
-	TLSKeyFile       string        `mapstructure:"tls_key_file"`
-	EnableTLS        bool          `mapstructure:"enable_tls"`
+	Port                      string        `mapstructure:"port"`
+	Host                      string        `mapstructure:"host"`
+	ReadTimeout               time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout              time.Duration `mapstructure:"write_timeout"`
+	IdleTimeout               time.Duration `mapstructure:"idle_timeout"`
+	ConcurrencyLimit          int           `mapstructure:"concurrency_limit"`
+	EnableDocs                bool          `mapstructure:"enable_docs"`
+	EnableCORS                bool          `mapstructure:"enable_cors"`
+	TLSCertFile               string        `mapstructure:"tls_cert_file"`
+	TLSKeyFile                string        `mapstructure:"tls_key_file"`
+	EnableTLS                 bool          `mapstructure:"enable_tls"`
+	HTTP2MaxConcurrentStreams int           `mapstructure:"http2_max_concurrent_streams"`
 }
 
 // DatabaseConfig holds MongoDB configuration
@@ -84,6 +85,12 @@ type LoggingConfig struct {
 	EnableJSON      bool   `mapstructure:"enable_json"`
 	EnableAsync     bool   `mapstructure:"enable_async"`
 	AsyncBufferSize int    `mapstructure:"async_buffer_size"`
+	// File logging with rotation
+	FilePath        string `mapstructure:"file_path"`        // Path to log file (empty = no file logging)
+	MaxSizeMB       int    `mapstructure:"max_size_mb"`      // Max size in MB before rotation (default 100)
+	MaxBackups      int    `mapstructure:"max_backups"`      // Max number of old log files to retain (default 30)
+	MaxAgeDays      int    `mapstructure:"max_age_days"`     // Max days to retain old log files (default 30)
+	CompressBackups bool   `mapstructure:"compress_backups"` // Compress rotated log files (default true)
 }
 
 // ProcessingConfig holds batch processing configuration
@@ -110,6 +117,7 @@ type RedisConfig struct {
 // StorageConfig holds storage layer configuration
 type StorageConfig struct {
 	UseRedisForCommitments bool          `mapstructure:"use_redis_for_commitments"`
+	RedisStreamName        string        `mapstructure:"redis_stream_name"`
 	RedisFlushInterval     time.Duration `mapstructure:"redis_flush_interval"`
 	RedisMaxBatchSize      int           `mapstructure:"redis_max_batch_size"`
 	RedisCleanupInterval   time.Duration `mapstructure:"redis_cleanup_interval"`
@@ -157,9 +165,10 @@ func (sm ShardingMode) IsChild() bool {
 
 // ShardingConfig holds sharding configuration
 type ShardingConfig struct {
-	Mode          ShardingMode `mapstructure:"mode"`            // Operating mode: standalone, parent, or child
-	ShardIDLength int          `mapstructure:"shard_id_length"` // Bit length for shard IDs (e.g., 4 bits = 16 shards)
-	Child         ChildConfig  `mapstructure:"child"`           // child aggregator config
+	Mode                       ShardingMode  `mapstructure:"mode"`                          // Operating mode: standalone, parent, or child
+	ShardIDLength              int           `mapstructure:"shard_id_length"`               // Bit length for shard IDs (e.g., 4 bits = 16 shards)
+	ParentCollectPhaseDuration time.Duration `mapstructure:"parent_collect_phase_duration"` // Collection window for parent mode before sending to BFT
+	Child                      ChildConfig   `mapstructure:"child"`                         // child aggregator config
 }
 
 type ChildConfig struct {
@@ -200,16 +209,37 @@ func (c ChildConfig) Validate() error {
 }
 
 type BFTConfig struct {
-	Enabled   bool                              `mapstructure:"enabled"`
-	KeyConf   *partition.KeyConf                `mapstructure:"key_conf"`
-	ShardConf *types.PartitionDescriptionRecord `mapstructure:"shard_conf"`
-	TrustBase types.RootTrustBase               `mapstructure:"trust_base"`
+	Enabled    bool                              `mapstructure:"enabled"`
+	KeyConf    *partition.KeyConf                `mapstructure:"key_conf"`
+	ShardConf  *types.PartitionDescriptionRecord `mapstructure:"shard_conf"`
+	TrustBases []types.RootTrustBaseV1           `mapstructure:"trust_bases"`
+
 	// Peer configuration
-	Address                    string   `mapstructure:"address"`
-	AnnounceAddresses          []string `mapstructure:"announce_addresses"`
-	BootstrapAddresses         []string `mapstructure:"bootstrap_addresses"`
-	BootstrapConnectRetry      int      `mapstructure:"bootstrap_connect_retry"`
-	BootstrapConnectRetryDelay int      `mapstructure:"bootstrap_connect_retry_delay"`
+	Address                    string        `mapstructure:"address"`
+	AnnounceAddresses          []string      `mapstructure:"announce_addresses"`
+	BootstrapAddresses         []string      `mapstructure:"bootstrap_addresses"`
+	BootstrapConnectRetry      int           `mapstructure:"bootstrap_connect_retry"`
+	BootstrapConnectRetryDelay int           `mapstructure:"bootstrap_connect_retry_delay"`
+	StubDelay                  time.Duration `mapstructure:"stub_delay"` // Delay for BFT stub (testing only)
+
+	// HeartbeatInterval how often to perform the inactivity check.
+	HeartbeatInterval time.Duration `mapstructure:"heartbeat_interval"`
+	// InactivityTimeout duration of inactivity after which a new handshake must be sent.
+	InactivityTimeout time.Duration `mapstructure:"inactivity_timeout"`
+}
+
+func (c *BFTConfig) Validate() error {
+	if c.Enabled {
+		if len(c.BootstrapAddresses) == 0 {
+			return errors.New("BFT_BOOTSTRAP_ADDRESSES must be specified when BFT is enabled")
+		}
+		for _, addr := range c.BootstrapAddresses {
+			if _, err := peer.AddrInfoFromString(addr); err != nil {
+				return fmt.Errorf("invalid bootstrap address: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 // Load loads configuration from environment variables with defaults
@@ -221,17 +251,18 @@ func Load() (*Config, error) {
 			ForkID:  getEnvOrDefault("CHAIN_FORK_ID", "testnet"),
 		},
 		Server: ServerConfig{
-			Port:             getEnvOrDefault("PORT", "3000"),
-			Host:             getEnvOrDefault("HOST", "0.0.0.0"),
-			ReadTimeout:      getEnvDurationOrDefault("READ_TIMEOUT", "30s"),
-			WriteTimeout:     getEnvDurationOrDefault("WRITE_TIMEOUT", "30s"),
-			IdleTimeout:      getEnvDurationOrDefault("IDLE_TIMEOUT", "120s"),
-			ConcurrencyLimit: getEnvIntOrDefault("CONCURRENCY_LIMIT", 1000),
-			EnableDocs:       getEnvBoolOrDefault("ENABLE_DOCS", true),
-			EnableCORS:       getEnvBoolOrDefault("ENABLE_CORS", true),
-			TLSCertFile:      getEnvOrDefault("TLS_CERT_FILE", ""),
-			TLSKeyFile:       getEnvOrDefault("TLS_KEY_FILE", ""),
-			EnableTLS:        getEnvBoolOrDefault("ENABLE_TLS", false),
+			Port:                      getEnvOrDefault("PORT", "3000"),
+			Host:                      getEnvOrDefault("HOST", "0.0.0.0"),
+			ReadTimeout:               getEnvDurationOrDefault("READ_TIMEOUT", "30s"),
+			WriteTimeout:              getEnvDurationOrDefault("WRITE_TIMEOUT", "30s"),
+			IdleTimeout:               getEnvDurationOrDefault("IDLE_TIMEOUT", "120s"),
+			ConcurrencyLimit:          getEnvIntOrDefault("CONCURRENCY_LIMIT", 1000),
+			EnableDocs:                getEnvBoolOrDefault("ENABLE_DOCS", true),
+			EnableCORS:                getEnvBoolOrDefault("ENABLE_CORS", true),
+			TLSCertFile:               getEnvOrDefault("TLS_CERT_FILE", ""),
+			TLSKeyFile:                getEnvOrDefault("TLS_KEY_FILE", ""),
+			EnableTLS:                 getEnvBoolOrDefault("ENABLE_TLS", false),
+			HTTP2MaxConcurrentStreams: getEnvIntOrDefault("HTTP2_MAX_CONCURRENT_STREAMS", 4096),
 		},
 		Database: DatabaseConfig{
 			URI:                    getEnvOrDefault("MONGODB_URI", "mongodb://localhost:27017"),
@@ -258,6 +289,12 @@ func Load() (*Config, error) {
 			EnableJSON:      getEnvBoolOrDefault("LOG_ENABLE_JSON", true),
 			EnableAsync:     getEnvBoolOrDefault("LOG_ENABLE_ASYNC", true),
 			AsyncBufferSize: getEnvIntOrDefault("LOG_ASYNC_BUFFER_SIZE", 10000),
+			// File logging with rotation
+			FilePath:        getEnvOrDefault("LOG_FILE_PATH", ""),
+			MaxSizeMB:       getEnvIntOrDefault("LOG_MAX_SIZE_MB", 100),
+			MaxBackups:      getEnvIntOrDefault("LOG_MAX_BACKUPS", 30),
+			MaxAgeDays:      getEnvIntOrDefault("LOG_MAX_AGE_DAYS", 30),
+			CompressBackups: getEnvBoolOrDefault("LOG_COMPRESS_BACKUPS", true),
 		},
 		Processing: ProcessingConfig{
 			BatchLimit:             getEnvIntOrDefault("BATCH_LIMIT", 1000),
@@ -278,14 +315,16 @@ func Load() (*Config, error) {
 		},
 		Storage: StorageConfig{
 			UseRedisForCommitments: getEnvBoolOrDefault("USE_REDIS_FOR_COMMITMENTS", false),
+			RedisStreamName:        getEnvOrDefault("REDIS_STREAM_NAME", "commitments"),
 			RedisFlushInterval:     getEnvDurationOrDefault("REDIS_FLUSH_INTERVAL", "100ms"),
 			RedisMaxBatchSize:      getEnvIntOrDefault("REDIS_MAX_BATCH_SIZE", 5000),
 			RedisCleanupInterval:   getEnvDurationOrDefault("REDIS_CLEANUP_INTERVAL", "5m"),
 			RedisMaxStreamLength:   int64(getEnvIntOrDefault("REDIS_MAX_STREAM_LENGTH", 1000000)),
 		},
 		Sharding: ShardingConfig{
-			Mode:          ShardingMode(getEnvOrDefault("SHARDING_MODE", "standalone")),
-			ShardIDLength: getEnvIntOrDefault("SHARD_ID_LENGTH", 4),
+			Mode:                       ShardingMode(getEnvOrDefault("SHARDING_MODE", "standalone")),
+			ShardIDLength:              getEnvIntOrDefault("SHARD_ID_LENGTH", 4),
+			ParentCollectPhaseDuration: getEnvDurationOrDefault("PARENT_COLLECT_PHASE_DURATION", "200ms"),
 			Child: ChildConfig{
 				ParentRpcAddr:      getEnvOrDefault("SHARDING_CHILD_PARENT_RPC_ADDR", "http://localhost:3009"),
 				ShardID:            getEnvIntOrDefault("SHARDING_CHILD_SHARD_ID", 0),
@@ -298,9 +337,11 @@ func Load() (*Config, error) {
 		Enabled:                    getEnvBoolOrDefault("BFT_ENABLED", true),
 		Address:                    getEnvOrDefault("BFT_ADDRESS", "/ip4/0.0.0.0/tcp/9000"),
 		AnnounceAddresses:          strings.Split(getEnvOrDefault("BFT_ANNOUNCE_ADDRESSES", ""), ","),
-		BootstrapAddresses:         strings.Split(getEnvOrDefault("BFT_BOOTSTRAP_ADDRESSES", "/ip4/127.0.0.1/tcp/26662/p2p/16Uiu2HAm6eQMr2sQVbcWZsPPbpc2Su7AnnMVGHpC23PUzGTAATnp"), ","),
+		BootstrapAddresses:         strings.Split(getEnvOrDefault("BFT_BOOTSTRAP_ADDRESSES", ""), ","),
 		BootstrapConnectRetry:      getEnvIntOrDefault("BFT_BOOTSTRAP_CONNECT_RETRY", 3),
 		BootstrapConnectRetryDelay: getEnvIntOrDefault("BFT_BOOTSTRAP_CONNECT_RETRY_DELAY", 5),
+		HeartbeatInterval:          getEnvDurationOrDefault("BFT_HEARTBEAT_INTERVAL", "1s"),
+		InactivityTimeout:          getEnvDurationOrDefault("BFT_INACTIVITY_TIMEOUT", "5s"),
 	}
 	if config.BFT.Enabled {
 		if err := loadConf(getEnvOrDefault("BFT_KEY_CONF_FILE", "bft-config/keys.json"), &config.BFT.KeyConf); err != nil {
@@ -309,11 +350,15 @@ func Load() (*Config, error) {
 		if err := loadConf(getEnvOrDefault("BFT_SHARD_CONF_FILE", "bft-config/shard-conf-7_0.json"), &config.BFT.ShardConf); err != nil {
 			return nil, fmt.Errorf("failed to load shard configuration: %w", err)
 		}
-		trustBaseV1 := types.RootTrustBaseV1{}
-		if err := loadConf(getEnvOrDefault("BFT_TRUST_BASE_FILE", "bft-config/trust-base.json"), &trustBaseV1); err != nil {
-			return nil, fmt.Errorf("failed to load trust base configuration: %w", err)
+		trustBaseFiles := strings.Split(getEnvOrDefault("BFT_TRUST_BASE_FILES", "bft-config/trust-base.json"), ",")
+		config.BFT.TrustBases = make([]types.RootTrustBaseV1, 0, len(trustBaseFiles))
+		for _, file := range trustBaseFiles {
+			trustBaseV1 := types.RootTrustBaseV1{}
+			if err := loadConf(file, &trustBaseV1); err != nil {
+				return nil, fmt.Errorf("failed to load trust base configuration from %s: %w", file, err)
+			}
+			config.BFT.TrustBases = append(config.BFT.TrustBases, trustBaseV1)
 		}
-		config.BFT.TrustBase = &trustBaseV1
 	}
 
 	if err := config.Validate(); err != nil {
@@ -351,6 +396,9 @@ func (c *Config) Validate() error {
 	if c.Server.EnableTLS && (c.Server.TLSCertFile == "" || c.Server.TLSKeyFile == "") {
 		return fmt.Errorf("TLS cert and key files must be provided when TLS is enabled")
 	}
+	if c.Server.EnableTLS && c.Server.HTTP2MaxConcurrentStreams <= 0 {
+		return fmt.Errorf("HTTP/2 max concurrent streams must be positive when TLS is enabled")
+	}
 
 	// Validate log level
 	validLevels := []string{"debug", "info", "warn", "error", "fatal", "panic"}
@@ -369,6 +417,10 @@ func (c *Config) Validate() error {
 
 	if err := c.Sharding.Validate(); err != nil {
 		return fmt.Errorf("invalid sharding configuration: %w", err)
+	}
+
+	if err := c.BFT.Validate(); err != nil {
+		return err
 	}
 
 	return nil
@@ -448,17 +500,4 @@ func (c *BFTConfig) PeerConf() (*network.PeerConfiguration, error) {
 	}
 
 	return network.NewPeerConfiguration(c.Address, c.AnnounceAddresses, authKeyPair, bootNodes, bootstrapConnectRetry)
-}
-
-func (c *BFTConfig) GetRootNodes() (peer.IDSlice, error) {
-	nodes := c.TrustBase.GetRootNodes()
-	idSlice := make(peer.IDSlice, len(nodes))
-	for i, node := range nodes {
-		id, err := peer.Decode(node.NodeID)
-		if err != nil {
-			return nil, fmt.Errorf("invalid root node id in trust base: %w", err)
-		}
-		idSlice[i] = id
-	}
-	return idSlice, nil
 }

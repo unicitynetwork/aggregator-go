@@ -125,3 +125,25 @@ func TestRootAggregatorClient_InvalidJSON(t *testing.T) {
 	_, err := client.GetShardProof(context.Background(), &api.GetShardProofRequest{ShardID: 5})
 	require.ErrorContains(t, err, "decode response")
 }
+
+func TestRootAggregatorClient_CheckHealth_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/health", r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewRootAggregatorClient(server.URL)
+	require.NoError(t, client.CheckHealth(context.Background()))
+}
+
+func TestRootAggregatorClient_CheckHealth_Failure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "parent down", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	client := NewRootAggregatorClient(server.URL)
+	err := client.CheckHealth(context.Background())
+	require.ErrorContains(t, err, "parent health")
+}

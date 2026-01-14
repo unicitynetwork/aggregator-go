@@ -14,9 +14,9 @@ import (
 )
 
 // NewStorage creates commitment queue and storage based on configuration
-func NewStorage(cfg *config.Config, log *logger.Logger) (interfaces.CommitmentQueue, interfaces.Storage, error) {
+func NewStorage(ctx context.Context, cfg *config.Config, log *logger.Logger) (interfaces.CommitmentQueue, interfaces.Storage, error) {
 	// Always create MongoDB for persistence
-	mongoStorage, err := mongodb.NewStorage(*cfg)
+	mongoStorage, err := mongodb.NewStorage(ctx, *cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create MongoDB storage: %w", err)
 	}
@@ -70,8 +70,14 @@ func createRedisCommitmentQueue(cfg *config.Config, log *logger.Logger) (interfa
 		serverID = "aggregator-server"
 	}
 
+	// Get stream name (defaults to "commitments" if not set)
+	streamName := cfg.Storage.RedisStreamName
+	if streamName == "" {
+		streamName = "commitments"
+	}
+
 	// Create certification request storage
-	commitmentStorage := redis.NewCommitmentStorage(redisClient, serverID, batchConfig, log)
+	commitmentStorage := redis.NewCommitmentStorage(redisClient, streamName, serverID, batchConfig, log)
 
 	return commitmentStorage, nil
 }

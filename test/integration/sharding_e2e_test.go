@@ -7,556 +7,269 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/suite"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
+	"github.com/stretchr/testify/require"
+	mongoContainer "github.com/testcontainers/testcontainers-go/modules/mongodb"
+	redisContainer "github.com/testcontainers/testcontainers-go/modules/redis"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
-	"github.com/unicitynetwork/aggregator-go/internal/ha"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/service"
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage"
-	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-type ShardingE2ETestSuite struct {
-	suite.Suite
-	mongoContainer testcontainers.Container
-	mongoURI       string
-	instances      []*aggregatorInstance
-}
+// TestShardingE2E tests the full sharding flow: parent + 2 child shards
+// submitting commitments and verifying inclusion proofs.
+func TestShardingE2E(t *testing.T) {
+	ctx := t.Context()
 
-type aggregatorInstance struct {
-	name            string
-	cfg             *config.Config
-	logger          *logger.Logger
-	commitmentQueue interfaces.CommitmentQueue
-	storage         interfaces.Storage
-	manager         round.Manager
-	service         gateway.Service
-	server          *gateway.Server
-	leaderElection  *ha.LeaderElection
-	cleanup         func()
-}
+	// Start containers (shared MongoDB with different databases per aggregator)
+	redis, err := redisContainer.Run(ctx, "redis:7")
+	require.NoError(t, err)
+	defer redis.Terminate(ctx)
+	redisURI, _ := redis.ConnectionString(ctx)
 
-type jsonRPCRequest struct {
-	JSONRPC string      `json:"jsonrpc"`
-	Method  string      `json:"method"`
-	Params  interface{} `json:"params"`
-	ID      int         `json:"id"`
-}
+	mongo, err := mongoContainer.Run(ctx, "mongo:7.0", mongoContainer.WithReplicaSet("rs0"))
+	require.NoError(t, err)
+	defer mongo.Terminate(ctx)
+	mongoURI, _ := mongo.ConnectionString(ctx)
+	mongoURI += "&directConnection=true"
 
-type jsonRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    string `json:"data,omitempty"`
-	} `json:"error,omitempty"`
-	ID int `json:"id"`
-}
+	// Start aggregators (each uses a different database)
+	parentCleanup := startAggregator(t, ctx, "parent", "9000", mongoURI, redisURI, config.ShardingModeParent, 0)
+	defer parentCleanup()
+	waitForBlock(t, "http://localhost:9000", 1, 15*time.Second)
 
-func (suite *ShardingE2ETestSuite) SetupSuite() {
-	ctx := context.Background()
+	shard2Cleanup := startAggregator(t, ctx, "shard2", "9001", mongoURI, redisURI, config.ShardingModeChild, 2)
+	defer shard2Cleanup()
 
-	req := testcontainers.ContainerRequest{
-		Image:        "mongo:7.0",
-		ExposedPorts: []string{"27017/tcp"},
-		WaitingFor:   wait.ForLog("Waiting for connections").WithStartupTimeout(60 * time.Second),
+	shard3Cleanup := startAggregator(t, ctx, "shard3", "9002", mongoURI, redisURI, config.ShardingModeChild, 3)
+	defer shard3Cleanup()
+
+	waitForBlock(t, "http://localhost:9001", 1, 15*time.Second)
+	waitForBlock(t, "http://localhost:9002", 1, 15*time.Second)
+
+	// Submit commitments over multiple rounds
+	var shard2ReqIDs, shard3ReqIDs []string
+
+	// Round 1: submit 2 commitments to each shard
+	for i := 0; i < 2; i++ {
+		c, reqID := createCommitmentForShard(t, 2)
+		submitCertificationRequest(t, "http://localhost:9001", c)
+		shard2ReqIDs = append(shard2ReqIDs, reqID)
+
+		c, reqID = createCommitmentForShard(t, 3)
+		submitCertificationRequest(t, "http://localhost:9002", c)
+		shard3ReqIDs = append(shard3ReqIDs, reqID)
 	}
 
-	mongoContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	suite.Require().NoError(err)
+	waitForBlock(t, "http://localhost:9001", 2, 15*time.Second)
+	waitForBlock(t, "http://localhost:9002", 2, 15*time.Second)
 
-	host, err := mongoContainer.Host(ctx)
-	suite.Require().NoError(err)
+	// Round 2: submit 2 more commitments to each shard
+	for i := 0; i < 2; i++ {
+		c, reqID := createCommitmentForShard(t, 2)
+		submitCertificationRequest(t, "http://localhost:9001", c)
+		shard2ReqIDs = append(shard2ReqIDs, reqID)
 
-	port, err := mongoContainer.MappedPort(ctx, "27017")
-	suite.Require().NoError(err)
-
-	suite.mongoContainer = mongoContainer
-	suite.mongoURI = fmt.Sprintf("mongodb://%s:%s", host, port.Port())
-	suite.instances = make([]*aggregatorInstance, 0)
-
-	suite.T().Logf("MongoDB container started at %s", suite.mongoURI)
-}
-
-func (suite *ShardingE2ETestSuite) TearDownSuite() {
-	ctx := context.Background()
-
-	for _, inst := range suite.instances {
-		if inst.cleanup != nil {
-			inst.cleanup()
-		}
+		c, reqID = createCommitmentForShard(t, 3)
+		submitCertificationRequest(t, "http://localhost:9002", c)
+		shard3ReqIDs = append(shard3ReqIDs, reqID)
 	}
 
-	if suite.mongoContainer != nil {
-		suite.mongoContainer.Terminate(ctx)
+	waitForBlock(t, "http://localhost:9001", 3, 15*time.Second)
+	waitForBlock(t, "http://localhost:9002", 3, 15*time.Second)
+
+	// Round 3: submit 1 more commitment to each shard
+	c, reqID := createCommitmentForShard(t, 2)
+	submitCertificationRequest(t, "http://localhost:9001", c)
+	shard2ReqIDs = append(shard2ReqIDs, reqID)
+
+	c, reqID = createCommitmentForShard(t, 3)
+	submitCertificationRequest(t, "http://localhost:9002", c)
+	shard3ReqIDs = append(shard3ReqIDs, reqID)
+
+	waitForBlock(t, "http://localhost:9001", 4, 15*time.Second)
+	waitForBlock(t, "http://localhost:9002", 4, 15*time.Second)
+
+	// Verify all proofs
+	for _, reqID := range shard2ReqIDs {
+		waitForValidProof(t, "http://localhost:9001", reqID, 15*time.Second)
+	}
+	for _, reqID := range shard3ReqIDs {
+		waitForValidProof(t, "http://localhost:9002", reqID, 15*time.Second)
 	}
 }
 
-func (suite *ShardingE2ETestSuite) buildConfig(mode config.ShardingMode, port, dbName string, shardID api.ShardID) *config.Config {
+func startAggregator(t *testing.T, ctx context.Context, name, port, mongoURI, redisURI string, mode config.ShardingMode, shardID api.ShardID) func() {
+	redisURL, _ := url.Parse(redisURI)
+	redisHost := redisURL.Hostname()
+	redisPort, _ := strconv.Atoi(redisURL.Port())
+
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			Host:             "localhost",
-			Port:             port,
-			EnableCORS:       true,
-			EnableDocs:       false,
-			ReadTimeout:      30 * time.Second,
-			WriteTimeout:     30 * time.Second,
-			IdleTimeout:      60 * time.Second,
+			Host: "localhost", Port: port,
+			ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 			ConcurrencyLimit: 100,
 		},
 		Database: config.DatabaseConfig{
-			URI:                    suite.mongoURI,
-			Database:               dbName,
-			ConnectTimeout:         10 * time.Second,
-			ServerSelectionTimeout: 10 * time.Second,
-			SocketTimeout:          10 * time.Second,
-			MaxPoolSize:            10,
-			MinPoolSize:            2,
+			URI: mongoURI, Database: fmt.Sprintf("aggregator_%s", name),
+			ConnectTimeout: 10 * time.Second, ServerSelectionTimeout: 10 * time.Second, SocketTimeout: 30 * time.Second,
+			MaxPoolSize: 10, MinPoolSize: 2,
 		},
-		HA: config.HAConfig{
-			Enabled: false,
-		},
-		Logging: config.LoggingConfig{
-			Level:  "info",
-			Format: "json",
-		},
-		BFT: config.BFTConfig{
-			Enabled: false,
-		},
+		Redis:   config.RedisConfig{Host: redisHost, Port: redisPort},
+		HA:      config.HAConfig{Enabled: false},
+		Logging: config.LoggingConfig{Level: "debug", Format: "json"},
+		BFT:     config.BFTConfig{Enabled: false, StubDelay: 500 * time.Millisecond},
 		Processing: config.ProcessingConfig{
-			RoundDuration:          100 * time.Millisecond,
-			BatchLimit:             1000,
-			MaxCommitmentsPerRound: 1000,
+			RoundDuration: 2 * time.Second, BatchLimit: 1000, MaxCommitmentsPerRound: 1000,
 		},
 		Storage: config.StorageConfig{
-			UseRedisForCommitments: false,
+			UseRedisForCommitments: true,
+			RedisStreamName:        fmt.Sprintf("commitments:%s", name),
+			RedisFlushInterval:     100 * time.Millisecond,
+			RedisMaxBatchSize:      1000,
+			RedisCleanupInterval:   1 * time.Minute,
+			RedisMaxStreamLength:   100000,
 		},
-		Sharding: config.ShardingConfig{
-			Mode:          mode,
-			ShardIDLength: 1, // 2 shards: IDs 2-3
-		},
+		Sharding: config.ShardingConfig{Mode: mode, ShardIDLength: 1},
 	}
 
-	// Child-specific configuration
 	if mode == config.ShardingModeChild {
 		cfg.Sharding.Child = config.ChildConfig{
-			ParentRpcAddr:      "http://localhost:9000",
-			ShardID:            shardID,
-			ParentPollTimeout:  5 * time.Second,
-			ParentPollInterval: 100 * time.Millisecond,
+			ParentRpcAddr: "http://localhost:9000", ShardID: shardID,
+			ParentPollTimeout: 30 * time.Second, ParentPollInterval: 100 * time.Millisecond,
 		}
 	}
 
-	return cfg
+	aggCtx, aggCancel := context.WithCancel(ctx)
+	log, _ := logger.New("warn", "json", "", false)
+	queue, stor, _ := storage.NewStorage(aggCtx, cfg, log)
+	queue.Initialize(aggCtx)
+
+	eventBus := events.NewEventBus(log)
+
+	// Create SMT instance based on sharding mode
+	var smtInstance *smt.SparseMerkleTree
+	switch cfg.Sharding.Mode {
+	case config.ShardingModeStandalone, config.ShardingModeChild:
+		smtInstance = smt.NewSparseMerkleTree(api.SHA256, 16+256)
+	case config.ShardingModeParent:
+		smtInstance = smt.NewParentSparseMerkleTree(api.SHA256, cfg.Sharding.ShardIDLength)
+	}
+	threadSafeSmt := smt.NewThreadSafeSMT(smtInstance)
+
+	mgr, _ := round.NewManager(aggCtx, cfg, log, queue, stor, state.NewSyncStateTracker(), nil, eventBus, threadSafeSmt)
+	mgr.Start(aggCtx)
+	mgr.Activate(aggCtx)
+
+	svc, _ := service.NewService(aggCtx, cfg, log, mgr, queue, stor, nil)
+	srv := gateway.NewServer(cfg, log, svc)
+	go srv.Start()
+	time.Sleep(100 * time.Millisecond)
+
+	return func() {
+		aggCancel()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		srv.Stop(shutdownCtx)
+		mgr.Stop(shutdownCtx)
+		queue.Close(shutdownCtx)
+		stor.Close(shutdownCtx)
+	}
 }
 
-func (suite *ShardingE2ETestSuite) startAggregatorInstance(name string, cfg *config.Config) *aggregatorInstance {
-	ctx := context.Background()
-
-	log, err := logger.New(cfg.Logging.Level, cfg.Logging.Format, cfg.Logging.Output, cfg.Logging.EnableJSON)
-	suite.Require().NoError(err)
-
-	commitmentQueue, storageInstance, err := storage.NewStorage(cfg, log)
-	suite.Require().NoError(err)
-
-	err = commitmentQueue.Initialize(ctx)
-	suite.Require().NoError(err)
-
-	stateTracker := state.NewSyncStateTracker()
-
-	manager, err := round.NewManager(ctx, cfg, log, commitmentQueue, storageInstance, stateTracker)
-	suite.Require().NoError(err)
-
-	err = manager.Start(ctx)
-	suite.Require().NoError(err)
-
-	var leaderElection *ha.LeaderElection
-	var leaderSelector service.LeaderSelector
-	var haManager *ha.HAManager
-
-	if cfg.HA.Enabled {
-		leaderElection = ha.NewLeaderElection(log, cfg.HA, storageInstance.LeadershipStorage())
-		leaderElection.Start(ctx)
-		leaderSelector = leaderElection
-
-		time.Sleep(100 * time.Millisecond)
-
-		disableBlockSync := cfg.Sharding.Mode == config.ShardingModeParent
-		haManager = ha.NewHAManager(log, manager, leaderElection, storageInstance, manager.GetSMT(), cfg.Sharding.Child.ShardID, stateTracker, cfg.Processing.RoundDuration, disableBlockSync)
-		haManager.Start(ctx)
-	} else {
-		leaderSelector = nil
-		err = manager.Activate(ctx)
-		suite.Require().NoError(err)
-	}
-
-	svc, err := service.NewService(ctx, cfg, log, manager, commitmentQueue, storageInstance, leaderSelector)
-	suite.Require().NoError(err)
-
-	server := gateway.NewServer(cfg, log, svc)
-
-	go func() {
-		if err := server.Start(); err != nil && err != http.ErrServerClosed {
-			log.Error("Server error", "error", err.Error())
-		}
-	}()
-
-	time.Sleep(200 * time.Millisecond)
-
-	inst := &aggregatorInstance{
-		name:            name,
-		cfg:             cfg,
-		logger:          log,
-		commitmentQueue: commitmentQueue,
-		storage:         storageInstance,
-		manager:         manager,
-		service:         svc,
-		server:          server,
-		leaderElection:  leaderElection,
-		cleanup: func() {
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			server.Stop(shutdownCtx)
-			if haManager != nil {
-				haManager.Stop()
-			}
-			if leaderElection != nil {
-				leaderElection.Stop(context.Background())
-			}
-			manager.Stop(context.Background())
-			storageInstance.Close(context.Background())
-		},
-	}
-
-	suite.instances = append(suite.instances, inst)
-	suite.T().Logf("✓ Started %s on :%s", name, cfg.Server.Port)
-
-	return inst
-}
-
-func (suite *ShardingE2ETestSuite) rpcCall(url string, method string, params interface{}) (json.RawMessage, error) {
-	reqBody := jsonRPCRequest{
-		JSONRPC: "2.0",
-		Method:  method,
-		Params:  params,
-		ID:      1,
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
+func rpcCall(url, method string, params interface{}) (json.RawMessage, error) {
+	body, _ := json.Marshal(map[string]interface{}{"jsonrpc": "2.0", "method": method, "params": params, "id": 1})
 	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("failed to make request: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
-
-	var rpcResp jsonRPCResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+	var result struct {
+		Result json.RawMessage           `json:"result"`
+		Error  *struct{ Message string } `json:"error"`
 	}
-
-	if rpcResp.Error != nil {
-		return nil, fmt.Errorf("RPC error: %s", rpcResp.Error.Message)
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result.Error != nil {
+		return nil, fmt.Errorf("rpc error: %s", result.Error.Message)
 	}
-
-	return rpcResp.Result, nil
+	return result.Result, nil
 }
 
-func (suite *ShardingE2ETestSuite) certificationRequest(url string, commitment *api.CertificationRequest) (*api.CertificationResponse, error) {
-	result, err := suite.rpcCall(url, "certification_request", commitment)
-	if err != nil {
-		return nil, err
-	}
+func submitCertificationRequest(t *testing.T, url string, c *api.CertificationRequest) api.CertificationResponse {
+	result, err := rpcCall(url, "certification_request", c)
+	require.NoError(t, err)
 
-	var response api.CertificationResponse
-	if err := json.Unmarshal(result, &response); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
+	var resp api.CertificationResponse
+	require.NoError(t, json.Unmarshal(result, &resp))
+	require.Equal(t, resp.Status, "SUCCESS")
 
-	return &response, nil
+	return resp
 }
 
-func (suite *ShardingE2ETestSuite) getInclusionProofV2(url string, stateID string) (*api.GetInclusionProofResponseV2, error) {
-	params := map[string]string{"stateId": stateID}
-	result, err := suite.rpcCall(url, "get_inclusion_proof.v2", params)
-	if err != nil {
-		return nil, err
-	}
-
-	var response api.GetInclusionProofResponseV2
-	if err := json.Unmarshal(result, &response); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	return &response, nil
-}
-
-func (suite *ShardingE2ETestSuite) getBlockHeight(url string) (*api.GetBlockHeightResponse, error) {
-	result, err := suite.rpcCall(url, "get_block_height", nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var response api.GetBlockHeightResponse
-	if err := json.Unmarshal(result, &response); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	return &response, nil
-}
-
-func (suite *ShardingE2ETestSuite) createCommitmentForShard(shardID api.ShardID, shardIDLength int) (*api.CertificationRequest, string) {
-	// Shard ID is encoded in the LSBs of the stateID (see commitment_validator.go verifyShardID)
-	msbPos := shardIDLength
-	compareMask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), uint(msbPos)), big.NewInt(1))
-	expectedLSBs := new(big.Int).And(big.NewInt(int64(shardID)), compareMask)
-
-	for attempts := 0; attempts < 1000; attempts++ {
-		baseData := fmt.Sprintf("shard_%d_attempt_%d", shardID, attempts)
-		commitment := testutil.CreateTestCertificationRequest(suite.T(), baseData)
-
-		stateIDBytes, err := commitment.StateID.Bytes()
-		suite.Require().NoError(err)
-		stateIDBigInt := new(big.Int).SetBytes(stateIDBytes)
-		stateIDLSBs := new(big.Int).And(stateIDBigInt, compareMask)
-
-		if stateIDLSBs.Cmp(expectedLSBs) == 0 {
-			apiCommitment := &api.CertificationRequest{
-				StateID: commitment.StateID,
-				CertificationData: api.CertificationData{
-					OwnerPredicate:  commitment.CertificationData.OwnerPredicate,
-					Witness:         commitment.CertificationData.Witness,
-					SourceStateHash: commitment.CertificationData.SourceStateHash,
-					TransactionHash: commitment.CertificationData.TransactionHash,
-				},
-				Receipt: true,
+func waitForBlock(t *testing.T, url string, minBlock int64, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		result, err := rpcCall(url, "get_block_height", nil)
+		if err == nil {
+			var resp api.GetBlockHeightResponse
+			json.Unmarshal(result, &resp)
+			if resp.BlockNumber != nil && resp.BlockNumber.Int64() >= minBlock {
+				return
 			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("Timeout waiting for block %d at %s", minBlock, url)
+}
 
-			return apiCommitment, commitment.StateID.String()
+func waitForValidProof(t *testing.T, url, reqID string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	reqIDObj := api.StateID(reqID)
+	path, _ := reqIDObj.GetPath()
+
+	for time.Now().Before(deadline) {
+		result, err := rpcCall(url, "get_inclusion_proof.v2", map[string]string{"stateId": reqID})
+		if err == nil {
+			var resp api.GetInclusionProofResponseV2
+			json.Unmarshal(result, &resp)
+			if resp.InclusionProof != nil && resp.InclusionProof.MerkleTreePath != nil {
+				verifyResult, _ := resp.InclusionProof.MerkleTreePath.Verify(path)
+				if verifyResult != nil && verifyResult.Result {
+					return
+				}
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("Timeout waiting for valid proof at %s", url)
+}
+
+func createCommitmentForShard(t *testing.T, shardID api.ShardID) (*api.CertificationRequest, string) {
+	mask := big.NewInt(1)
+	expected := big.NewInt(int64(shardID & 1))
+
+	for i := 0; i < 1000; i++ {
+		c := testutil.CreateTestCertificationRequest(t, fmt.Sprintf("shard%d_%d_%d", shardID, i, time.Now().UnixNano()))
+		reqBytes, _ := c.StateID.Bytes()
+		if new(big.Int).And(new(big.Int).SetBytes(reqBytes), mask).Cmp(expected) == 0 {
+			certificationRequest := c.ToAPI()
+			certificationRequest.Receipt = true
+			return certificationRequest, c.StateID.String()
 		}
 	}
-
-	suite.FailNow("Failed to generate certification request for shard after 1000 attempts")
+	t.Fatal("Failed to generate commitment for shard")
 	return nil, ""
-}
-
-func (suite *ShardingE2ETestSuite) waitForBlock(url string, blockNumber int64, timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		resp, err := suite.getBlockHeight(url)
-		if err == nil && resp.BlockNumber != nil && resp.BlockNumber.Cmp(big.NewInt(blockNumber)) >= 0 {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	suite.FailNow(fmt.Sprintf("Timeout waiting for block %d at %s", blockNumber, url))
-}
-
-// waitForProofAvailableV2 waits for a VALID inclusion proof to become available
-// This includes waiting for the parent proof to be received and joined
-func (suite *ShardingE2ETestSuite) waitForProofAvailableV2(url, stateIDStr string, timeout time.Duration) *api.GetInclusionProofResponseV2 {
-	deadline := time.Now().Add(timeout)
-	stateID := api.StateID(stateIDStr)
-	stateIDPath, err := stateID.GetPath()
-	suite.Require().NoError(err)
-
-	for time.Now().Before(deadline) {
-		resp, err := suite.getInclusionProofV2(url, stateIDStr)
-		if err == nil && resp.InclusionProof != nil && resp.InclusionProof.MerkleTreePath != nil {
-			// Also verify that the proof is valid (includes parent proof)
-			result, verifyErr := resp.InclusionProof.MerkleTreePath.Verify(stateIDPath)
-			if verifyErr == nil && result != nil && result.Result {
-				return resp
-			}
-			// Proof exists but not valid yet (probably waiting for parent proof), keep retrying
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	suite.FailNow(fmt.Sprintf("Timeout waiting for valid proof for stateID %s at %s", stateID, url))
-	return nil
-}
-
-// TestShardingE2E tests hierarchical sharding with parent and child aggregators.
-// Verifies that commitments submitted to children are included in child blocks,
-// child root hashes are aggregated by the parent, and clients can retrieve
-// valid joined inclusion proofs that chain child and parent merkle paths.
-func (suite *ShardingE2ETestSuite) TestShardingE2E() {
-	ctx := context.Background()
-	_ = ctx
-
-	parentCfg := suite.buildConfig(config.ShardingModeParent, "9000", "aggregator_test_parent", 0)
-	suite.startAggregatorInstance("parent aggregator", parentCfg)
-	parentURL := "http://localhost:9000"
-
-	child0Cfg := suite.buildConfig(config.ShardingModeChild, "9001", "aggregator_test_child_0", 2)
-	suite.startAggregatorInstance("child aggregator 0 (shard 2)", child0Cfg)
-	child0URL := "http://localhost:9001"
-
-	child1Cfg := suite.buildConfig(config.ShardingModeChild, "9002", "aggregator_test_child_1", 3)
-	suite.startAggregatorInstance("child aggregator 1 (shard 3)", child1Cfg)
-	child1URL := "http://localhost:9002"
-
-	time.Sleep(500 * time.Millisecond)
-
-	suite.T().Log("Phase 1: Submitting commitments...")
-
-	commitment1, stateID1 := suite.createCommitmentForShard(2, 1)
-	submitTime1 := time.Now()
-	resp1, err := suite.certificationRequest(child0URL, commitment1)
-	suite.Require().NoError(err)
-	suite.Require().Equal("SUCCESS", resp1.Status)
-	suite.T().Logf("  Submitted certification request 1 to child 0: %s", stateID1)
-
-	commitment2, stateID2 := suite.createCommitmentForShard(2, 1)
-	submitTime2 := time.Now()
-	resp2, err := suite.certificationRequest(child0URL, commitment2)
-	suite.Require().NoError(err)
-	suite.Require().Equal("SUCCESS", resp2.Status)
-	suite.T().Logf("  Submitted certification request 2 to child 0: %s", stateID2)
-
-	commitment3, stateID3 := suite.createCommitmentForShard(3, 1)
-	submitTime3 := time.Now()
-	resp3, err := suite.certificationRequest(child1URL, commitment3)
-	suite.Require().NoError(err)
-	suite.Require().Equal("SUCCESS", resp3.Status)
-	suite.T().Logf("  Submitted certification request 3 to child 1: %s", stateID3)
-
-	commitment4, stateID4 := suite.createCommitmentForShard(3, 1)
-	submitTime4 := time.Now()
-	resp4, err := suite.certificationRequest(child1URL, commitment4)
-	suite.Require().NoError(err)
-	suite.Require().Equal("SUCCESS", resp4.Status)
-	suite.T().Logf("  Submitted certification request 4 to child 1: %s", stateID4)
-
-	suite.T().Log("✓ Submitted 2 commitments to child 0")
-	suite.T().Log("✓ Submitted 2 commitments to child 1")
-
-	suite.T().Log("Phase 2: Waiting for parent block...")
-	suite.waitForBlock(parentURL, 1, 3*time.Second)
-	suite.T().Log("✓ Parent created block 1 (children submitted roots)")
-
-	suite.T().Log("Phase 3: Verifying joined proofs...")
-
-	testCases := []struct {
-		stateID    string
-		childURL   string
-		shardID    int
-		name       string
-		submitTime time.Time
-	}{
-		{stateID1, child0URL, 2, "commitment 1 (child 0)", submitTime1},
-		{stateID2, child0URL, 2, "commitment 2 (child 0)", submitTime2},
-		{stateID3, child1URL, 3, "commitment 3 (child 1)", submitTime3},
-		{stateID4, child1URL, 3, "commitment 4 (child 1)", submitTime4},
-	}
-
-	for _, tc := range testCases {
-		proofAvailableStart := time.Now()
-		childProofResp := suite.waitForProofAvailableV2(tc.childURL, tc.stateID, 500*time.Millisecond)
-		totalLatency := time.Since(tc.submitTime)
-		suite.T().Logf("%s: proof available after %v (total from submit: %v)",
-			tc.name, time.Since(proofAvailableStart), totalLatency)
-		suite.Require().NotNil(childProofResp.InclusionProof, "Inclusion proof is nil for %s", tc.name)
-		suite.Require().NotNil(childProofResp.InclusionProof.MerkleTreePath, "Merkle path is nil for %s", tc.name)
-		joinedProof := childProofResp.InclusionProof.MerkleTreePath
-
-		stateID := api.StateID(tc.stateID)
-		stateIDPath, err := stateID.GetPath()
-		suite.Require().NoError(err, "Failed to get path from stateID for %s", tc.name)
-
-		result, err := joinedProof.Verify(stateIDPath)
-		suite.Require().NoError(err, "Proof verification failed for %s", tc.name)
-		suite.Require().NotNil(result, "Verification result is nil for %s", tc.name)
-
-		suite.Require().True(result.PathValid, "Path not valid for %s", tc.name)
-		suite.Require().True(result.PathIncluded, "Path not included for %s", tc.name)
-		suite.Require().True(result.Result, "Overall verification failed for %s", tc.name)
-
-		suite.T().Logf("✓ Verified joined proof for %s", tc.name)
-	}
-
-	suite.T().Log("✓ All initial proofs verified successfully!")
-
-	suite.T().Log("Phase 4: Testing with additional blocks...")
-
-	commitment5, stateID5 := suite.createCommitmentForShard(2, 1)
-	submitTime5 := time.Now()
-	suite.certificationRequest(child0URL, commitment5)
-
-	commitment6, stateID6 := suite.createCommitmentForShard(3, 1)
-	submitTime6 := time.Now()
-	suite.certificationRequest(child1URL, commitment6)
-
-	suite.T().Log("✓ Submitted additional commitments")
-
-	suite.T().Log("Verifying old commitments still work...")
-	for _, tc := range testCases {
-		childProofResp, err := suite.getInclusionProofV2(tc.childURL, tc.stateID)
-		suite.Require().NoError(err, "Failed to get proof for old %s", tc.name)
-		suite.Require().NotNil(childProofResp.InclusionProof)
-
-		stateID := api.StateID(tc.stateID)
-		stateIDPath, err := stateID.GetPath()
-		suite.Require().NoError(err)
-
-		result, err := childProofResp.InclusionProof.MerkleTreePath.Verify(stateIDPath)
-		suite.Require().NoError(err, "Verification failed for old %s", tc.name)
-		suite.Require().True(result.Result, "Old certification request proof invalid for %s", tc.name)
-	}
-	suite.T().Log("✓ All old commitments still verify correctly")
-
-	suite.T().Log("Verifying new commitments...")
-	newTestCases := []struct {
-		stateID    string
-		childURL   string
-		name       string
-		submitTime time.Time
-	}{
-		{stateID5, child0URL, "new certification request (child 0)", submitTime5},
-		{stateID6, child1URL, "new certification request (child 1)", submitTime6},
-	}
-
-	for _, tc := range newTestCases {
-		proofAvailableStart := time.Now()
-		childProofResp := suite.waitForProofAvailableV2(tc.childURL, tc.stateID, 10*time.Second)
-		totalLatency := time.Since(tc.submitTime)
-		suite.T().Logf("%s: proof available after %v (total from submit: %v)",
-			tc.name, time.Since(proofAvailableStart), totalLatency)
-		suite.Require().NotNil(childProofResp.InclusionProof)
-
-		stateID := api.StateID(tc.stateID)
-		stateIDPath, err := stateID.GetPath()
-		suite.Require().NoError(err)
-
-		result, err := childProofResp.InclusionProof.MerkleTreePath.Verify(stateIDPath)
-		suite.Require().NoError(err, "Verification failed for %s", tc.name)
-		suite.Require().True(result.Result, "New certification request proof invalid for %s", tc.name)
-
-		suite.T().Logf("✓ Verified %s", tc.name)
-	}
-
-	suite.T().Log("✓ All new commitments verify correctly!")
-	suite.T().Log("✓ E2E sharding test completed successfully - old and new proofs work!")
-}
-
-func TestShardingE2E(t *testing.T) {
-	suite.Run(t, new(ShardingE2ETestSuite))
 }

@@ -127,9 +127,9 @@ func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interf
 		return nil
 	}
 
-	requestIDs := make([]api.RequestID, len(entries))
+	requestIDs := make([]api.StateID, len(entries))
 	for i, entry := range entries {
-		requestIDs[i] = entry.RequestID
+		requestIDs[i] = entry.StateID
 	}
 
 	filter := bson.M{"requestId": bson.M{"$in": requestIDs}}
@@ -175,6 +175,59 @@ func (cs *CommitmentStorage) CountUnprocessed(ctx context.Context) (int64, error
 		return 0, fmt.Errorf("failed to count unprocessed commitments: %w", err)
 	}
 	return count, nil
+}
+
+// GetAllPending retrieves all unprocessed commitments (for crash recovery)
+func (cs *CommitmentStorage) GetAllPending(ctx context.Context) ([]*models.CertificationRequest, error) {
+	filter := bson.M{"processedAt": bson.M{"$exists": false}}
+	return cs.findCommitments(ctx, filter)
+}
+
+// GetByRequestIDs retrieves commitments matching the given request IDs.
+func (cs *CommitmentStorage) GetByRequestIDs(ctx context.Context, requestIDs []api.StateID) (map[string]*models.CertificationRequest, error) {
+	if len(requestIDs) == 0 {
+		return make(map[string]*models.CertificationRequest), nil
+	}
+
+	// Convert to strings for query
+	reqIDStrings := make([]string, len(requestIDs))
+	for i, reqID := range requestIDs {
+		reqIDStrings[i] = string(reqID)
+	}
+
+	filter := bson.M{"requestId": bson.M{"$in": reqIDStrings}}
+	commitments, err := cs.findCommitments(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]*models.CertificationRequest, len(commitments))
+	for _, c := range commitments {
+		result[string(c.StateID)] = c
+	}
+	return result, nil
+}
+
+func (cs *CommitmentStorage) findCommitments(ctx context.Context, filter bson.M) ([]*models.CertificationRequest, error) {
+	cursor, err := cs.collection.Find(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get commitments: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var commitments []*models.CertificationRequest
+	for cursor.Next(ctx) {
+		var commitmentBSON models.CertificationRequestBSON
+		if err := cursor.Decode(&commitmentBSON); err != nil {
+			return nil, fmt.Errorf("failed to decode commitment: %w", err)
+		}
+		commitment, err := commitmentBSON.FromBSON()
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+		}
+		commitments = append(commitments, commitment)
+	}
+	return commitments, cursor.Err()
 }
 
 // Initialize initializes the certification request storage (no-op for MongoDB)

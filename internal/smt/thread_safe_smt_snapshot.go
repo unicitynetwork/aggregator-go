@@ -102,6 +102,26 @@ func (tss *ThreadSafeSmtSnapshot) Commit(originalSMT *ThreadSafeSMT) {
 	tss.snapshot.Commit()
 }
 
+// SetCommitTarget changes the target tree for snapshot chaining.
+func (tss *ThreadSafeSmtSnapshot) SetCommitTarget(target *ThreadSafeSMT) {
+	tss.rwMux.Lock()
+	defer tss.rwMux.Unlock()
+
+	target.rwMux.RLock()
+	defer target.rwMux.RUnlock()
+
+	tss.snapshot.SetCommitTarget(target.smt)
+}
+
+// CreateSnapshot creates a child snapshot for chained/pipelined processing.
+func (tss *ThreadSafeSmtSnapshot) CreateSnapshot() *ThreadSafeSmtSnapshot {
+	tss.rwMux.RLock()
+	defer tss.rwMux.RUnlock()
+
+	childSnapshot := tss.snapshot.CreateSnapshot()
+	return NewThreadSafeSmtSnapshot(childSnapshot)
+}
+
 // WithWriteLock executes a function while holding a write lock on the snapshot
 // The function receives the underlying snapshot for direct access to avoid deadlocks
 func (tss *ThreadSafeSmtSnapshot) WithWriteLock(fn func(*SmtSnapshot) error) error {

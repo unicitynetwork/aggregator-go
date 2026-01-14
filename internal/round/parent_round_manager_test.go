@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
@@ -20,10 +21,11 @@ import (
 // ParentRoundManagerTestSuite is the test suite for parent round manager
 type ParentRoundManagerTestSuite struct {
 	suite.Suite
-	cfg     *config.Config
-	logger  *logger.Logger
-	storage *mongodb.Storage
-	cleanup func()
+	cfg      *config.Config
+	logger   *logger.Logger
+	storage  *mongodb.Storage
+	eventBus *events.EventBus
+	cleanup  func()
 }
 
 // SetupSuite runs once before all tests - creates one MongoDB container for all tests
@@ -32,10 +34,13 @@ func (suite *ParentRoundManagerTestSuite) SetupSuite() {
 	suite.logger, err = logger.New("info", "text", "stdout", false)
 	require.NoError(suite.T(), err, "Should create logger")
 
+	suite.eventBus = events.NewEventBus(suite.logger)
+
 	suite.cfg = &config.Config{
 		Sharding: config.ShardingConfig{
-			Mode:          config.ShardingModeParent,
-			ShardIDLength: 4, // 4 bits = 16 possible shards (realistic for testing)
+			Mode:                       config.ShardingModeParent,
+			ShardIDLength:              4,                      // 4 bits = 16 possible shards (realistic for testing)
+			ParentCollectPhaseDuration: 100 * time.Millisecond, // Prevent creating too many rounds
 		},
 		Database: config.DatabaseConfig{
 			Database:       "test_parent_aggregator",
@@ -60,14 +65,17 @@ func (suite *ParentRoundManagerTestSuite) TearDownSuite() {
 	}
 }
 
-// TearDownTest runs after each test to clean all collections
+// TearDownTest runs after each test to clean all collections and reinitialize indexes
 func (suite *ParentRoundManagerTestSuite) TearDownTest() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Clean all collections to ensure clean state for next test
+	// Clean all collections to ensure clean state before test
 	if err := suite.storage.CleanAllCollections(ctx); err != nil {
 		suite.T().Logf("Warning: failed to clean collections: %v", err)
+	}
+	if err := suite.storage.Initialize(ctx); err != nil {
+		suite.T().Logf("Warning: failed to reinitialize storage: %v", err)
 	}
 }
 
@@ -81,10 +89,11 @@ func makeTestHash(value byte) []byte {
 
 // Test 1: Initialization
 func (suite *ParentRoundManagerTestSuite) TestInitialization() {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Create parent round manager (BFT stub will be created automatically when BFT.Enabled = false)
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage)
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
 	suite.Require().NoError(err, "Should create parent round manager successfully")
 	suite.Require().NotNil(prm, "ParentRoundManager should not be nil")
 
@@ -101,9 +110,10 @@ func (suite *ParentRoundManagerTestSuite) TestInitialization() {
 
 // Test 2: Basic Round Lifecycle
 func (suite *ParentRoundManagerTestSuite) TestBasicRoundLifecycle() {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage)
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
 	suite.Require().NoError(err)
 	defer prm.Stop(ctx) // Stop round manager before cleanup to avoid disconnection errors
 
@@ -149,9 +159,10 @@ func (suite *ParentRoundManagerTestSuite) TestBasicRoundLifecycle() {
 // TODO: This test will fail until SMT supports updating existing leaves
 func (suite *ParentRoundManagerTestSuite) TestMultiRoundUpdates() {
 	suite.T().Skip("TODO(SMT): enable once sparse Merkle tree supports updating existing leaves")
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage)
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
 	suite.Require().NoError(err)
 	defer prm.Stop(ctx) // Stop round manager before cleanup to avoid disconnection errors
 
@@ -214,9 +225,10 @@ func (suite *ParentRoundManagerTestSuite) TestMultiRoundUpdates() {
 
 // Test 4: Multiple Shards in One Round
 func (suite *ParentRoundManagerTestSuite) TestMultipleShards() {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage)
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
 	suite.Require().NoError(err)
 	defer prm.Stop(ctx)
 
@@ -264,9 +276,10 @@ func (suite *ParentRoundManagerTestSuite) TestMultipleShards() {
 
 // Test 5: Empty Round (no shard updates)
 func (suite *ParentRoundManagerTestSuite) TestEmptyRound() {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage)
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
 	suite.Require().NoError(err)
 	defer prm.Stop(ctx)
 
@@ -299,9 +312,10 @@ func (suite *ParentRoundManagerTestSuite) TestEmptyRound() {
 
 // Test 6: Duplicate Shard Update (same shard, same value)
 func (suite *ParentRoundManagerTestSuite) TestDuplicateShardUpdate() {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage)
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
 	suite.Require().NoError(err)
 	defer prm.Stop(ctx)
 
@@ -343,9 +357,10 @@ func (suite *ParentRoundManagerTestSuite) TestDuplicateShardUpdate() {
 // TODO: This test will fail until SMT supports updating existing leaves
 func (suite *ParentRoundManagerTestSuite) TestSameShardMultipleValues() {
 	suite.T().Skip("TODO(SMT): enable once sparse Merkle tree supports updating existing leaves")
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage)
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
 	suite.Require().NoError(err)
 	defer prm.Stop(ctx)
 
@@ -399,9 +414,10 @@ func (suite *ParentRoundManagerTestSuite) TestSameShardMultipleValues() {
 
 // Test 8: Block root persisted in storage matches SMT root after round finalization
 func (suite *ParentRoundManagerTestSuite) TestBlockRootMatchesSMTRoot() {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage)
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
 	suite.Require().NoError(err)
 	defer prm.Stop(ctx)
 
@@ -417,6 +433,15 @@ func (suite *ParentRoundManagerTestSuite) TestBlockRootMatchesSMTRoot() {
 	err = prm.SubmitShardRoot(ctx, update)
 	suite.Require().NoError(err)
 
+	// Wait for the SMT to include the shard update (root hash will change from empty)
+	var expectedRootHex string
+	suite.Require().Eventually(func() bool {
+		expectedRootHex = prm.GetSMT().GetRootHash()
+		// Empty SMT has a specific hash, wait for it to change after shard update is processed
+		return expectedRootHex != smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength).GetRootHashHex()
+	}, 5*time.Second, 50*time.Millisecond, "expected SMT to include shard update")
+
+	// Now wait for a block with this root hash to be stored
 	var latestBlock *models.Block
 	suite.Require().Eventually(func() bool {
 		block, err := suite.storage.BlockStorage().GetLatest(ctx)
@@ -424,15 +449,11 @@ func (suite *ParentRoundManagerTestSuite) TestBlockRootMatchesSMTRoot() {
 			return false
 		}
 		latestBlock = block
-		return true
-	}, 5*time.Second, 50*time.Millisecond, "expected finalized block to be available")
+		// Check if this block has the expected root (contains our shard update)
+		return latestBlock.RootHash.String() == expectedRootHex
+	}, 5*time.Second, 50*time.Millisecond, "expected block with shard update to be stored")
 
-	currentRootHex := prm.GetSMT().GetRootHash()
-	expectedRoot, err := api.NewHexBytesFromString(currentRootHex)
-	suite.Require().NoError(err)
-	suite.Require().NotNil(latestBlock, "latest block should be available")
-
-	suite.Assert().Equal(expectedRoot.String(), latestBlock.RootHash.String(), "stored block root should match SMT root")
+	suite.Assert().Equal(expectedRootHex, latestBlock.RootHash.String(), "stored block root should match SMT root")
 }
 
 // TestParentRoundManagerSuite runs the test suite

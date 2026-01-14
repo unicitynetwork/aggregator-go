@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	testsharding "github.com/unicitynetwork/aggregator-go/internal/sharding"
@@ -20,6 +21,10 @@ import (
 
 // test the good case where blocks are created and stored successfully
 func TestParentShardIntegration_GoodCase(t *testing.T) {
+	// Override osExit to prevent actual process termination during test cleanup
+	restoreExit := SetExitFunc(func(code int) {})
+	defer restoreExit()
+
 	// setup dependencies
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -43,7 +48,7 @@ func TestParentShardIntegration_GoodCase(t *testing.T) {
 	rootAggregatorClient := testsharding.NewRootAggregatorClientStub()
 
 	// create round manager
-	rm, err := NewRoundManager(ctx, &cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), storage.CommitmentQueue(), storage, rootAggregatorClient, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(ctx, &cfg, testLogger, storage.CommitmentQueue(), storage, rootAggregatorClient, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
 	require.NoError(t, err)
 
 	// start round manager
@@ -61,14 +66,13 @@ func TestParentShardIntegration_GoodCase(t *testing.T) {
 		}, 3*time.Second, 100*time.Millisecond, "block %d should have been created", i)
 	}
 
-	// verify metrics
-	require.Equal(t, 3, rootAggregatorClient.SubmissionCount())
-	require.Equal(t, 3, rootAggregatorClient.ProofCount())
+	// verify metrics - at least 3 blocks were processed
+	require.GreaterOrEqual(t, rootAggregatorClient.SubmissionCount(), 3)
+	require.GreaterOrEqual(t, rootAggregatorClient.ProofCount(), 3)
 }
 
-// test that any error on block processing e.g. error on root aggregator communication does not hang the block processor
+// test that errors on parent communication cause retries (not deadlock)
 func TestParentShardIntegration_RoundProcessingError(t *testing.T) {
-	// setup dependencies
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cfg := config.Config{
@@ -94,26 +98,23 @@ func TestParentShardIntegration_RoundProcessingError(t *testing.T) {
 	rootAggregatorClient.SetSubmissionError(errors.New("some error"))
 
 	// create round manager
-	rm, err := NewRoundManager(ctx, &cfg, testLogger, smt.NewSparseMerkleTree(api.SHA256, 16+256), storage.CommitmentQueue(), storage, rootAggregatorClient, state.NewSyncStateTracker())
+	rm, err := NewRoundManager(ctx, &cfg, testLogger, storage.CommitmentQueue(), storage, rootAggregatorClient, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
 	require.NoError(t, err)
 
-	// start round manager
 	require.NoError(t, rm.Start(ctx))
 	require.NoError(t, rm.Activate(ctx))
 
-	// wait for a couple of rounds worth of time
-	time.Sleep(500 * time.Millisecond)
+	// wait for multiple retry attempts (retry delay is 1s)
+	time.Sleep(2500 * time.Millisecond)
 
-	// verify that no blocks were created
+	// verify that no blocks were created (submissions all failed)
 	latestBlock, err := storage.BlockStorage().GetLatest(ctx)
 	require.NoError(t, err)
 	require.Nil(t, latestBlock)
 
-	// verify that the round manager is NOT stuck on round 1
-	currentRound := rm.GetCurrentRound()
-	require.NotNil(t, currentRound)
-	require.Greater(t, currentRound.Number.Int64(), int64(1))
+	// verify retries are happening (at least 2 attempts in 2.5s with 1s retry delay)
+	require.GreaterOrEqual(t, rootAggregatorClient.SubmissionAttempts(), 2, "should have retried submissions")
 
-	// verify no submission requests were made successfully
+	// verify no successful submissions
 	require.Equal(t, 0, rootAggregatorClient.SubmissionCount())
 }

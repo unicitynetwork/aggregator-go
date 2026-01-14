@@ -7,6 +7,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
+	"go.mongodb.org/mongo-driver/mongo/writeconcern"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
@@ -25,10 +26,11 @@ type Storage struct {
 	smtStorage              *SmtStorage
 	blockRecordsStorage     *BlockRecordsStorage
 	leadershipStorage       *LeadershipStorage
+	cachedTrustBaseStorage  *CachedTrustBaseStorage
 }
 
 // NewStorage creates a new MongoDB storage instance
-func NewStorage(config config.Config) (*Storage, error) {
+func NewStorage(ctx context.Context, config config.Config) (*Storage, error) {
 	cfg := config.Database
 	// Create client options
 	clientOpts := options.Client().
@@ -40,17 +42,20 @@ func NewStorage(config config.Config) (*Storage, error) {
 		SetMinPoolSize(cfg.MinPoolSize).
 		SetMaxConnIdleTime(cfg.MaxConnIdleTime)
 
+	// Use write concern W1 (primary acknowledged) for lower latency
+	clientOpts.SetWriteConcern(writeconcern.W1())
+
 	// Connect to MongoDB
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.ConnectTimeout)
+	connectCtx, cancel := context.WithTimeout(ctx, cfg.ConnectTimeout)
 	defer cancel()
 
-	client, err := mongo.Connect(ctx, clientOpts)
+	client, err := mongo.Connect(connectCtx, clientOpts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
 	}
 
 	// Ping to verify connection
-	if err := client.Ping(ctx, readpref.Primary()); err != nil {
+	if err := client.Ping(connectCtx, readpref.Primary()); err != nil {
 		return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
 	}
 
@@ -69,9 +74,15 @@ func NewStorage(config config.Config) (*Storage, error) {
 	storage.smtStorage = NewSmtStorage(database)
 	storage.blockRecordsStorage = NewBlockRecordsStorage(database)
 	storage.leadershipStorage = NewLeadershipStorage(database, config.HA.LockTTLSeconds)
+	storage.cachedTrustBaseStorage = NewCachedTrustBaseStorage(NewTrustBaseStorage(database))
+
+	// init trust base store cache
+	if err := storage.cachedTrustBaseStorage.ReloadCache(ctx); err != nil {
+		return nil, fmt.Errorf("failed to init cached trust base storage cache: %w", err)
+	}
 
 	// Create indexes
-	if err := storage.createIndexes(context.Background()); err != nil {
+	if err := storage.createIndexes(ctx); err != nil {
 		return nil, fmt.Errorf("failed to create indexes: %w", err)
 	}
 
@@ -112,6 +123,11 @@ func (s *Storage) LeadershipStorage() interfaces.LeadershipStorage {
 	return s.leadershipStorage
 }
 
+// TrustBaseStorage returns the trust base storage implementation
+func (s *Storage) TrustBaseStorage() interfaces.TrustBaseStorage {
+	return s.cachedTrustBaseStorage
+}
+
 // Ping verifies the database connection
 func (s *Storage) Ping(ctx context.Context) error {
 	return s.client.Ping(ctx, readpref.Primary())
@@ -138,20 +154,88 @@ func (s *Storage) CleanAllCollections(ctx context.Context) error {
 	return nil
 }
 
-// WithTransaction executes a function within a MongoDB transaction
+// MongoDB transaction error labels
+const (
+	labelTransientTransaction     = "TransientTransactionError"
+	labelUnknownTransactionCommit = "UnknownTransactionCommitResult"
+)
+
+// WithTransaction executes a function within a MongoDB transaction with limited retries.
+// Only retries on transient errors (TransientTransactionError label).
 func (s *Storage) WithTransaction(ctx context.Context, fn func(context.Context) error) error {
+	const maxRetries = 3
+
 	session, err := s.client.StartSession()
 	if err != nil {
 		return fmt.Errorf("failed to start session: %w", err)
 	}
 	defer session.EndSession(ctx)
 
-	callback := func(sessCtx mongo.SessionContext) (interface{}, error) {
-		return nil, fn(sessCtx)
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		err = session.StartTransaction()
+		if err != nil {
+			return fmt.Errorf("failed to start transaction: %w", err)
+		}
+
+		err = mongo.WithSession(ctx, session, func(sessCtx mongo.SessionContext) error {
+			return fn(sessCtx)
+		})
+
+		if err != nil {
+			// Abort the transaction on error
+			_ = session.AbortTransaction(ctx)
+
+			// Check if this is a transient error that we should retry
+			if cmdErr, ok := err.(mongo.CommandError); ok {
+				if cmdErr.HasErrorLabel(labelTransientTransaction) && attempt < maxRetries {
+					lastErr = err
+					continue // Retry
+				}
+			}
+			// Non-transient error or max retries reached
+			return fmt.Errorf("transaction failed (attempt %d/%d): %w", attempt, maxRetries, err)
+		}
+
+		// Try to commit with retry for unknown commit result
+		for commitAttempt := 1; commitAttempt <= maxRetries; commitAttempt++ {
+			err = session.CommitTransaction(ctx)
+			if err == nil {
+				return nil // Success
+			}
+
+			cmdErr, ok := err.(mongo.CommandError)
+			if !ok {
+				return fmt.Errorf("transaction commit failed (attempt %d/%d): %w", attempt, maxRetries, err)
+			}
+
+			// TransientTransactionError on commit - retry whole transaction
+			if cmdErr.HasErrorLabel(labelTransientTransaction) && attempt < maxRetries {
+				lastErr = err
+				break // Break inner loop, continue outer loop to retry whole transaction
+			}
+
+			// UnknownTransactionCommitResult - retry just the commit
+			if cmdErr.HasErrorLabel(labelUnknownTransactionCommit) && commitAttempt < maxRetries {
+				lastErr = err
+				continue // Retry commit
+			}
+
+			return fmt.Errorf("transaction commit failed (attempt %d/%d, commit %d/%d): %w",
+				attempt, maxRetries, commitAttempt, maxRetries, err)
+		}
+
+		// If we broke out of commit loop due to transient error, continue to retry whole transaction
+		if lastErr != nil {
+			continue
+		}
+
+		// Success
+		return nil
 	}
 
-	_, err = session.WithTransaction(ctx, callback)
-	return err
+	// Should not reach here, but just in case
+	return fmt.Errorf("transaction failed after %d retries: %w", maxRetries, lastErr)
 }
 
 // createIndexes creates all necessary database indexes
@@ -178,6 +262,10 @@ func (s *Storage) createIndexes(ctx context.Context) error {
 	}
 
 	if err := s.leadershipStorage.CreateIndexes(ctx); err != nil {
+		return fmt.Errorf("failed to create leadership indexes: %w", err)
+	}
+
+	if err := s.cachedTrustBaseStorage.storage.CreateIndexes(ctx); err != nil {
 		return fmt.Errorf("failed to create leadership indexes: %w", err)
 	}
 

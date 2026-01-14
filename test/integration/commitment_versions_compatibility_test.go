@@ -3,7 +3,12 @@ package integration
 import (
 	"encoding/json"
 	"fmt"
+	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
+	mongoContainer "github.com/testcontainers/testcontainers-go/modules/mongodb"
+	redisContainer "github.com/testcontainers/testcontainers-go/modules/redis"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -12,7 +17,8 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-func (suite *ShardingE2ETestSuite) TestCompatibilityV2() {
+// TestCompatibilityV2 tests compatibility of v1 and v2 commitments and proofs
+func TestCompatibilityV2(t *testing.T) {
 	// phase 1:
 	// submit commitment_v1
 	// submit commitment_v2
@@ -27,89 +33,88 @@ func (suite *ShardingE2ETestSuite) TestCompatibilityV2() {
 	//
 	// phase 4:
 	// verify block records
+	ctx := t.Context()
 
+	// Start containers (shared MongoDB with different databases per aggregator)
+	redis, err := redisContainer.Run(ctx, "redis:7")
+	require.NoError(t, err)
+	defer redis.Terminate(ctx)
+	redisURI, _ := redis.ConnectionString(ctx)
+
+	mongo, err := mongoContainer.Run(ctx, "mongo:7.0", mongoContainer.WithReplicaSet("rs0"))
+	require.NoError(t, err)
+	defer mongo.Terminate(ctx)
+	mongoURI, _ := mongo.ConnectionString(ctx)
+	mongoURI += "&directConnection=true"
+
+	// Start standalone aggregator
 	url := "http://localhost:9100"
-	cfg := suite.buildConfig(config.ShardingModeStandalone, "9100", "backwards_compatibility_Test", 0)
-	suite.startAggregatorInstance("aggregator", cfg)
+	nodeCleanup := startAggregator(t, ctx, "backwards_compatibility_Test", "9100", mongoURI, redisURI, config.ShardingModeStandalone, 0)
+	defer nodeCleanup()
+	waitForBlock(t, url, 1, 15*time.Second)
 
-	time.Sleep(500 * time.Millisecond)
+	t.Log("Phase 1: Submitting commitments...")
+	v1 := testutil.CreateTestCommitment(t, fmt.Sprintf("commitment_v1"))
+	v1Resp, err := submitCommitment(url, v1.ToAPI())
+	require.NoError(t, err)
+	require.Equal(t, "SUCCESS", v1Resp.Status)
 
-	suite.T().Log("Phase 1: Submitting commitments...")
-	v1 := testutil.CreateTestCommitment(suite.T(), fmt.Sprintf("commitment_v1"))
-	v1Resp, err := suite.submitCommitment(url, v1.ToAPI())
-	suite.Require().NoError(err)
-	suite.Require().Equal("SUCCESS", v1Resp.Status)
+	v2 := testutil.CreateTestCertificationRequest(t, fmt.Sprintf("commitment_v2"))
+	submitCertificationRequest(t, url, v2.ToAPI())
+	t.Logf("Commitments submitted successfully")
 
-	v2 := testutil.CreateTestCertificationRequest(suite.T(), fmt.Sprintf("commitment_v2"))
-	v2Resp, err := suite.certificationRequest(url, v2.ToAPI())
-	suite.Require().NoError(err)
-	suite.Require().Equal("SUCCESS", v2Resp.Status)
-	suite.T().Logf("Commitments submitted successfully")
+	t.Log("Phase 2: Verifying proofs...")
+	v1ProofResp := waitForProofAvailableV1(t, url, v1.RequestID.String(), 5*time.Second)
+	verifyProofV1(t, v1ProofResp, v1)
+	v2ProofResp := waitForProofAvailableV2(t, url, v2.StateID.String(), 5*time.Second)
+	verifyProofV2(t, v2ProofResp, v2)
+	t.Logf("Proofs verified successfully")
 
-	suite.T().Log("Phase 2: Verifying proofs...")
-	v1ProofResp := suite.waitForProofAvailableV1(url, v1.RequestID.String(), 500*time.Millisecond)
-	suite.verifyProofV1(v1ProofResp, v1)
-	v2ProofResp := suite.waitForProofAvailableV2(url, v2.StateID.String(), 500*time.Millisecond)
-	suite.verifyProofV2(v2ProofResp, v2)
-	suite.T().Logf("Proofs verified successfully")
+	t.Log("Phase 3: Verifying endpoint compatibility...")
+	// try to fetch v2 proof from v1 api
+	invalidProofV1, err := getInclusionProofV1(t, url, v2.StateID.String())
+	require.Nil(t, invalidProofV1)
+	require.ErrorContains(t, err, "Failed to get inclusion proof")
 
-	suite.T().Log("Phase 3: Verifying endpoint compatibility...")
-	invalidProofV1, err := suite.getInclusionProofV1(url, v2.StateID.String()) // fetch proof from v1 api
-	suite.Require().Nil(invalidProofV1)
-	suite.Require().ErrorContains(err, "Failed to get inclusion proof")
+	// try to fetch v1 proof from v2 api
+	invalidProofV2, err := getInclusionProofV2(t, url, v1.RequestID.String())
+	require.Nil(t, invalidProofV2)
+	require.ErrorContains(t, err, "Failed to get inclusion proof")
 
-	invalidProofV2, err := suite.getInclusionProofV2(url, v1.RequestID.String()) // fetch proof from v2 api
-	suite.Require().Nil(invalidProofV2)
-	suite.Require().ErrorContains(err, "Failed to get inclusion proof")
+	t.Log("Phase 4: Verifying block records endpoint...")
+	blockRecordsResponse := getBlockRecords(t, err, url, v2ProofResp.BlockNumber)
+	require.Len(t, blockRecordsResponse.AggregatorRecords, 2)
 
-	suite.T().Log("Phase 4: Verifying block records endpoint...")
-	blockRecordsResponseJSON, err := suite.rpcCall(
-		url,
-		"get_block_records",
-		api.GetBlockCommitmentsRequest{BlockNumber: api.NewBigIntFromUint64(v2ProofResp.BlockNumber)},
-	)
-	suite.Require().NoError(err)
-	var blockRecordsResponse api.GetBlockRecordsResponse
-	suite.Require().NoError(json.Unmarshal(blockRecordsResponseJSON, &blockRecordsResponse))
-	suite.Require().Len(blockRecordsResponse.AggregatorRecords, 2)
-
-	blockCommitmentsResponseJSON, err := suite.rpcCall(
-		url,
-		"get_block_commitments",
-		api.GetBlockCommitmentsRequest{BlockNumber: api.NewBigIntFromUint64(v2ProofResp.BlockNumber)},
-	)
-	suite.Require().NoError(err)
-	var blockCommitmentsResponse api.GetBlockCommitmentsResponse
-	suite.Require().NoError(json.Unmarshal(blockCommitmentsResponseJSON, &blockCommitmentsResponse))
-	suite.Require().Len(blockCommitmentsResponse.Commitments, 2)
+	blockCommitmentsResponse := getBlockCommitments(t, err, url, v2ProofResp.BlockNumber)
+	require.Len(t, blockCommitmentsResponse.Commitments, 2)
 }
 
-func (suite *ShardingE2ETestSuite) verifyProofV1(v1ProofResp *api.GetInclusionProofResponseV1, v1 *modelsV1.Commitment) {
-	suite.Require().NotNil(v1ProofResp)
-	suite.Require().NotNil(v1ProofResp.InclusionProof)
-	suite.Require().NotNil(v1ProofResp.InclusionProof.MerkleTreePath)
+func verifyProofV1(t *testing.T, v1ProofResp *api.GetInclusionProofResponseV1, v1 *modelsV1.Commitment) {
+	require.NotNil(t, v1ProofResp)
+	require.NotNil(t, v1ProofResp.InclusionProof)
+	require.NotNil(t, v1ProofResp.InclusionProof.MerkleTreePath)
 
 	merklePath, err := v1.RequestID.GetPath()
-	suite.Require().NoError(err)
+	require.NoError(t, err)
 	verificationResult, err := v1ProofResp.InclusionProof.MerkleTreePath.Verify(merklePath)
-	suite.Require().NoError(err)
-	suite.Require().True(verificationResult.Result)
+	require.NoError(t, err)
+	require.True(t, verificationResult.Result)
 }
 
-func (suite *ShardingE2ETestSuite) verifyProofV2(v2ProofResp *api.GetInclusionProofResponseV2, v2 *models.CertificationRequest) {
-	suite.Require().NotNil(v2ProofResp)
-	suite.Require().NotNil(v2ProofResp.InclusionProof)
-	suite.Require().NotNil(v2ProofResp.InclusionProof.MerkleTreePath)
+func verifyProofV2(t *testing.T, v2ProofResp *api.GetInclusionProofResponseV2, v2 *models.CertificationRequest) {
+	require.NotNil(t, v2ProofResp)
+	require.NotNil(t, v2ProofResp.InclusionProof)
+	require.NotNil(t, v2ProofResp.InclusionProof.MerkleTreePath)
 
 	merklePath, err := v2.StateID.GetPath()
-	suite.Require().NoError(err)
+	require.NoError(t, err)
 	verificationResult, err := v2ProofResp.InclusionProof.MerkleTreePath.Verify(merklePath)
-	suite.Require().NoError(err)
-	suite.Require().True(verificationResult.Result)
+	require.NoError(t, err)
+	require.True(t, verificationResult.Result)
 }
 
-func (suite *ShardingE2ETestSuite) submitCommitment(url string, commitment *api.Commitment) (*api.SubmitCommitmentResponse, error) {
-	result, err := suite.rpcCall(url, "submit_commitment", commitment)
+func submitCommitment(url string, commitment *api.Commitment) (*api.SubmitCommitmentResponse, error) {
+	result, err := rpcCall(url, "submit_commitment", commitment)
 	if err != nil {
 		return nil, err
 	}
@@ -123,34 +128,43 @@ func (suite *ShardingE2ETestSuite) submitCommitment(url string, commitment *api.
 }
 
 // waitForProofAvailableV1 waits for a VALID inclusion proof to become available
-func (suite *ShardingE2ETestSuite) waitForProofAvailableV1(url, stateIDStr string, timeout time.Duration) *api.GetInclusionProofResponseV1 {
+func waitForProofAvailableV1(t *testing.T, url, stateIDStr string, timeout time.Duration) *api.GetInclusionProofResponseV1 {
 	deadline := time.Now().Add(timeout)
 	requestID := api.RequestID(stateIDStr)
-	stateIDPath, err := requestID.GetPath()
-	suite.Require().NoError(err)
 
 	for time.Now().Before(deadline) {
-		resp, err := suite.getInclusionProofV1(url, stateIDStr)
-		if resp != nil {
-			fmt.Println(resp)
-		}
-		if err == nil && resp.InclusionProof != nil && resp.InclusionProof.MerkleTreePath != nil {
-			// Also verify that the proof is valid (includes parent proof)
-			result, verifyErr := resp.InclusionProof.MerkleTreePath.Verify(stateIDPath)
-			if verifyErr == nil && result != nil && result.Result {
-				return resp
-			}
-			// Proof exists but not valid yet (probably waiting for parent proof), keep retrying
+		resp, err := getInclusionProofV1(t, url, stateIDStr)
+		require.NoError(t, err)
+		if resp.InclusionProof != nil && resp.InclusionProof.Authenticator != nil {
+			return resp // only return non inclusion proofs
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	suite.FailNow(fmt.Sprintf("Timeout waiting for valid proof for requestID %s at %s", requestID, url))
+	t.Fatalf("Timeout waiting for valid proof for requestID %s at %s", requestID, url)
 	return nil
 }
 
-func (suite *ShardingE2ETestSuite) getInclusionProofV1(url string, requestID string) (*api.GetInclusionProofResponseV1, error) {
+// waitForProofAvailableV2 waits for a VALID inclusion proof to become available
+// This includes waiting for the parent proof to be received and joined
+func waitForProofAvailableV2(t *testing.T, url, stateIDStr string, timeout time.Duration) *api.GetInclusionProofResponseV2 {
+	deadline := time.Now().Add(timeout)
+	stateID := api.StateID(stateIDStr)
+
+	for time.Now().Before(deadline) {
+		resp, err := getInclusionProofV2(t, url, stateIDStr)
+		require.NoError(t, err)
+		if resp.InclusionProof != nil && resp.InclusionProof.CertificationData != nil {
+			return resp // only return non inclusion proofs
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("Timeout waiting for valid proof for stateID %s at %s", stateID, url)
+	return nil
+}
+
+func getInclusionProofV1(t *testing.T, url string, requestID string) (*api.GetInclusionProofResponseV1, error) {
 	params := map[string]string{"requestId": requestID}
-	result, err := suite.rpcCall(url, "get_inclusion_proof", params)
+	result, err := rpcCall(url, "get_inclusion_proof", params)
 	if err != nil {
 		return nil, err
 	}
@@ -161,4 +175,46 @@ func (suite *ShardingE2ETestSuite) getInclusionProofV1(url string, requestID str
 	}
 
 	return &response, nil
+}
+
+func getInclusionProofV2(t *testing.T, url string, stateID string) (*api.GetInclusionProofResponseV2, error) {
+	params := map[string]string{"stateId": stateID}
+	result, err := rpcCall(url, "get_inclusion_proof.v2", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var response api.GetInclusionProofResponseV2
+	if err := json.Unmarshal(result, &response); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	return &response, nil
+}
+
+func getBlockCommitments(t *testing.T, err error, url string, blockNumber uint64) api.GetBlockCommitmentsResponse {
+	blockCommitmentsResponseJSON, err := rpcCall(
+		url,
+		"get_block_commitments",
+		api.GetBlockCommitmentsRequest{BlockNumber: api.NewBigIntFromUint64(blockNumber)},
+	)
+	require.NoError(t, err)
+
+	var blockCommitmentsResponse api.GetBlockCommitmentsResponse
+	require.NoError(t, json.Unmarshal(blockCommitmentsResponseJSON, &blockCommitmentsResponse))
+	return blockCommitmentsResponse
+}
+
+func getBlockRecords(t *testing.T, err error, url string, blockNumber uint64) api.GetBlockRecordsResponse {
+	blockRecordsResponseJSON, err := rpcCall(
+		url,
+		"get_block_records",
+		api.GetBlockCommitmentsRequest{BlockNumber: api.NewBigIntFromUint64(blockNumber)},
+	)
+	require.NoError(t, err)
+
+	var blockRecordsResponse api.GetBlockRecordsResponse
+	require.NoError(t, json.Unmarshal(blockRecordsResponseJSON, &blockRecordsResponse))
+
+	return blockRecordsResponse
 }
