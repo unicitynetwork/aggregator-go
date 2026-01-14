@@ -1,4 +1,4 @@
-package models
+package v1
 
 import (
 	"fmt"
@@ -8,10 +8,10 @@ import (
 
 // Authenticator represents the authentication data for a commitment
 type Authenticator struct {
-	Algorithm string        `json:"algorithm" bson:"algorithm"`
-	PublicKey api.HexBytes  `json:"publicKey" bson:"publicKey"`
-	Signature api.HexBytes  `json:"signature" bson:"signature"`
-	StateHash api.StateHash `json:"stateHash" bson:"stateHash"`
+	Algorithm string              `json:"algorithm" bson:"algorithm"`
+	PublicKey api.HexBytes        `json:"publicKey" bson:"publicKey"`
+	Signature api.HexBytes        `json:"signature" bson:"signature"`
+	StateHash api.SourceStateHash `json:"stateHash" bson:"stateHash"`
 }
 
 type AuthenticatorBSON struct {
@@ -54,6 +54,6 @@ func (ab *AuthenticatorBSON) FromBSON() (*Authenticator, error) {
 		Algorithm: ab.Algorithm,
 		PublicKey: publicKey,
 		Signature: signature,
-		StateHash: api.StateHash(ab.StateHash),
+		StateHash: api.SourceStateHash(ab.StateHash),
 	}, nil
 }

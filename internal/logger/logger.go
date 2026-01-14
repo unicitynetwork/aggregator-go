@@ -14,8 +14,8 @@ import (
 type ContextKey string
 
 const (
-	// RequestIDKey is the context key for request ID
-	RequestIDKey ContextKey = "request_id"
+	// StateIDKey is the context key for state ID
+	StateIDKey ContextKey = "state_id"
 	// JSONRPCIDKey is the context key for client-provided JSON-RPC id
 	JSONRPCIDKey ContextKey = "jsonrpc_id"
 	// ComponentKey is the context key for component name
@@ -141,10 +141,10 @@ func (l *Logger) Close() error {
 func (l *Logger) WithContext(ctx context.Context) *slog.Logger {
 	var args []any
 
-	// Add request ID if available
-	if requestID := ctx.Value(RequestIDKey); requestID != nil {
-		if rid, ok := requestID.(string); ok {
-			args = append(args, slog.String("request_id", rid))
+	// Add state ID if available
+	if stateID := ctx.Value(StateIDKey); stateID != nil {
+		if rid, ok := stateID.(string); ok {
+			args = append(args, slog.String("state_id", rid))
 		}
 	}
 
@@ -172,9 +172,9 @@ func (l *Logger) WithComponent(component string) *slog.Logger {
 	return l.Logger.With(slog.String("component", component))
 }
 
-// WithRequestID creates a new logger with request ID field
-func (l *Logger) WithRequestID(requestID string) *slog.Logger {
-	return l.Logger.With(slog.String("request_id", requestID))
+// WithStateID creates a new logger with state ID field
+func (l *Logger) WithStateID(stateID string) *slog.Logger {
+	return l.Logger.With(slog.String("state_id", stateID))
 }
 
 // WithFields creates a new logger with multiple fields

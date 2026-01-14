@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -29,14 +30,14 @@ func NewReceiptSigner(privateKey []byte) (*ReceiptSigner, error) {
 	return &ReceiptSigner{
 		privateKey: privateKey,
 		publicKey:  publicKey,
-		algorithm:  AlgorithmSecp256k1,
+		algorithm:  "secp256k1",
 	}, nil
 }
 
-// SignReceipt creates a signed receipt for a commitment
-func (rs *ReceiptSigner) SignReceipt(requestID api.RequestID, transactionHash api.TransactionHash, stateHash api.StateHash) (*api.Receipt, error) {
+// SignReceiptV1 creates a signed receipt for a commitment
+func (rs *ReceiptSigner) SignReceiptV1(requestID api.RequestID, transactionHash api.TransactionHash, stateHash api.SourceStateHash) (*api.ReceiptV1, error) {
 	// Create the receipt request data to be signed
-	request := api.ReceiptRequest{
+	request := api.ReceiptRequestV1{
 		Service:         "aggregator",
 		Method:          "submit_commitment",
 		RequestID:       requestID,
@@ -57,11 +58,32 @@ func (rs *ReceiptSigner) SignReceipt(requestID api.RequestID, transactionHash ap
 		return nil, fmt.Errorf("failed to sign receipt: %w", err)
 	}
 
-	return &api.Receipt{
+	return &api.ReceiptV1{
 		Algorithm: rs.algorithm,
 		PublicKey: rs.publicKey,
 		Signature: signature,
 		Request:   request,
+	}, nil
+}
+
+// SignReceiptV2 creates a signed receipt for a certification request
+func (rs *ReceiptSigner) SignReceiptV2(certData api.CertificationData) (*api.ReceiptV2, error) {
+	// Serialize the request to CBOR for signing
+	sigBytes, err := types.Cbor.Marshal(certData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize receipt request: %w", err)
+	}
+
+	// Sign the serialized request
+	signingService := NewSigningService()
+	signature, err := signingService.Sign(sigBytes, rs.privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign receipt: %w", err)
+	}
+
+	return &api.ReceiptV2{
+		PublicKey: rs.publicKey,
+		Signature: signature,
 	}, nil
 }
 
@@ -74,4 +96,3 @@ func (rs *ReceiptSigner) PublicKey() []byte {
 func (rs *ReceiptSigner) Algorithm() string {
 	return rs.algorithm
 }
-

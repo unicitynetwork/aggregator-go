@@ -21,10 +21,10 @@ import (
 )
 
 // helper to get leaf from commitment for tests
-func getLeafFromCommitment(t *testing.T, commitment *models.Commitment) *smt.Leaf {
-	path, err := commitment.RequestID.GetPath()
+func getLeafFromCommitment(t *testing.T, commitment *models.CertificationRequest) *smt.Leaf {
+	path, err := commitment.StateID.GetPath()
 	require.NoError(t, err)
-	leafValue, err := commitment.CreateLeafValue()
+	leafValue, err := commitment.CertificationData.ToAPI().Hash()
 	require.NoError(t, err)
 	return smt.NewLeaf(path, leafValue)
 }
@@ -32,7 +32,7 @@ func getLeafFromCommitment(t *testing.T, commitment *models.Commitment) *smt.Lea
 func TestPreCollectionMechanism(t *testing.T) {
 	t.Run("InitPreCollectionCreatesChainedSnapshot", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		defer cancel()
 		cfg := config.Config{
 			Processing: config.ProcessingConfig{
 				RoundDuration:          100 * time.Millisecond,
@@ -55,7 +55,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 			config:           &cfg,
 			logger:           testLogger,
 			smt:              smtInstance,
-			commitmentStream: make(chan *models.Commitment, 100),
+			commitmentStream: make(chan *models.CertificationRequest, 100),
 		}
 
 		// Create a round with a snapshot
@@ -81,7 +81,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 
 	t.Run("AddToPreCollectionAddsCommitment", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		defer cancel()
 		cfg := config.Config{
 			Processing: config.ProcessingConfig{
 				MaxCommitmentsPerRound: 1000,
@@ -103,7 +103,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 			config:           &cfg,
 			logger:           testLogger,
 			smt:              smtInstance,
-			commitmentStream: make(chan *models.Commitment, 100),
+			commitmentStream: make(chan *models.CertificationRequest, 100),
 		}
 
 		// Create current round and initialize pre-collection
@@ -117,7 +117,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 		initialRootHash := rm.preCollectionSnapshot.GetRootHash()
 
 		// Create a test commitment using test utility
-		commitment := testutil.CreateTestCommitment(t, "precollect_test")
+		commitment := testutil.CreateTestCertificationRequest(t, "precollect_test")
 
 		// Add to pre-collection
 		err = rm.addToPreCollection(ctx, commitment)
@@ -135,7 +135,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 
 	t.Run("ClearPreCollectionResetsState", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		defer cancel()
 		cfg := config.Config{
 			Processing: config.ProcessingConfig{
 				MaxCommitmentsPerRound: 1000,
@@ -157,7 +157,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 			config:           &cfg,
 			logger:           testLogger,
 			smt:              smtInstance,
-			commitmentStream: make(chan *models.Commitment, 100),
+			commitmentStream: make(chan *models.CertificationRequest, 100),
 		}
 
 		// Create current round and initialize pre-collection
@@ -169,7 +169,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 		rm.initPreCollection(ctx)
 
 		// Add a commitment using test utility
-		commitment := testutil.CreateTestCommitment(t, "clear_test")
+		commitment := testutil.CreateTestCertificationRequest(t, "clear_test")
 		err = rm.addToPreCollection(ctx, commitment)
 		require.NoError(t, err)
 
@@ -188,7 +188,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 
 	t.Run("AddToPreCollectionFailsWithoutSnapshot", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		defer cancel()
 		cfg := config.Config{}
 
 		testLogger, err := logger.New("info", "text", "stdout", false)
@@ -201,7 +201,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 
 		// Don't initialize pre-collection - snapshot is nil
 
-		commitment := testutil.CreateTestCommitment(t, "fail_test")
+		commitment := testutil.CreateTestCertificationRequest(t, "fail_test")
 
 		// Should fail because pre-collection snapshot is nil
 		err = rm.addToPreCollection(ctx, commitment)
@@ -213,7 +213,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 func TestPreCollectionReparenting(t *testing.T) {
 	t.Run("ReparentedSnapshotCommitsToMainSMT", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		defer cancel()
 		cfg := config.Config{
 			Processing: config.ProcessingConfig{
 				MaxCommitmentsPerRound: 1000,
@@ -236,11 +236,11 @@ func TestPreCollectionReparenting(t *testing.T) {
 			config:           &cfg,
 			logger:           testLogger,
 			smt:              smtInstance,
-			commitmentStream: make(chan *models.Commitment, 100),
+			commitmentStream: make(chan *models.CertificationRequest, 100),
 		}
 
 		// Create commitment for Round N
-		roundNCommitment := testutil.CreateTestCommitment(t, "round_n")
+		roundNCommitment := testutil.CreateTestCertificationRequest(t, "round_n")
 		roundNLeaf := getLeafFromCommitment(t, roundNCommitment)
 
 		// Round N: Create snapshot and add a leaf
@@ -261,7 +261,7 @@ func TestPreCollectionReparenting(t *testing.T) {
 		rm.initPreCollection(ctx)
 
 		// Add pre-collected commitment to chained snapshot
-		preCollectedCommitment := testutil.CreateTestCommitment(t, "precollected")
+		preCollectedCommitment := testutil.CreateTestCertificationRequest(t, "precollected")
 		err = rm.addToPreCollection(ctx, preCollectedCommitment)
 		require.NoError(t, err)
 
@@ -284,13 +284,13 @@ func TestPreCollectionReparenting(t *testing.T) {
 		assert.Equal(t, preCollectedRootHash, smtInstance.GetRootHash())
 
 		// Verify we can retrieve both leaves from main SMT
-		roundNPath, err := roundNCommitment.RequestID.GetPath()
+		roundNPath, err := roundNCommitment.StateID.GetPath()
 		require.NoError(t, err)
 		leaf1, err := smtInstance.GetLeaf(roundNPath)
 		require.NoError(t, err)
 		assert.NotNil(t, leaf1)
 
-		preCollectedPath, err := preCollectedCommitment.RequestID.GetPath()
+		preCollectedPath, err := preCollectedCommitment.StateID.GetPath()
 		require.NoError(t, err)
 		leaf2, err := smtInstance.GetLeaf(preCollectedPath)
 		require.NoError(t, err)
@@ -338,12 +338,12 @@ func TestStartNewRoundWithSnapshot(t *testing.T) {
 
 		// Create pre-collected snapshot with data
 		preSnapshot := smtInstance.CreateSnapshot()
-		commitment := testutil.CreateTestCommitment(t, "precollected_round")
+		commitment := testutil.CreateTestCertificationRequest(t, "precollected_round")
 		leaf := getLeafFromCommitment(t, commitment)
 		_, err = preSnapshot.AddLeaves([]*smt.Leaf{leaf})
 		require.NoError(t, err)
 
-		preCommitments := []*models.Commitment{commitment}
+		preCommitments := []*models.CertificationRequest{commitment}
 		preLeaves := []*smt.Leaf{leaf}
 
 		// Start round with pre-collected snapshot

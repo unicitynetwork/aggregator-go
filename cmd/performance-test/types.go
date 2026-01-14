@@ -47,19 +47,18 @@ type GetBlockHeightResponse struct {
 	BlockNumber string `json:"blockNumber"`
 }
 
-type GetInclusionProofRequest struct {
-	RequestID string `json:"requestId"`
+type GetInclusionProofRequestV2 struct {
+	StateID string `json:"stateId"`
 }
 
-type GetInclusionProofResponse struct {
-	InclusionProof *InclusionProof `json:"inclusionProof"`
+type GetInclusionProofResponseV2 struct {
+	InclusionProof *InclusionProofV2 `json:"inclusionProof"`
 }
 
-type InclusionProof struct {
-	Authenticator      *api.Authenticator `json:"authenticator"`
-	MerkleTreePath     *MerkleTreePath    `json:"merkleTreePath"`
-	TransactionHash    string             `json:"transactionHash"`
-	UnicityCertificate string             `json:"unicityCertificate"`
+type InclusionProofV2 struct {
+	CertificationData  *api.CertificationData `json:"certificationData"`
+	MerkleTreePath     *api.MerkleTreePath    `json:"merkleTreePath"`
+	UnicityCertificate string                 `json:"unicityCertificate"`
 }
 
 type MerkleTreePath struct {

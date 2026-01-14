@@ -18,7 +18,7 @@ import (
 
 // processMiniBatch processes a small batch of commitments into the SMT for efficiency
 // NOTE: The caller is expected to hold rm.roundMutex when calling this function
-func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.Commitment) error {
+func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.CertificationRequest) error {
 	if len(commitments) == 0 {
 		return nil
 	}
@@ -26,20 +26,20 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 	// Convert commitments to SMT leaves
 	leaves := make([]*smt.Leaf, 0, len(commitments))
 	for _, commitment := range commitments {
-		// Generate leaf path from requestID
-		path, err := commitment.RequestID.GetPath()
+		// Generate leaf path from stateID
+		path, err := commitment.StateID.GetPath()
 		if err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
-				"requestID", commitment.RequestID.String(),
+				"stateID", commitment.StateID.String(),
 				"error", err.Error())
 			continue
 		}
 
-		// Create leaf value (hash of commitment data)
-		leafValue, err := commitment.CreateLeafValue()
+		// Create leaf value (hash of certification request data)
+		leafValue, err := commitment.CertificationData.ToAPI().Hash()
 		if err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to create leaf value",
-				"requestID", commitment.RequestID.String(),
+				"stateID", commitment.StateID.String(),
 				"error", err.Error())
 			continue
 		}
@@ -267,7 +267,7 @@ func (rm *RoundManager) pollWithPreCollection(ctx context.Context, rootHash stri
 			if preCollectCount < maxPreCollect {
 				if err := rm.addToPreCollection(ctx, commitment); err != nil {
 					rm.logger.WithContext(ctx).Error("Failed to add commitment to pre-collection",
-						"requestID", commitment.RequestID.String(),
+						"requestID", commitment.StateID.String(),
 						"error", err.Error())
 				} else {
 					preCollectCount++
@@ -277,7 +277,7 @@ func (rm *RoundManager) pollWithPreCollection(ctx context.Context, rootHash stri
 	}
 }
 
-func (rm *RoundManager) addToPreCollection(ctx context.Context, commitment *models.Commitment) error {
+func (rm *RoundManager) addToPreCollection(ctx context.Context, commitment *models.CertificationRequest) error {
 	rm.preCollectionMutex.Lock()
 	defer rm.preCollectionMutex.Unlock()
 
@@ -285,12 +285,13 @@ func (rm *RoundManager) addToPreCollection(ctx context.Context, commitment *mode
 		return fmt.Errorf("pre-collection snapshot not initialized")
 	}
 
-	path, err := commitment.RequestID.GetPath()
+	path, err := commitment.StateID.GetPath()
 	if err != nil {
 		return fmt.Errorf("failed to get path for commitment: %w", err)
 	}
 
-	leafValue, err := commitment.CreateLeafValue()
+	// Create leaf value (hash of certification request data)
+	leafValue, err := commitment.CertificationData.ToAPI().Hash()
 	if err != nil {
 		return fmt.Errorf("failed to create leaf value: %w", err)
 	}
@@ -324,7 +325,7 @@ func (rm *RoundManager) initPreCollection(ctx context.Context) {
 	}
 
 	rm.preCollectionSnapshot = currentSnapshot.CreateSnapshot()
-	rm.preCollectedCommitments = make([]*models.Commitment, 0)
+	rm.preCollectedCommitments = make([]*models.CertificationRequest, 0)
 	rm.preCollectedLeaves = make([]*smt.Leaf, 0)
 }
 
@@ -432,19 +433,19 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	rm.roundMutex.Unlock()
 
 	rm.roundMutex.Lock()
-	requestIds := make([]api.RequestID, 0)
-	ackEntries := make([]interfaces.CommitmentAck, 0)
+	requestIds := make([]api.StateID, 0)
+	ackEntries := make([]interfaces.CertificationRequestAck, 0)
 	var proofTimes []time.Duration
 
 	if rm.currentRound != nil {
 		commitmentCount = len(rm.currentRound.Commitments)
-		requestIds = make([]api.RequestID, commitmentCount)
-		ackEntries = make([]interfaces.CommitmentAck, commitmentCount)
+		requestIds = make([]api.StateID, commitmentCount)
+		ackEntries = make([]interfaces.CertificationRequestAck, commitmentCount)
 
 		now := time.Now()
 		for i, commitment := range rm.currentRound.Commitments {
-			requestIds[i] = commitment.RequestID
-			ackEntries[i] = interfaces.CommitmentAck{RequestID: commitment.RequestID, StreamID: commitment.StreamID}
+			requestIds[i] = commitment.StateID
+			ackEntries[i] = interfaces.CertificationRequestAck{StateID: commitment.StateID, StreamID: commitment.StreamID}
 
 			if commitment.CreatedAt != nil {
 				proofReadyTime := now.Sub(commitment.CreatedAt.Time)
@@ -458,7 +459,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 
 	rm.roundMutex.Lock()
 	var pendingLeaves []*smt.Leaf
-	var commitments []*models.Commitment
+	var commitments []*models.CertificationRequest
 	snapshot := rm.currentRound.Snapshot
 	if rm.currentRound != nil {
 		pendingLeaves = rm.currentRound.PendingLeaves
@@ -623,7 +624,7 @@ func (rm *RoundManager) convertLeavesToNodes(leaves []*smt.Leaf) []*models.SmtNo
 }
 
 // convertCommitmentsToRecords converts commitments to aggregator records
-func (rm *RoundManager) convertCommitmentsToRecords(commitments []*models.Commitment, blockIndex *api.BigInt) []*models.AggregatorRecord {
+func (rm *RoundManager) convertCommitmentsToRecords(commitments []*models.CertificationRequest, blockIndex *api.BigInt) []*models.AggregatorRecord {
 	if len(commitments) == 0 {
 		return nil
 	}
@@ -639,7 +640,7 @@ func (rm *RoundManager) convertCommitmentsToRecords(commitments []*models.Commit
 // executeBlockTransaction executes the block finalization transaction.
 // storeBlockAndRecords stores the block and block records in a mini-transaction.
 // The block is stored with finalized=false.
-func (rm *RoundManager) storeBlockAndRecords(ctx context.Context, block *models.Block, requestIds []api.RequestID) error {
+func (rm *RoundManager) storeBlockAndRecords(ctx context.Context, block *models.Block, requestIds []api.StateID) error {
 	return rm.storage.WithTransaction(ctx, func(txCtx context.Context) error {
 		if err := rm.storage.BlockStorage().Store(txCtx, block); err != nil {
 			return fmt.Errorf("failed to store block: %w", err)

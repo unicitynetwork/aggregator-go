@@ -63,19 +63,19 @@ func setupAggregatorRecordTestDB(t *testing.T) *mongo.Database {
 }
 
 // createTestAggregatorRecord creates a test aggregator record
-func createTestAggregatorRecord(requestID string, blockNumber int64, leafIndex int64) *models.AggregatorRecord {
-	// Create a complete commitment with all required fields
+func createTestAggregatorRecord(stateID string, blockNumber int64, leafIndex int64) *models.AggregatorRecord {
+	// Create a complete certification request with all required fields
 	transactionHash, _ := api.NewImprintHexString("0x00001234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
-	stateHash, _ := api.NewImprintHexString("0x0000abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
+	sourceStateHash, _ := api.NewImprintHexString("0x0000abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
 
-	authenticator := models.Authenticator{
-		Algorithm: "ed25519",
-		PublicKey: api.HexBytes("test_public_key_1234567890abcdef"),
-		Signature: api.HexBytes("test_signature_1234567890abcdef"),
-		StateHash: stateHash,
+	certData := models.CertificationData{
+		OwnerPredicate:  api.NewPayToPublicKeyPredicate([]byte("test_public_key_1234567890abcdef")),
+		SourceStateHash: sourceStateHash,
+		TransactionHash: transactionHash,
+		Witness:         api.HexBytes("test_signature_1234567890abcdef"),
 	}
 
-	commitment := models.NewCommitment(api.RequestID(requestID), transactionHash, authenticator)
+	commitment := models.NewCertificationRequest(api.StateID(stateID), certData)
 
 	blockIndex := api.NewBigInt(big.NewInt(blockNumber))
 	leafIdx := api.NewBigInt(big.NewInt(leafIndex))
@@ -181,14 +181,14 @@ func TestAggregatorRecordStorage_GetByBlockNumber(t *testing.T) {
 		require.NotNil(t, retrieved)
 		require.Len(t, retrieved, 3)
 
-		// Check request IDs to be sure
-		requestIDs := make(map[api.RequestID]bool)
+		// Check state IDs to be sure
+		stateIDs := make(map[api.StateID]bool)
 		for _, r := range retrieved {
-			requestIDs[r.RequestID] = true
+			stateIDs[r.StateID] = true
 		}
-		require.True(t, requestIDs["req1-b100"])
-		require.True(t, requestIDs["req2-b100"])
-		require.True(t, requestIDs["req3-b100"])
+		require.True(t, stateIDs["req1-b100"])
+		require.True(t, stateIDs["req2-b100"])
+		require.True(t, stateIDs["req3-b100"])
 	})
 
 	t.Run("should return empty slice for non-existent block number", func(t *testing.T) {
@@ -204,6 +204,6 @@ func TestAggregatorRecordStorage_GetByBlockNumber(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, retrieved)
 		require.Len(t, retrieved, 1)
-		require.Equal(t, api.RequestID("req1-b0"), retrieved[0].RequestID)
+		require.Equal(t, api.StateID("req1-b0"), retrieved[0].StateID)
 	})
 }

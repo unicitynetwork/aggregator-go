@@ -1,4 +1,4 @@
-package models
+package v1
 
 import (
 	"crypto/sha256"
@@ -14,7 +14,7 @@ import (
 
 // TestCreateLeafValue tests the createLeafValue function to ensure it matches
 // the TypeScript LeafValue.create() implementation exactly
-func TestCreateLeafValue(t *testing.T) {
+func TestCreateLeafValueV1(t *testing.T) {
 	t.Run("should create expected leaf value", func(t *testing.T) {
 		// Create test data
 		publicKeyHex := "02bf8d9e7687f66c7fce1e98edbc05566f7db740030722cf6cf62aca035c5035ea"
@@ -336,7 +336,7 @@ func TestCreateLeafValue(t *testing.T) {
 }
 
 // BenchmarkCreateLeafValue benchmarks the createLeafValue function
-func BenchmarkCreateLeafValue(b *testing.B) {
+func BenchmarkCreateLeafValueV1(b *testing.B) {
 	// Setup test data
 	publicKey := []byte{0x02, 0x79, 0xbe, 0x66}
 	signature := []byte{0xa0, 0xb3, 0x7f, 0x8f}

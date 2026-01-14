@@ -1,4 +1,4 @@
-package models
+package v1
 
 import (
 	"crypto/sha256"
@@ -142,4 +142,15 @@ func (c *Commitment) CreateLeafValue() ([]byte, error) {
 	copy(imprint[2:], hash[:])
 
 	return imprint, nil
+}
+
+func (c *Commitment) ToAPI() *api.Commitment {
+	return &api.Commitment{
+		RequestID:             c.RequestID,
+		TransactionHash:       c.TransactionHash,
+		Authenticator:         *c.Authenticator.ToAPI(),
+		AggregateRequestCount: c.AggregateRequestCount,
+		CreatedAt:             c.CreatedAt,
+		ProcessedAt:           c.ProcessedAt,
+	}
 }

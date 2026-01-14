@@ -30,7 +30,7 @@ func CborBytes(n int) []byte {
 	return cborTag(2, n)
 }
 
-// CborArray retuns the CBOR tag for "array of n elements"
+// CborArray returns the CBOR tag for "array of n elements"
 func CborArray(n int) []byte {
 	return cborTag(4, n)
 }
