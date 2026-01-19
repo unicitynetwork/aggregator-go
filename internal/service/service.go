@@ -14,6 +14,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/internal/trustbase"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -65,7 +66,7 @@ type AggregatorService struct {
 	roundManager        round.Manager
 	leaderSelector      LeaderSelector
 	commitmentValidator *signing.CommitmentValidator
-	trustBaseValidator  *TrustBaseValidator
+	trustBaseValidator  *trustbase.TrustBaseValidator
 	receiptSigner       *signing.ReceiptSigner
 }
 
@@ -136,7 +137,7 @@ func NewAggregatorService(cfg *config.Config,
 		roundManager:        roundManager,
 		leaderSelector:      leaderSelector,
 		commitmentValidator: signing.NewCommitmentValidator(cfg.Sharding),
-		trustBaseValidator:  NewTrustBaseValidator(storage.TrustBaseStorage()),
+		trustBaseValidator:  trustbase.NewTrustBaseValidator(storage.TrustBaseStorage()),
 		receiptSigner:       receiptSigner,
 	}
 }

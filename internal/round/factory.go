@@ -36,12 +36,13 @@ func NewManager(
 	luc *types.UnicityCertificate,
 	eventBus *events.EventBus,
 	threadSafeSmt *smt.ThreadSafeSMT,
+	trustBaseProvider interfaces.TrustBaseProvider,
 ) (Manager, error) {
 	switch cfg.Sharding.Mode {
 	case config.ShardingModeStandalone:
 		return NewRoundManager(ctx, cfg, logger, commitmentQueue, storage, nil, stateTracker, luc, eventBus, threadSafeSmt)
 	case config.ShardingModeParent:
-		return NewParentRoundManager(ctx, cfg, logger, storage, luc, eventBus, threadSafeSmt)
+		return NewParentRoundManager(ctx, cfg, logger, storage, luc, eventBus, threadSafeSmt, trustBaseProvider)
 	case config.ShardingModeChild:
 		rootAggregatorClient := sharding.NewRootAggregatorClient(cfg.Sharding.Child.ParentRpcAddr)
 		return NewRoundManager(ctx, cfg, logger, commitmentQueue, storage, rootAggregatorClient, stateTracker, luc, eventBus, threadSafeSmt)

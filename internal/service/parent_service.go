@@ -13,6 +13,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/internal/trustbase"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -23,7 +24,7 @@ type ParentAggregatorService struct {
 	storage            interfaces.Storage
 	parentRoundManager *round.ParentRoundManager
 	leaderSelector     LeaderSelector
-	trustBaseValidator *TrustBaseValidator
+	trustBaseValidator *trustbase.TrustBaseValidator
 }
 
 func (pas *ParentAggregatorService) isLeader(ctx context.Context) (bool, error) {
@@ -54,7 +55,7 @@ func NewParentAggregatorService(
 		storage:            storage,
 		parentRoundManager: parentRoundManager,
 		leaderSelector:     leaderSelector,
-		trustBaseValidator: NewTrustBaseValidator(storage.TrustBaseStorage()),
+		trustBaseValidator: trustbase.NewTrustBaseValidator(storage.TrustBaseStorage()),
 	}
 }
 

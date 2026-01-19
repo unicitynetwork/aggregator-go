@@ -199,6 +199,10 @@ type TrustBaseStorage interface {
 	GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error)
 }
 
+type TrustBaseProvider interface {
+	GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error)
+}
+
 // Storage handles persistent data storage
 type Storage interface {
 	AggregatorRecordStorage() AggregatorRecordStorage

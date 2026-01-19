@@ -1,4 +1,4 @@
-package service
+package trustbase
 
 import (
 	"context"
@@ -18,14 +18,18 @@ func NewTrustBaseValidator(storage interfaces.TrustBaseStorage) *TrustBaseValida
 	return &TrustBaseValidator{storage: storage}
 }
 
-func (t *TrustBaseValidator) Verify(ctx context.Context, trustBase *types.RootTrustBaseV1) error {
+func (t *TrustBaseValidator) Verify(ctx context.Context, trustBase types.RootTrustBase) error {
 	if trustBase == nil {
 		return errors.New("trust base is nil")
+	}
+	trustBaseV1, ok := trustBase.(*types.RootTrustBaseV1)
+	if !ok {
+		return fmt.Errorf("failed to cast trust base to version 1 for epoch %d", trustBase.GetEpoch())
 	}
 
 	// verify trust base extends previous trust base
 	var previousTrustBaseV1 *types.RootTrustBaseV1
-	epoch := trustBase.GetEpoch()
+	epoch := trustBaseV1.GetEpoch()
 	if epoch > 1 {
 		previousTrustBase, err := t.storage.GetByEpoch(ctx, epoch-1)
 		if err != nil {
@@ -37,7 +41,7 @@ func (t *TrustBaseValidator) Verify(ctx context.Context, trustBase *types.RootTr
 			return fmt.Errorf("failed to cast previous trust base to version 1 for epoch %d", epoch)
 		}
 	}
-	if err := trustBase.Verify(previousTrustBaseV1); err != nil {
+	if err := trustBaseV1.Verify(previousTrustBaseV1); err != nil {
 		return fmt.Errorf("failed to verify trust base: %w", err)
 	}
 	return nil

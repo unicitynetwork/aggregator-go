@@ -71,6 +71,7 @@ func NewParentRoundManager(
 	luc *types.UnicityCertificate,
 	eventBus *events.EventBus,
 	threadSafeSmt *smt.ThreadSafeSMT,
+	trustBaseProvider interfaces.TrustBaseProvider,
 ) (*ParentRoundManager, error) {
 	prm := &ParentRoundManager{
 		config:    cfg,
@@ -84,7 +85,7 @@ func NewParentRoundManager(
 	// Create BFT client (same logic as regular RoundManager)
 	if cfg.BFT.Enabled {
 		var err error
-		prm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, prm, storage.TrustBaseStorage(), luc, logger, eventBus)
+		prm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, prm, trustBaseProvider, luc, logger, eventBus)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create BFT client: %w", err)
 		}

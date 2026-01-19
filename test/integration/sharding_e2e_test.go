@@ -170,7 +170,7 @@ func startAggregator(t *testing.T, ctx context.Context, name, port, mongoURI, re
 	}
 	threadSafeSmt := smt.NewThreadSafeSMT(smtInstance)
 
-	mgr, _ := round.NewManager(aggCtx, cfg, log, queue, stor, state.NewSyncStateTracker(), nil, eventBus, threadSafeSmt)
+	mgr, _ := round.NewManager(aggCtx, cfg, log, queue, stor, state.NewSyncStateTracker(), nil, eventBus, threadSafeSmt, stor.TrustBaseStorage())
 	mgr.Start(aggCtx)
 	mgr.Activate(aggCtx)
 

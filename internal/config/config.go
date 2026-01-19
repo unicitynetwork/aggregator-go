@@ -172,10 +172,10 @@ func (sm ShardingMode) IsChild() bool {
 
 // ShardingConfig holds sharding configuration
 type ShardingConfig struct {
-	Mode                        ShardingMode  `mapstructure:"mode"`                           // Operating mode: standalone, parent, or child
-	ShardIDLength               int           `mapstructure:"shard_id_length"`                // Bit length for shard IDs (e.g., 4 bits = 16 shards)
-	ParentCollectPhaseDuration  time.Duration `mapstructure:"parent_collect_phase_duration"`  // Collection window for parent mode before sending to BFT
-	Child                       ChildConfig   `mapstructure:"child"`                          // child aggregator config
+	Mode                       ShardingMode  `mapstructure:"mode"`                          // Operating mode: standalone, parent, or child
+	ShardIDLength              int           `mapstructure:"shard_id_length"`               // Bit length for shard IDs (e.g., 4 bits = 16 shards)
+	ParentCollectPhaseDuration time.Duration `mapstructure:"parent_collect_phase_duration"` // Collection window for parent mode before sending to BFT
+	Child                      ChildConfig   `mapstructure:"child"`                         // child aggregator config
 }
 
 type ChildConfig struct {
@@ -233,6 +233,9 @@ type BFTConfig struct {
 	HeartbeatInterval time.Duration `mapstructure:"heartbeat_interval"`
 	// InactivityTimeout duration of inactivity after which a new handshake must be sent.
 	InactivityTimeout time.Duration `mapstructure:"inactivity_timeout"`
+
+	// BFT node REST api address
+	RPCAddress string `mapstructure:"rpc_address"`
 }
 
 func (c *BFTConfig) Validate() error {
@@ -353,6 +356,7 @@ func Load() (*Config, error) {
 	config.BFT = BFTConfig{
 		Enabled:                    getEnvBoolOrDefault("BFT_ENABLED", true),
 		Address:                    getEnvOrDefault("BFT_ADDRESS", "/ip4/0.0.0.0/tcp/9000"),
+		RPCAddress:                 getEnvOrDefault("BFT_RPC_ADDRESS", "127.0.0.1:8002"),
 		AnnounceAddresses:          strings.Split(getEnvOrDefault("BFT_ANNOUNCE_ADDRESSES", ""), ","),
 		BootstrapAddresses:         strings.Split(getEnvOrDefault("BFT_BOOTSTRAP_ADDRESSES", ""), ","),
 		BootstrapConnectRetry:      getEnvIntOrDefault("BFT_BOOTSTRAP_CONNECT_RETRY", 3),
