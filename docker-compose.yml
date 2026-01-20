@@ -187,6 +187,7 @@ services:
       BFT_ENABLED: "true"
       BFT_SHARD_CONF_FILE: "/app/bft-config/shard-conf-7_0.json"
       BFT_TRUST_BASE_FILES: "/app/bft-config/trust-base.json"
+      BFT_RPC_ADDRESS: "http://127.0.0.1:8002"
       # BFT_BOOTSTRAP_ADDRESSES will be set dynamically by the entrypoint script
 
     entrypoint: ["/bin/sh", "-c"]

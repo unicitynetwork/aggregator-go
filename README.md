@@ -178,7 +178,7 @@ The service is configured via environment variables:
 |-------------------------------------|-------------------------------------------------------------------------------------|----------------------------------|
 | `BFT_ENABLED`                       | Enables or disables the BFT client integration.                                     | `true`                           |
 | `BFT_ADDRESS`                       | The libp2p multiaddress for the BFT client to listen on.                            | `/ip4/0.0.0.0/tcp/9000`          |
-| `BFT_RPC_ADDRESS`                   | The BFT node's RPC API address.                                                     | `127.0.0.1:8002`                 |
+| `BFT_RPC_ADDRESS`                   | The BFT node's RPC API address.                                                     | `http://127.0.0.1:8002`          |
 | `BFT_ANNOUNCE_ADDRESSES`            | Comma-separated list of public callback multi-addresses to announce to other peers. | `""`                             |
 | `BFT_BOOTSTRAP_ADDRESSES`           | Comma-separated list of bootstrap peer addresses.                                   | `""`                             |
 | `BFT_BOOTSTRAP_CONNECT_RETRY`       | Number of retries for connecting to bootstrap peers.                                | `3`                              |

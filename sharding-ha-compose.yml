@@ -317,6 +317,7 @@ services:
       BFT_ENABLED: "false"
       BFT_SHARD_CONF_FILE: "/app/bft-config/shard-conf-7_0.json"
       BFT_TRUST_BASE_FILES: "/app/bft-config/trust-base.json"
+      BFT_RPC_ADDRESS: "http://127.0.0.1:8002"
       REDIS_HOST: "redis"
       REDIS_PORT: "6379"
       REDIS_PASSWORD: ""
