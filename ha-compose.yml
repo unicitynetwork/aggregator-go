@@ -5,6 +5,8 @@ services:
     # https://github.com/unicitynetwork/bft-core/pkgs/container/bft-core
     image: ghcr.io/unicitynetwork/bft-core:8a4f7aa263ef814ef514cfd73f8a366f3a3b348e
   bft-root:
+    ports:
+      - "8002:8002" # expose rpc server
     <<: *bft-base
     volumes:
       - ./data/genesis-root:/genesis/root

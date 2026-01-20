@@ -5,6 +5,8 @@ services:
     image: ghcr.io/unicitynetwork/bft-core:8a4f7aa263ef814ef514cfd73f8a366f3a3b348e
   bft-root:
     <<: *bft-base
+    ports:
+      - "8002:8002" # expose rpc server
     volumes:
       - ./data/genesis-root:/genesis/root
       - ./data/genesis:/genesis

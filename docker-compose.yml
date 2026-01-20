@@ -7,6 +7,8 @@ services:
 
   bft-root:
     <<: *bft-base
+    ports:
+      - "8002:8002" # expose rpc server
     volumes:
       - ./data/genesis-root:/genesis/root
       - ./data/genesis:/genesis
