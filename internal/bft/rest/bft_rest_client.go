@@ -31,15 +31,15 @@ type GetTrustBasesResponse struct {
 	TrustBases []*types.RootTrustBaseV1 `cbor:"trustBases"`
 }
 
-func (c *BFTRestClient) GetTrustBases(ctx context.Context, epoch1, epoch2 uint64) ([]*types.RootTrustBaseV1, error) {
+func (c *BFTRestClient) GetTrustBases(ctx context.Context, fromEpoch, toEpoch uint64) ([]*types.RootTrustBaseV1, error) {
 	u, err := url.Parse(c.baseURL + "/api/v1/trustbases")
 	if err != nil {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
 	}
 
 	q := u.Query()
-	q.Set("epoch1", strconv.FormatUint(epoch1, 10))
-	q.Set("epoch2", strconv.FormatUint(epoch2, 10))
+	q.Set("from", strconv.FormatUint(fromEpoch, 10))
+	q.Set("to", strconv.FormatUint(toEpoch, 10))
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)

@@ -29,8 +29,8 @@ func TestBFTRestClient_GetTrustBases(t *testing.T) {
 			epoch2: 1,
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				require.Equal(t, "/api/v1/trustbases", r.URL.Path)
-				require.Equal(t, "1", r.URL.Query().Get("epoch1"))
-				require.Equal(t, "1", r.URL.Query().Get("epoch2"))
+				require.Equal(t, "1", r.URL.Query().Get("from"))
+				require.Equal(t, "1", r.URL.Query().Get("to"))
 				require.Equal(t, "application/cbor", r.Header.Get("Accept"))
 
 				w.Header().Set("Content-Type", "application/cbor")
