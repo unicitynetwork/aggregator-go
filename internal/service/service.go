@@ -225,6 +225,9 @@ func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.Subm
 
 // GetInclusionProof retrieves inclusion proof for a commitment
 func (as *AggregatorService) GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error) {
+	unlock := as.roundManager.FinalizationReadLock()
+	defer unlock()
+
 	// verify that the request ID matches the shard ID of this aggregator
 	if err := as.commitmentValidator.ValidateShardID(req.RequestID); err != nil {
 		return nil, fmt.Errorf("request ID validation failed: %w", err)
@@ -418,7 +421,7 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 
 	// Add database connectivity check
 	if err := as.storage.Ping(ctx); err != nil {
-		status.Status = "unhealthy"
+		status.Status = api.HealthStatusUnhealthy
 		status.AddDetail("database", "disconnected")
 		as.logger.WithContext(ctx).Error("Database health check failed", "error", err.Error())
 	} else {
@@ -428,7 +431,7 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 	// Add commitment queue status and warning if too high
 	unprocessedCount, err := as.commitmentQueue.CountUnprocessed(ctx)
 	if err != nil {
-		status.Status = "unhealthy"
+		status.Status = api.HealthStatusUnhealthy
 		status.AddDetail("commitment_queue_status", "error")
 		as.logger.WithContext(ctx).Error("Commitment queue health check failed", "error", err.Error())
 	} else {
@@ -450,7 +453,7 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 
 	if as.config.Sharding.Mode == config.ShardingModeChild {
 		if err := as.roundManager.CheckParentHealth(ctx); err != nil {
-			status.Status = "degraded"
+			status.Status = api.HealthStatusUnhealthy
 			status.AddDetail("parent", "unreachable")
 			status.AddDetail("parent_error", err.Error())
 			as.logger.WithContext(ctx).Warn("Parent aggregator health check failed", "error", err.Error())

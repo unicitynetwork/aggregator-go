@@ -178,6 +178,23 @@ func (suite *ParentServiceTestSuite) TestSubmitShardRoot_NotLeader() {
 	suite.Assert().Equal(api.ShardRootStatusNotLeader, response.Status, "Follower should reject shard submissions with NOT_LEADER")
 }
 
+func (suite *ParentServiceTestSuite) TestSubmitShardRoot_NotReady() {
+	ctx := context.Background()
+
+	err := suite.prm.Deactivate(ctx)
+	suite.Require().NoError(err, "Deactivate should succeed")
+
+	request := &api.SubmitShardRootRequest{
+		ShardID:  4,
+		RootHash: makeTestHash(0xAA),
+	}
+
+	response, err := suite.service.SubmitShardRoot(ctx, request)
+	suite.Require().NoError(err, "Not ready should not return Go error")
+	suite.Require().NotNil(response, "Response should not be nil")
+	suite.Assert().Equal(api.ShardRootStatusNotReady, response.Status, "Not ready should be rejected")
+}
+
 // SubmitShardRoot - Invalid ShardID (empty)
 func (suite *ParentServiceTestSuite) TestSubmitShardRoot_EmptyShardID() {
 	ctx := context.Background()
@@ -193,6 +210,19 @@ func (suite *ParentServiceTestSuite) TestSubmitShardRoot_EmptyShardID() {
 	suite.Assert().Equal(api.ShardRootStatusInvalidShardID, response.Status, "Should return INVALID_SHARD_ID status")
 
 	suite.T().Log("✓ Empty shard ID rejected correctly")
+}
+
+func (suite *ParentServiceTestSuite) TestGetHealthStatus_NotReady() {
+	ctx := context.Background()
+
+	err := suite.prm.Deactivate(ctx)
+	suite.Require().NoError(err, "Deactivate should succeed")
+
+	status, err := suite.service.GetHealthStatus(ctx)
+	suite.Require().NoError(err, "Health status should be returned")
+	suite.Require().NotNil(status, "Health status should not be nil")
+	suite.Assert().Equal(api.HealthStatusUnhealthy, status.Status, "Not ready should be unhealthy")
+	suite.Assert().Equal("false", status.Details["ready"], "Ready detail should be false")
 }
 
 // SubmitShardRoot - Invalid ShardID (out of range)

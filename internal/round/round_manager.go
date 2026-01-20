@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"os"
 	"sync"
 	"time"
 
@@ -32,18 +31,6 @@ const (
 )
 
 const miniBatchSize = 100 // Number of commitments to process per SMT mini-batch
-
-// osExit is the function used to exit the process on fatal errors.
-// It can be overridden in tests to prevent actual process termination.
-var osExit = os.Exit
-
-// SetExitFunc allows tests to override the exit function to prevent actual process termination.
-// Returns a function to restore the original exit function.
-func SetExitFunc(f func(int)) func() {
-	original := osExit
-	osExit = f
-	return func() { osExit = original }
-}
 
 func (rs RoundState) String() string {
 	switch rs {
@@ -106,6 +93,8 @@ type RoundManager struct {
 	// Round management
 	currentRound *Round
 	roundMutex   sync.RWMutex
+	// Guards the window where SMT root advances before block finalization is persisted.
+	finalizationMu sync.RWMutex
 	wg           sync.WaitGroup
 
 	// Round duration (configurable, default 1 second)
@@ -305,6 +294,12 @@ func (rm *RoundManager) GetSMT() *smt.ThreadSafeSMT {
 	return rm.smt
 }
 
+// FinalizationReadLock blocks only during the commit+finalize window to avoid root/block mismatches in proofs.
+func (rm *RoundManager) FinalizationReadLock() func() {
+	rm.finalizationMu.RLock()
+	return func() { rm.finalizationMu.RUnlock() }
+}
+
 // GetStats returns round manager statistics
 func (rm *RoundManager) GetStats() map[string]interface{} {
 	rm.roundMutex.RLock()
@@ -390,10 +385,15 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 					"roundNumber", roundNumber.String())
 				return
 			}
-			rm.logger.WithContext(ctx).Error("FATAL: Round processing failed, exiting",
+			rm.logger.WithContext(ctx).Error("Round processing failed, requesting shutdown",
 				"roundNumber", roundNumber.String(),
 				"error", err.Error())
-			osExit(1)
+			if rm.eventBus != nil {
+				rm.eventBus.Publish(events.TopicFatalError, events.FatalErrorEvent{
+					Source: "round_manager",
+					Error:  err.Error(),
+				})
+			}
 		}
 	})
 

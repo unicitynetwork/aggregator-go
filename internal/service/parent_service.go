@@ -40,6 +40,16 @@ func (pas *ParentAggregatorService) isLeader(ctx context.Context) (bool, error) 
 	return isLeader, nil
 }
 
+func (pas *ParentAggregatorService) isReady(isLeader bool) (bool, string) {
+	if !isLeader {
+		return false, "not_leader"
+	}
+	if !pas.parentRoundManager.IsReady() {
+		return false, "not_initialized"
+	}
+	return true, ""
+}
+
 // NewParentAggregatorService creates a new parent aggregator service
 func NewParentAggregatorService(
 	cfg *config.Config,
@@ -97,6 +107,15 @@ func (pas *ParentAggregatorService) SubmitShardRoot(ctx context.Context, req *ap
 			"shardId", req.ShardID)
 		return &api.SubmitShardRootResponse{
 			Status: api.ShardRootStatusNotLeader,
+		}, nil
+	}
+
+	if ready, reason := pas.isReady(isLeader); !ready {
+		pas.logger.WithContext(ctx).Warn("Rejecting shard root submission because parent is not ready",
+			"shardId", req.ShardID,
+			"reason", reason)
+		return &api.SubmitShardRootResponse{
+			Status: api.ShardRootStatusNotReady,
 		}, nil
 	}
 
@@ -163,14 +182,21 @@ func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.
 			"shardId", req.ShardID)
 	}
 
-	latestBlock, err := pas.storage.BlockStorage().GetLatest(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get latest block: %w", err)
-	}
-
 	var unicityCertificate api.HexBytes
-	if latestBlock != nil {
-		unicityCertificate = latestBlock.UnicityCertificate
+	if proofPath != nil {
+		rootHash, err := api.NewHexBytesFromString(merkleTreePath.Root)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse root hash: %w", err)
+		}
+
+		block, err := pas.storage.BlockStorage().GetLatestByRootHash(ctx, rootHash)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get latest block by root hash: %w", err)
+		}
+		if block == nil {
+			return nil, fmt.Errorf("no block found with root hash %s", rootHash.String())
+		}
+		unicityCertificate = block.UnicityCertificate
 	}
 
 	return &api.GetShardProofResponse{
@@ -248,11 +274,13 @@ func (pas *ParentAggregatorService) GetBlockCommitments(ctx context.Context, req
 func (pas *ParentAggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthStatus, error) {
 	// Check if HA is enabled and determine role
 	var role string
+	var isLeader bool
 	if pas.leaderSelector != nil {
-		isLeader, err := pas.leaderSelector.IsLeader(ctx)
+		var err error
+		isLeader, err = pas.leaderSelector.IsLeader(ctx)
 		if err != nil {
 			pas.logger.WithContext(ctx).Warn("Failed to check leadership status", "error", err.Error())
-			// Don't fail health check on leadership query failure
+			// Default to follower to avoid accepting traffic while leadership is unknown.
 			isLeader = false
 		}
 
@@ -263,6 +291,7 @@ func (pas *ParentAggregatorService) GetHealthStatus(ctx context.Context) (*api.H
 		}
 	} else {
 		role = "parent-standalone"
+		isLeader = true
 	}
 
 	sharding := api.Sharding{
@@ -273,11 +302,20 @@ func (pas *ParentAggregatorService) GetHealthStatus(ctx context.Context) (*api.H
 
 	// Add database connectivity check
 	if err := pas.storage.Ping(ctx); err != nil {
-		status.Status = "unhealthy"
+		status.Status = api.HealthStatusUnhealthy
 		status.AddDetail("database", "disconnected")
 		pas.logger.WithContext(ctx).Error("Database health check failed", "error", err.Error())
 	} else {
 		status.AddDetail("database", "connected")
+	}
+
+	if ready, reason := pas.isReady(isLeader); !ready {
+		status.Status = api.HealthStatusUnhealthy
+		status.AddDetail("ready", "false")
+		status.AddDetail("ready_reason", reason)
+		pas.logger.WithContext(ctx).Warn("Parent health check NOT_READY", "reason", reason)
+	} else {
+		status.AddDetail("ready", "true")
 	}
 
 	return modelToAPIHealthStatus(status), nil
