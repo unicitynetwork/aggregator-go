@@ -291,3 +291,11 @@ func (pas *ParentAggregatorService) PutTrustBase(ctx context.Context, trustBase 
 	}
 	return pas.storage.TrustBaseStorage().Store(ctx, trustBase)
 }
+
+func (pas *ParentAggregatorService) GetTrustBases(ctx context.Context, from, to uint64) ([]*types.RootTrustBaseV1, error) {
+	return pas.storage.TrustBaseStorage().GetTrustBases(ctx, from, to)
+}
+
+func (pas *ParentAggregatorService) GetLatestTrustBase(ctx context.Context) (*types.RootTrustBaseV1, error) {
+	return pas.storage.TrustBaseStorage().GetLatest(ctx)
+}

@@ -30,7 +30,7 @@ func TestTrustBaseManager(t *testing.T) {
 	t.Run("test ok", func(t *testing.T) {
 		// no trust base in store
 		trustBaseStore := &mockStorage{
-			GetByEpochFunc: func(ctx context.Context, epoch uint64) (types.RootTrustBase, error) {
+			GetByEpochFunc: func(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
 				return nil, interfaces.ErrTrustBaseNotFound
 			},
 		}

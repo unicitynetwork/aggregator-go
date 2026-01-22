@@ -14,14 +14,14 @@ import (
 // TrustBaseManager manages trust base synchronization between BFT node and local state
 type TrustBaseManager struct {
 	log                *logger.Logger
-	trustBaseStore     interfaces.TrustBaseStorage
+	trustBaseStore     TrustBaseStore
 	bftRestClient      BFTRestClient
 	trustBaseValidator TrustBaseVerifier
 }
 
 type (
 	TrustBaseStore interface {
-		GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error)
+		GetByEpoch(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error)
 		Store(ctx context.Context, trustBase types.RootTrustBase) error
 	}
 	BFTRestClient interface {
@@ -44,7 +44,7 @@ func NewTrustBaseManager(log *logger.Logger, trustBaseStore TrustBaseStore, bftR
 // GetByEpoch returns trust base from (in order of precedence):
 // cache -> storage -> BFT node -> error if not found.
 // If new trust base is found from BFT node then the trust base is persisted to TrustBaseStore before returning.
-func (s *TrustBaseManager) GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error) {
+func (s *TrustBaseManager) GetByEpoch(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
 	// attempt to load from local store (cache + disk via decorator chain)
 	tbFromCache, err := s.trustBaseStore.GetByEpoch(ctx, epoch)
 	if err != nil && !errors.Is(err, interfaces.ErrTrustBaseNotFound) {
