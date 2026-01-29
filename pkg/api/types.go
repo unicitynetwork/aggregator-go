@@ -273,6 +273,14 @@ const (
 	ShardRootStatusInvalidRootHash = "INVALID_ROOT_HASH"
 	ShardRootStatusInternalError   = "INTERNAL_ERROR"
 	ShardRootStatusNotLeader       = "NOT_LEADER"
+	ShardRootStatusNotReady        = "NOT_READY"
+)
+
+// Health status values returned by the health endpoint.
+const (
+	HealthStatusOk        = "ok"
+	HealthStatusUnhealthy = "unhealthy"
+	HealthStatusDegraded  = "degraded"
 )
 
 // SubmitShardRootRequest represents the submit_shard_root JSON-RPC request
@@ -309,7 +317,7 @@ type HealthStatus struct {
 // NewHealthStatus creates a new health status
 func NewHealthStatus(role, serverID string) *HealthStatus {
 	return &HealthStatus{
-		Status:   "ok",
+		Status:   HealthStatusOk,
 		Role:     role,
 		ServerID: serverID,
 		Details:  make(map[string]string),

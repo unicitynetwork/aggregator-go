@@ -14,7 +14,7 @@ type HealthStatus struct {
 // NewHealthStatus creates a new health status
 func NewHealthStatus(role, serverID string, sharding api.Sharding) *HealthStatus {
 	return &HealthStatus{
-		Status:   "ok",
+		Status:   api.HealthStatusOk,
 		Role:     role,
 		ServerID: serverID,
 		Sharding: sharding,

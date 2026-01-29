@@ -8,6 +8,7 @@ bft-config
 /data/
 /logs/
 .cache/
+.gocache/
 
 # Environment files with secrets
 .env

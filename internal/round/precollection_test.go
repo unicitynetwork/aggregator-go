@@ -32,7 +32,7 @@ func getLeafFromCommitment(t *testing.T, commitment *models.Commitment) *smt.Lea
 func TestPreCollectionMechanism(t *testing.T) {
 	t.Run("InitPreCollectionCreatesChainedSnapshot", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		defer cancel()
 		cfg := config.Config{
 			Processing: config.ProcessingConfig{
 				RoundDuration:          100 * time.Millisecond,
@@ -81,7 +81,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 
 	t.Run("AddToPreCollectionAddsCommitment", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		defer cancel()
 		cfg := config.Config{
 			Processing: config.ProcessingConfig{
 				MaxCommitmentsPerRound: 1000,
@@ -135,7 +135,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 
 	t.Run("ClearPreCollectionResetsState", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		defer cancel()
 		cfg := config.Config{
 			Processing: config.ProcessingConfig{
 				MaxCommitmentsPerRound: 1000,
@@ -188,7 +188,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 
 	t.Run("AddToPreCollectionFailsWithoutSnapshot", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		defer cancel()
 		cfg := config.Config{}
 
 		testLogger, err := logger.New("info", "text", "stdout", false)
@@ -208,12 +208,219 @@ func TestPreCollectionMechanism(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "pre-collection snapshot not initialized")
 	})
+
+	t.Run("AddBatchToPreCollectionAddsManyCommitments", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		cfg := config.Config{
+			Processing: config.ProcessingConfig{
+				MaxCommitmentsPerRound: 1000,
+			},
+			Sharding: config.ShardingConfig{
+				Mode: config.ShardingModeChild,
+				Child: config.ChildConfig{
+					ShardID: 0b11,
+				},
+			},
+		}
+
+		testLogger, err := logger.New("info", "text", "stdout", false)
+		require.NoError(t, err)
+
+		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+
+		rm := &RoundManager{
+			config:           &cfg,
+			logger:           testLogger,
+			smt:              smtInstance,
+			commitmentStream: make(chan *models.Commitment, 100),
+		}
+
+		// Create current round and initialize pre-collection
+		snapshot := smtInstance.CreateSnapshot()
+		rm.currentRound = &Round{
+			Number:   api.NewBigInt(big.NewInt(1)),
+			Snapshot: snapshot,
+		}
+		rm.initPreCollection(ctx)
+
+		initialRootHash := rm.preCollectionSnapshot.GetRootHash()
+
+		// Create a batch of test commitments
+		batchSize := 50
+		commitments := make([]*models.Commitment, batchSize)
+		for i := 0; i < batchSize; i++ {
+			commitments[i] = testutil.CreateTestCommitment(t, "batch_test")
+		}
+
+		// Add batch to pre-collection
+		err = rm.addBatchToPreCollection(ctx, commitments)
+		require.NoError(t, err)
+
+		// Verify all commitments were added
+		assert.Len(t, rm.preCollectedCommitments, batchSize)
+		assert.Len(t, rm.preCollectedLeaves, batchSize)
+
+		// Verify root hash changed
+		newRootHash := rm.preCollectionSnapshot.GetRootHash()
+		assert.NotEqual(t, initialRootHash, newRootHash)
+	})
+
+	t.Run("AddBatchToPreCollectionEmptyBatchNoOp", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		cfg := config.Config{}
+
+		testLogger, err := logger.New("info", "text", "stdout", false)
+		require.NoError(t, err)
+
+		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+
+		rm := &RoundManager{
+			config:           &cfg,
+			logger:           testLogger,
+			smt:              smtInstance,
+			commitmentStream: make(chan *models.Commitment, 100),
+		}
+
+		// Create current round and initialize pre-collection
+		snapshot := smtInstance.CreateSnapshot()
+		rm.currentRound = &Round{
+			Number:   api.NewBigInt(big.NewInt(1)),
+			Snapshot: snapshot,
+		}
+		rm.initPreCollection(ctx)
+
+		// Empty batch should succeed without doing anything
+		err = rm.addBatchToPreCollection(ctx, []*models.Commitment{})
+		require.NoError(t, err)
+
+		assert.Empty(t, rm.preCollectedCommitments)
+		assert.Empty(t, rm.preCollectedLeaves)
+	})
+
+	t.Run("FailedBatchCanBeRetriedAfterReinitialization", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		cfg := config.Config{
+			Processing: config.ProcessingConfig{
+				MaxCommitmentsPerRound: 1000,
+			},
+			Sharding: config.ShardingConfig{
+				Mode: config.ShardingModeChild,
+				Child: config.ChildConfig{
+					ShardID: 0b11,
+				},
+			},
+		}
+
+		testLogger, err := logger.New("info", "text", "stdout", false)
+		require.NoError(t, err)
+
+		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+
+		rm := &RoundManager{
+			config:           &cfg,
+			logger:           testLogger,
+			smt:              smtInstance,
+			commitmentStream: make(chan *models.Commitment, 100),
+		}
+
+		// Create a batch of commitments (simulating pendingCommitments in flushBatch)
+		batch := make([]*models.Commitment, 5)
+		for i := 0; i < 5; i++ {
+			batch[i] = testutil.CreateTestCommitment(t, "retry_test")
+		}
+
+		// First attempt: no snapshot initialized, should fail
+		err = rm.addBatchToPreCollection(ctx, batch)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "pre-collection snapshot not initialized")
+
+		// Batch is still available for retry (caller retains it on error)
+		assert.Len(t, batch, 5)
+
+		// Now initialize pre-collection properly
+		snapshot := smtInstance.CreateSnapshot()
+		rm.currentRound = &Round{
+			Number:   api.NewBigInt(big.NewInt(1)),
+			Snapshot: snapshot,
+		}
+		rm.initPreCollection(ctx)
+
+		// Retry the same batch - should succeed now
+		err = rm.addBatchToPreCollection(ctx, batch)
+		require.NoError(t, err)
+
+		// Verify all commitments were added
+		assert.Len(t, rm.preCollectedCommitments, 5)
+		assert.Len(t, rm.preCollectedLeaves, 5)
+	})
+
+	t.Run("BatchWithBadLeafFallsBackToOneByOne", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		cfg := config.Config{
+			Processing: config.ProcessingConfig{
+				MaxCommitmentsPerRound: 1000,
+			},
+			Sharding: config.ShardingConfig{
+				Mode: config.ShardingModeChild,
+				Child: config.ChildConfig{
+					ShardID: 0b11, // Shard prefix is 11
+				},
+			},
+		}
+
+		testLogger, err := logger.New("info", "text", "stdout", false)
+		require.NoError(t, err)
+
+		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+
+		rm := &RoundManager{
+			config:           &cfg,
+			logger:           testLogger,
+			smt:              smtInstance,
+			commitmentStream: make(chan *models.Commitment, 100),
+		}
+
+		// Create current round and initialize pre-collection
+		snapshot := smtInstance.CreateSnapshot()
+		rm.currentRound = &Round{
+			Number:   api.NewBigInt(big.NewInt(1)),
+			Snapshot: snapshot,
+		}
+		rm.initPreCollection(ctx)
+
+		// Create 2 valid commitments
+		commitment1 := testutil.CreateTestCommitment(t, "fallback_test_1")
+		commitment2 := testutil.CreateTestCommitment(t, "fallback_test_2")
+
+		// Add first commitment
+		err = rm.addBatchToPreCollection(ctx, []*models.Commitment{commitment1})
+		require.NoError(t, err)
+		assert.Len(t, rm.preCollectedCommitments, 1)
+
+		// Create a modified version of commitment1 (same requestID, different value)
+		// This will trigger ErrLeafModification when trying to add as batch
+		modifiedCommitment := *commitment1
+		modifiedCommitment.TransactionHash = commitment2.TransactionHash // Different hash
+
+		// Now try to add a batch with: modifiedCommitment (will fail), commitment2 (valid)
+		batch := []*models.Commitment{&modifiedCommitment, commitment2}
+		err = rm.addBatchToPreCollection(ctx, batch)
+		require.NoError(t, err) // Should succeed overall (fallback handles errors)
+
+		// Should have commitment1 and commitment2 (modifiedCommitment was skipped)
+		// Total: 2 commitments
+		assert.Len(t, rm.preCollectedCommitments, 2)
+	})
 }
 
 func TestPreCollectionReparenting(t *testing.T) {
 	t.Run("ReparentedSnapshotCommitsToMainSMT", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		defer cancel()
 		cfg := config.Config{
 			Processing: config.ProcessingConfig{
 				MaxCommitmentsPerRound: 1000,

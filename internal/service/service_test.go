@@ -64,15 +64,9 @@ func (suite *AggregatorTestSuite) TearDownTest() {
 func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func()) {
 	var mongoContainer *mongodb.MongoDBContainer
 
-	// Override osExit to prevent test process termination during teardown
-	restoreExit := round.SetExitFunc(func(code int) {
-		t.Logf("os.Exit(%d) called but suppressed in test", code)
-	})
-
 	// Ensure cleanup happens even if setup fails
 	defer func() {
 		if r := recover(); r != nil {
-			restoreExit()
 			if mongoContainer != nil {
 				mongoContainer.Terminate(context.Background())
 			}
@@ -178,9 +172,6 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 
 	// Return the server address and cleanup function
 	return serverAddr, func() {
-		// Restore the original exit function at the end
-		defer restoreExit()
-
 		// Create shutdown context
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -522,6 +513,7 @@ func (s *stubRoundManager) Deactivate(context.Context) error {
 }
 func (s *stubRoundManager) GetSMT() *smt.ThreadSafeSMT              { return s.smt }
 func (s *stubRoundManager) CheckParentHealth(context.Context) error { return nil }
+func (s *stubRoundManager) FinalizationReadLock() func()            { return func() {} }
 
 func newAggregatorServiceForTest(t *testing.T, shardingCfg config.ShardingConfig, baseTree *smt.SparseMerkleTree) *AggregatorService {
 	t.Helper()
