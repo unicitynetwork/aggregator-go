@@ -156,7 +156,7 @@ func (ars *AggregatorRecordStorage) decodeRecord(raw bson.Raw) (*models.Aggregat
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert aggregator record v1 bson to domain: %w", err)
 		}
-		return modelsV1.AggregatorRecordFromV1(aggregatorRecordV1)
+		return aggregatorRecordFromV1(aggregatorRecordV1)
 	case 1, 2:
 		// version 1 - data stored after commitment-v2 through v1 api
 		// version 2 - data stored after commitment-v2 through v2 api
@@ -168,6 +168,24 @@ func (ars *AggregatorRecordStorage) decodeRecord(raw bson.Raw) (*models.Aggregat
 	default:
 		return nil, fmt.Errorf("unsupported aggregator record version: %d", probe.Version)
 	}
+}
+
+func aggregatorRecordFromV1(v1 *modelsV1.AggregatorRecordV1) (*models.AggregatorRecord, error) {
+	return &models.AggregatorRecord{
+		Version: 1,
+		StateID: v1.RequestID,
+		CertificationData: models.CertificationData{
+			OwnerPredicate:  api.NewPayToPublicKeyPredicate(v1.Authenticator.PublicKey),
+			SourceStateHash: v1.Authenticator.StateHash,
+			TransactionHash: v1.TransactionHash,
+			Witness:         v1.Authenticator.Signature,
+		},
+		AggregateRequestCount: v1.AggregateRequestCount,
+		BlockNumber:           v1.BlockNumber,
+		LeafIndex:             v1.LeafIndex,
+		CreatedAt:             v1.CreatedAt,
+		FinalizedAt:           v1.FinalizedAt,
+	}, nil
 }
 
 // Count returns the total number of records

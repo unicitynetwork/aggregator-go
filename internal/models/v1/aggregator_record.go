@@ -6,7 +6,6 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
-	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -102,23 +101,5 @@ func (arb *AggregatorRecordV1BSON) FromBSON() (*AggregatorRecordV1, error) {
 		LeafIndex:             leafIndex,
 		CreatedAt:             api.NewTimestamp(arb.CreatedAt),
 		FinalizedAt:           api.NewTimestamp(arb.FinalizedAt),
-	}, nil
-}
-
-func AggregatorRecordFromV1(v1 *AggregatorRecordV1) (*models.AggregatorRecord, error) {
-	return &models.AggregatorRecord{
-		Version: 1,
-		StateID: v1.RequestID,
-		CertificationData: models.CertificationData{
-			OwnerPredicate:  api.NewPayToPublicKeyPredicate(v1.Authenticator.PublicKey),
-			SourceStateHash: v1.Authenticator.StateHash,
-			TransactionHash: v1.TransactionHash,
-			Witness:         v1.Authenticator.Signature,
-		},
-		AggregateRequestCount: v1.AggregateRequestCount,
-		BlockNumber:           v1.BlockNumber,
-		LeafIndex:             v1.LeafIndex,
-		CreatedAt:             v1.CreatedAt,
-		FinalizedAt:           v1.FinalizedAt,
 	}, nil
 }

@@ -11,8 +11,6 @@ import (
 	redisContainer "github.com/testcontainers/testcontainers-go/modules/redis"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
-	"github.com/unicitynetwork/aggregator-go/internal/models"
-	modelsV1 "github.com/unicitynetwork/aggregator-go/internal/models/v1"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -32,7 +30,7 @@ func TestCompatibilityV2(t *testing.T) {
 	// verify inclusion_proof_v1 for commitment_v2 returns error
 	//
 	// phase 4:
-	// verify block records
+	// verify block records v1 and v2
 	ctx := t.Context()
 
 	// Start containers (shared MongoDB with different databases per aggregator)
@@ -65,9 +63,9 @@ func TestCompatibilityV2(t *testing.T) {
 
 	t.Log("Phase 2: Verifying proofs...")
 	v1ProofResp := waitForProofAvailableV1(t, url, v1.RequestID.String(), 5*time.Second)
-	verifyProofV1(t, v1ProofResp, v1)
+	verifyProofV1(t, v1ProofResp, v1.ToAPI())
 	v2ProofResp := waitForProofAvailableV2(t, url, v2.StateID.String(), 5*time.Second)
-	verifyProofV2(t, v2ProofResp, v2)
+	verifyProofV2(t, v2ProofResp, v2.ToAPI())
 	t.Logf("Proofs verified successfully")
 
 	t.Log("Phase 3: Verifying endpoint compatibility...")
@@ -89,28 +87,18 @@ func TestCompatibilityV2(t *testing.T) {
 	require.Len(t, blockCommitmentsResponse.Commitments, 2)
 }
 
-func verifyProofV1(t *testing.T, v1ProofResp *api.GetInclusionProofResponseV1, v1 *modelsV1.Commitment) {
+func verifyProofV1(t *testing.T, v1ProofResp *api.GetInclusionProofResponseV1, v1 *api.Commitment) {
 	require.NotNil(t, v1ProofResp)
 	require.NotNil(t, v1ProofResp.InclusionProof)
 	require.NotNil(t, v1ProofResp.InclusionProof.MerkleTreePath)
-
-	merklePath, err := v1.RequestID.GetPath()
-	require.NoError(t, err)
-	verificationResult, err := v1ProofResp.InclusionProof.MerkleTreePath.Verify(merklePath)
-	require.NoError(t, err)
-	require.True(t, verificationResult.Result)
+	require.NoError(t, v1ProofResp.InclusionProof.Verify(v1))
 }
 
-func verifyProofV2(t *testing.T, v2ProofResp *api.GetInclusionProofResponseV2, v2 *models.CertificationRequest) {
+func verifyProofV2(t *testing.T, v2ProofResp *api.GetInclusionProofResponseV2, v2 *api.CertificationRequest) {
 	require.NotNil(t, v2ProofResp)
 	require.NotNil(t, v2ProofResp.InclusionProof)
 	require.NotNil(t, v2ProofResp.InclusionProof.MerkleTreePath)
-
-	merklePath, err := v2.StateID.GetPath()
-	require.NoError(t, err)
-	verificationResult, err := v2ProofResp.InclusionProof.MerkleTreePath.Verify(merklePath)
-	require.NoError(t, err)
-	require.True(t, verificationResult.Result)
+	require.NoError(t, v2ProofResp.InclusionProof.Verify(v2))
 }
 
 func submitCommitment(url string, commitment *api.Commitment) (*api.SubmitCommitmentResponse, error) {

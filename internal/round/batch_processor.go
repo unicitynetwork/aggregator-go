@@ -36,7 +36,7 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 		}
 
 		// Create leaf value (hash of certification request data)
-		leafValue, err := commitment.CertificationData.ToAPI().Hash()
+		leafValue, err := commitment.LeafValue()
 		if err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to create leaf value",
 				"stateID", commitment.StateID.String(),
@@ -291,7 +291,7 @@ func (rm *RoundManager) addToPreCollection(ctx context.Context, commitment *mode
 	}
 
 	// Create leaf value (hash of certification request data)
-	leafValue, err := commitment.CertificationData.ToAPI().Hash()
+	leafValue, err := commitment.LeafValue()
 	if err != nil {
 		return fmt.Errorf("failed to create leaf value: %w", err)
 	}

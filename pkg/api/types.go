@@ -3,8 +3,12 @@
 package api
 
 import (
+	"bytes"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math/big"
 	"strconv"
 	"time"
 
@@ -240,4 +244,46 @@ func (c *GetInclusionProofResponseV2) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("failed to unmarshal JSON to HexBytes: %w", err)
 	}
 	return types.Cbor.Unmarshal(hb, c)
+}
+
+func (p *InclusionProofV2) Verify(v2 *CertificationRequest) error {
+	path, err := v2.StateID.GetPath()
+	if err != nil {
+		return fmt.Errorf("failed to get path: %w", err)
+	}
+	expectedLeafValue, err := v2.CertificationData.Hash()
+	if err != nil {
+		return fmt.Errorf("failed to get leaf value: %w", err)
+	}
+	return verify(p.MerkleTreePath, path, expectedLeafValue)
+}
+
+func verify(p *MerkleTreePath, path *big.Int, expectedLeafValue []byte) error {
+	// Verify leaf matches the first merkle tree step
+	if p == nil {
+		return errors.New("missing merkle tree path")
+	}
+	if len(p.Steps) == 0 {
+		return errors.New("empty merkle path")
+	}
+	if p.Steps[0].Data == nil {
+		return errors.New("missing leaf data in proof")
+	}
+	leafValue, err := hex.DecodeString(*p.Steps[0].Data)
+	if err != nil {
+		return fmt.Errorf("invalid leaf data encoding: %w", err)
+	}
+	if !bytes.Equal(expectedLeafValue, leafValue) {
+		return errors.New("leaf hash mismatch: proof does not include expected value")
+	}
+
+	// Verify merkle tree path hashes to root
+	res, err := p.Verify(path)
+	if err != nil {
+		return fmt.Errorf("merkle path verification failed: %w", err)
+	}
+	if !res.Result {
+		return errors.New("merkle path verification failed")
+	}
+	return nil
 }

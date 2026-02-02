@@ -237,7 +237,7 @@ func recoverMissingData(
 			if err != nil {
 				return fmt.Errorf("failed to get path for commitment: %w", err)
 			}
-			leafValue, err := commitment.ToAPI().CertificationData.Hash()
+			leafValue, err := commitment.LeafValue()
 			if err != nil {
 				return fmt.Errorf("failed to create leaf value: %w", err)
 			}
