@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -17,7 +19,7 @@ type (
 	RootAggregatorClient struct {
 		rpcURL     string
 		httpClient *http.Client
-		stateIDC   *atomic.Int64
+		requestIDC *atomic.Int64
 	}
 
 	jsonRpcRequest struct {
@@ -42,10 +44,22 @@ type (
 )
 
 func NewRootAggregatorClient(rpcURL string) *RootAggregatorClient {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: 5 * time.Second,
+		}).DialContext,
+		ResponseHeaderTimeout: 10 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		IdleConnTimeout:       30 * time.Second,
+		MaxIdleConnsPerHost:   10,
+	}
 	return &RootAggregatorClient{
 		rpcURL:     rpcURL,
-		httpClient: &http.Client{},
-		stateIDC:   new(atomic.Int64),
+		httpClient: &http.Client{
+			Timeout:   10 * time.Second,
+			Transport: transport,
+		},
+		requestIDC: new(atomic.Int64),
 	}
 }
 
@@ -94,7 +108,7 @@ func doRpcRequest[T any](ctx context.Context, c *RootAggregatorClient, method st
 		JsonRpc: "2.0",
 		Method:  method,
 		Params:  params,
-		ID:      c.stateIDC.Add(1),
+		ID:      c.requestIDC.Add(1),
 	}
 
 	reqBody, err := json.Marshal(rpcReq)

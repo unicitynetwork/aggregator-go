@@ -597,13 +597,60 @@ func (cs *CommitmentStorage) periodicCleanup(ctx context.Context) {
 	}
 }
 
-// trimStream keeps the stream at a reasonable size
+// trimStream removes only acknowledged entries by trimming up to the oldest pending ID
+// (or last-delivered ID if no pending), so unprocessed messages are preserved.
 func (cs *CommitmentStorage) trimStream(ctx context.Context) {
 	// Get current count before trimming
 	countBefore, _ := cs.Count(ctx)
 
-	// Trim to keep only the last N messages
-	trimmed := cs.client.XTrimMaxLen(ctx, cs.streamName, cs.batchConfig.MaxStreamLength).Val()
+	if countBefore <= cs.batchConfig.MaxStreamLength {
+		return
+	}
+
+	pendingInfo := cs.client.XPending(ctx, cs.streamName, consumerGroup)
+	if err := pendingInfo.Err(); err != nil {
+		if !isNoGroupError(err) {
+			cs.logger.WithContext(ctx).Warn("Failed to get pending info for trim", "error", err.Error())
+			return
+		}
+		if ensureErr := cs.ensureConsumerGroup(ctx); ensureErr != nil {
+			cs.logger.WithContext(ctx).Warn("Failed to ensure consumer group for trim", "error", ensureErr.Error())
+			return
+		}
+		pendingInfo = cs.client.XPending(ctx, cs.streamName, consumerGroup)
+		if err := pendingInfo.Err(); err != nil {
+			cs.logger.WithContext(ctx).Warn("Failed to get pending info for trim after group creation", "error", err.Error())
+			return
+		}
+	}
+
+	pending := pendingInfo.Val()
+	minID := ""
+	if pending.Count > 0 {
+		minID = pending.Lower
+	} else {
+		groups, err := cs.client.XInfoGroups(ctx, cs.streamName).Result()
+		if err != nil {
+			cs.logger.WithContext(ctx).Warn("Failed to get consumer group info for trim", "error", err.Error())
+			return
+		}
+		for _, group := range groups {
+			if group.Name == consumerGroup {
+				minID = group.LastDeliveredID
+				break
+			}
+		}
+	}
+
+	if minID == "" || minID == "0-0" {
+		return
+	}
+
+	trimmed, err := cs.client.XTrimMinID(ctx, cs.streamName, minID).Result()
+	if err != nil {
+		cs.logger.WithContext(ctx).Warn("Failed to trim stream by min ID", "error", err.Error())
+		return
+	}
 
 	if trimmed > 0 {
 		countAfter := countBefore - trimmed
@@ -612,7 +659,8 @@ func (cs *CommitmentStorage) trimStream(ctx context.Context) {
 			"trimmed", trimmed,
 			"before", countBefore,
 			"after", countAfter,
-			"maxLength", cs.batchConfig.MaxStreamLength)
+			"maxLength", cs.batchConfig.MaxStreamLength,
+			"minID", minID)
 	}
 }
 

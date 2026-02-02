@@ -162,10 +162,19 @@ type GetBlockRecordsResponse struct {
 
 // Status constants for SubmitShardRootResponse
 const (
-	ShardRootStatusSuccess        = "SUCCESS"
-	ShardRootStatusInvalidShardID = "INVALID_SHARD_ID"
-	ShardRootStatusInternalError  = "INTERNAL_ERROR"
-	ShardRootStatusNotLeader      = "NOT_LEADER"
+	ShardRootStatusSuccess         = "SUCCESS"
+	ShardRootStatusInvalidShardID  = "INVALID_SHARD_ID"
+	ShardRootStatusInvalidRootHash = "INVALID_ROOT_HASH"
+	ShardRootStatusInternalError   = "INTERNAL_ERROR"
+	ShardRootStatusNotLeader       = "NOT_LEADER"
+	ShardRootStatusNotReady        = "NOT_READY"
+)
+
+// Health status values returned by the health endpoint.
+const (
+	HealthStatusOk        = "ok"
+	HealthStatusUnhealthy = "unhealthy"
+	HealthStatusDegraded  = "degraded"
 )
 
 // SubmitShardRootRequest represents the submit_shard_root JSON-RPC request
@@ -176,7 +185,7 @@ type SubmitShardRootRequest struct {
 
 // SubmitShardRootResponse represents the submit_shard_root JSON-RPC response
 type SubmitShardRootResponse struct {
-	Status string `json:"status"` // "SUCCESS", "INVALID_SHARD_ID", etc.
+	Status string `json:"status"` // "SUCCESS", "INVALID_SHARD_ID", "INVALID_ROOT_HASH", etc.
 }
 
 // GetShardProofRequest represents the get_shard_proof JSON-RPC request
@@ -202,7 +211,7 @@ type HealthStatus struct {
 // NewHealthStatus creates a new health status
 func NewHealthStatus(role, serverID string) *HealthStatus {
 	return &HealthStatus{
-		Status:   "ok",
+		Status:   HealthStatusOk,
 		Role:     role,
 		ServerID: serverID,
 		Details:  make(map[string]string),

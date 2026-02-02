@@ -1,6 +1,6 @@
-# Unicity Aggregator - Go Implementation
+# Unicity Aggregator
 
-This is a high-performance Go rewrite of the TypeScript aggregator service for the Unicity blockchain platform. The service provides JSON-RPC 2.0 API endpoints for state transition aggregation with MongoDB persistence and high availability support.
+High-performance aggregator service for the Unicity blockchain platform. Provides JSON-RPC 2.0 API endpoints for state transition aggregation with MongoDB persistence, BFT consensus integration, and high availability support.
 
 ## Overview
 
@@ -16,9 +16,9 @@ The Unicity Aggregator implements a decentralized Agent-Aggregator communication
 - ✅ **JSON-RPC 2.0 API** - Complete implementation of all aggregator methods
 - ✅ **MongoDB Integration** - Efficient storage with proper indexing
 - ✅ **High Availability** - Leader election and distributed processing
-- ✅ **Signature Validation** - Full secp256k1 cryptographic validation for certification requests
-- ✅ **SMT Integration** - Sparse Merkle Tree for inclusion proofs with TypeScript compatibility
-- ✅ **Round Management** - Automated 1-second block creation with batch processing
+- ✅ **Signature Validation** - Full secp256k1 cryptographic validation for commitments
+- ✅ **SMT Integration** - Sparse Merkle Tree for inclusion proofs
+- ✅ **Round Management** - Automated block creation with batch processing
 - ✅ **DataHash Support** - Proper algorithm imprint format for SHA256 hashes
 - ✅ **Configurable Concurrency** - Request rate limiting and parallel processing
 - ✅ **Graceful Shutdown** - Proper resource cleanup on termination
@@ -26,7 +26,7 @@ The Unicity Aggregator implements a decentralized Agent-Aggregator communication
 - ✅ **TLS Support** - HTTPS/TLS configuration for production
 - ✅ **CORS Support** - Cross-origin resource sharing for web clients
 - ✅ **Performance Testing** - Built-in performance test with cryptographically valid data
-- 🚧 **Consensus Integration** - Alphabill blockchain submission (planned)
+- ✅ **BFT Consensus** - Integration with Unicity BFT network for block finalization
 
 ## Quick Start
 
@@ -157,7 +157,7 @@ The service is configured via environment variables:
 ### Processing Configuration
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `BATCH_LIMIT` | Maximum number of certification requests to process per batch | `1000` |
+| `BATCH_LIMIT` | Maximum number of commitments to process per batch | `1000` |
 | `ROUND_DURATION` | Duration between block creation rounds | `1s` |
 
 ### Storage Configuration
@@ -586,13 +586,9 @@ aggregator-go/
 │   │   └── mongodb/       # MongoDB implementations
 │   ├── models/            # Data models and types
 │   └── logger/            # Logging utilities
-├── pkg/                   # Public/reusable packages
-│   └── jsonrpc/          # JSON-RPC server implementation
-├── tests/                 # Comprehensive test suites
-│   ├── api/              # API compatibility tests
-│   ├── benchmarks/       # Performance benchmarks
-│   └── integration/      # Integration tests
-└── aggregator-ts/        # TypeScript reference implementation
+└── pkg/                   # Public/reusable packages
+    ├── api/              # Public API types
+    └── jsonrpc/          # JSON-RPC server implementation
 ```
 
 ### Database Collections
@@ -618,6 +614,9 @@ make performance-test
 
 # Run performance test against a remote endpoint with authentication
 make performance-test-auth URL=http://localhost:8080 AUTH='Bearer supersecret'
+
+# Sharded performance test (provide shard targets with shardID suffix)
+SHARD_TARGETS="http://localhost:3001:3,http://localhost:3002:2" TEST_DURATION=10s REQUESTS_PER_SEC=100 go run ./cmd/performance-test
 ```
 
 **Performance Test Features:**
@@ -712,7 +711,7 @@ The following diagram illustrates a sharded setup with one parent and two child 
         |                      |
 +----------------+     +----------------+
 | Agent sends    |     | Agent sends    |
-| certification request     |     | certification request     |
+| commitment     |     | commitment     |
 | ID = ...xxx0   |     | ID = ...xxx1   |
 +----------------+     +----------------+
 ```
@@ -769,7 +768,7 @@ The service implements comprehensive JSON-RPC 2.0 error codes:
 
 - **Connection Pooling**: Configurable MongoDB connection pool
 - **Concurrency Limiting**: Prevents resource exhaustion
-- **Request Correlation**: Efficient logging with state IDs
+- **Request Correlation**: Efficient logging with request IDs
 - **Graceful Shutdown**: Proper cleanup on termination
 - **Batch Operations**: Efficient database operations (when available)
 - **Asynchronous Logging**: Non-blocking log writes with configurable buffer size (enabled by default)
@@ -805,30 +804,19 @@ The service implements complete secp256k1 signature validation:
 ## Architecture Notes
 
 ### Round Management
-- **1-second rounds** - Automated block creation every second
-- **Batch processing** - Multiple certification requests per block
+- **Round-based processing** - Automated block creation
+- **Batch processing** - Multiple commitments per block
 - **Leader-only block creation** - High availability with single leader
 - **Graceful shutdown** - Proper cleanup of pending rounds
 
 ### SMT Integration
-- **TypeScript compatibility** - Exact hash matching with reference implementation
-- **Production performance** - 90,000+ leaves/second processing capability
+- **Spec compliant** - Exact hash matching with Unicity SMT specification
 - **Memory efficient** - Optimized for large-scale operations
 - **Concurrent safe** - Thread-safe operations with proper locking
 
 ## Limitations
 
-- **Consensus Integration**: No Alphabill submission yet (implementation pending)
 - **Receipt Signing**: Returns unsigned receipts (cryptographic signing planned)
-
-## Migration from TypeScript
-
-This Go implementation maintains API compatibility with the TypeScript version while providing:
-
-- **Better Performance**: Native compiled binary with efficient concurrency
-- **Lower Memory Usage**: More efficient memory management
-- **Type Safety**: Compile-time type checking
-- **Easier Deployment**: Single binary deployment
 
 ## Contributing
 
@@ -836,7 +824,6 @@ This Go implementation maintains API compatibility with the TypeScript version w
 2. Write tests for new functionality
 3. Update documentation concurrently with code changes
 4. Use the provided Makefile for builds and testing
-5. Ensure backward compatibility with TypeScript API
 
 ## License
 

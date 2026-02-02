@@ -356,6 +356,76 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_StreamTrimming() {
 	suite.T().Logf("Stream length after trim: %d (max: %d)", count, maxStreamLength)
 }
 
+// Test 4b: Stream Trimming - only acknowledges safe, already-processed entries
+func (suite *RedisTestSuite) TestCommitmentPipeline_StreamTrimmingKeepsPending() {
+	if testing.Short() {
+		suite.T().Skip("Skipping stream trimming test in short mode")
+	}
+
+	ctx := suite.ctx
+	suite.storage.batchConfig.MaxStreamLength = 3
+
+	commitments := make([]*models.Commitment, 5)
+	for i := 0; i < len(commitments); i++ {
+		commitments[i] = createTestCommitment()
+	}
+
+	err := suite.storage.StoreBatch(ctx, commitments)
+	require.NoError(suite.T(), err)
+
+	time.Sleep(150 * time.Millisecond)
+
+	commitmentChan := make(chan *models.Commitment, 10)
+	streamCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = suite.storage.StreamCommitments(streamCtx, commitmentChan)
+	}()
+
+	var streamed []*models.Commitment
+	timeout := time.After(1 * time.Second)
+CollectLoop:
+	for {
+		select {
+		case c := <-commitmentChan:
+			streamed = append(streamed, c)
+			if len(streamed) == len(commitments) {
+				break CollectLoop
+			}
+		case <-timeout:
+			break CollectLoop
+		}
+	}
+	require.Equal(suite.T(), len(commitments), len(streamed), "Should stream all stored commitments")
+
+	ackEntries := make([]interfaces.CommitmentAck, 0, 2)
+	for _, c := range streamed[:2] {
+		ackEntries = append(ackEntries, interfaces.CommitmentAck{
+			RequestID: c.RequestID,
+			StreamID:  c.StreamID,
+		})
+	}
+	require.NoError(suite.T(), suite.storage.MarkProcessed(ctx, ackEntries))
+
+	suite.storage.trimStream(ctx)
+
+	count, err := suite.storage.Count(ctx)
+	require.NoError(suite.T(), err)
+	assert.Equal(suite.T(), int64(3), count, "Trim should keep only unacknowledged entries")
+
+	for _, c := range streamed[:2] {
+		entries, err := suite.client.XRange(ctx, suite.storage.streamName, c.StreamID, c.StreamID).Result()
+		require.NoError(suite.T(), err)
+		assert.Empty(suite.T(), entries, "Acked entry should be trimmed")
+	}
+	for _, c := range streamed[2:] {
+		entries, err := suite.client.XRange(ctx, suite.storage.streamName, c.StreamID, c.StreamID).Result()
+		require.NoError(suite.T(), err)
+		assert.Len(suite.T(), entries, 1, "Pending entry should remain")
+	}
+}
+
 // Test 5: No Message Loss - All stored commitments eventually stream out
 func (suite *RedisTestSuite) TestCommitmentPipeline_NoMessageLoss() {
 
@@ -549,6 +619,32 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_PeriodicCleanup() {
 
 	// Wait for async processing
 	time.Sleep(200 * time.Millisecond)
+
+	// Stream and ack all commitments so trimming can safely remove them
+	commitmentChan := make(chan *models.Commitment, 2000)
+	streamCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = customStorage.StreamCommitments(streamCtx, commitmentChan)
+	}()
+
+	var received []*models.Commitment
+	timeout := time.After(4 * time.Second)
+CollectLoop:
+	for {
+		select {
+		case c := <-commitmentChan:
+			received = append(received, c)
+			if len(received) == targetCount {
+				break CollectLoop
+			}
+		case <-timeout:
+			break CollectLoop
+		}
+	}
+	require.Equal(suite.T(), targetCount, len(received), "Should stream all commitments before cleanup")
+	require.NoError(suite.T(), customStorage.MarkProcessed(ctx, toAckEntries(received)))
 
 	// Check initial count (may be full or already trimmed depending on timing)
 	countBefore, err := customStorage.Count(ctx)
