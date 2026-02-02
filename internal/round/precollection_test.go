@@ -233,7 +233,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 			config:           &cfg,
 			logger:           testLogger,
 			smt:              smtInstance,
-			commitmentStream: make(chan *models.Commitment, 100),
+			commitmentStream: make(chan *models.CertificationRequest, 100),
 		}
 
 		// Create current round and initialize pre-collection
@@ -248,9 +248,9 @@ func TestPreCollectionMechanism(t *testing.T) {
 
 		// Create a batch of test commitments
 		batchSize := 50
-		commitments := make([]*models.Commitment, batchSize)
+		commitments := make([]*models.CertificationRequest, batchSize)
 		for i := 0; i < batchSize; i++ {
-			commitments[i] = testutil.CreateTestCommitment(t, "batch_test")
+			commitments[i] = testutil.CreateTestCertificationRequest(t, "batch_test")
 		}
 
 		// Add batch to pre-collection
@@ -280,7 +280,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 			config:           &cfg,
 			logger:           testLogger,
 			smt:              smtInstance,
-			commitmentStream: make(chan *models.Commitment, 100),
+			commitmentStream: make(chan *models.CertificationRequest, 100),
 		}
 
 		// Create current round and initialize pre-collection
@@ -292,7 +292,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 		rm.initPreCollection(ctx)
 
 		// Empty batch should succeed without doing anything
-		err = rm.addBatchToPreCollection(ctx, []*models.Commitment{})
+		err = rm.addBatchToPreCollection(ctx, []*models.CertificationRequest{})
 		require.NoError(t, err)
 
 		assert.Empty(t, rm.preCollectedCommitments)
@@ -323,13 +323,13 @@ func TestPreCollectionMechanism(t *testing.T) {
 			config:           &cfg,
 			logger:           testLogger,
 			smt:              smtInstance,
-			commitmentStream: make(chan *models.Commitment, 100),
+			commitmentStream: make(chan *models.CertificationRequest, 100),
 		}
 
 		// Create a batch of commitments (simulating pendingCommitments in flushBatch)
-		batch := make([]*models.Commitment, 5)
+		batch := make([]*models.CertificationRequest, 5)
 		for i := 0; i < 5; i++ {
-			batch[i] = testutil.CreateTestCommitment(t, "retry_test")
+			batch[i] = testutil.CreateTestCertificationRequest(t, "retry_test")
 		}
 
 		// First attempt: no snapshot initialized, should fail
@@ -381,7 +381,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 			config:           &cfg,
 			logger:           testLogger,
 			smt:              smtInstance,
-			commitmentStream: make(chan *models.Commitment, 100),
+			commitmentStream: make(chan *models.CertificationRequest, 100),
 		}
 
 		// Create current round and initialize pre-collection
@@ -393,21 +393,21 @@ func TestPreCollectionMechanism(t *testing.T) {
 		rm.initPreCollection(ctx)
 
 		// Create 2 valid commitments
-		commitment1 := testutil.CreateTestCommitment(t, "fallback_test_1")
-		commitment2 := testutil.CreateTestCommitment(t, "fallback_test_2")
+		commitment1 := testutil.CreateTestCertificationRequest(t, "fallback_test_1")
+		commitment2 := testutil.CreateTestCertificationRequest(t, "fallback_test_2")
 
 		// Add first commitment
-		err = rm.addBatchToPreCollection(ctx, []*models.Commitment{commitment1})
+		err = rm.addBatchToPreCollection(ctx, []*models.CertificationRequest{commitment1})
 		require.NoError(t, err)
 		assert.Len(t, rm.preCollectedCommitments, 1)
 
 		// Create a modified version of commitment1 (same requestID, different value)
 		// This will trigger ErrLeafModification when trying to add as batch
 		modifiedCommitment := *commitment1
-		modifiedCommitment.TransactionHash = commitment2.TransactionHash // Different hash
+		modifiedCommitment.CertificationData.TransactionHash = commitment2.CertificationData.TransactionHash // Different hash
 
 		// Now try to add a batch with: modifiedCommitment (will fail), commitment2 (valid)
-		batch := []*models.Commitment{&modifiedCommitment, commitment2}
+		batch := []*models.CertificationRequest{&modifiedCommitment, commitment2}
 		err = rm.addBatchToPreCollection(ctx, batch)
 		require.NoError(t, err) // Should succeed overall (fallback handles errors)
 

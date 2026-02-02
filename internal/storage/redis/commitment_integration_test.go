@@ -365,7 +365,7 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_StreamTrimmingKeepsPending()
 	ctx := suite.ctx
 	suite.storage.batchConfig.MaxStreamLength = 3
 
-	commitments := make([]*models.Commitment, 5)
+	commitments := make([]*models.CertificationRequest, 5)
 	for i := 0; i < len(commitments); i++ {
 		commitments[i] = createTestCommitment()
 	}
@@ -375,15 +375,15 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_StreamTrimmingKeepsPending()
 
 	time.Sleep(150 * time.Millisecond)
 
-	commitmentChan := make(chan *models.Commitment, 10)
+	commitmentChan := make(chan *models.CertificationRequest, 10)
 	streamCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
 	go func() {
-		_ = suite.storage.StreamCommitments(streamCtx, commitmentChan)
+		_ = suite.storage.StreamCertificationRequests(streamCtx, commitmentChan)
 	}()
 
-	var streamed []*models.Commitment
+	var streamed []*models.CertificationRequest
 	timeout := time.After(1 * time.Second)
 CollectLoop:
 	for {
@@ -399,11 +399,11 @@ CollectLoop:
 	}
 	require.Equal(suite.T(), len(commitments), len(streamed), "Should stream all stored commitments")
 
-	ackEntries := make([]interfaces.CommitmentAck, 0, 2)
+	ackEntries := make([]interfaces.CertificationRequestAck, 0, 2)
 	for _, c := range streamed[:2] {
-		ackEntries = append(ackEntries, interfaces.CommitmentAck{
-			RequestID: c.RequestID,
-			StreamID:  c.StreamID,
+		ackEntries = append(ackEntries, interfaces.CertificationRequestAck{
+			StateID:  c.StateID,
+			StreamID: c.StreamID,
 		})
 	}
 	require.NoError(suite.T(), suite.storage.MarkProcessed(ctx, ackEntries))
@@ -621,15 +621,15 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_PeriodicCleanup() {
 	time.Sleep(200 * time.Millisecond)
 
 	// Stream and ack all commitments so trimming can safely remove them
-	commitmentChan := make(chan *models.Commitment, 2000)
+	commitmentChan := make(chan *models.CertificationRequest, 2000)
 	streamCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	go func() {
-		_ = customStorage.StreamCommitments(streamCtx, commitmentChan)
+		_ = customStorage.StreamCertificationRequests(streamCtx, commitmentChan)
 	}()
 
-	var received []*models.Commitment
+	var received []*models.CertificationRequest
 	timeout := time.After(4 * time.Second)
 CollectLoop:
 	for {
