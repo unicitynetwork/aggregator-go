@@ -79,7 +79,7 @@ func getTrustBaseHandler(logger *logger.Logger, service TrustBaseService) gin.Ha
 		// return trust base records for the epochs from <epoch1> to <epoch2>, inclusively.
 		// Both parameters are optional and default to the latest epoch.
 		// parameters are uint64 (0 value is not allowed by business rules)
-		latestTrustBase, err := service.GetLatestTrustBase(c)
+		latestTrustBase, err := service.GetLatestTrustBase(ctx)
 		if err != nil {
 			logger.WithContext(ctx).Error("GET trustbases request: failed to load latest active epoch", "error", err.Error())
 			http.Error(c.Writer, "failed to load latest trust base", http.StatusInternalServerError)
@@ -95,7 +95,7 @@ func getTrustBaseHandler(logger *logger.Logger, service TrustBaseService) gin.Ha
 
 		trustBases, err := service.GetTrustBases(ctx, from, to)
 		if err != nil {
-			logger.WithContext(ctx).Warn("GET trustbases request: %v", "error", err.Error())
+			logger.WithContext(ctx).Warn("GET trustbases request", "error", err.Error())
 			http.Error(c.Writer, "failed to load trust base", http.StatusInternalServerError)
 			return
 		}

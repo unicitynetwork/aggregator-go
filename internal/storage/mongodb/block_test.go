@@ -574,7 +574,7 @@ func TestBlockStorage_GetRange(t *testing.T) {
 		toBlock := api.NewBigInt(big.NewInt(110))
 
 		blocks, err := storage.GetRange(ctx, fromBlock, toBlock)
-		require.NoError(t, err, "GetTrustBases should not return an error for non-existent range")
+		require.NoError(t, err, "GetRange should not return an error for non-existent range")
 		assert.Empty(t, blocks, "Should return empty slice for non-existent range")
 	})
 
@@ -583,7 +583,7 @@ func TestBlockStorage_GetRange(t *testing.T) {
 		toBlock := api.NewBigInt(big.NewInt(5))
 
 		blocks, err := storage.GetRange(ctx, fromBlock, toBlock)
-		require.NoError(t, err, "GetTrustBases should not return an error")
+		require.NoError(t, err, "GetRange should not return an error")
 		require.Len(t, blocks, 1, "Should return exactly one block")
 
 		assert.Equal(t, 0, fromBlock.Cmp(blocks[0].Index.Int), "Block index should match")
@@ -594,7 +594,7 @@ func TestBlockStorage_GetRange(t *testing.T) {
 		toBlock := api.NewBigInt(big.NewInt(7))
 
 		blocks, err := storage.GetRange(ctx, fromBlock, toBlock)
-		require.NoError(t, err, "GetTrustBases should not return an error")
+		require.NoError(t, err, "GetRange should not return an error")
 		require.Len(t, blocks, 5, "Should return 5 blocks (3,4,5,6,7)")
 
 		// Verify blocks are returned in ascending order
@@ -609,7 +609,7 @@ func TestBlockStorage_GetRange(t *testing.T) {
 		toBlock := api.NewBigInt(big.NewInt(10))
 
 		blocks, err := storage.GetRange(ctx, fromBlock, toBlock)
-		require.NoError(t, err, "GetTrustBases should not return an error")
+		require.NoError(t, err, "GetRange should not return an error")
 		require.Len(t, blocks, 10, "Should return all 10 blocks")
 
 		// Verify ascending order
@@ -624,7 +624,7 @@ func TestBlockStorage_GetRange(t *testing.T) {
 		toBlock := api.NewBigInt(big.NewInt(15)) // extends beyond stored blocks
 
 		blocks, err := storage.GetRange(ctx, fromBlock, toBlock)
-		require.NoError(t, err, "GetTrustBases should not return an error")
+		require.NoError(t, err, "GetRange should not return an error")
 		require.Len(t, blocks, 3, "Should return 3 blocks (8,9,10)")
 
 		expectedIndices := []int64{8, 9, 10}
@@ -639,7 +639,7 @@ func TestBlockStorage_GetRange(t *testing.T) {
 		toBlock := api.NewBigInt(big.NewInt(5))
 
 		blocks, err := storage.GetRange(ctx, fromBlock, toBlock)
-		require.NoError(t, err, "GetTrustBases should not return an error for inverted range")
+		require.NoError(t, err, "GetRange should not return an error for inverted range")
 		assert.Empty(t, blocks, "Should return empty slice for inverted range")
 	})
 
@@ -658,7 +658,7 @@ func TestBlockStorage_GetRange(t *testing.T) {
 		toBlock := largeIndexBigInt
 
 		blocks, err := storage.GetRange(ctx, fromBlock, toBlock)
-		require.NoError(t, err, "GetTrustBases should not return an error for large numbers")
+		require.NoError(t, err, "GetRange should not return an error for large numbers")
 		require.Len(t, blocks, 1, "Should return the large number block")
 
 		assert.Equal(t, 0, largeIndexBigInt.Cmp(blocks[0].Index.Int), "Large index should match")
