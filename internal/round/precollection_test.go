@@ -32,7 +32,7 @@ func getLeafFromCommitment(t *testing.T, commitment *models.Commitment) *smt.Lea
 func TestPreCollectionMechanism(t *testing.T) {
 	t.Run("InitPreCollectionCreatesChainedSnapshot", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		defer cancel()
 		cfg := config.Config{
 			Processing: config.ProcessingConfig{
 				RoundDuration:          100 * time.Millisecond,
@@ -81,7 +81,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 
 	t.Run("AddToPreCollectionAddsCommitment", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		defer cancel()
 		cfg := config.Config{
 			Processing: config.ProcessingConfig{
 				MaxCommitmentsPerRound: 1000,
@@ -135,7 +135,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 
 	t.Run("ClearPreCollectionResetsState", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		defer cancel()
 		cfg := config.Config{
 			Processing: config.ProcessingConfig{
 				MaxCommitmentsPerRound: 1000,
@@ -188,7 +188,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 
 	t.Run("AddToPreCollectionFailsWithoutSnapshot", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		defer cancel()
 		cfg := config.Config{}
 
 		testLogger, err := logger.New("info", "text", "stdout", false)
@@ -213,7 +213,7 @@ func TestPreCollectionMechanism(t *testing.T) {
 func TestPreCollectionReparenting(t *testing.T) {
 	t.Run("ReparentedSnapshotCommitsToMainSMT", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		defer cancel()
 		cfg := config.Config{
 			Processing: config.ProcessingConfig{
 				MaxCommitmentsPerRound: 1000,
@@ -333,6 +333,7 @@ func TestStartNewRoundWithSnapshot(t *testing.T) {
 			nil, // No BFT client for this test
 			events.NewEventBus(testLogger),
 			smtInstance,
+			nil,
 		)
 		require.NoError(t, err)
 
@@ -409,6 +410,7 @@ func TestPipelinedChildModeFlow(t *testing.T) {
 			nil, // No BFT client for child mode
 			events.NewEventBus(testLogger),
 			smtInstance,
+			nil,
 		)
 		require.NoError(t, err)
 

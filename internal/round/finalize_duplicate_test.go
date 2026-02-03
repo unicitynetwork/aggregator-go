@@ -65,7 +65,7 @@ func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 	smtInstance := smt.NewSparseMerkleTree(api.SHA256, 16+256)
 	threadSafeSMT := smt.NewThreadSafeSMT(smtInstance)
 	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil,
-		state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT)
+		state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
 	require.NoError(t, err)
 
 	// Generate test commitments with unique IDs
@@ -150,7 +150,7 @@ func (s *FinalizeDuplicateTestSuite) Test2_NoDuplicates() {
 	smtInstance := smt.NewSparseMerkleTree(api.SHA256, 16+256)
 	threadSafeSMT := smt.NewThreadSafeSMT(smtInstance)
 	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil,
-		state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT)
+		state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
 	require.NoError(t, err)
 
 	commitments := testutil.CreateTestCommitments(t, 3, "t2_req")
@@ -202,7 +202,7 @@ func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 	smtInstance := smt.NewSparseMerkleTree(api.SHA256, 16+256)
 	threadSafeSMT := smt.NewThreadSafeSMT(smtInstance)
 	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil,
-		state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT)
+		state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
 	require.NoError(t, err)
 
 	commitments := testutil.CreateTestCommitments(t, 3, "t3_req")
@@ -273,7 +273,7 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 	require.NoError(t, err)
 
 	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
-	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT)
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
 	require.NoError(t, err)
 
 	commitments := testutil.CreateTestCommitments(t, 3, "t4_req")
@@ -355,7 +355,7 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	require.NoError(t, err)
 
 	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
-	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT)
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
 	require.NoError(t, err)
 
 	commitments := testutil.CreateTestCommitments(t, 3, "t5_req")

@@ -40,12 +40,12 @@ func NewManager(
 ) (Manager, error) {
 	switch cfg.Sharding.Mode {
 	case config.ShardingModeStandalone:
-		return NewRoundManager(ctx, cfg, logger, commitmentQueue, storage, nil, stateTracker, luc, eventBus, threadSafeSmt)
+		return NewRoundManager(ctx, cfg, logger, commitmentQueue, storage, nil, stateTracker, luc, eventBus, threadSafeSmt, trustBaseProvider)
 	case config.ShardingModeParent:
 		return NewParentRoundManager(ctx, cfg, logger, storage, luc, eventBus, threadSafeSmt, trustBaseProvider)
 	case config.ShardingModeChild:
 		rootAggregatorClient := sharding.NewRootAggregatorClient(cfg.Sharding.Child.ParentRpcAddr)
-		return NewRoundManager(ctx, cfg, logger, commitmentQueue, storage, rootAggregatorClient, stateTracker, luc, eventBus, threadSafeSmt)
+		return NewRoundManager(ctx, cfg, logger, commitmentQueue, storage, rootAggregatorClient, stateTracker, luc, eventBus, threadSafeSmt, nil)
 	default:
 		return nil, fmt.Errorf("unsupported sharding mode: %s", cfg.Sharding.Mode)
 	}

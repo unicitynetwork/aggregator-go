@@ -8,13 +8,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
-
-	"net/url"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/fxamacker/cbor/v2"
@@ -137,7 +136,7 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 
 	// Initialize round manager
 	rootAggregatorClient := sharding.NewRootAggregatorClientStub()
-	roundManager, err := round.NewRoundManager(ctx, cfg, log, commitmentQueue, mongoStorage, rootAggregatorClient, state.NewSyncStateTracker(), nil, events.NewEventBus(log), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
+	roundManager, err := round.NewRoundManager(ctx, cfg, log, commitmentQueue, mongoStorage, rootAggregatorClient, state.NewSyncStateTracker(), nil, events.NewEventBus(log), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
 	require.NoError(t, err)
 
 	// Start the round manager (restores SMT)

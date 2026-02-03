@@ -48,7 +48,9 @@ func TestParentShardIntegration_GoodCase(t *testing.T) {
 	rootAggregatorClient := testsharding.NewRootAggregatorClientStub()
 
 	// create round manager
-	rm, err := NewRoundManager(ctx, &cfg, testLogger, storage.CommitmentQueue(), storage, rootAggregatorClient, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
+	rm, err := NewRoundManager(ctx, &cfg, testLogger, storage.CommitmentQueue(), storage, rootAggregatorClient,
+		state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger),
+		smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
 	require.NoError(t, err)
 
 	// start round manager
@@ -98,7 +100,9 @@ func TestParentShardIntegration_RoundProcessingError(t *testing.T) {
 	rootAggregatorClient.SetSubmissionError(errors.New("some error"))
 
 	// create round manager
-	rm, err := NewRoundManager(ctx, &cfg, testLogger, storage.CommitmentQueue(), storage, rootAggregatorClient, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
+	rm, err := NewRoundManager(ctx, &cfg, testLogger, storage.CommitmentQueue(), storage, rootAggregatorClient,
+		state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger),
+		smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
 	require.NoError(t, err)
 
 	require.NoError(t, rm.Start(ctx))

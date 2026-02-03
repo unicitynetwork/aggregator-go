@@ -73,7 +73,7 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
 	require.NoError(t, err, "Should create RoundManager")
 
 	// Test persistence
@@ -93,7 +93,7 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 	freshHash := freshSmt.GetRootHashHex()
 
 	// Create RoundManager and call Start() to trigger restoration
-	restoredRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
+	restoredRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
 	require.NoError(t, err, "Should create RoundManager")
 
 	err = restoredRm.Start(ctx)
@@ -127,7 +127,7 @@ func TestLargeSmtRestoration(t *testing.T) {
 			RoundDuration: time.Second,
 		},
 	}
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
 	require.NoError(t, err, "Should create RoundManager")
 
 	const testNodeCount = 2500 // Ensure multiple chunks (chunkSize = 1000 in round_manager.go)
@@ -158,7 +158,7 @@ func TestLargeSmtRestoration(t *testing.T) {
 	require.Equal(t, int64(testNodeCount), count, "Should have stored all nodes")
 
 	// Create new RoundManager and call Start() to restore from storage (uses multiple chunks)
-	newRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
+	newRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
 	require.NoError(t, err, "Should create new RoundManager")
 
 	err = newRm.Start(ctx)
@@ -191,7 +191,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
 	require.NoError(t, err, "Should create RoundManager")
 
 	rm.currentRound = &Round{
@@ -243,7 +243,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 
 	// Simulate service restart with new round manager
 	cfg = &config.Config{Processing: config.ProcessingConfig{RoundDuration: time.Second}}
-	newRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
+	newRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
 	require.NoError(t, err, "NewRoundManager should succeed after restart")
 
 	// Call Start() to trigger SMT restoration
@@ -320,7 +320,7 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 	cfg := &config.Config{
 		Processing: config.ProcessingConfig{RoundDuration: time.Second},
 	}
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
 	require.NoError(t, err, "Should create RoundManager")
 
 	// Persist SMT nodes to storage
@@ -330,7 +330,7 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 
 	// Test 1: Successful verification (matching root hash)
 	t.Run("SuccessfulVerification", func(t *testing.T) {
-		successRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
+		successRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
 		require.NoError(t, err, "Should create RoundManager")
 
 		err = successRm.Start(ctx)
@@ -364,7 +364,7 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 		err = storage.BlockStorage().Store(ctx, wrongBlock)
 		require.NoError(t, err, "Should store wrong test block")
 
-		failRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)))
+		failRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
 		require.NoError(t, err, "Should create RoundManager")
 
 		// This should fail because the restored SMT root hash doesn't match the latest block

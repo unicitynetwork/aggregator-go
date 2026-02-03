@@ -162,6 +162,7 @@ func NewRoundManager(
 	luc *types.UnicityCertificate,
 	eventBus *events.EventBus,
 	threadSafeSmt *smt.ThreadSafeSMT,
+	trustBaseProvider interfaces.TrustBaseProvider,
 ) (*RoundManager, error) {
 	rm := &RoundManager{
 		config:              cfg,
@@ -183,7 +184,7 @@ func NewRoundManager(
 	if cfg.Sharding.Mode == config.ShardingModeStandalone {
 		if cfg.BFT.Enabled {
 			var err error
-			rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, storage.TrustBaseStorage(), luc, logger, eventBus)
+			rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, trustBaseProvider, luc, logger, eventBus)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create BFT client: %w", err)
 			}
