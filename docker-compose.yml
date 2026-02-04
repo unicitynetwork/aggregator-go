@@ -110,18 +110,15 @@ services:
       - "27017:27017"
     networks:
       - default
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: password
-      MONGO_INITDB_DATABASE: aggregator
     volumes:
       - ./data/mongodb_data:/data/db
-      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    command: ["--replSet", "rs0", "--bind_ip_all", "--noauth"]
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
+      test: ["CMD", "mongosh", "--eval", "try { rs.status().ok } catch(e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongodb:27017'}]}) }"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 10s
 
   aggregator:
     build:
@@ -144,7 +141,7 @@ services:
       ENABLE_CORS: "true"
 
       # Database Configuration
-      MONGODB_URI: "mongodb://admin:password@mongodb:27017/aggregator?authSource=admin"
+      MONGODB_URI: "mongodb://mongodb:27017/aggregator?replicaSet=rs0&directConnection=true"
       MONGODB_DATABASE: "aggregator"
       MONGODB_CONNECT_TIMEOUT: "10s"
       MONGODB_SERVER_SELECTION_TIMEOUT: "5s"
