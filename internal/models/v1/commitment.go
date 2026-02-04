@@ -1,11 +1,8 @@
-package models
+package v1
 
 import (
-	"crypto/sha256"
-	"fmt"
 	"time"
 
-	"github.com/fxamacker/cbor/v2"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -94,52 +91,13 @@ func (cb *CommitmentBSON) FromBSON() (*Commitment, error) {
 	}, nil
 }
 
-// CreateLeafValue creates the value to store in the SMT leaf for a commitment
-// This matches the TypeScript LeafValue.create() method exactly:
-// - CBOR encode the authenticator as an array [algorithm, publicKey, signature, stateHashImprint]
-// - Hash the CBOR-encoded authenticator and transaction hash imprint using SHA256
-// - Return as DataHash imprint format (2-byte algorithm prefix + hash)
-func (c *Commitment) CreateLeafValue() ([]byte, error) {
-	// Get the state hash imprint for CBOR encoding
-	stateHashImprint, err := c.Authenticator.StateHash.Imprint()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get state hash imprint: %w", err)
+func (c *Commitment) ToAPI() *api.Commitment {
+	return &api.Commitment{
+		RequestID:             c.RequestID,
+		TransactionHash:       c.TransactionHash,
+		Authenticator:         *c.Authenticator.ToAPI(),
+		AggregateRequestCount: c.AggregateRequestCount,
+		CreatedAt:             c.CreatedAt,
+		ProcessedAt:           c.ProcessedAt,
 	}
-
-	// CBOR encode the authenticator as an array (matching TypeScript authenticator.toCBOR())
-	// TypeScript: [algorithm, publicKey, signature.encode(), stateHash.imprint]
-	authenticatorArray := []interface{}{
-		c.Authenticator.Algorithm,         // algorithm as text string
-		[]byte(c.Authenticator.PublicKey), // publicKey as byte string
-		[]byte(c.Authenticator.Signature), // signature as byte string
-		stateHashImprint,                  // stateHash.imprint as byte string
-	}
-
-	authenticatorCBOR, err := cbor.Marshal(authenticatorArray)
-	if err != nil {
-		return nil, fmt.Errorf("failed to CBOR encode authenticator: %w", err)
-	}
-
-	// Get the transaction hash imprint
-	transactionHashImprint, err := c.TransactionHash.Imprint()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get transaction hash imprint: %w", err)
-	}
-
-	// Create SHA256 hasher and update with CBOR-encoded authenticator and transaction hash imprint
-	// This matches the TypeScript DataHasher(SHA256).update(authenticator.toCBOR()).update(transactionHash.imprint).digest()
-	hasher := sha256.New()
-	hasher.Write(authenticatorCBOR)
-	hasher.Write(transactionHashImprint)
-
-	// Get the final hash
-	hash := hasher.Sum(nil)
-
-	// Return as DataHash imprint with SHA256 algorithm prefix (0x00, 0x00)
-	imprint := make([]byte, 2+len(hash))
-	imprint[0] = 0x00 // SHA256 algorithm high byte
-	imprint[1] = 0x00 // SHA256 algorithm low byte
-	copy(imprint[2:], hash[:])
-
-	return imprint, nil
 }

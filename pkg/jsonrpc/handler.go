@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 )
 
@@ -77,7 +78,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Add request ID to context
-	ctx := context.WithValue(r.Context(), logger.RequestIDKey, uuid.New().String())
+	ctx := context.WithValue(r.Context(), logger.StateIDKey, uuid.New().String())
 
 	// Parse request
 	var req Request
@@ -162,7 +163,7 @@ func (s *Server) writeErrorResponse(w http.ResponseWriter, rpcErr *Error, id int
 func RequestIDMiddleware() MiddlewareFunc {
 	return func(ctx context.Context, req *Request, next func(context.Context, *Request) *Response) *Response {
 		requestID := uuid.New().String()
-		ctx = context.WithValue(ctx, logger.RequestIDKey, requestID)
+		ctx = context.WithValue(ctx, logger.StateIDKey, requestID)
 		return next(ctx, req)
 	}
 }

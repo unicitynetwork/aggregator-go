@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -38,16 +39,16 @@ func main() {
 	fmt.Println("Unicity Aggregator Client Example")
 	fmt.Println("=================================")
 
-	// Example 1: Create a cryptographically valid commitment
-	fmt.Println("1. Creating a valid commitment...")
-	commitment := createValidCommitment()
-	fmt.Printf("   Request ID: %s\n", commitment.RequestID)
-	fmt.Printf("   Public Key: %x\n", commitment.Authenticator.PublicKey)
-	fmt.Printf("   Signature: %x\n", commitment.Authenticator.Signature)
+	// Example 1: Create a cryptographically valid certification request
+	fmt.Println("1. Creating a valid certification request...")
+	req := createValidCertificationRequest()
+	fmt.Printf("   State ID: %s\n", req.StateID)
+	fmt.Printf("   Owner predicate: %+v\n", req.CertificationData.OwnerPredicate)
+	fmt.Printf("   Witness: %x\n", req.CertificationData.Witness)
 
-	// Example 2: Submit the commitment (commented out since server might not be running)
-	// fmt.Println("\n2. Submitting commitment...")
-	// response, err := submitCommitment(commitment)
+	// Example 2: Submit the certification request (commented out since server might not be running)
+	// fmt.Println("\n2. Submitting certification request...")
+	// response, err := certificationRequest(req)
 	// if err != nil {
 	// 	log.Printf("   Error: %v", err)
 	// } else {
@@ -56,36 +57,37 @@ func main() {
 
 	// Example 3: Show other API types usage
 	fmt.Println("\n3. Other API types available:")
-	fmt.Println("   - api.GetInclusionProofRequest")
-	fmt.Println("   - api.GetInclusionProofResponse")
+	fmt.Println("   - api.GetInclusionProofRequestV2")
+	fmt.Println("   - api.GetInclusionProofResponseV2")
 	fmt.Println("   - api.GetBlockRequest")
 	fmt.Println("   - api.GetBlockResponse")
-	fmt.Println("   - api.GetBlockCommitmentsRequest")
-	fmt.Println("   - api.GetBlockCommitmentsResponse")
+	fmt.Println("   - api.GetBlockRecords")
+	fmt.Println("   - api.GetBlockRecordsResponse")
 	fmt.Println("   - api.GetBlockHeightResponse")
 	fmt.Println("   - api.GetNoDeletionProofResponse")
 
 	fmt.Println("\nAll types are available in the 'github.com/unicitynetwork/aggregator-go/pkg/api' package")
 }
 
-// createValidCommitment demonstrates how to create a cryptographically valid commitment
-func createValidCommitment() *api.SubmitCommitmentRequest {
+// createValidCertificationRequest demonstrates how to create a cryptographically valid certification request
+func createValidCertificationRequest() *api.CertificationRequest {
 	// Generate a real secp256k1 key pair
 	privateKey, err := btcec.NewPrivateKey()
 	if err != nil {
 		panic(fmt.Sprintf("Failed to generate private key: %v", err))
 	}
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
+	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
 	// Generate random state data and create DataHash imprint
 	stateData := make([]byte, 32)
 	rand.Read(stateData)
 
 	stateHashImprint := signing.CreateDataHashImprint(stateData)
-	// Create RequestID deterministically 
-	requestID, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
+	// Create StateID deterministically
+	stateID, err := api.CreateStateID(ownerPredicate, stateHashImprint)
 	if err != nil {
-		panic(fmt.Sprintf("Failed to create request ID: %v", err))
+		panic(fmt.Sprintf("Failed to create state ID: %v", err))
 	}
 
 	// Generate random transaction data and create DataHash imprint
@@ -93,41 +95,30 @@ func createValidCommitment() *api.SubmitCommitmentRequest {
 	rand.Read(transactionData)
 	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
 
-	// Extract transaction hash bytes for signing
-	transactionHashBytes, err := transactionHashImprint.Imprint()
-	if err != nil {
-		panic(fmt.Sprintf("Failed to extract transaction hash: %v", err))
-	}
-
-	// Sign the transaction hash bytes
+	// Sign the transaction
 	signingService := signing.NewSigningService()
-	signatureBytes, err := signingService.Sign(transactionHashBytes, privateKey.Serialize())
-	if err != nil {
-		panic(fmt.Sprintf("Failed to sign transaction: %v", err))
+	certData := &api.CertificationData{
+		OwnerPredicate:  ownerPredicate,
+		SourceStateHash: stateHashImprint,
+		TransactionHash: transactionHashImprint,
+	}
+	if err := signingService.SignCertData(certData, privateKey.Serialize()); err != nil {
+		panic(fmt.Sprintf("Failed to sign certification request data: %v", err))
 	}
 
-	// Create receipt flag
-	receipt := true
-
-	return &api.SubmitCommitmentRequest{
-		RequestID:       requestID,
-		TransactionHash: api.TransactionHash(transactionHashImprint),
-		Authenticator: api.Authenticator{
-			Algorithm: "secp256k1",
-			PublicKey: api.HexBytes(publicKeyBytes),
-			Signature: api.HexBytes(signatureBytes),
-			StateHash: api.StateHash(stateHashImprint),
-		},
-		Receipt: &receipt,
+	return &api.CertificationRequest{
+		StateID:           stateID,
+		CertificationData: *certData,
+		Receipt:           true,
 	}
 }
 
-// submitCommitment demonstrates how to submit a commitment via JSON-RPC
-func submitCommitment(req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error) {
+// certificationRequest demonstrates how to submit a certification request via JSON-RPC
+func certificationRequest(req *api.CertificationRequest) (*api.CertificationResponse, error) {
 	// Create JSON-RPC request
 	rpcReq := JSONRPCRequest{
 		JSONRPC: "2.0",
-		Method:  "submit_commitment",
+		Method:  "certification_request",
 		Params:  req,
 		ID:      1,
 	}
@@ -155,8 +146,8 @@ func submitCommitment(req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentRe
 		return nil, fmt.Errorf("RPC error: %s", rpcResp.Error.Message)
 	}
 
-	// Parse the result as SubmitCommitmentResponse
-	var result api.SubmitCommitmentResponse
+	// Parse the result as CertificationResponse
+	var result api.CertificationResponse
 	resultBytes, _ := json.Marshal(rpcResp.Result)
 	if err := json.Unmarshal(resultBytes, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse result: %w", err)

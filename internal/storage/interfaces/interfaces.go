@@ -15,50 +15,50 @@ var ErrDuplicateKey = errors.New("duplicate key error")
 
 // CommitmentQueue handles commitment queue operations
 type CommitmentQueue interface {
-	// Store stores a new commitment
-	Store(ctx context.Context, commitment *models.Commitment) error
+	// Store stores a new certification request
+	Store(ctx context.Context, certificationRequest *models.CertificationRequest) error
 
-	// GetByRequestID retrieves a commitment by request ID
-	GetByRequestID(ctx context.Context, requestID api.RequestID) (*models.Commitment, error)
+	// GetByStateID retrieves a certification request by state ID
+	GetByStateID(ctx context.Context, stateID api.StateID) (*models.CertificationRequest, error)
 
-	// GetUnprocessedBatch retrieves a batch of unprocessed commitments
-	GetUnprocessedBatch(ctx context.Context, limit int) ([]*models.Commitment, error)
+	// GetUnprocessedBatch retrieves a batch of unprocessed certification requests
+	GetUnprocessedBatch(ctx context.Context, limit int) ([]*models.CertificationRequest, error)
 
 	// GetUnprocessedBatchWithCursor retrieves a batch with cursor-based pagination
-	GetUnprocessedBatchWithCursor(ctx context.Context, lastID string, limit int) ([]*models.Commitment, string, error)
+	GetUnprocessedBatchWithCursor(ctx context.Context, lastID string, limit int) ([]*models.CertificationRequest, string, error)
 
-	// StreamCommitments continuously streams commitments to the provided channel
-	StreamCommitments(ctx context.Context, commitmentChan chan<- *models.Commitment) error
+	// StreamCertificationRequests continuously streams certification requests to the provided channel
+	StreamCertificationRequests(ctx context.Context, certificationRequestChannel chan<- *models.CertificationRequest) error
 
-	// MarkProcessed marks commitments as processed
-	MarkProcessed(ctx context.Context, entries []CommitmentAck) error
+	// MarkProcessed marks certification requests as processed
+	MarkProcessed(ctx context.Context, entries []CertificationRequestAck) error
 
-	// Delete removes processed commitments
-	Delete(ctx context.Context, requestIDs []api.RequestID) error
+	// Delete removes processed certification requests
+	Delete(ctx context.Context, stateIDs []api.StateID) error
 
-	// Count returns the total number of commitments
+	// Count returns the total number of certification requests
 	Count(ctx context.Context) (int64, error)
 
-	// CountUnprocessed returns the number of unprocessed commitments
+	// CountUnprocessed returns the number of unprocessed certification requests
 	CountUnprocessed(ctx context.Context) (int64, error)
 
 	// GetAllPending retrieves all pending (unacknowledged) commitments
 	// Used to cleanup already-processed pending commitments on startup
-	GetAllPending(ctx context.Context) ([]*models.Commitment, error)
+	GetAllPending(ctx context.Context) ([]*models.CertificationRequest, error)
 
 	// GetByRequestIDs retrieves commitments matching the given request IDs.
 	// Streams through data in batches to avoid loading everything into memory.
-	GetByRequestIDs(ctx context.Context, requestIDs []api.RequestID) (map[string]*models.Commitment, error)
+	GetByRequestIDs(ctx context.Context, requestIDs []api.StateID) (map[string]*models.CertificationRequest, error)
 
 	// Lifecycle methods
 	Initialize(ctx context.Context) error
 	Close(ctx context.Context) error
 }
 
-// CommitmentAck represents the metadata required to acknowledge a commitment.
-type CommitmentAck struct {
-	RequestID api.RequestID
-	StreamID  string
+// CertificationRequestAck represents the metadata required to acknowledge a commitment.
+type CertificationRequestAck struct {
+	StateID  api.StateID
+	StreamID string
 }
 
 // AggregatorRecordStorage handles finalized aggregator records
@@ -69,17 +69,14 @@ type AggregatorRecordStorage interface {
 	// StoreBatch stores multiple aggregator records
 	StoreBatch(ctx context.Context, records []*models.AggregatorRecord) error
 
-	// GetByRequestID retrieves an aggregator record by request ID
-	GetByRequestID(ctx context.Context, requestID api.RequestID) (*models.AggregatorRecord, error)
+	// GetByStateID retrieves an aggregator record by state ID
+	GetByStateID(ctx context.Context, stateID api.StateID) (*models.AggregatorRecord, error)
 
 	// GetByBlockNumber retrieves all records for a specific block
 	GetByBlockNumber(ctx context.Context, blockNumber *api.BigInt) ([]*models.AggregatorRecord, error)
 
 	// Count returns the total number of records
 	Count(ctx context.Context) (int64, error)
-
-	// GetLatest retrieves the most recent records
-	GetLatest(ctx context.Context, limit int) ([]*models.AggregatorRecord, error)
 
 	// GetExistingRequestIDs returns which of the given request IDs already exist
 	GetExistingRequestIDs(ctx context.Context, requestIDs []string) (map[string]bool, error)
@@ -151,7 +148,7 @@ type SmtStorage interface {
 	GetExistingKeys(ctx context.Context, keys []string) (map[string]bool, error)
 }
 
-// BlockRecordsStorage handles block to request ID mappings
+// BlockRecordsStorage handles block to state ID mappings
 type BlockRecordsStorage interface {
 	// Store stores a new block records entry
 	Store(ctx context.Context, records *models.BlockRecords) error
@@ -159,8 +156,8 @@ type BlockRecordsStorage interface {
 	// GetByBlockNumber retrieves block records by block number
 	GetByBlockNumber(ctx context.Context, blockNumber *api.BigInt) (*models.BlockRecords, error)
 
-	// GetByRequestID retrieves the block number for a request ID
-	GetByRequestID(ctx context.Context, requestID api.RequestID) (*api.BigInt, error)
+	// GetByStateID retrieves the block number for a state ID
+	GetByStateID(ctx context.Context, stateID api.StateID) (*api.BigInt, error)
 
 	// Count returns the total number of block records
 	Count(ctx context.Context) (int64, error)

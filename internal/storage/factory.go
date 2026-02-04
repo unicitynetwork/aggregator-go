@@ -76,7 +76,7 @@ func createRedisCommitmentQueue(cfg *config.Config, log *logger.Logger) (interfa
 		streamName = "commitments"
 	}
 
-	// Create commitment storage
+	// Create certification request storage
 	commitmentStorage := redis.NewCommitmentStorage(redisClient, streamName, serverID, batchConfig, log)
 
 	return commitmentStorage, nil

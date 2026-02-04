@@ -78,7 +78,7 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_BasicFlow() {
 	ctx := suite.ctx
 
 	// Store commitments
-	commitments := []*models.Commitment{
+	commitments := []*models.CertificationRequest{
 		createTestCommitment(),
 		createTestCommitment(),
 		createTestCommitment(),
@@ -93,16 +93,16 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_BasicFlow() {
 	time.Sleep(150 * time.Millisecond)
 
 	// Stream commitments
-	commitmentChan := make(chan *models.Commitment, 10)
+	commitmentChan := make(chan *models.CertificationRequest, 10)
 	streamCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
 	go func() {
-		_ = suite.storage.StreamCommitments(streamCtx, commitmentChan)
+		_ = suite.storage.StreamCertificationRequests(streamCtx, commitmentChan)
 	}()
 
 	// Collect streamed commitments
-	var streamed []*models.Commitment
+	var streamed []*models.CertificationRequest
 	timeout := time.After(1 * time.Second)
 CollectLoop:
 	for {
@@ -120,9 +120,9 @@ CollectLoop:
 	require.Equal(suite.T(), len(commitments), len(streamed), "Should stream all stored commitments")
 
 	// Mark as processed
-	acks := make([]interfaces.CommitmentAck, len(streamed))
+	acks := make([]interfaces.CertificationRequestAck, len(streamed))
 	for i, c := range streamed {
-		acks[i] = interfaces.CommitmentAck{RequestID: c.RequestID, StreamID: c.StreamID}
+		acks[i] = interfaces.CertificationRequestAck{StateID: c.StateID, StreamID: c.StreamID}
 	}
 
 	err := suite.storage.MarkProcessed(ctx, acks)
@@ -139,14 +139,14 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_FIFOOrdering() {
 
 	ctx := suite.ctx
 
-	// Store commitments in specific order using StoreBatch and track their RequestIDs
+	// Store commitments in specific order using StoreBatch and track their StateIDs
 	numCommitments := 100
-	expectedOrder := make([]api.RequestID, numCommitments)
-	commitments := make([]*models.Commitment, numCommitments)
+	expectedOrder := make([]api.StateID, numCommitments)
+	commitments := make([]*models.CertificationRequest, numCommitments)
 
 	for i := 0; i < numCommitments; i++ {
 		commitment := createTestCommitment()
-		expectedOrder[i] = commitment.RequestID
+		expectedOrder[i] = commitment.StateID
 		commitments[i] = commitment
 	}
 
@@ -157,22 +157,22 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_FIFOOrdering() {
 	time.Sleep(100 * time.Millisecond)
 
 	// Stream commitments and verify order
-	commitmentChan := make(chan *models.Commitment, 200)
+	commitmentChan := make(chan *models.CertificationRequest, 200)
 	streamCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
 	go func() {
-		_ = suite.storage.StreamCommitments(streamCtx, commitmentChan)
+		_ = suite.storage.StreamCertificationRequests(streamCtx, commitmentChan)
 	}()
 
 	// Collect streamed commitments
-	actualOrder := make([]api.RequestID, 0, numCommitments)
+	actualOrder := make([]api.StateID, 0, numCommitments)
 	timeout := time.After(2 * time.Second)
 CollectLoop:
 	for {
 		select {
 		case c := <-commitmentChan:
-			actualOrder = append(actualOrder, c.RequestID)
+			actualOrder = append(actualOrder, c.StateID)
 			if len(actualOrder) == numCommitments {
 				break CollectLoop
 			}
@@ -186,7 +186,7 @@ CollectLoop:
 	// Verify FIFO order
 	for i := 0; i < numCommitments; i++ {
 		assert.Equal(suite.T(), expectedOrder[i], actualOrder[i],
-			"Commitment at position %d should match (expected: %s, got: %s)",
+			"CertificationData at position %d should match (expected: %s, got: %s)",
 			i, expectedOrder[i], actualOrder[i])
 	}
 }
@@ -207,12 +207,12 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_HighThroughput() {
 	suite.T().Logf("Testing %v at %d RPS (expected: %d commitments)", duration, targetRPS, expectedTotal)
 
 	// Start streaming in background
-	commitmentChan := make(chan *models.Commitment, 10000)
+	commitmentChan := make(chan *models.CertificationRequest, 10000)
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
 
 	go func() {
-		_ = suite.storage.StreamCommitments(streamCtx, commitmentChan)
+		_ = suite.storage.StreamCertificationRequests(streamCtx, commitmentChan)
 	}()
 
 	// Start consumer
@@ -221,7 +221,7 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_HighThroughput() {
 
 	go func() {
 		defer close(consumerDone)
-		batch := make([]*models.Commitment, 0, 1000)
+		batch := make([]*models.CertificationRequest, 0, 1000)
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 
@@ -329,7 +329,7 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_StreamTrimming() {
 	// Store commitments using StoreBatch for efficiency
 	numToStore := 1000
 
-	commitments := make([]*models.Commitment, numToStore)
+	commitments := make([]*models.CertificationRequest, numToStore)
 	for i := 0; i < numToStore; i++ {
 		commitments[i] = createTestCommitment()
 	}
@@ -365,7 +365,7 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_StreamTrimmingKeepsPending()
 	ctx := suite.ctx
 	suite.storage.batchConfig.MaxStreamLength = 3
 
-	commitments := make([]*models.Commitment, 5)
+	commitments := make([]*models.CertificationRequest, 5)
 	for i := 0; i < len(commitments); i++ {
 		commitments[i] = createTestCommitment()
 	}
@@ -375,15 +375,15 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_StreamTrimmingKeepsPending()
 
 	time.Sleep(150 * time.Millisecond)
 
-	commitmentChan := make(chan *models.Commitment, 10)
+	commitmentChan := make(chan *models.CertificationRequest, 10)
 	streamCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
 	go func() {
-		_ = suite.storage.StreamCommitments(streamCtx, commitmentChan)
+		_ = suite.storage.StreamCertificationRequests(streamCtx, commitmentChan)
 	}()
 
-	var streamed []*models.Commitment
+	var streamed []*models.CertificationRequest
 	timeout := time.After(1 * time.Second)
 CollectLoop:
 	for {
@@ -399,11 +399,11 @@ CollectLoop:
 	}
 	require.Equal(suite.T(), len(commitments), len(streamed), "Should stream all stored commitments")
 
-	ackEntries := make([]interfaces.CommitmentAck, 0, 2)
+	ackEntries := make([]interfaces.CertificationRequestAck, 0, 2)
 	for _, c := range streamed[:2] {
-		ackEntries = append(ackEntries, interfaces.CommitmentAck{
-			RequestID: c.RequestID,
-			StreamID:  c.StreamID,
+		ackEntries = append(ackEntries, interfaces.CertificationRequestAck{
+			StateID:  c.StateID,
+			StreamID: c.StreamID,
 		})
 	}
 	require.NoError(suite.T(), suite.storage.MarkProcessed(ctx, ackEntries))
@@ -433,13 +433,13 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_NoMessageLoss() {
 
 	// Store commitments with unique IDs using StoreBatch
 	numCommitments := 1000
-	storedIDs := make(map[api.RequestID]bool)
+	storedIDs := make(map[api.StateID]bool)
 
-	commitments := make([]*models.Commitment, numCommitments)
+	commitments := make([]*models.CertificationRequest, numCommitments)
 	for i := 0; i < numCommitments; i++ {
 		commitment := createTestCommitment()
 		commitments[i] = commitment
-		storedIDs[commitment.RequestID] = true
+		storedIDs[commitment.StateID] = true
 	}
 
 	err := suite.storage.StoreBatch(ctx, commitments)
@@ -449,22 +449,22 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_NoMessageLoss() {
 	time.Sleep(100 * time.Millisecond)
 
 	// Stream all commitments
-	commitmentChan := make(chan *models.Commitment, 2000)
+	commitmentChan := make(chan *models.CertificationRequest, 2000)
 	streamCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	go func() {
-		_ = suite.storage.StreamCommitments(streamCtx, commitmentChan)
+		_ = suite.storage.StreamCertificationRequests(streamCtx, commitmentChan)
 	}()
 
 	// Collect all streamed commitments
-	streamedIDs := make(map[api.RequestID]bool)
+	streamedIDs := make(map[api.StateID]bool)
 	timeout := time.After(3 * time.Second)
 CollectLoop:
 	for {
 		select {
 		case c := <-commitmentChan:
-			streamedIDs[c.RequestID] = true
+			streamedIDs[c.StateID] = true
 			if len(streamedIDs) == numCommitments {
 				break CollectLoop
 			}
@@ -478,23 +478,23 @@ CollectLoop:
 		"Should stream exactly the same number of commitments as stored")
 
 	// Verify no missing commitments
-	for requestID := range storedIDs {
-		assert.True(suite.T(), streamedIDs[requestID],
-			"Stored commitment %s was not streamed", requestID)
+	for stateID := range storedIDs {
+		assert.True(suite.T(), streamedIDs[stateID],
+			"Stored certification request %s was not streamed", stateID)
 	}
 
 	// Verify no extra commitments
-	for requestID := range streamedIDs {
-		assert.True(suite.T(), storedIDs[requestID],
-			"Streamed commitment %s was not stored", requestID)
+	for stateID := range streamedIDs {
+		assert.True(suite.T(), storedIDs[stateID],
+			"Streamed certification request %s was not stored", stateID)
 	}
 }
 
-// Test 6: StreamCommitments recovers after consumer group deletion by recreating the group.
+// Test 6: StreamCertificationRequests recovers after consumer group deletion by recreating the group.
 func (suite *RedisTestSuite) TestCommitmentStream_ConsumerGroupRecovery() {
 	ctx := suite.ctx
 
-	// Store initial commitment so the stream goroutine has data to consume.
+	// Store initial certification request so the stream goroutine has data to consume.
 	initial := createTestCommitment()
 	require.NoError(suite.T(), suite.storage.Store(ctx, initial))
 	time.Sleep(150 * time.Millisecond) // allow async flush
@@ -502,39 +502,39 @@ func (suite *RedisTestSuite) TestCommitmentStream_ConsumerGroupRecovery() {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	commitmentChan := make(chan *models.Commitment, 4)
+	commitmentChan := make(chan *models.CertificationRequest, 4)
 	var streamErr error
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		streamErr = suite.storage.StreamCommitments(streamCtx, commitmentChan)
+		streamErr = suite.storage.StreamCertificationRequests(streamCtx, commitmentChan)
 	}()
 
-	// Expect the first commitment to arrive.
+	// Expect the first certification request to arrive.
 	select {
 	case first := <-commitmentChan:
-		require.Equal(suite.T(), initial.RequestID, first.RequestID)
+		require.Equal(suite.T(), initial.StateID, first.StateID)
 	case <-time.After(2 * time.Second):
-		suite.T().Fatal("did not receive initial commitment before timeout")
+		suite.T().Fatal("did not receive initial certification request before timeout")
 	}
 
 	// drop the consumer group while the stream is active.
 	err := suite.client.XGroupDestroy(ctx, suite.storage.streamName, consumerGroup).Err()
 	require.NoError(suite.T(), err, "failed to destroy consumer group for test")
 
-	// Publish another commitment that should trigger the recovery path.
+	// Publish another certification request that should trigger the recovery path.
 	nextCommitment := createTestCommitment()
 	require.NoError(suite.T(), suite.storage.Store(ctx, nextCommitment))
 	time.Sleep(150 * time.Millisecond)
 
 	// The streaming goroutine should recreate the group and deliver the new commitment.
-	var received *models.Commitment
+	var received *models.CertificationRequest
 	require.Eventually(suite.T(), func() bool {
 		select {
 		case c := <-commitmentChan:
 			received = c
-			return c.RequestID == nextCommitment.RequestID
+			return c.StateID == nextCommitment.StateID
 		default:
 			return false
 		}
@@ -542,7 +542,7 @@ func (suite *RedisTestSuite) TestCommitmentStream_ConsumerGroupRecovery() {
 
 	// Validate the streamed commitment.
 	require.NotNil(suite.T(), received)
-	assert.Equal(suite.T(), nextCommitment.RequestID, received.RequestID)
+	assert.Equal(suite.T(), nextCommitment.StateID, received.StateID)
 	assert.NotEmpty(suite.T(), received.StreamID, "StreamID should be populated after recovery")
 
 	// Confirm the consumer group was recreated.
@@ -554,7 +554,7 @@ func (suite *RedisTestSuite) TestCommitmentStream_ConsumerGroupRecovery() {
 	cancel()
 	wg.Wait()
 	if streamErr != nil && streamErr != context.Canceled {
-		suite.T().Logf("StreamCommitments exit error: %v", streamErr)
+		suite.T().Logf("StreamCertificationRequests exit error: %v", streamErr)
 	}
 }
 
@@ -608,7 +608,7 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_PeriodicCleanup() {
 			currentBatchSize = remaining
 		}
 
-		batch := make([]*models.Commitment, currentBatchSize)
+		batch := make([]*models.CertificationRequest, currentBatchSize)
 		for j := 0; j < currentBatchSize; j++ {
 			batch[j] = createTestCommitment()
 		}
@@ -621,15 +621,15 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_PeriodicCleanup() {
 	time.Sleep(200 * time.Millisecond)
 
 	// Stream and ack all commitments so trimming can safely remove them
-	commitmentChan := make(chan *models.Commitment, 2000)
+	commitmentChan := make(chan *models.CertificationRequest, 2000)
 	streamCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	go func() {
-		_ = customStorage.StreamCommitments(streamCtx, commitmentChan)
+		_ = customStorage.StreamCertificationRequests(streamCtx, commitmentChan)
 	}()
 
-	var received []*models.Commitment
+	var received []*models.CertificationRequest
 	timeout := time.After(4 * time.Second)
 CollectLoop:
 	for {
@@ -666,7 +666,7 @@ CollectLoop:
 
 	// Store more commitments to exceed limit again
 	suite.T().Log("Storing 3K more commitments...")
-	moreBatch := make([]*models.Commitment, 3000)
+	moreBatch := make([]*models.CertificationRequest, 3000)
 	for j := 0; j < 3000; j++ {
 		moreBatch[j] = createTestCommitment()
 	}
@@ -703,22 +703,22 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_RestartRecovery() {
 
 	// Phase 1: Store 10 commitments and stream them (but don't ACK - simulate crash)
 	numPending := 10
-	commitments := make([]*models.Commitment, numPending)
+	commitments := make([]*models.CertificationRequest, numPending)
 	for i := 0; i < numPending; i++ {
 		commitments[i] = createTestCommitment()
 	}
 	require.NoError(suite.T(), storage1.StoreBatch(ctx, commitments))
 	time.Sleep(100 * time.Millisecond)
 
-	commitmentChan := make(chan *models.Commitment, 20)
+	commitmentChan := make(chan *models.CertificationRequest, 20)
 	streamCtx, cancelStream := context.WithTimeout(ctx, 2*time.Second)
 	defer cancelStream()
 
 	go func() {
-		_ = storage1.StreamCommitments(streamCtx, commitmentChan)
+		_ = storage1.StreamCertificationRequests(streamCtx, commitmentChan)
 	}()
 
-	var received []*models.Commitment
+	var received []*models.CertificationRequest
 	timeout := time.After(500 * time.Millisecond)
 CollectLoop:
 	for {
@@ -744,24 +744,24 @@ CollectLoop:
 	require.NoError(suite.T(), storage2.Initialize(ctx))
 
 	numNew := 5
-	newCommitments := make([]*models.Commitment, numNew)
+	newCommitments := make([]*models.CertificationRequest, numNew)
 	for i := 0; i < numNew; i++ {
 		newCommitments[i] = createTestCommitment()
 	}
 	require.NoError(suite.T(), storage2.StoreBatch(ctx, newCommitments))
 	time.Sleep(100 * time.Millisecond)
 
-	// Phase 3: StreamCommitments should recover pending + new in one call
+	// Phase 3: StreamCertificationRequests should recover pending + new in one call
 	totalExpected := numPending + numNew
-	commitmentChan2 := make(chan *models.Commitment, 20)
+	commitmentChan2 := make(chan *models.CertificationRequest, 20)
 	streamCtx2, cancelStream2 := context.WithTimeout(ctx, 3*time.Second)
 	defer cancelStream2()
 
 	go func() {
-		_ = storage2.StreamCommitments(streamCtx2, commitmentChan2)
+		_ = storage2.StreamCertificationRequests(streamCtx2, commitmentChan2)
 	}()
 
-	var allReceived []*models.Commitment
+	var allReceived []*models.CertificationRequest
 	timeout2 := time.After(1 * time.Second)
 CollectLoop2:
 	for {
@@ -788,7 +788,7 @@ func (suite *RedisTestSuite) TestGetByRequestIDs() {
 	t := suite.T()
 
 	// Store 5 commitments
-	commitments := make([]*models.Commitment, 5)
+	commitments := make([]*models.CertificationRequest, 5)
 	for i := 0; i < 5; i++ {
 		commitments[i] = createTestCommitment()
 	}
@@ -796,10 +796,10 @@ func (suite *RedisTestSuite) TestGetByRequestIDs() {
 	time.Sleep(100 * time.Millisecond)
 
 	// Request only 3 of them
-	requestIDs := []api.RequestID{
-		commitments[0].RequestID,
-		commitments[2].RequestID,
-		commitments[4].RequestID,
+	requestIDs := []api.StateID{
+		commitments[0].StateID,
+		commitments[2].StateID,
+		commitments[4].StateID,
 	}
 
 	result, err := suite.storage.GetByRequestIDs(ctx, requestIDs)
@@ -807,11 +807,11 @@ func (suite *RedisTestSuite) TestGetByRequestIDs() {
 	require.Len(t, result, 3, "Should return exactly 3 commitments")
 
 	// Verify correct ones returned
-	require.NotNil(t, result[string(commitments[0].RequestID)])
-	require.NotNil(t, result[string(commitments[2].RequestID)])
-	require.NotNil(t, result[string(commitments[4].RequestID)])
-	require.Nil(t, result[string(commitments[1].RequestID)])
-	require.Nil(t, result[string(commitments[3].RequestID)])
+	require.NotNil(t, result[string(commitments[0].StateID)])
+	require.NotNil(t, result[string(commitments[2].StateID)])
+	require.NotNil(t, result[string(commitments[4].StateID)])
+	require.Nil(t, result[string(commitments[1].StateID)])
+	require.Nil(t, result[string(commitments[3].StateID)])
 }
 
 // TestGetByRequestIDs_WithMissingIDs verifies graceful handling of missing IDs.
@@ -820,7 +820,7 @@ func (suite *RedisTestSuite) TestGetByRequestIDs_WithMissingIDs() {
 	t := suite.T()
 
 	// Store 2 commitments
-	commitments := make([]*models.Commitment, 2)
+	commitments := make([]*models.CertificationRequest, 2)
 	for i := 0; i < 2; i++ {
 		commitments[i] = createTestCommitment()
 	}
@@ -830,9 +830,9 @@ func (suite *RedisTestSuite) TestGetByRequestIDs_WithMissingIDs() {
 	// Request 3 IDs (one doesn't exist)
 	nonExistent := createTestCommitment()
 	requestIDs := []api.RequestID{
-		commitments[0].RequestID,
-		commitments[1].RequestID,
-		nonExistent.RequestID, // This one doesn't exist in Redis
+		commitments[0].StateID,
+		commitments[1].StateID,
+		nonExistent.StateID, // This one doesn't exist in Redis
 	}
 
 	result, err := suite.storage.GetByRequestIDs(ctx, requestIDs)
@@ -847,7 +847,7 @@ func (suite *RedisTestSuite) TestGetAllPending_OnlyReturnsPending() {
 	t := suite.T()
 
 	// Store 5 commitments
-	commitments := make([]*models.Commitment, 5)
+	commitments := make([]*models.CertificationRequest, 5)
 	for i := 0; i < 5; i++ {
 		commitments[i] = createTestCommitment()
 	}
@@ -855,14 +855,14 @@ func (suite *RedisTestSuite) TestGetAllPending_OnlyReturnsPending() {
 	time.Sleep(100 * time.Millisecond)
 
 	// Read them via StreamCommitments to make them "pending"
-	commitmentChan := make(chan *models.Commitment, 10)
+	commitmentChan := make(chan *models.CertificationRequest, 10)
 	streamCtx, cancelStream := context.WithTimeout(ctx, 500*time.Millisecond)
 
 	go func() {
-		_ = suite.storage.StreamCommitments(streamCtx, commitmentChan)
+		_ = suite.storage.StreamCertificationRequests(streamCtx, commitmentChan)
 	}()
 
-	var received []*models.Commitment
+	var received []*models.CertificationRequest
 	for c := range commitmentChan {
 		received = append(received, c)
 		if len(received) == 5 {
@@ -873,11 +873,11 @@ func (suite *RedisTestSuite) TestGetAllPending_OnlyReturnsPending() {
 	require.Len(t, received, 5, "Should have received 5 commitments")
 
 	// ACK 3 of them
-	ackEntries := make([]interfaces.CommitmentAck, 3)
+	ackEntries := make([]interfaces.CertificationRequestAck, 3)
 	for i := 0; i < 3; i++ {
-		ackEntries[i] = interfaces.CommitmentAck{
-			RequestID: received[i].RequestID,
-			StreamID:  received[i].StreamID,
+		ackEntries[i] = interfaces.CertificationRequestAck{
+			StateID:  received[i].StateID,
+			StreamID: received[i].StreamID,
 		}
 	}
 	require.NoError(t, suite.storage.MarkProcessed(ctx, ackEntries))
@@ -901,7 +901,7 @@ func (suite *RedisTestSuite) TestGetByRequestIDs_BatchesCorrectly() {
 	const totalMessages = 15000
 	const batchSize = 10000
 
-	commitments := make([]*models.Commitment, totalMessages)
+	commitments := make([]*models.CertificationRequest, totalMessages)
 	for i := 0; i < totalMessages; i++ {
 		commitments[i] = createTestCommitment()
 	}
@@ -925,7 +925,7 @@ func (suite *RedisTestSuite) TestGetByRequestIDs_FindsAcrossMultipleBatches() {
 
 	// Store 25000 messages (requires 3 batches of 10000 to scan)
 	const totalMessages = 25000
-	commitments := make([]*models.Commitment, totalMessages)
+	commitments := make([]*models.CertificationRequest, totalMessages)
 	for i := 0; i < totalMessages; i++ {
 		commitments[i] = createTestCommitment()
 	}
@@ -933,10 +933,10 @@ func (suite *RedisTestSuite) TestGetByRequestIDs_FindsAcrossMultipleBatches() {
 	time.Sleep(300 * time.Millisecond)
 
 	// Request the LAST commitment - requires scanning all batches
-	requestIDs := []api.RequestID{commitments[totalMessages-1].RequestID}
+	requestIDs := []api.RequestID{commitments[totalMessages-1].StateID}
 
 	result, err := suite.storage.GetByRequestIDs(ctx, requestIDs)
 	require.NoError(t, err)
 	require.Len(t, result, 1, "Should find the commitment in the last batch")
-	require.NotNil(t, result[string(commitments[totalMessages-1].RequestID)])
+	require.NotNil(t, result[string(commitments[totalMessages-1].StateID)])
 }

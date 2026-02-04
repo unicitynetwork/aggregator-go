@@ -27,12 +27,12 @@ The service provides **executable** interactive API documentation accessible at 
 
 ### Core Methods
 
-1. **`submit_commitment`** - Submit state transition requests
-2. **`get_inclusion_proof`** - Retrieve inclusion proofs for commitments
+1. **`certification_request`** - Submit state transition requests
+2. **`get_inclusion_proof.v2`** - Retrieve inclusion proofs for commitments
 3. **`get_no_deletion_proof`** - Get global no-deletion proofs
 4. **`get_block_height`** - Get current blockchain height
 5. **`get_block`** - Retrieve block information
-6. **`get_block_commitments`** - Get all commitments in a block
+6. **`get_block_records`** - Get all certification requests in a block
 
 ### Infrastructure Endpoints
 
@@ -101,23 +101,13 @@ The executable documentation at `/docs` provides multiple ways to test the API:
 ### Manual Testing
 
 ```bash
-# Test submit_commitment
+# Test certification_request
 curl -X POST http://localhost:3333/ \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
-    "method": "submit_commitment",
-    "params": {
-      "requestId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122",
-      "transactionHash": "0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297",
-      "authenticator": {
-        "algorithm": "secp256k1",
-        "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
-        "signature": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
-        "stateHash": "0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647"
-      },
-      "receipt": true
-    },
+    "method": "certification_request",
+    "params": "8458220000b1333daf3261d9bfa9d6dd98f170c0e756c26dbe284b5f90b27df900f6a77c04848301410158210299de0a2414a39fc981694b40bcb7006c6a3c70da7097a9a02877469fe1d2a62b582200002dc34763859638857585ce6aa30a43d3d7a342b51e6caee408888f3ab1c9e84b582200004c3b2c6fce3a19589cb219a0c18281696fedcbab1f28afd8aecc830cff55dacb584103ce4ef0fe3b4f53f5264daee6930c5e7a3b60f4dfd102b4d8f2420d8bbba17e446b0f855ad402437f14d00c1f27752e9aa802301ca42a57a80cb1f6f57e03eb00f500",
     "id": 1
   }'
 

@@ -173,7 +173,7 @@ func buildShardClients(aggregatorURL, authHeader string, metrics *Metrics) []*Sh
 	return clients
 }
 
-func selectShardIndex(requestID api.RequestID, shardClients []*ShardClient) int {
+func selectShardIndex(requestID api.StateID, shardClients []*ShardClient) int {
 	shardCount := len(shardClients)
 	if shardCount <= 1 {
 		return 0
@@ -239,21 +239,22 @@ func matchesAnyShardTarget(requestIDHex string) bool {
 	return false
 }
 
-// Generate a cryptographically valid commitment request
-func generateCommitmentRequest() *api.SubmitCommitmentRequest {
+// Generate a cryptographically valid certification request request
+func generateCommitmentRequest() *api.CertificationRequest {
 	// Generate a real secp256k1 key pair
 	privateKey, err := btcec.NewPrivateKey()
 	if err != nil {
 		panic(fmt.Sprintf("Failed to generate private key: %v", err))
 	}
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
+	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
 	// Generate random state data and create DataHash imprint
 	stateData := make([]byte, 32)
 	rand.Read(stateData)
-	stateHashImprint := signing.CreateDataHashImprint(stateData)
+	sourceStateHashImprint := signing.CreateDataHashImprint(stateData)
 
-	var requestID api.RequestID
+	var stateID api.StateID
 
 	// Check if we have shard targets with masks configured
 	hasShardMasks := false
@@ -265,23 +266,23 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 	}
 
 	for {
-		calculated, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
+		calculated, err := api.CreateStateID(ownerPredicate, sourceStateHashImprint)
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create request ID: %v", err))
 		}
 		// If no shard masks configured, accept any request ID
 		if !hasShardMasks {
-			requestID = calculated
+			stateID = calculated
 			break
 		}
 		// Check if the request ID matches any of the configured shard targets
 		if matchesAnyShardTarget(string(calculated)) {
-			requestID = calculated
+			stateID = calculated
 			break
 		}
 		// Regenerate state hash and try again
 		rand.Read(stateData)
-		stateHashImprint = signing.CreateDataHashImprint(stateData)
+		sourceStateHashImprint = signing.CreateDataHashImprint(stateData)
 	}
 
 	// Generate random transaction data and create DataHash imprint
@@ -289,37 +290,26 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 	rand.Read(transactionData)
 	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
 
-	// Extract transaction hash bytes for signing
-	transactionHashBytes, err := transactionHashImprint.DataBytes()
-	if err != nil {
-		panic(fmt.Sprintf("Failed to extract transaction hash: %v", err))
-	}
-
-	// Sign the transaction hash bytes
 	signingService := signing.NewSigningService()
-	signatureBytes, err := signingService.SignHash(transactionHashBytes, privateKey.Serialize())
-	if err != nil {
+	certData := &api.CertificationData{
+		OwnerPredicate:  ownerPredicate,
+		SourceStateHash: sourceStateHashImprint,
+		TransactionHash: transactionHashImprint,
+	}
+	if err = signingService.SignCertData(certData, privateKey.Serialize()); err != nil {
 		panic(fmt.Sprintf("Failed to sign transaction: %v", err))
 	}
 
 	// Create receipt flag
-	receipt := false
-
-	return &api.SubmitCommitmentRequest{
-		RequestID:       api.RequestID(requestID),
-		TransactionHash: api.TransactionHash(transactionHashImprint),
-		Authenticator: api.Authenticator{
-			Algorithm: "secp256k1",
-			PublicKey: api.HexBytes(publicKeyBytes),
-			Signature: api.HexBytes(signatureBytes),
-			StateHash: api.StateHash(stateHashImprint),
-		},
-		Receipt: &receipt,
+	return &api.CertificationRequest{
+		StateID:           stateID,
+		CertificationData: *certData,
+		Receipt:           false,
 	}
 }
 
 // Worker function that continuously submits commitments
-func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics *Metrics, proofQueue chan proofJob, commitmentPool []*api.SubmitCommitmentRequest, poolIndex *atomic.Int64, counters *RequestRateCounters, submissionWg *sync.WaitGroup) {
+func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics *Metrics, proofQueue chan proofJob, commitmentPool []*api.CertificationRequest, poolIndex *atomic.Int64, counters *RequestRateCounters, submissionWg *sync.WaitGroup) {
 	requestsPerWorker := float64(requestsPerSec) / float64(workerCount)
 	if requestsPerWorker <= 0 {
 		requestsPerWorker = 1
@@ -344,7 +334,7 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 				idx := poolIndex.Add(1) % int64(len(commitmentPool))
 				req := commitmentPool[idx]
 
-				shardIdx := selectShardIndex(req.RequestID, shardClients)
+				shardIdx := selectShardIndex(req.StateID, shardClients)
 				client := shardClients[shardIdx].client
 
 				if counters != nil {
@@ -360,7 +350,7 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 				submitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 
-				resp, err := client.callWithContext(submitCtx, "submit_commitment", req)
+				resp, err := client.callWithContext(submitCtx, "certification_request", req)
 
 				if counters != nil {
 					counters.IncSubmitCompleted()
@@ -380,19 +370,19 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 					if sm := metrics.shard(shardIdx); sm != nil {
 						sm.failedRequests.Add(1)
 					}
-					if resp.Error.Message == "REQUEST_ID_EXISTS" {
+					if resp.Error.Message == "STATE_ID_EXISTS" {
 						atomic.AddInt64(&metrics.requestIdExistsErr, 1)
 						if sm := metrics.shard(shardIdx); sm != nil {
 							sm.requestIdExistsErr.Add(1)
 						}
-						requestIDStr := normalizeRequestID(string(req.RequestID))
+						requestIDStr := normalizeRequestID(string(req.StateID))
 						metrics.submittedRequestIDs.Store(requestIDStr, true)
 					}
 					return
 				}
 
 				// Parse response
-				var submitResp api.SubmitCommitmentResponse
+				var submitResp api.CertificationResponse
 				respBytes, _ := json.Marshal(resp.Result)
 				if err := json.Unmarshal(respBytes, &submitResp); err != nil {
 					atomic.AddInt64(&metrics.failedRequests, 1)
@@ -411,7 +401,7 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 					if sm := metrics.shard(shardIdx); sm != nil {
 						sm.successfulRequests.Add(1)
 					}
-					requestIDStr := normalizeRequestID(string(req.RequestID))
+					requestIDStr := normalizeRequestID(string(req.StateID))
 					metrics.submittedRequestIDs.Store(requestIDStr, true)
 
 					if proofQueue != nil {
@@ -428,7 +418,7 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 						sm.failedRequests.Add(1)
 					}
 					if submitResp.Status != "" {
-						fmt.Printf("Unexpected status '%s' for request %s\n", submitResp.Status, req.RequestID)
+						fmt.Printf("Unexpected status '%s' for request %s\n", submitResp.Status, req.StateID)
 					}
 				}
 			}()
@@ -464,7 +454,7 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 						}
 					}
 
-					proofReq := GetInclusionProofRequest{RequestID: reqID}
+					proofReq := GetInclusionProofRequestV2{StateID: reqID}
 
 					atomic.AddInt64(&metrics.proofActiveRequests, 1)
 					if counters != nil {
@@ -474,7 +464,7 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 
 					// Create a context with 5 second timeout for proof retrieval
 					proofCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					resp, err := client.callWithContext(proofCtx, "get_inclusion_proof", proofReq)
+					resp, err := client.callWithContext(proofCtx, "get_inclusion_proof.v2", proofReq)
 					cancel()
 
 					if counters != nil {
@@ -509,7 +499,7 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 						continue
 					}
 
-					var proofResp GetInclusionProofResponse
+					var proofResp GetInclusionProofResponseV2
 					respBytes, _ := json.Marshal(resp.Result)
 					if err := json.Unmarshal(respBytes, &proofResp); err != nil {
 						metrics.recordError(fmt.Sprintf("Failed to parse proof response: %v", err))
@@ -520,7 +510,7 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 						return
 					}
 
-					if proofResp.InclusionProof == nil || proofResp.InclusionProof.TransactionHash == "" || proofResp.InclusionProof.Authenticator == nil {
+					if proofResp.InclusionProof == nil || proofResp.InclusionProof.CertificationData == nil || proofResp.InclusionProof.CertificationData.TransactionHash == "" {
 						time.Sleep(proofRetryDelay)
 						continue
 					}
@@ -1008,7 +998,7 @@ func main() {
 	// Calculate pool size: total requests needed + 10% buffer
 	poolSize := int(float64(requestsPerSec) * testDuration.Seconds() * 1.1)
 	fmt.Printf("\nPre-generating %d commitments (%d RPS × %v + 10%% buffer)...\n", poolSize, requestsPerSec, testDuration)
-	commitmentPool := make([]*api.SubmitCommitmentRequest, poolSize)
+	commitmentPool := make([]*api.CertificationRequest, poolSize)
 	workerCountPreGen := runtime.NumCPU()
 	if workerCountPreGen < 1 {
 		workerCountPreGen = 1
@@ -1046,7 +1036,7 @@ func main() {
 	fmt.Printf("Generating %d warmup commitments (%d RPS × %v + 10%% buffer)...\n", warmupPoolSize, requestsPerSec, warmupDuration)
 
 	// Generate separate warmup pool
-	warmupPool := make([]*api.SubmitCommitmentRequest, warmupPoolSize)
+	warmupPool := make([]*api.CertificationRequest, warmupPoolSize)
 	warmupJobs := make(chan int, workerCountPreGen*2)
 	var warmupPreGenWG sync.WaitGroup
 	for w := 0; w < workerCountPreGen; w++ {
@@ -1249,7 +1239,7 @@ func main() {
 	fmt.Printf("Total requests: %d\n", total)
 	fmt.Printf("Successful requests: %d\n", successful)
 	fmt.Printf("Failed requests: %d\n", failed)
-	fmt.Printf("REQUEST_ID_EXISTS: %d\n", exists)
+	fmt.Printf("STATE_ID_EXISTS: %d\n", exists)
 	fmt.Printf("Average RPS: %.2f\n", float64(total)/submissionDuration.Seconds())
 	fmt.Printf("Success rate: %.2f%%\n", float64(successful)/float64(total)*100)
 	if failed > 0 {

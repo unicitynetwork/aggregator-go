@@ -18,12 +18,12 @@ import (
 
 const commitmentCollection = "commitments"
 
-// CommitmentStorage implements commitment storage for MongoDB
+// CommitmentStorage implements certification request storage for MongoDB
 type CommitmentStorage struct {
 	collection *mongo.Collection
 }
 
-// NewCommitmentStorage creates a new commitment storage instance
+// NewCommitmentStorage creates a new certification request storage instance
 func NewCommitmentStorage(db *mongo.Database) *CommitmentStorage {
 	return &CommitmentStorage{
 		collection: db.Collection(commitmentCollection),
@@ -31,7 +31,7 @@ func NewCommitmentStorage(db *mongo.Database) *CommitmentStorage {
 }
 
 // Store stores a new commitment
-func (cs *CommitmentStorage) Store(ctx context.Context, commitment *models.Commitment) error {
+func (cs *CommitmentStorage) Store(ctx context.Context, commitment *models.CertificationRequest) error {
 	_, err := cs.collection.InsertOne(ctx, commitment.ToBSON())
 	if err != nil {
 		return fmt.Errorf("failed to store commitment: %w", err)
@@ -39,20 +39,20 @@ func (cs *CommitmentStorage) Store(ctx context.Context, commitment *models.Commi
 	return nil
 }
 
-// GetByRequestID retrieves a commitment by request ID
-func (cs *CommitmentStorage) GetByRequestID(ctx context.Context, requestID api.RequestID) (*models.Commitment, error) {
-	var commitmentBSON models.CommitmentBSON
-	err := cs.collection.FindOne(ctx, bson.M{"requestId": requestID}).Decode(&commitmentBSON)
+// GetByStateID retrieves a certification request by state ID
+func (cs *CommitmentStorage) GetByStateID(ctx context.Context, stateID api.StateID) (*models.CertificationRequest, error) {
+	var commitmentBSON models.CertificationRequestBSON
+	err := cs.collection.FindOne(ctx, bson.M{"requestId": stateID}).Decode(&commitmentBSON)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("failed to get commitment by request ID: %w", err)
+		return nil, fmt.Errorf("failed to get certification request by state ID: %w", err)
 	}
 
 	commitment, err := commitmentBSON.FromBSON()
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert commitment from BSON: %w", err)
+		return nil, fmt.Errorf("failed to convert certification request from BSON: %w", err)
 	}
 
 	// Handle backward compatibility: default to 1 if AggregateRequestCount is 0
@@ -63,13 +63,13 @@ func (cs *CommitmentStorage) GetByRequestID(ctx context.Context, requestID api.R
 }
 
 // GetUnprocessedBatch retrieves a batch of unprocessed commitments
-func (cs *CommitmentStorage) GetUnprocessedBatch(ctx context.Context, limit int) ([]*models.Commitment, error) {
+func (cs *CommitmentStorage) GetUnprocessedBatch(ctx context.Context, limit int) ([]*models.CertificationRequest, error) {
 	commitments, _, err := cs.GetUnprocessedBatchWithCursor(ctx, "", limit)
 	return commitments, err
 }
 
 // GetUnprocessedBatchWithCursor retrieves a batch of unprocessed commitments with cursor-based pagination
-func (cs *CommitmentStorage) GetUnprocessedBatchWithCursor(ctx context.Context, lastID string, limit int) ([]*models.Commitment, string, error) {
+func (cs *CommitmentStorage) GetUnprocessedBatchWithCursor(ctx context.Context, lastID string, limit int) ([]*models.CertificationRequest, string, error) {
 	filter := bson.M{"processedAt": bson.M{"$exists": false}}
 
 	// If we have a cursor, only get commitments after that ID
@@ -90,17 +90,17 @@ func (cs *CommitmentStorage) GetUnprocessedBatchWithCursor(ctx context.Context, 
 	}
 	defer cursor.Close(ctx)
 
-	var commitments []*models.Commitment
+	var commitments []*models.CertificationRequest
 	var newCursor string
 
 	for cursor.Next(ctx) {
-		var commitmentBSON models.CommitmentBSON
+		var commitmentBSON models.CertificationRequestBSON
 		if err := cursor.Decode(&commitmentBSON); err != nil {
 			return nil, "", fmt.Errorf("failed to decode commitment: %w", err)
 		}
 		commitment, err := commitmentBSON.FromBSON()
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to convert commitment from BSON: %w", err)
+			return nil, "", fmt.Errorf("failed to convert certification request from BSON: %w", err)
 		}
 
 		// Handle backward compatibility: default to 1 if AggregateRequestCount is 0
@@ -122,14 +122,14 @@ func (cs *CommitmentStorage) GetUnprocessedBatchWithCursor(ctx context.Context, 
 }
 
 // MarkProcessed marks commitments as processed
-func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interfaces.CommitmentAck) error {
+func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interfaces.CertificationRequestAck) error {
 	if len(entries) == 0 {
 		return nil
 	}
 
-	requestIDs := make([]api.RequestID, len(entries))
+	requestIDs := make([]api.StateID, len(entries))
 	for i, entry := range entries {
-		requestIDs[i] = entry.RequestID
+		requestIDs[i] = entry.StateID
 	}
 
 	filter := bson.M{"requestId": bson.M{"$in": requestIDs}}
@@ -144,12 +144,12 @@ func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interf
 }
 
 // Delete removes processed commitments
-func (cs *CommitmentStorage) Delete(ctx context.Context, requestIDs []api.RequestID) error {
-	if len(requestIDs) == 0 {
+func (cs *CommitmentStorage) Delete(ctx context.Context, stateIDs []api.StateID) error {
+	if len(stateIDs) == 0 {
 		return nil
 	}
 
-	filter := bson.M{"requestId": bson.M{"$in": requestIDs}}
+	filter := bson.M{"requestId": bson.M{"$in": stateIDs}}
 	_, err := cs.collection.DeleteMany(ctx, filter)
 	if err != nil {
 		return fmt.Errorf("failed to delete commitments: %w", err)
@@ -178,15 +178,15 @@ func (cs *CommitmentStorage) CountUnprocessed(ctx context.Context) (int64, error
 }
 
 // GetAllPending retrieves all unprocessed commitments (for crash recovery)
-func (cs *CommitmentStorage) GetAllPending(ctx context.Context) ([]*models.Commitment, error) {
+func (cs *CommitmentStorage) GetAllPending(ctx context.Context) ([]*models.CertificationRequest, error) {
 	filter := bson.M{"processedAt": bson.M{"$exists": false}}
 	return cs.findCommitments(ctx, filter)
 }
 
 // GetByRequestIDs retrieves commitments matching the given request IDs.
-func (cs *CommitmentStorage) GetByRequestIDs(ctx context.Context, requestIDs []api.RequestID) (map[string]*models.Commitment, error) {
+func (cs *CommitmentStorage) GetByRequestIDs(ctx context.Context, requestIDs []api.StateID) (map[string]*models.CertificationRequest, error) {
 	if len(requestIDs) == 0 {
-		return make(map[string]*models.Commitment), nil
+		return make(map[string]*models.CertificationRequest), nil
 	}
 
 	// Convert to strings for query
@@ -201,23 +201,23 @@ func (cs *CommitmentStorage) GetByRequestIDs(ctx context.Context, requestIDs []a
 		return nil, err
 	}
 
-	result := make(map[string]*models.Commitment, len(commitments))
+	result := make(map[string]*models.CertificationRequest, len(commitments))
 	for _, c := range commitments {
-		result[string(c.RequestID)] = c
+		result[string(c.StateID)] = c
 	}
 	return result, nil
 }
 
-func (cs *CommitmentStorage) findCommitments(ctx context.Context, filter bson.M) ([]*models.Commitment, error) {
+func (cs *CommitmentStorage) findCommitments(ctx context.Context, filter bson.M) ([]*models.CertificationRequest, error) {
 	cursor, err := cs.collection.Find(ctx, filter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get commitments: %w", err)
 	}
 	defer cursor.Close(ctx)
 
-	var commitments []*models.Commitment
+	var commitments []*models.CertificationRequest
 	for cursor.Next(ctx) {
-		var commitmentBSON models.CommitmentBSON
+		var commitmentBSON models.CertificationRequestBSON
 		if err := cursor.Decode(&commitmentBSON); err != nil {
 			return nil, fmt.Errorf("failed to decode commitment: %w", err)
 		}
@@ -230,22 +230,22 @@ func (cs *CommitmentStorage) findCommitments(ctx context.Context, filter bson.M)
 	return commitments, cursor.Err()
 }
 
-// Initialize initializes the commitment storage (no-op for MongoDB)
+// Initialize initializes the certification request storage (no-op for MongoDB)
 func (cs *CommitmentStorage) Initialize(ctx context.Context) error {
 	return nil
 }
 
-// StreamCommitments is not supported for MongoDB - use GetUnprocessedBatchWithCursor instead
-func (cs *CommitmentStorage) StreamCommitments(ctx context.Context, commitmentChan chan<- *models.Commitment) error {
-	return fmt.Errorf("StreamCommitments not supported for MongoDB - use GetUnprocessedBatchWithCursor for polling")
+// StreamCertificationRequests is not supported for MongoDB - use GetUnprocessedBatchWithCursor instead
+func (cs *CommitmentStorage) StreamCertificationRequests(ctx context.Context, commitmentChan chan<- *models.CertificationRequest) error {
+	return fmt.Errorf("StreamCertificationRequests not supported for MongoDB - use GetUnprocessedBatchWithCursor for polling")
 }
 
-// Close closes the commitment storage (no-op for MongoDB as connection is managed by Storage)
+// Close closes the certification request storage (no-op for MongoDB as connection is managed by Storage)
 func (cs *CommitmentStorage) Close(ctx context.Context) error {
 	return nil
 }
 
-// CreateIndexes creates necessary indexes for the commitment collection
+// CreateIndexes creates necessary indexes for the certification request collection
 func (cs *CommitmentStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
 		{
@@ -268,7 +268,7 @@ func (cs *CommitmentStorage) CreateIndexes(ctx context.Context) error {
 
 	_, err := cs.collection.Indexes().CreateMany(ctx, indexes)
 	if err != nil {
-		return fmt.Errorf("failed to create commitment indexes: %w", err)
+		return fmt.Errorf("failed to create indexes: %w", err)
 	}
 
 	return nil

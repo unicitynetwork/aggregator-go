@@ -293,8 +293,8 @@ func (suite *ParentServiceTestSuite) TestGetShardProof_Success() {
 	childSMT := smt.NewChildSparseMerkleTree(api.SHA256, 4, shard0ID)
 
 	// Add some leaves to the child SMT
-	testLeafPath := big.NewInt(0b10000) // Request ID within this shard
-	testLeafValue := []byte{0x61}       // Commitment data
+	testLeafPath := big.NewInt(0b10000) // State ID within this shard
+	testLeafValue := []byte{0x61}
 	err := childSMT.AddLeaf(testLeafPath, testLeafValue)
 	suite.Require().NoError(err, "Should add leaf to child SMT")
 

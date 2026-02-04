@@ -238,9 +238,19 @@ func (pas *ParentAggregatorService) SubmitCommitment(ctx context.Context, req *a
 	return nil, fmt.Errorf("submit_commitment is not supported in parent mode - use submit_shard_root instead")
 }
 
-// GetInclusionProof - not used in parent mode
-func (pas *ParentAggregatorService) GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error) {
+// CertificationRequest - not used in parent mode
+func (pas *ParentAggregatorService) CertificationRequest(ctx context.Context, req *api.CertificationRequest) (*api.CertificationResponse, error) {
+	return nil, fmt.Errorf("certification_request is not supported in parent mode - use submit_shard_root instead")
+}
+
+// GetInclusionProofV1 - not used in parent mode
+func (pas *ParentAggregatorService) GetInclusionProofV1(ctx context.Context, req *api.GetInclusionProofRequestV1) (*api.GetInclusionProofResponseV1, error) {
 	return nil, fmt.Errorf("get_inclusion_proof is not supported in parent mode - use get_shard_proof instead")
+}
+
+// GetInclusionProofV2 - not used in parent mode
+func (pas *ParentAggregatorService) GetInclusionProofV2(ctx context.Context, req *api.GetInclusionProofRequestV2) (*api.GetInclusionProofResponseV2, error) {
+	return nil, fmt.Errorf("get_inclusion_proof.v2 is not supported in parent mode - use get_shard_proof instead")
 }
 
 // GetNoDeletionProof - TODO: implement
@@ -268,6 +278,11 @@ func (pas *ParentAggregatorService) GetBlock(ctx context.Context, req *api.GetBl
 // GetBlockCommitments - TODO: implement
 func (pas *ParentAggregatorService) GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error) {
 	return nil, fmt.Errorf("get_block_commitments not implemented yet in parent mode")
+}
+
+// GetBlockRecords - TODO: implement
+func (pas *ParentAggregatorService) GetBlockRecords(ctx context.Context, req *api.GetBlockRecords) (*api.GetBlockRecordsResponse, error) {
+	return nil, fmt.Errorf("get_block_records not implemented yet in parent mode")
 }
 
 // GetHealthStatus retrieves the health status of the parent aggregator service

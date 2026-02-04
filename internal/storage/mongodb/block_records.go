@@ -67,8 +67,8 @@ func (brs *BlockRecordsStorage) GetByBlockNumber(ctx context.Context, blockNumbe
 	return blockRecords, nil
 }
 
-// GetByRequestID retrieves the block number for a request ID
-func (brs *BlockRecordsStorage) GetByRequestID(ctx context.Context, requestID api.RequestID) (*api.BigInt, error) {
+// GetByStateID retrieves the block number for a state ID
+func (brs *BlockRecordsStorage) GetByStateID(ctx context.Context, requestID api.RequestID) (*api.BigInt, error) {
 	filter := bson.M{"requestIds": requestID.String()}
 	opts := options.FindOne().SetProjection(bson.M{"blockNumber": 1})
 

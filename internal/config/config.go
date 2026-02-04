@@ -172,10 +172,10 @@ func (sm ShardingMode) IsChild() bool {
 
 // ShardingConfig holds sharding configuration
 type ShardingConfig struct {
-	Mode                        ShardingMode  `mapstructure:"mode"`                           // Operating mode: standalone, parent, or child
-	ShardIDLength               int           `mapstructure:"shard_id_length"`                // Bit length for shard IDs (e.g., 4 bits = 16 shards)
-	ParentCollectPhaseDuration  time.Duration `mapstructure:"parent_collect_phase_duration"`  // Collection window for parent mode before sending to BFT
-	Child                       ChildConfig   `mapstructure:"child"`                          // child aggregator config
+	Mode                       ShardingMode  `mapstructure:"mode"`                          // Operating mode: standalone, parent, or child
+	ShardIDLength              int           `mapstructure:"shard_id_length"`               // Bit length for shard IDs (e.g., 4 bits = 16 shards)
+	ParentCollectPhaseDuration time.Duration `mapstructure:"parent_collect_phase_duration"` // Collection window for parent mode before sending to BFT
+	Child                      ChildConfig   `mapstructure:"child"`                         // child aggregator config
 }
 
 type ChildConfig struct {

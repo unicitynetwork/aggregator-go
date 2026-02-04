@@ -50,7 +50,7 @@ type Round struct {
 	Number      *api.BigInt
 	StartTime   time.Time
 	State       RoundState
-	Commitments []*models.Commitment
+	Commitments []*models.CertificationRequest
 	Block       *models.Block
 	// Track commitments that have been added to SMT but not yet finalized in a block
 	PendingRecords  []*models.AggregatorRecord
@@ -101,7 +101,7 @@ type RoundManager struct {
 	roundDuration time.Duration
 
 	// Streaming support
-	commitmentStream chan *models.Commitment
+	commitmentStream chan *models.CertificationRequest
 	streamMutex      sync.RWMutex
 	lastFetchedID    string             // Cursor for MongoDB pagination
 	prefetchCancel   context.CancelFunc // Cancel function for running streamer/prefetcher
@@ -116,7 +116,7 @@ type RoundManager struct {
 
 	// Pre-collection: collect commitments for next round while waiting for parent proof
 	preCollectionSnapshot   *smt.ThreadSafeSmtSnapshot
-	preCollectedCommitments []*models.Commitment
+	preCollectedCommitments []*models.CertificationRequest
 	preCollectedLeaves      []*smt.Leaf
 	preCollectionMutex      sync.Mutex
 
@@ -161,11 +161,11 @@ func NewRoundManager(
 		rootClient:          rootAggregatorClient,
 		stateTracker:        stateTracker,
 		eventBus:            eventBus,
-		roundDuration:       cfg.Processing.RoundDuration,         // Configurable round duration (default 1s)
-		commitmentStream:    make(chan *models.Commitment, 10000), // Reasonable buffer for streaming
-		avgProcessingRate:   1.0,                                  // Initial estimate: 1 commitment per ms
-		avgFinalizationTime: 200 * time.Millisecond,               // Initial estimate (conservative)
-		avgSMTUpdateTime:    5 * time.Millisecond,                 // Initial estimate per batch
+		roundDuration:       cfg.Processing.RoundDuration,                   // Configurable round duration (default 1s)
+		commitmentStream:    make(chan *models.CertificationRequest, 10000), // Reasonable buffer for streaming
+		avgProcessingRate:   1.0,                                            // Initial estimate: 1 commitment per ms
+		avgFinalizationTime: 200 * time.Millisecond,                         // Initial estimate (conservative)
+		avgSMTUpdateTime:    5 * time.Millisecond,                           // Initial estimate per batch
 	}
 
 	// create BFT client for standalone mode
@@ -258,7 +258,7 @@ func (rm *RoundManager) GetCurrentRound() *Round {
 		Number:      rm.currentRound.Number,
 		StartTime:   rm.currentRound.StartTime,
 		State:       rm.currentRound.State,
-		Commitments: append([]*models.Commitment(nil), rm.currentRound.Commitments...),
+		Commitments: append([]*models.CertificationRequest(nil), rm.currentRound.Commitments...),
 		Block:       rm.currentRound.Block,
 	}
 }
@@ -336,7 +336,7 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 	ctx context.Context,
 	roundNumber *api.BigInt,
 	snapshot *smt.ThreadSafeSmtSnapshot,
-	commitments []*models.Commitment,
+	commitments []*models.CertificationRequest,
 	leaves []*smt.Leaf,
 ) error {
 	rm.logger.WithContext(ctx).Info("StartNewRound called",
@@ -356,7 +356,7 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 		snapshot = rm.smt.CreateSnapshot()
 	}
 	if commitments == nil {
-		commitments = make([]*models.Commitment, 0)
+		commitments = make([]*models.CertificationRequest, 0)
 	}
 	if leaves == nil {
 		leaves = make([]*smt.Leaf, 0)
@@ -467,7 +467,7 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 	return nil
 }
 
-// redisCommitmentStreamer uses StreamCommitments to continuously stream commitments.
+// redisCommitmentStreamer uses StreamCertificationRequests to continuously stream commitments.
 // If connection fails, it retries every 5 seconds until context is cancelled.
 func (rm *RoundManager) redisCommitmentStreamer(ctx context.Context) {
 	rm.logger.WithContext(ctx).Info("Redis commitment streamer started")
@@ -475,7 +475,7 @@ func (rm *RoundManager) redisCommitmentStreamer(ctx context.Context) {
 	const retryInterval = 5 * time.Second
 
 	for {
-		err := rm.commitmentQueue.StreamCommitments(ctx, rm.commitmentStream)
+		err := rm.commitmentQueue.StreamCertificationRequests(ctx, rm.commitmentStream)
 
 		if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			rm.logger.WithContext(ctx).Info("Redis commitment streamer stopped gracefully")

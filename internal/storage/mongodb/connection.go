@@ -242,7 +242,7 @@ func (s *Storage) WithTransaction(ctx context.Context, fn func(context.Context) 
 func (s *Storage) createIndexes(ctx context.Context) error {
 	// Create indexes for each collection
 	if err := s.commitmentStorage.CreateIndexes(ctx); err != nil {
-		return fmt.Errorf("failed to create commitment indexes: %w", err)
+		return fmt.Errorf("failed to create commitment storage indexes: %w", err)
 	}
 
 	if err := s.aggregatorRecordStorage.CreateIndexes(ctx); err != nil {

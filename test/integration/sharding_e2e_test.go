@@ -32,7 +32,7 @@ import (
 // TestShardingE2E tests the full sharding flow: parent + 2 child shards
 // submitting commitments and verifying inclusion proofs.
 func TestShardingE2E(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Start containers (shared MongoDB with different databases per aggregator)
 	redis, err := redisContainer.Run(ctx, "redis:7")
@@ -66,11 +66,11 @@ func TestShardingE2E(t *testing.T) {
 	// Round 1: submit 2 commitments to each shard
 	for i := 0; i < 2; i++ {
 		c, reqID := createCommitmentForShard(t, 2)
-		submitCommitment(t, "http://localhost:9001", c)
+		submitCertificationRequest(t, "http://localhost:9001", c)
 		shard2ReqIDs = append(shard2ReqIDs, reqID)
 
 		c, reqID = createCommitmentForShard(t, 3)
-		submitCommitment(t, "http://localhost:9002", c)
+		submitCertificationRequest(t, "http://localhost:9002", c)
 		shard3ReqIDs = append(shard3ReqIDs, reqID)
 	}
 
@@ -80,11 +80,11 @@ func TestShardingE2E(t *testing.T) {
 	// Round 2: submit 2 more commitments to each shard
 	for i := 0; i < 2; i++ {
 		c, reqID := createCommitmentForShard(t, 2)
-		submitCommitment(t, "http://localhost:9001", c)
+		submitCertificationRequest(t, "http://localhost:9001", c)
 		shard2ReqIDs = append(shard2ReqIDs, reqID)
 
 		c, reqID = createCommitmentForShard(t, 3)
-		submitCommitment(t, "http://localhost:9002", c)
+		submitCertificationRequest(t, "http://localhost:9002", c)
 		shard3ReqIDs = append(shard3ReqIDs, reqID)
 	}
 
@@ -93,11 +93,11 @@ func TestShardingE2E(t *testing.T) {
 
 	// Round 3: submit 1 more commitment to each shard
 	c, reqID := createCommitmentForShard(t, 2)
-	submitCommitment(t, "http://localhost:9001", c)
+	submitCertificationRequest(t, "http://localhost:9001", c)
 	shard2ReqIDs = append(shard2ReqIDs, reqID)
 
 	c, reqID = createCommitmentForShard(t, 3)
-	submitCommitment(t, "http://localhost:9002", c)
+	submitCertificationRequest(t, "http://localhost:9002", c)
 	shard3ReqIDs = append(shard3ReqIDs, reqID)
 
 	waitForBlock(t, "http://localhost:9001", 4, 15*time.Second)
@@ -130,7 +130,7 @@ func startAggregator(t *testing.T, ctx context.Context, name, port, mongoURI, re
 		},
 		Redis:   config.RedisConfig{Host: redisHost, Port: redisPort},
 		HA:      config.HAConfig{Enabled: false},
-		Logging: config.LoggingConfig{Level: "warn", Format: "json"},
+		Logging: config.LoggingConfig{Level: "debug", Format: "json"},
 		BFT:     config.BFTConfig{Enabled: false, StubDelay: 500 * time.Millisecond},
 		Processing: config.ProcessingConfig{
 			RoundDuration: 2 * time.Second, BatchLimit: 1000, MaxCommitmentsPerRound: 1000,
@@ -208,12 +208,15 @@ func rpcCall(url, method string, params interface{}) (json.RawMessage, error) {
 	return result.Result, nil
 }
 
-func submitCommitment(t *testing.T, url string, c *api.SubmitCommitmentRequest) {
-	result, err := rpcCall(url, "submit_commitment", c)
+func submitCertificationRequest(t *testing.T, url string, c *api.CertificationRequest) api.CertificationResponse {
+	result, err := rpcCall(url, "certification_request", c)
 	require.NoError(t, err)
-	var resp api.SubmitCommitmentResponse
-	json.Unmarshal(result, &resp)
-	require.Equal(t, "SUCCESS", resp.Status)
+
+	var resp api.CertificationResponse
+	require.NoError(t, json.Unmarshal(result, &resp))
+	require.Equal(t, resp.Status, "SUCCESS")
+
+	return resp
 }
 
 func waitForBlock(t *testing.T, url string, minBlock int64, timeout time.Duration) {
@@ -234,13 +237,13 @@ func waitForBlock(t *testing.T, url string, minBlock int64, timeout time.Duratio
 
 func waitForValidProof(t *testing.T, url, reqID string, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
-	reqIDObj := api.RequestID(reqID)
+	reqIDObj := api.StateID(reqID)
 	path, _ := reqIDObj.GetPath()
 
 	for time.Now().Before(deadline) {
-		result, err := rpcCall(url, "get_inclusion_proof", map[string]string{"requestId": reqID})
+		result, err := rpcCall(url, "get_inclusion_proof.v2", map[string]string{"stateId": reqID})
 		if err == nil {
-			var resp api.GetInclusionProofResponse
+			var resp api.GetInclusionProofResponseV2
 			json.Unmarshal(result, &resp)
 			if resp.InclusionProof != nil && resp.InclusionProof.MerkleTreePath != nil {
 				verifyResult, _ := resp.InclusionProof.MerkleTreePath.Verify(path)
@@ -254,26 +257,17 @@ func waitForValidProof(t *testing.T, url, reqID string, timeout time.Duration) {
 	t.Fatalf("Timeout waiting for valid proof at %s", url)
 }
 
-func createCommitmentForShard(t *testing.T, shardID api.ShardID) (*api.SubmitCommitmentRequest, string) {
+func createCommitmentForShard(t *testing.T, shardID api.ShardID) (*api.CertificationRequest, string) {
 	mask := big.NewInt(1)
 	expected := big.NewInt(int64(shardID & 1))
 
 	for i := 0; i < 1000; i++ {
-		c := testutil.CreateTestCommitment(t, fmt.Sprintf("shard%d_%d_%d", shardID, i, time.Now().UnixNano()))
-		reqBytes, _ := c.RequestID.Bytes()
+		c := testutil.CreateTestCertificationRequest(t, fmt.Sprintf("shard%d_%d_%d", shardID, i, time.Now().UnixNano()))
+		reqBytes, _ := c.StateID.Bytes()
 		if new(big.Int).And(new(big.Int).SetBytes(reqBytes), mask).Cmp(expected) == 0 {
-			receipt := true
-			return &api.SubmitCommitmentRequest{
-				RequestID:       c.RequestID,
-				TransactionHash: api.TransactionHash(c.TransactionHash),
-				Authenticator: api.Authenticator{
-					Algorithm: c.Authenticator.Algorithm,
-					PublicKey: api.HexBytes(c.Authenticator.PublicKey),
-					Signature: api.HexBytes(c.Authenticator.Signature),
-					StateHash: api.StateHash(c.Authenticator.StateHash),
-				},
-				Receipt: &receipt,
-			}, c.RequestID.String()
+			certificationRequest := c.ToAPI()
+			certificationRequest.Receipt = true
+			return certificationRequest, c.StateID.String()
 		}
 	}
 	t.Fatal("Failed to generate commitment for shard")

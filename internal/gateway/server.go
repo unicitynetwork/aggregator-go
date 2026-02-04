@@ -31,11 +31,14 @@ type Server struct {
 // Service represents the business logic service interface
 type Service interface {
 	SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error)
-	GetInclusionProof(ctx context.Context, req *api.GetInclusionProofRequest) (*api.GetInclusionProofResponse, error)
+	CertificationRequest(ctx context.Context, req *api.CertificationRequest) (*api.CertificationResponse, error)
+	GetInclusionProofV1(ctx context.Context, req *api.GetInclusionProofRequestV1) (*api.GetInclusionProofResponseV1, error)
+	GetInclusionProofV2(ctx context.Context, req *api.GetInclusionProofRequestV2) (*api.GetInclusionProofResponseV2, error)
 	GetNoDeletionProof(ctx context.Context) (*api.GetNoDeletionProofResponse, error)
 	GetBlockHeight(ctx context.Context) (*api.GetBlockHeightResponse, error)
 	GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error)
 	GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error)
+	GetBlockRecords(ctx context.Context, req *api.GetBlockRecords) (*api.GetBlockRecordsResponse, error)
 	GetHealthStatus(ctx context.Context) (*api.HealthStatus, error)
 	PutTrustBase(ctx context.Context, req *types.RootTrustBaseV1) error
 
@@ -146,15 +149,20 @@ func (s *Server) setupJSONRPCHandlers() {
 		s.rpcServer.RegisterMethod("get_shard_proof", s.handleGetShardProof)
 	} else {
 		// Standalone mode handlers (default)
-		s.rpcServer.RegisterMethod("submit_commitment", s.handleSubmitCommitment)
-		s.rpcServer.RegisterMethod("get_inclusion_proof", s.handleGetInclusionProof)
+		s.rpcServer.RegisterMethod("submit_commitment", s.handleSubmitCommitment)         // v1
+		s.rpcServer.RegisterMethod("certification_request", s.handleCertificationRequest) // v2
+
+		s.rpcServer.RegisterMethod("get_inclusion_proof", s.handleGetInclusionProofV1)    // v1
+		s.rpcServer.RegisterMethod("get_inclusion_proof.v2", s.handleGetInclusionProofV2) // v2
 	}
 
 	// Common handlers for all modes
 	s.rpcServer.RegisterMethod("get_no_deletion_proof", s.handleGetNoDeletionProof)
 	s.rpcServer.RegisterMethod("get_block_height", s.handleGetBlockHeight)
 	s.rpcServer.RegisterMethod("get_block", s.handleGetBlock)
-	s.rpcServer.RegisterMethod("get_block_commitments", s.handleGetBlockCommitments)
+
+	s.rpcServer.RegisterMethod("get_block_commitments", s.handleGetBlockCommitments) // v1
+	s.rpcServer.RegisterMethod("get_block_records", s.handleGetBlockRecords)         // v2
 }
 
 // Start starts the HTTP server

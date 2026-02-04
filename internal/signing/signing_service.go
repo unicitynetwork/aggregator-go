@@ -2,15 +2,13 @@ package signing
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
-)
 
-// Algorithm constants
-const (
-	AlgorithmSecp256k1 = "secp256k1"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // SigningService provides cryptographic signing and verification operations
@@ -28,7 +26,7 @@ func (s *SigningService) Sign(data []byte, privateKey []byte) ([]byte, error) {
 	return s.SignHash(hash[:], privateKey)
 }
 
-// convertBtcecToUnicity converts a signature from btcec's [V || R || S] format 
+// convertBtcecToUnicity converts a signature from btcec's [V || R || S] format
 // to Unicity's [R || S || V] format
 func convertBtcecToUnicity(compactSig []byte) []byte {
 	// For compressed keys, btcec's V is 31-34. We normalize it to 0 or 1.
@@ -60,6 +58,28 @@ func convertUnicityToBtcec(signature []byte) []byte {
 	return compactSig
 }
 
+// SignCertData signs the given certification request data and stores the signature to the Witness field.
+func (s *SigningService) SignCertData(certData *api.CertificationData, privateKey []byte) error {
+	if certData == nil {
+		return errors.New("certification data is nil")
+	}
+	sigDataHash, err := certData.SigDataHash()
+	if err != nil {
+		return fmt.Errorf("failed to generate signature bytes: %w", err)
+	}
+	sig, err := s.SignDataHash(sigDataHash, privateKey)
+	if err != nil {
+		return fmt.Errorf("error generating signature: %w", err)
+	}
+	certData.Witness = sig
+	return nil
+}
+
+// SignDataHash signs the given data hash with the private key and returns the signature
+func (s *SigningService) SignDataHash(dataHash *api.DataHash, privateKey []byte) ([]byte, error) {
+	return s.SignHash(dataHash.RawHash, privateKey)
+}
+
 // SignHash signs the given hash with the private key and returns the signature
 func (s *SigningService) SignHash(dataHash []byte, privateKey []byte) ([]byte, error) {
 	if len(privateKey) != 32 {
@@ -69,7 +89,7 @@ func (s *SigningService) SignHash(dataHash []byte, privateKey []byte) ([]byte, e
 	// Create private key object
 	privKey, _ := btcec.PrivKeyFromBytes(privateKey)
 
-	// Sign the hash  
+	// Sign the hash
 	compactSig := ecdsa.SignCompact(privKey, dataHash, true) // true for compressed public key recovery
 
 	// Convert from btcec's [V || R || S] format to Unicity's [R || S || V] format
@@ -82,6 +102,12 @@ func (s *SigningService) VerifyWithPublicKey(data []byte, signature []byte, publ
 	return s.VerifyHashWithPublicKey(hash[:], signature, publicKey)
 }
 
+// VerifyDataHashWithPublicKey verifies a signature against data hash using a public key
+func (s *SigningService) VerifyDataHashWithPublicKey(dataHash *api.DataHash, signature []byte, publicKey []byte) (bool, error) {
+	return s.VerifyHashWithPublicKey(dataHash.RawHash, signature, publicKey)
+}
+
+// VerifyHashWithPublicKey verifies a signature against data hash using a public key
 func (s *SigningService) VerifyHashWithPublicKey(dataHash []byte, signature []byte, publicKey []byte) (bool, error) {
 	if len(signature) != 65 {
 		return false, fmt.Errorf("signature must be 65 bytes (64 bytes + recovery), got %d", len(signature))
@@ -109,7 +135,7 @@ func (s *SigningService) VerifyHashWithPublicKey(dataHash []byte, signature []by
 
 	// Check if the recovered public key matches the provided public key
 	if !recoveredPubKey.IsEqual(pubKey) {
-		return false, nil // Signature doesn't match the public key
+		return false, nil // Witness doesn't match the public key
 	}
 
 	return true, nil

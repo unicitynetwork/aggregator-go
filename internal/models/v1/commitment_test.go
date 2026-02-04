@@ -1,4 +1,4 @@
-package models
+package v1
 
 import (
 	"crypto/sha256"
@@ -14,7 +14,7 @@ import (
 
 // TestCreateLeafValue tests the createLeafValue function to ensure it matches
 // the TypeScript LeafValue.create() implementation exactly
-func TestCreateLeafValue(t *testing.T) {
+func TestCreateLeafValueV1(t *testing.T) {
 	t.Run("should create expected leaf value", func(t *testing.T) {
 		// Create test data
 		publicKeyHex := "02bf8d9e7687f66c7fce1e98edbc05566f7db740030722cf6cf62aca035c5035ea"
@@ -47,7 +47,7 @@ func TestCreateLeafValue(t *testing.T) {
 		}
 
 		// Create commitment
-		commitment := NewCommitment(requestID, transactionHash, authenticator)
+		commitment := NewCommitment(requestID, transactionHash, authenticator).ToAPI()
 
 		// Call createLeafValue
 		leafValue, err := commitment.CreateLeafValue()
@@ -94,7 +94,7 @@ func TestCreateLeafValue(t *testing.T) {
 		}
 
 		// Create commitment
-		commitment := NewCommitment(requestID, transactionHash, authenticator)
+		commitment := NewCommitment(requestID, transactionHash, authenticator).ToAPI()
 
 		// Call createLeafValue
 		leafValue, err := commitment.CreateLeafValue()
@@ -129,7 +129,7 @@ func TestCreateLeafValue(t *testing.T) {
 		requestID, err := api.CreateRequestID(authenticator.PublicKey, authenticator.StateHash)
 		require.NoError(t, err)
 
-		commitment := NewCommitment(requestID, transactionHash, authenticator)
+		commitment := NewCommitment(requestID, transactionHash, authenticator).ToAPI()
 
 		// Get leaf value from our function
 		leafValue, err := commitment.CreateLeafValue()
@@ -223,7 +223,7 @@ func TestCreateLeafValue(t *testing.T) {
 					StateHash: stateHash,
 				}
 
-				commitment := NewCommitment(requestID, transactionHash, authenticator)
+				commitment := NewCommitment(requestID, transactionHash, authenticator).ToAPI()
 
 				leafValue, err := commitment.CreateLeafValue()
 				require.NoError(t, err)
@@ -255,7 +255,7 @@ func TestCreateLeafValue(t *testing.T) {
 			StateHash: stateHash,
 		}
 
-		commitment := NewCommitment(requestID, transactionHash, authenticator)
+		commitment := NewCommitment(requestID, transactionHash, authenticator).ToAPI()
 
 		leafValue, err := commitment.CreateLeafValue()
 		require.NoError(t, err)
@@ -279,7 +279,7 @@ func TestCreateLeafValue(t *testing.T) {
 
 		// Create invalid transaction hash (contains invalid hex characters)
 		invalidTransactionHash := api.ImprintHexString("invalid")
-		commitment := NewCommitment(requestID, invalidTransactionHash, authenticator)
+		commitment := NewCommitment(requestID, invalidTransactionHash, authenticator).ToAPI()
 
 		leafValue, err := commitment.CreateLeafValue()
 		require.Error(t, err)
@@ -321,8 +321,8 @@ func TestCreateLeafValue(t *testing.T) {
 			StateHash: stateHash2,
 		}
 
-		commitment1 := NewCommitment(requestID1, transactionHash1, authenticator1)
-		commitment2 := NewCommitment(requestID2, transactionHash2, authenticator2)
+		commitment1 := NewCommitment(requestID1, transactionHash1, authenticator1).ToAPI()
+		commitment2 := NewCommitment(requestID2, transactionHash2, authenticator2).ToAPI()
 
 		leafValue1, err := commitment1.CreateLeafValue()
 		require.NoError(t, err)
@@ -336,7 +336,7 @@ func TestCreateLeafValue(t *testing.T) {
 }
 
 // BenchmarkCreateLeafValue benchmarks the createLeafValue function
-func BenchmarkCreateLeafValue(b *testing.B) {
+func BenchmarkCreateLeafValueV1(b *testing.B) {
 	// Setup test data
 	publicKey := []byte{0x02, 0x79, 0xbe, 0x66}
 	signature := []byte{0xa0, 0xb3, 0x7f, 0x8f}
@@ -351,7 +351,7 @@ func BenchmarkCreateLeafValue(b *testing.B) {
 		StateHash: stateHash,
 	}
 
-	commitment := NewCommitment(requestID, transactionHash, authenticator)
+	commitment := NewCommitment(requestID, transactionHash, authenticator).ToAPI()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

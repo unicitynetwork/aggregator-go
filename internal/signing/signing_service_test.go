@@ -61,7 +61,7 @@ func TestSigningService_SignAndVerify(t *testing.T) {
 	}
 
 	if !isValid {
-		t.Error("Signature verification failed")
+		t.Error("Witness verification failed")
 	}
 }
 
@@ -91,7 +91,7 @@ func TestSigningService_VerifyWithWrongData(t *testing.T) {
 	}
 
 	if isValid {
-		t.Error("Signature verification should have failed with different data")
+		t.Error("Witness verification should have failed with different data")
 	}
 }
 
@@ -260,7 +260,7 @@ func TestSigningService_ErrorCases(t *testing.T) {
 	// Test invalid private key length
 	invalidPrivateKey := make([]byte, 31) // Should be 32
 	testData := []byte("test")
-	
+
 	_, err := service.Sign(testData, invalidPrivateKey)
 	if err == nil {
 		t.Error("Should fail with invalid private key length")
@@ -269,7 +269,7 @@ func TestSigningService_ErrorCases(t *testing.T) {
 	// Test invalid signature length for verification
 	privateKey, publicKey, _ := service.GenerateKeyPair()
 	invalidSignature := make([]byte, 64) // Should be 65
-	
+
 	_, err = service.VerifyWithPublicKey(testData, invalidSignature, publicKey)
 	if err == nil {
 		t.Error("Should fail with invalid signature length")
@@ -278,7 +278,7 @@ func TestSigningService_ErrorCases(t *testing.T) {
 	// Test invalid public key length for verification
 	validSignature, _ := service.Sign(testData, privateKey)
 	invalidPublicKey := make([]byte, 32) // Should be 33
-	
+
 	_, err = service.VerifyWithPublicKey(testData, validSignature, invalidPublicKey)
 	if err == nil {
 		t.Error("Should fail with invalid public key length")

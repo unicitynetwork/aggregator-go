@@ -69,7 +69,7 @@ func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 	require.NoError(t, err)
 
 	// Generate test commitments with unique IDs
-	commitments := testutil.CreateTestCommitments(t, 5, "t1_req")
+	commitments := testutil.CreateTestCertificationRequests(t, 5, "t1_req")
 
 	// Set up the round
 	rm.currentRound = &Round{
@@ -153,7 +153,7 @@ func (s *FinalizeDuplicateTestSuite) Test2_NoDuplicates() {
 		state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT)
 	require.NoError(t, err)
 
-	commitments := testutil.CreateTestCommitments(t, 3, "t2_req")
+	commitments := testutil.CreateTestCertificationRequests(t, 3, "t2_req")
 
 	rm.currentRound = &Round{
 		Number:      api.NewBigInt(big.NewInt(2)),
@@ -205,7 +205,7 @@ func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 		state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT)
 	require.NoError(t, err)
 
-	commitments := testutil.CreateTestCommitments(t, 3, "t3_req")
+	commitments := testutil.CreateTestCertificationRequests(t, 3, "t3_req")
 
 	rm.currentRound = &Round{
 		Number:      api.NewBigInt(big.NewInt(3)),
@@ -276,7 +276,7 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT)
 	require.NoError(t, err)
 
-	commitments := testutil.CreateTestCommitments(t, 3, "t4_req")
+	commitments := testutil.CreateTestCertificationRequests(t, 3, "t4_req")
 
 	rm.currentRound = &Round{
 		Number:      api.NewBigInt(big.NewInt(4)),
@@ -312,9 +312,9 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 	require.NoError(t, err, "Pre-storing block should succeed")
 
 	// Also pre-store block records
-	requestIds := make([]api.RequestID, len(commitments))
+	requestIds := make([]api.StateID, len(commitments))
 	for i, c := range commitments {
-		requestIds[i] = c.RequestID
+		requestIds[i] = c.StateID
 	}
 	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds))
 	require.NoError(t, err, "Pre-storing block records should succeed")
@@ -358,7 +358,7 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT)
 	require.NoError(t, err)
 
-	commitments := testutil.CreateTestCommitments(t, 3, "t5_req")
+	commitments := testutil.CreateTestCertificationRequests(t, 3, "t5_req")
 
 	rm.currentRound = &Round{
 		Number:      api.NewBigInt(big.NewInt(5)),
@@ -394,9 +394,9 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	require.NoError(t, err, "Pre-storing finalized block should succeed")
 
 	// Pre-store block records
-	requestIds := make([]api.RequestID, len(commitments))
+	requestIds := make([]api.StateID, len(commitments))
 	for i, c := range commitments {
-		requestIds[i] = c.RequestID
+		requestIds[i] = c.StateID
 	}
 	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds))
 	require.NoError(t, err, "Pre-storing block records should succeed")

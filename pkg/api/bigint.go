@@ -28,6 +28,11 @@ func NewBigIntFromString(s string) (*BigInt, error) {
 	return &BigInt{i}, nil
 }
 
+func NewBigIntFromUint64(n uint64) *BigInt {
+	i := new(big.Int).SetUint64(n)
+	return &BigInt{i}
+}
+
 // MarshalJSON implements json.Marshaler
 func (b *BigInt) MarshalJSON() ([]byte, error) {
 	if b.Int == nil {

@@ -121,26 +121,26 @@ func (s *RecoveryTestSuite) SetupTest() {
 }
 
 // Helper to create and store test data
-func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, prefix string) ([]*models.Commitment, *models.Block, []api.RequestID) {
+func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, prefix string) ([]*models.CertificationRequest, *models.Block, []api.RequestID) {
 	t := s.T()
 	blockNumber := api.NewBigInt(big.NewInt(blockNum))
 
 	// Create commitments
-	commitments := testutil.CreateTestCommitments(t, commitmentCount, prefix)
+	commitments := testutil.CreateTestCertificationRequests(t, commitmentCount, prefix)
 
 	// Create request IDs
 	requestIDs := make([]api.RequestID, len(commitments))
 	for i, c := range commitments {
-		requestIDs[i] = c.RequestID
+		requestIDs[i] = c.StateID
 	}
 
 	// Compute SMT root hash
 	smtTree := smt.NewSparseMerkleTree(api.SHA256, 16+256)
 	leaves := make([]*smt.Leaf, len(commitments))
 	for i, c := range commitments {
-		path, err := c.RequestID.GetPath()
+		path, err := c.StateID.GetPath()
 		require.NoError(t, err)
-		leafValue, err := c.CreateLeafValue()
+		leafValue, err := c.CertificationData.ToAPI().Hash()
 		require.NoError(t, err)
 		leaves[i] = &smt.Leaf{Path: path, Value: leafValue}
 	}
@@ -156,7 +156,7 @@ func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, 
 }
 
 // Helper to store commitments in Redis pending queue
-func (s *RecoveryTestSuite) storeCommitmentsInRedis(commitments []*models.Commitment) {
+func (s *RecoveryTestSuite) storeCommitmentsInRedis(commitments []*models.CertificationRequest) {
 	for _, c := range commitments {
 		err := s.commitmentQueue.Store(s.ctx, c)
 		s.Require().NoError(err)
@@ -166,12 +166,12 @@ func (s *RecoveryTestSuite) storeCommitmentsInRedis(commitments []*models.Commit
 }
 
 // Helper to store SMT nodes
-func (s *RecoveryTestSuite) storeSmtNodes(commitments []*models.Commitment) {
+func (s *RecoveryTestSuite) storeSmtNodes(commitments []*models.CertificationRequest) {
 	nodes := make([]*models.SmtNode, len(commitments))
 	for i, c := range commitments {
-		path, err := c.RequestID.GetPath()
+		path, err := c.StateID.GetPath()
 		s.Require().NoError(err)
-		leafValue, err := c.CreateLeafValue()
+		leafValue, err := c.CertificationData.ToAPI().Hash()
 		s.Require().NoError(err)
 		nodes[i] = models.NewSmtNode(api.HexBytes(path.Bytes()), leafValue)
 	}
@@ -180,7 +180,7 @@ func (s *RecoveryTestSuite) storeSmtNodes(commitments []*models.Commitment) {
 }
 
 // Helper to store aggregator records
-func (s *RecoveryTestSuite) storeAggregatorRecords(commitments []*models.Commitment, blockNumber *api.BigInt) {
+func (s *RecoveryTestSuite) storeAggregatorRecords(commitments []*models.CertificationRequest, blockNumber *api.BigInt) {
 	records := make([]*models.AggregatorRecord, len(commitments))
 	for i, c := range commitments {
 		records[i] = models.NewAggregatorRecord(c, blockNumber, api.NewBigInt(big.NewInt(int64(i))))
@@ -546,7 +546,7 @@ func (s *RecoveryTestSuite) Test09_PartialAggregatorRecords_LeafIndexPreserved()
 	// Record at position 2 should have leafIndex=2, record at position 3 should have leafIndex=3
 	missingIndices := []int{2, 3}
 	for _, idx := range missingIndices {
-		record, err := s.storage.AggregatorRecordStorage().GetByRequestID(s.ctx, requestIDs[idx])
+		record, err := s.storage.AggregatorRecordStorage().GetByStateID(s.ctx, requestIDs[idx])
 		require.NoError(t, err)
 		require.NotNil(t, record, "Record at position %d should exist after recovery", idx)
 		require.Equal(t, int64(idx), record.LeafIndex.Int.Int64(),
@@ -555,7 +555,7 @@ func (s *RecoveryTestSuite) Test09_PartialAggregatorRecords_LeafIndexPreserved()
 
 	// Also verify existing records still have correct indices
 	for _, idx := range existingIndices {
-		record, err := s.storage.AggregatorRecordStorage().GetByRequestID(s.ctx, requestIDs[idx])
+		record, err := s.storage.AggregatorRecordStorage().GetByStateID(s.ctx, requestIDs[idx])
 		require.NoError(t, err)
 		require.NotNil(t, record, "Existing record at position %d should still exist", idx)
 		require.Equal(t, int64(idx), record.LeafIndex.Int.Int64(),
@@ -590,9 +590,9 @@ func (s *RecoveryTestSuite) Test10_PartialSmtNodes_CorrectDetection() {
 	existingIndices := []int{0, 1, 4}
 	existingNodes := make([]*models.SmtNode, len(existingIndices))
 	for i, idx := range existingIndices {
-		path, err := commitments[idx].RequestID.GetPath()
+		path, err := commitments[idx].StateID.GetPath()
 		require.NoError(t, err)
-		leafValue, err := commitments[idx].CreateLeafValue()
+		leafValue, err := commitments[idx].CertificationData.ToAPI().Hash()
 		require.NoError(t, err)
 		existingNodes[i] = models.NewSmtNode(api.HexBytes(path.Bytes()), leafValue)
 	}
@@ -632,19 +632,19 @@ func (s *RecoveryTestSuite) Test11_LoadRecoveredNodesIntoSMT() {
 	t := s.T()
 
 	// Create test commitments and store their SMT nodes
-	commitments := testutil.CreateTestCommitments(t, 4, "t09")
+	commitments := testutil.CreateTestCertificationRequests(t, 4, "t09")
 	requestIDs := make([]api.RequestID, len(commitments))
 	for i, c := range commitments {
-		requestIDs[i] = c.RequestID
+		requestIDs[i] = c.StateID
 	}
 
 	// Compute expected root hash
 	expectedSMT := smt.NewSparseMerkleTree(api.SHA256, 16+256)
 	leaves := make([]*smt.Leaf, len(commitments))
 	for i, c := range commitments {
-		path, err := c.RequestID.GetPath()
+		path, err := c.StateID.GetPath()
 		require.NoError(t, err)
-		leafValue, err := c.CreateLeafValue()
+		leafValue, err := c.CertificationData.ToAPI().Hash()
 		require.NoError(t, err)
 		leaves[i] = &smt.Leaf{Path: path, Value: leafValue}
 	}
@@ -690,7 +690,7 @@ func (s *RecoveryTestSuite) Test13_CleanupAllNew() {
 	t := s.T()
 
 	// Create and store commitments in Redis (but NOT in AggregatorRecords)
-	commitments := testutil.CreateTestCommitments(t, 3, "t13")
+	commitments := testutil.CreateTestCertificationRequests(t, 3, "t13")
 	s.storeCommitmentsInRedis(commitments)
 
 	// Read them to make them "pending" (claimed but not ACKed)
@@ -753,7 +753,7 @@ func (s *RecoveryTestSuite) Test15_CleanupMixed() {
 	t := s.T()
 
 	// Create 4 commitments
-	commitments := testutil.CreateTestCommitments(t, 4, "t15")
+	commitments := testutil.CreateTestCertificationRequests(t, 4, "t15")
 	blockNumber := api.NewBigInt(big.NewInt(15))
 
 	// Store all 4 in Redis and make them pending
@@ -822,12 +822,12 @@ func (s *RecoveryTestSuite) Test16_RecoveryCallsCleanup() {
 // Helper to read pending commitments to make them "claimed" state
 func (s *RecoveryTestSuite) readPendingToMakeThemClaimed() {
 	// Reading from stream claims the messages (moves them to pending state)
-	commitmentChan := make(chan *models.Commitment, 1000)
+	commitmentChan := make(chan *models.CertificationRequest, 1000)
 	ctx, cancel := context.WithTimeout(s.ctx, 500*time.Millisecond)
 	defer cancel()
 
 	go func() {
-		_ = s.commitmentQueue.StreamCommitments(ctx, commitmentChan)
+		_ = s.commitmentQueue.StreamCertificationRequests(ctx, commitmentChan)
 	}()
 
 	// Wait for timeout to ensure all are claimed

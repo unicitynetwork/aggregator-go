@@ -56,12 +56,9 @@ const (
 
 // Predefined errors
 var (
-	ErrParseError     = &Error{Code: ParseErrorCode, Message: "Parse error"}
-	ErrInvalidRequest = &Error{Code: InvalidRequestCode, Message: "Invalid Request"}
-	ErrMethodNotFound = &Error{Code: MethodNotFoundCode, Message: "Method not found"}
-	ErrInvalidParams  = &Error{Code: InvalidParamsCode, Message: "Invalid params"}
-	ErrInternalError  = &Error{Code: InternalErrorCode, Message: "Internal error"}
-
+	ErrParseError       = &Error{Code: ParseErrorCode, Message: "Parse error"}
+	ErrInvalidRequest   = &Error{Code: InvalidRequestCode, Message: "Invalid Request"}
+	ErrMethodNotFound   = &Error{Code: MethodNotFoundCode, Message: "Method not found"}
 	ErrConcurrencyLimit = &Error{Code: ConcurrencyLimitCode, Message: "Concurrency limit exceeded"}
 )
 
@@ -82,64 +79,26 @@ func NewValidationError(message string) *Error {
 	}
 }
 
-// NewCommitmentExistsError creates a commitment exists error
-func NewCommitmentExistsError(requestID string) *Error {
-	return &Error{
-		Code:    CommitmentExistsCode,
-		Message: "Commitment already exists",
-		Data:    map[string]string{"requestId": requestID},
-	}
-}
-
-// NewCommitmentNotFoundError creates a commitment not found error
-func NewCommitmentNotFoundError(requestID string) *Error {
-	return &Error{
-		Code:    CommitmentNotFoundCode,
-		Message: "Commitment not found",
-		Data:    map[string]string{"requestId": requestID},
-	}
-}
-
-// NewBlockNotFoundError creates a block not found error
-func NewBlockNotFoundError(blockNumber string) *Error {
-	return &Error{
-		Code:    BlockNotFoundCode,
-		Message: "Block not found",
-		Data:    map[string]string{"blockNumber": blockNumber},
-	}
-}
-
-// NewDatabaseError creates a database error
-func NewDatabaseError(message string) *Error {
-	return &Error{
-		Code:    DatabaseErrorCode,
-		Message: message,
-	}
-}
-
-// NewConsensusError creates a consensus error
-func NewConsensusError(message string) *Error {
-	return &Error{
-		Code:    ConsensusErrorCode,
-		Message: message,
-	}
-}
-
 // NewRequest creates a new JSON-RPC request
 func NewRequest(method string, params interface{}, id interface{}) (*Request, error) {
-	var paramsBytes json.RawMessage
+	var rawParams json.RawMessage
+
 	if params != nil {
-		bytes, err := json.Marshal(params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal params: %w", err)
+		if raw, ok := params.(json.RawMessage); ok {
+			rawParams = raw
+		} else {
+			bytes, err := json.Marshal(params)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal params: %w", err)
+			}
+			rawParams = bytes
 		}
-		paramsBytes = bytes
 	}
 
 	return &Request{
 		JSONRPC: Version,
 		Method:  method,
-		Params:  paramsBytes,
+		Params:  rawParams,
 		ID:      id,
 	}, nil
 }

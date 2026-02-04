@@ -19,13 +19,12 @@ func TestBackwardCompatibility(t *testing.T) {
 	t.Run("FromBSON defaults AggregateRequestCount to 1 when missing", func(t *testing.T) {
 		// Simulate an old record without AggregateRequestCount
 		bsonRecord := &AggregatorRecordBSON{
-			RequestID:       "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
-			TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
-			Authenticator: AuthenticatorBSON{
-				Algorithm: "secp256k1",
-				PublicKey: "02345678",
-				Signature: "abcdef12",
-				StateHash: "0000cd60",
+			StateID: "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
+			CertificationData: CertificationDataBSON{
+				OwnerPredicate:  PredicateBSON{},
+				SourceStateHash: "0000cd60",
+				TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
+				Witness:         "abcdef12",
 			},
 			// AggregateRequestCount is intentionally not set (will be 0)
 			BlockNumber: blockNumber,
@@ -45,13 +44,12 @@ func TestBackwardCompatibility(t *testing.T) {
 	t.Run("FromBSON preserves AggregateRequestCount when present", func(t *testing.T) {
 		// New record with AggregateRequestCount
 		bsonRecord := &AggregatorRecordBSON{
-			RequestID:       "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
-			TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
-			Authenticator: AuthenticatorBSON{
-				Algorithm: "secp256k1",
-				PublicKey: "02345678",
-				Signature: "abcdef12",
-				StateHash: "0000cd60",
+			StateID: "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
+			CertificationData: CertificationDataBSON{
+				OwnerPredicate:  PredicateBSON{},
+				SourceStateHash: "0000cd60",
+				TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
+				Witness:         "abcdef12",
 			},
 			AggregateRequestCount: 500,
 			BlockNumber:           blockNumber,
@@ -82,32 +80,31 @@ func TestBackwardCompatibility(t *testing.T) {
 			{AggregateRequestCount: 100},
 		}
 
-		var totalCommitments uint64
+		var totalCount uint64
 		for _, record := range records {
-			totalCommitments += record.AggregateRequestCount
+			totalCount += record.AggregateRequestCount
 		}
 
 		// Expected: 1 + 10 + 25 + 1 + 100 = 137
-		require.Equal(t, uint64(137), totalCommitments)
+		require.Equal(t, uint64(137), totalCount)
 	})
 }
 
 func TestAggregatorRecordSerialization(t *testing.T) {
 	// Create AggregatorRecord
-	originalRequestID := api.RequestID("0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890")
+	originalStateID := api.StateID("0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890")
 	originalTransactionHash := api.TransactionHash("0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890")
 	originalBlockNumber, err := api.NewBigIntFromString("123")
 	require.NoError(t, err)
 	originalLeafIndex, err := api.NewBigIntFromString("456")
 	require.NoError(t, err)
 	record := &AggregatorRecord{
-		RequestID:       originalRequestID,
-		TransactionHash: originalTransactionHash,
-		Authenticator: Authenticator{
-			Algorithm: "secp256k1",
-			PublicKey: api.HexBytes("02345678"),
-			Signature: api.HexBytes("abcdef12"),
-			StateHash: api.StateHash("0000cd60"),
+		StateID: originalStateID,
+		CertificationData: CertificationData{
+			OwnerPredicate:  api.Predicate{},
+			SourceStateHash: api.SourceStateHash("0000cd60"),
+			TransactionHash: originalTransactionHash,
+			Witness:         api.HexBytes("abcdef12"),
 		},
 		AggregateRequestCount: 1,
 		BlockNumber:           originalBlockNumber,
@@ -121,18 +118,16 @@ func TestAggregatorRecordSerialization(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, bsonRecord)
 
-	// Verify RequestID and TransactionHash in BSON format
-	require.Equal(t, string(originalRequestID), bsonRecord.RequestID)
-	require.Equal(t, string(originalTransactionHash), bsonRecord.TransactionHash)
+	// Verify StateID in BSON format
+	require.Equal(t, string(originalStateID), bsonRecord.StateID)
 
 	// Convert back from BSON
 	unmarshaledRecord, err := bsonRecord.FromBSON()
 	require.NoError(t, err)
 	require.NotNil(t, unmarshaledRecord)
 
-	// Verify RequestID and TransactionHash are preserved
-	require.Equal(t, originalRequestID, unmarshaledRecord.RequestID)
-	require.Equal(t, originalTransactionHash, unmarshaledRecord.TransactionHash)
+	// Verify StateID and TransactionHashImprint are preserved
+	require.Equal(t, originalStateID, unmarshaledRecord.StateID)
 	require.Equal(t, originalBlockNumber.String(), unmarshaledRecord.BlockNumber.String())
 	require.Equal(t, originalLeafIndex.String(), unmarshaledRecord.LeafIndex.String())
 }

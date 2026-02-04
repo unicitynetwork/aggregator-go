@@ -119,7 +119,7 @@ func (bs *BlockSyncer) SyncToLatestBlock(ctx context.Context) error {
 		}
 
 		// skip empty blocks
-		if len(b.RequestIDs) == 0 {
+		if len(b.StateIDs) == 0 {
 			bs.logger.WithContext(ctx).Debug("skipping block sync (empty block)", "blockNumber", b.BlockNumber.String())
 			currBlock = b.BlockNumber.Int
 			bs.stateTracker.SetLastSyncedBlock(currBlock)
@@ -156,18 +156,18 @@ func (bs *BlockSyncer) verifySMTForBlock(ctx context.Context, smtRootHash string
 }
 
 func (bs *BlockSyncer) updateSMTForBlock(ctx context.Context, blockRecord *models.BlockRecords) error {
-	// build leaf ids while filtering duplicate blockRecord.RequestIDs
-	uniqueRequestIds := make(map[string]struct{}, len(blockRecord.RequestIDs))
-	leafIDs := make([]api.HexBytes, 0, len(blockRecord.RequestIDs))
-	for _, reqID := range blockRecord.RequestIDs {
+	// build leaf ids while filtering duplicate blockRecord.StateIDs
+	uniqueStateIds := make(map[string]struct{}, len(blockRecord.StateIDs))
+	leafIDs := make([]api.HexBytes, 0, len(blockRecord.StateIDs))
+	for _, stateID := range blockRecord.StateIDs {
 		// skip duplicates
-		key := string(reqID)
-		if _, exists := uniqueRequestIds[key]; exists {
+		key := string(stateID)
+		if _, exists := uniqueStateIds[key]; exists {
 			continue
 		}
-		uniqueRequestIds[key] = struct{}{}
+		uniqueStateIds[key] = struct{}{}
 
-		path, err := reqID.GetPath()
+		path, err := stateID.GetPath()
 		if err != nil {
 			return fmt.Errorf("failed to get path: %w", err)
 		}
