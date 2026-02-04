@@ -11,15 +11,15 @@ import (
 
 // BlockRecords represents the mapping of block numbers to state IDs
 type BlockRecords struct {
-	BlockNumber *api.BigInt    `json:"blockNumber" bson:"blockNumber"`
-	StateIDs    []api.StateID  `json:"stateIds" bson:"stateIds"`
-	CreatedAt   *api.Timestamp `json:"createdAt" bson:"createdAt"`
+	BlockNumber *api.BigInt    `json:"blockNumber"`
+	StateIDs    []api.StateID  `json:"stateIds"`
+	CreatedAt   *api.Timestamp `json:"createdAt"`
 }
 
 // BlockRecordsBSON is the MongoDB representation of BlockRecords
 type BlockRecordsBSON struct {
 	BlockNumber primitive.Decimal128 `bson:"blockNumber"`
-	StateIDs    []string             `bson:"stateIds"`
+	StateIDs    []string             `bson:"requestIds"` // keep requestId in BSON for backwards compatibility
 	CreatedAt   time.Time            `bson:"createdAt"`
 }
 
