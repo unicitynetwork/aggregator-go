@@ -23,6 +23,8 @@ type Manager interface {
 	Deactivate(ctx context.Context) error
 	GetSMT() *smt.ThreadSafeSMT
 	CheckParentHealth(ctx context.Context) error
+	// FinalizationReadLock blocks during the SMT commit+finalize window to keep root/block consistent.
+	FinalizationReadLock() func()
 }
 
 // NewManager creates the appropriate round manager based on sharding mode

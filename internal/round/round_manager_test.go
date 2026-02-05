@@ -21,10 +21,6 @@ import (
 
 // test the good case where blocks are created and stored successfully
 func TestParentShardIntegration_GoodCase(t *testing.T) {
-	// Override osExit to prevent actual process termination during test cleanup
-	restoreExit := SetExitFunc(func(code int) {})
-	defer restoreExit()
-
 	// setup dependencies
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

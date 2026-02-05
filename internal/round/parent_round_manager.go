@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -58,6 +59,8 @@ type ParentRoundManager struct {
 	// Metrics
 	totalRounds       int64
 	totalShardUpdates int64
+
+	ready atomic.Bool
 }
 
 const parentRoundRetryDelay = 1 * time.Second
@@ -385,9 +388,20 @@ func (prm *ParentRoundManager) GetSMT() *smt.ThreadSafeSMT {
 	return prm.parentSMT
 }
 
+// IsReady reports whether the parent round manager is ready to accept shard roots.
+func (prm *ParentRoundManager) IsReady() bool {
+	return prm.ready.Load()
+}
+
+// FinalizationReadLock is a no-op for parent mode (no SMT/block finalize race).
+func (prm *ParentRoundManager) FinalizationReadLock() func() {
+	return func() {}
+}
+
 // Activate starts active round processing (called when node becomes leader in HA mode)
 func (prm *ParentRoundManager) Activate(ctx context.Context) error {
 	prm.logger.WithContext(ctx).Info("Activating parent round manager")
+	prm.ready.Store(false)
 
 	// Reconstruct parent SMT from current shard states in storage
 	// This ensures the follower-turned-leader has the latest state
@@ -431,12 +445,14 @@ func (prm *ParentRoundManager) Activate(ctx context.Context) error {
 	prm.logger.WithContext(ctx).Info("Parent round manager activated successfully",
 		"initialRound", nextRoundNumber.String())
 
+	prm.ready.Store(true)
 	return nil
 }
 
 // Deactivate stops active round processing (called when node loses leadership in HA mode)
 func (prm *ParentRoundManager) Deactivate(ctx context.Context) error {
 	prm.logger.WithContext(ctx).Info("Deactivating parent round manager")
+	prm.ready.Store(false)
 
 	// Stop BFT client
 	prm.bftClient.Stop()
@@ -499,29 +515,40 @@ func (prm *ParentRoundManager) FinalizeBlock(ctx context.Context, block *models.
 	}
 	prm.roundMutex.RUnlock()
 
+	// Build SMT nodes from shard updates (outside transaction)
+	var smtNodes []*models.SmtNode
 	if len(processedShardUpdates) > 0 {
-		smtNodes := make([]*models.SmtNode, 0, len(processedShardUpdates))
+		smtNodes = make([]*models.SmtNode, 0, len(processedShardUpdates))
 		for _, update := range processedShardUpdates {
 			bytes := make([]byte, 4)
 			binary.BigEndian.PutUint32(bytes, uint32(update.ShardID))
 			smtNode := models.NewSmtNode(api.NewHexBytes(bytes), update.RootHash)
 			smtNodes = append(smtNodes, smtNode)
 		}
+	}
 
-		if err := prm.storage.SmtStorage().UpsertBatch(ctx, smtNodes); err != nil {
-			return fmt.Errorf("failed to upsert shard states: %w", err)
+	// Use transaction to atomically store shard states and block together
+	// This prevents root hash mismatch if crash occurs between operations
+	block.Finalized = true
+	if err := prm.storage.WithTransaction(ctx, func(txCtx context.Context) error {
+		if len(smtNodes) > 0 {
+			if err := prm.storage.SmtStorage().UpsertBatch(txCtx, smtNodes); err != nil {
+				return fmt.Errorf("failed to upsert shard states: %w", err)
+			}
 		}
+		if err := prm.storage.BlockStorage().Store(txCtx, block); err != nil {
+			return fmt.Errorf("failed to store parent block: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to finalize parent block transaction: %w", err)
+	}
 
+	if len(smtNodes) > 0 {
 		prm.logger.WithContext(ctx).Info("Updated current shard states in storage",
 			"blockNumber", block.Index.String(),
 			"shardCount", len(processedShardUpdates),
 			"shardIDs", getShardIDs(processedShardUpdates))
-	}
-
-	// For parent mode, we store everything synchronously, so the block is finalized immediately
-	block.Finalized = true
-	if err := prm.storage.BlockStorage().Store(ctx, block); err != nil {
-		return fmt.Errorf("failed to store parent block: %w", err)
 	}
 
 	if snapshot != nil {
@@ -597,6 +624,22 @@ func (prm *ParentRoundManager) reconstructParentSMT(ctx context.Context) error {
 		prm.logger.WithContext(ctx).Info("Successfully reconstructed parent SMT",
 			"leafCount", len(leaves),
 			"rootHash", prm.parentSMT.GetRootHash())
+	}
+
+	// Verify reconstructed root hash matches latest block (safety check)
+	latestBlock, err := prm.storage.BlockStorage().GetLatest(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get latest block for verification: %w", err)
+	}
+	if latestBlock != nil {
+		reconstructedHash := prm.parentSMT.GetRootHash()
+		expectedHash := latestBlock.RootHash.String()
+		if reconstructedHash != expectedHash {
+			return fmt.Errorf("parent SMT reconstruction failed: root hash mismatch (got %s, expected %s)", reconstructedHash, expectedHash)
+		}
+		prm.logger.WithContext(ctx).Info("Parent SMT root hash verification passed",
+			"rootHash", reconstructedHash,
+			"blockNumber", latestBlock.Index.String())
 	}
 
 	return nil

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,18 +24,6 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
-
-// osExit is the function used to exit the process on fatal errors.
-// It can be overridden in tests to prevent actual process termination.
-var osExit = os.Exit
-
-// SetExitFunc allows tests to override the exit function to prevent actual process termination.
-// Returns a function to restore the original exit function.
-func SetExitFunc(f func(int)) func() {
-	original := osExit
-	osExit = f
-	return func() { osExit = original }
-}
 
 const (
 	idle status = iota
@@ -495,11 +482,16 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 	c.proposedBlock.UnicityCertificate = api.NewHexBytes(ucCbor)
 
 	if err := c.roundManager.FinalizeBlockWithRetry(ctx, c.proposedBlock); err != nil {
-		// Fatal error - exit immediately, recovery will handle on restart
-		c.logger.WithContext(ctx).Error("FATAL: Failed to finalize block after retries, exiting",
+		c.logger.WithContext(ctx).Error("Failed to finalize block after retries",
 			"blockNumber", c.proposedBlock.Index.String(),
 			"error", err.Error())
-		osExit(1)
+		if c.eventBus != nil {
+			c.eventBus.Publish(events.TopicFatalError, events.FatalErrorEvent{
+				Source: "bft",
+				Error:  err.Error(),
+			})
+		}
+		return fmt.Errorf("failed to finalize block after retries: %w", err)
 	}
 
 	// Clear the proposed block after finalization

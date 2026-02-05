@@ -124,12 +124,12 @@ func main() {
 	trustBaseValidator := trustbase.NewTrustBaseValidator(trustBaseStore)
 	for _, tb := range cfg.BFT.TrustBases {
 		if err := trustBaseValidator.Verify(ctx, &tb); err != nil {
-			log.WithComponent("main").Error(fmt.Sprintf("Trust base verification failed"), "error", err.Error())
+			log.WithComponent("main").Error("Trust base verification failed", "error", err.Error())
 			gracefulExit(asyncLogger, 1)
 		}
 		if err := trustBaseStore.Store(ctx, &tb); err != nil {
 			if errors.Is(err, interfaces.ErrTrustBaseAlreadyExists) {
-				log.WithComponent("main").Warn(fmt.Sprintf("Trust base already exists, not overwriting it"), "epoch", tb.GetEpoch())
+				log.WithComponent("main").Warn("Trust base already exists, not overwriting it", "epoch", tb.GetEpoch())
 			} else {
 				log.WithComponent("main").Error("Failed to store trust base", "epoch", tb.GetEpoch(), "error", err.Error())
 				gracefulExit(asyncLogger, 1)
@@ -148,6 +148,7 @@ func main() {
 	stateTracker := state.NewSyncStateTracker()
 
 	eventBus := events.NewEventBus(log)
+	startFatalErrorListener(ctx, log, eventBus, stop)
 
 	// Load last committed unicity certificate (can be nil for genesis)
 	var luc *types.UnicityCertificate
@@ -314,6 +315,39 @@ func main() {
 	if err := baseLogger.Close(); err != nil {
 		fmt.Printf("Failed to close file logger: %v\n", err)
 	}
+}
+
+func startFatalErrorListener(ctx context.Context, log *logger.Logger, eventBus *events.EventBus, stop context.CancelFunc) {
+	fatalCh := eventBus.Subscribe(events.TopicFatalError)
+	go func() {
+		defer func() {
+			if err := eventBus.Unsubscribe(events.TopicFatalError, fatalCh); err != nil {
+				log.WithComponent("fatal-listener").Error("Failed to unsubscribe from fatal error topic", "error", err)
+			}
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case evt := <-fatalCh:
+				source := "unknown"
+				detail := ""
+				switch e := evt.(type) {
+				case events.FatalErrorEvent:
+					source = e.Source
+					detail = e.Error
+				case *events.FatalErrorEvent:
+					source = e.Source
+					detail = e.Error
+				}
+				log.WithComponent("fatal-listener").Error("Fatal error event received, shutting down",
+					"source", source,
+					"error", detail)
+				stop()
+				return
+			}
+		}
+	}()
 }
 
 func startLeaderChangedEventListener(ctx context.Context, log *logger.Logger, cfg *config.Config, roundManager round.Manager, bs *ha.BlockSyncer, eventBus *events.EventBus) error {
