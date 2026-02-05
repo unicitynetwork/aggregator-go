@@ -155,7 +155,8 @@ func startAggregator(t *testing.T, ctx context.Context, name, port, mongoURI, re
 
 	aggCtx, aggCancel := context.WithCancel(ctx)
 	log, _ := logger.New("warn", "json", "", false)
-	queue, stor, _ := storage.NewStorage(aggCtx, cfg, log)
+	queue, stor, err := storage.NewStorage(aggCtx, cfg, log)
+	require.NoError(t, err)
 	queue.Initialize(aggCtx)
 
 	eventBus := events.NewEventBus(log)

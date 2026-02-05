@@ -49,7 +49,7 @@ func (s *TrustBaseStorage) Store(ctx context.Context, trustBase types.RootTrustB
 }
 
 // GetByEpoch retrieves a RootTrustBase by its epoch number.
-func (s *TrustBaseStorage) GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error) {
+func (s *TrustBaseStorage) GetByEpoch(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
 	version := s.GetVersion(epoch)
 	if s.GetVersion(epoch) != 1 {
 		return nil, fmt.Errorf("invalid version: got %d expected %d", version, 1)
@@ -69,9 +69,26 @@ func (s *TrustBaseStorage) GetByEpoch(ctx context.Context, epoch uint64) (types.
 	return trustBase, nil
 }
 
+// GetLatest retrieves the trust base with the highest epoch.
+func (s *TrustBaseStorage) GetLatest(ctx context.Context) (*types.RootTrustBaseV1, error) {
+	var trustBaseBSON TrustBaseBSON
+	opts := options.FindOne().SetSort(bson.M{"epoch": -1})
+	if err := s.collection.FindOne(ctx, bson.M{}, opts).Decode(&trustBaseBSON); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, interfaces.ErrTrustBaseNotFound
+		}
+		return nil, fmt.Errorf("failed to get latest trust base: %w", err)
+	}
+	trustBase, err := trustBaseBSON.FromBSON()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse trust base BSON: %w", err)
+	}
+	return trustBase, nil
+}
+
 // GetByRound retrieves the active RootTrustBase for a given root chain round number.
 // It finds the trust base with the highest EpochStart that is less than or equal to the given round.
-func (s *TrustBaseStorage) GetByRound(ctx context.Context, round uint64) (types.RootTrustBase, error) {
+func (s *TrustBaseStorage) GetByRound(ctx context.Context, round uint64) (*types.RootTrustBaseV1, error) {
 	var trustBaseBSON TrustBaseBSON
 	filter := bson.M{"epochStartRound": bson.M{"$lte": round}}
 	opts := options.FindOne().SetSort(bson.M{"epochStartRound": -1})
@@ -90,7 +107,7 @@ func (s *TrustBaseStorage) GetByRound(ctx context.Context, round uint64) (types.
 }
 
 // GetAll retrieves all trust bases from storage.
-func (s *TrustBaseStorage) GetAll(ctx context.Context) ([]types.RootTrustBase, error) {
+func (s *TrustBaseStorage) GetAll(ctx context.Context) ([]*types.RootTrustBaseV1, error) {
 	cursor, err := s.collection.Find(ctx, bson.M{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get all trust bases: %w", err)
@@ -102,7 +119,7 @@ func (s *TrustBaseStorage) GetAll(ctx context.Context) ([]types.RootTrustBase, e
 		return nil, fmt.Errorf("failed to decode trust bases: %w", err)
 	}
 
-	result := make([]types.RootTrustBase, len(trustBaseBSONs))
+	result := make([]*types.RootTrustBaseV1, len(trustBaseBSONs))
 	for i, tb := range trustBaseBSONs {
 		result[i], err = tb.FromBSON()
 		if err != nil {

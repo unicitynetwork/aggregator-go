@@ -93,7 +93,7 @@ type (
 	}
 
 	TrustBaseStore interface {
-		GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error)
+		GetByEpoch(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error)
 	}
 
 	status int

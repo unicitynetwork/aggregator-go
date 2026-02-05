@@ -6,15 +6,13 @@ import (
 	"fmt"
 
 	"github.com/unicitynetwork/bft-go-base/types"
-
-	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
 type TrustBaseValidator struct {
-	storage interfaces.TrustBaseStorage
+	storage TrustBaseStore
 }
 
-func NewTrustBaseValidator(storage interfaces.TrustBaseStorage) *TrustBaseValidator {
+func NewTrustBaseValidator(storage TrustBaseStore) *TrustBaseValidator {
 	return &TrustBaseValidator{storage: storage}
 }
 
@@ -31,14 +29,10 @@ func (t *TrustBaseValidator) Verify(ctx context.Context, trustBase types.RootTru
 	var previousTrustBaseV1 *types.RootTrustBaseV1
 	epoch := trustBaseV1.GetEpoch()
 	if epoch > 1 {
-		previousTrustBase, err := t.storage.GetByEpoch(ctx, epoch-1)
+		var err error
+		previousTrustBaseV1, err = t.storage.GetByEpoch(ctx, epoch-1)
 		if err != nil {
 			return fmt.Errorf("previous trust base not found for epoch %d: %w", epoch-1, err)
-		}
-		var ok bool
-		previousTrustBaseV1, ok = previousTrustBase.(*types.RootTrustBaseV1)
-		if !ok {
-			return fmt.Errorf("failed to cast previous trust base to version 1 for epoch %d", epoch)
 		}
 	}
 	if err := trustBaseV1.Verify(previousTrustBaseV1); err != nil {

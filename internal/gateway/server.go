@@ -2,9 +2,7 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -37,11 +35,18 @@ type Service interface {
 	GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error)
 	GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error)
 	GetHealthStatus(ctx context.Context) (*api.HealthStatus, error)
-	PutTrustBase(ctx context.Context, req *types.RootTrustBaseV1) error
+
+	TrustBaseService
 
 	// Parent mode specific methods (will return errors in standalone mode)
 	SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) (*api.SubmitShardRootResponse, error)
 	GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.GetShardProofResponse, error)
+}
+
+type TrustBaseService interface {
+	PutTrustBase(ctx context.Context, req *types.RootTrustBaseV1) error
+	GetTrustBases(ctx context.Context, from, to uint64) ([]*types.RootTrustBaseV1, error)
+	GetLatestTrustBase(ctx context.Context) (*types.RootTrustBaseV1, error)
 }
 
 // NewServer creates a new gateway server
@@ -106,6 +111,7 @@ func (s *Server) setupRoutes() {
 	// Health endpoint
 	s.router.GET("/health", s.handleHealth)
 	s.router.PUT("/api/v1/trustbases", s.handlePutTrustBase)
+	s.router.GET("/api/v1/trustbases", getTrustBaseHandler(s.logger, s.service))
 
 	// JSON-RPC endpoint
 	s.router.POST("/", gin.WrapH(s.rpcServer))
@@ -172,57 +178,4 @@ func (s *Server) Start() error {
 func (s *Server) Stop(ctx context.Context) error {
 	s.logger.WithComponent("gateway").Info("Stopping HTTP server")
 	return s.httpServer.Shutdown(ctx)
-}
-
-// handleHealth handles the health endpoint
-func (s *Server) handleHealth(c *gin.Context) {
-	ctx := c.Request.Context()
-
-	status, err := s.service.GetHealthStatus(ctx)
-	if err != nil {
-		s.logger.WithContext(ctx).Error("Failed to get health status", "error", err.Error())
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
-		return
-	}
-
-	// Return 503 if unhealthy so load balancers can remove from rotation
-	if status.Status == "unhealthy" {
-		c.JSON(http.StatusServiceUnavailable, status)
-		return
-	}
-
-	c.JSON(http.StatusOK, status)
-}
-
-func (s *Server) handlePutTrustBase(c *gin.Context) {
-	ctx := c.Request.Context()
-
-	jsonData, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		s.logger.WithContext(ctx).Error("Failed to read request body", "error", err.Error())
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
-		return
-	}
-
-	var trustBase *types.RootTrustBaseV1
-	if err := json.Unmarshal(jsonData, &trustBase); err != nil {
-		s.logger.WithContext(ctx).Warn("Failed to parse trust base from request body", "error", err.Error())
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to parse trust base from request body"})
-		return
-	}
-
-	if err := s.service.PutTrustBase(ctx, trustBase); err != nil {
-		s.logger.WithContext(ctx).Warn("Failed to store trust base", "error", err.Error())
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}) // make the actual error visible to client
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{})
-}
-
-// handleDocs handles the API documentation endpoint
-func (s *Server) handleDocs(c *gin.Context) {
-	html := GenerateDocsHTML()
-	c.Header("Content-Type", "text/html")
-	c.String(http.StatusOK, html)
 }
