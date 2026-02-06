@@ -56,7 +56,6 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 	if rm.currentRound != nil && rm.currentRound.Snapshot != nil {
 		_, err := rm.currentRound.Snapshot.AddLeaves(leaves)
 		if err != nil {
-			// AddLeaves failed (possibly partial success) - fall back to one-by-one
 			result := rm.tryAddLeavesOneByOne(ctx, rm.currentRound.Snapshot, leaves, validCommitments)
 			rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, result.successLeaves...)
 			rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, result.successCommitments...)
@@ -86,9 +85,6 @@ type leafAddResult struct {
 }
 
 // tryAddLeavesOneByOne adds leaves one-by-one to a snapshot and returns results.
-// - ErrDuplicateLeaf (same path, same value): tracked as success (already in SMT)
-// - ErrLeafModification (same path, different value): rejected (conflict)
-// - No error: tracked as success
 func (rm *RoundManager) tryAddLeavesOneByOne(
 	ctx context.Context,
 	snapshot *smt.ThreadSafeSmtSnapshot,
@@ -109,7 +105,6 @@ func (rm *RoundManager) tryAddLeavesOneByOne(
 				result.successCommitments = append(result.successCommitments, commitments[i])
 				continue
 			}
-			// Real conflict (ErrLeafModification) - reject this commitment
 			rm.logger.WithContext(ctx).Warn("Rejected conflicting leaf",
 				"path", leaf.Path.String(),
 				"error", err.Error())
@@ -544,39 +539,33 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	rm.roundMutex.Unlock()
 
 	rm.roundMutex.Lock()
-	requestIds := make([]api.StateID, 0)
-	ackEntries := make([]interfaces.CertificationRequestAck, 0)
-	var proofTimes []time.Duration
-
-	if rm.currentRound != nil {
-		commitmentCount = len(rm.currentRound.Commitments)
-		requestIds = make([]api.StateID, commitmentCount)
-		ackEntries = make([]interfaces.CertificationRequestAck, commitmentCount)
-
-		now := time.Now()
-		for i, commitment := range rm.currentRound.Commitments {
-			requestIds[i] = commitment.StateID
-			ackEntries[i] = interfaces.CertificationRequestAck{StateID: commitment.StateID, StreamID: commitment.StreamID}
-
-			if commitment.CreatedAt != nil {
-				proofReadyTime := now.Sub(commitment.CreatedAt.Time)
-				if proofReadyTime > 0 {
-					proofTimes = append(proofTimes, proofReadyTime)
-				}
-			}
-		}
-	}
-	rm.roundMutex.Unlock()
-
-	rm.roundMutex.Lock()
 	var pendingLeaves []*smt.Leaf
 	var pendingCommitments []*models.CertificationRequest
-	snapshot := rm.currentRound.Snapshot
+	var snapshot *smt.ThreadSafeSmtSnapshot
 	if rm.currentRound != nil {
 		pendingLeaves = rm.currentRound.PendingLeaves
 		pendingCommitments = rm.currentRound.PendingCommitments
+		snapshot = rm.currentRound.Snapshot
 	}
 	rm.roundMutex.Unlock()
+
+	commitmentCount = len(pendingCommitments)
+	requestIds := make([]api.StateID, commitmentCount)
+	ackEntries := make([]interfaces.CertificationRequestAck, commitmentCount)
+	var proofTimes []time.Duration
+
+	now := time.Now()
+	for i, commitment := range pendingCommitments {
+		requestIds[i] = commitment.StateID
+		ackEntries[i] = interfaces.CertificationRequestAck{StateID: commitment.StateID, StreamID: commitment.StreamID}
+
+		if commitment.CreatedAt != nil {
+			proofReadyTime := now.Sub(commitment.CreatedAt.Time)
+			if proofReadyTime > 0 {
+				proofTimes = append(proofTimes, proofReadyTime)
+			}
+		}
+	}
 
 	persistDataStart = time.Now()
 	smtNodes := rm.convertLeavesToNodes(pendingLeaves)
@@ -623,6 +612,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		rm.currentRound.Block = block
 		rm.currentRound.PendingRootHash = ""
 		rm.currentRound.PendingLeaves = nil
+		rm.currentRound.PendingCommitments = nil
 		rm.currentRound.Snapshot = nil
 	}
 	rm.roundMutex.Unlock()
