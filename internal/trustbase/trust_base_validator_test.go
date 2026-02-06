@@ -1,4 +1,4 @@
-package service
+package trustbase
 
 import (
 	"context"
@@ -19,7 +19,7 @@ func TestTrustBaseValidator(t *testing.T) {
 	validator := NewTrustBaseValidator(&mockStorage{})
 
 	t.Run("should verify a valid trust base", func(t *testing.T) {
-		// Create trust base for epoch 0
+		// Create trust base for epoch 1
 		rootNodes, signers := newRootNodes(t, 3)
 		trustBaseEpoch1, err := types.NewTrustBase(types.NetworkLocal, rootNodes,
 			types.WithEpoch(1),
@@ -32,7 +32,7 @@ func TestTrustBaseValidator(t *testing.T) {
 		trustBaseEpoch0Hash, err := trustBaseEpoch1.Hash(crypto.SHA256)
 		require.NoError(t, err)
 
-		// Create trust base for epoch 1 with reference to epoch 0
+		// Create trust base for epoch 2 with reference to epoch 1
 		rootNodes1, _ := newRootNodes(t, 3)
 		trustBaseEpoch2, err := types.NewTrustBase(types.NetworkLocal, rootNodes1,
 			types.WithEpoch(2),
@@ -48,7 +48,7 @@ func TestTrustBaseValidator(t *testing.T) {
 
 		// Mock storage to return the previous trust base
 		storage := &mockStorage{
-			GetByEpochFunc: func(ctx context.Context, epoch uint64) (types.RootTrustBase, error) {
+			GetByEpochFunc: func(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
 				if epoch == 1 {
 					return trustBaseEpoch1, nil
 				}
@@ -76,7 +76,7 @@ func TestTrustBaseValidator(t *testing.T) {
 
 		// Mock storage that returns error for epoch 2
 		storage := &mockStorage{
-			GetByEpochFunc: func(ctx context.Context, epoch uint64) (types.RootTrustBase, error) {
+			GetByEpochFunc: func(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
 				return nil, interfaces.ErrTrustBaseNotFound
 			},
 		}
@@ -111,7 +111,7 @@ func TestTrustBaseValidator(t *testing.T) {
 
 		// Mock storage to return the previous trust base
 		storage := &mockStorage{
-			GetByEpochFunc: func(ctx context.Context, epoch uint64) (types.RootTrustBase, error) {
+			GetByEpochFunc: func(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
 				if epoch == 1 {
 					return trustBaseEpoch1, nil
 				}
@@ -154,10 +154,13 @@ func newRootNodes(t *testing.T, n int) ([]*types.NodeInfo, map[string]cryptobft.
 }
 
 type mockStorage struct {
-	GetByEpochFunc func(ctx context.Context, epoch uint64) (types.RootTrustBase, error)
+	GetByEpochFunc func(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error)
+	StoreFunc      func(ctx context.Context, trustBase types.RootTrustBase) error
+
+	stored map[uint64]types.RootTrustBase
 }
 
-func (m *mockStorage) GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error) {
+func (m *mockStorage) GetByEpoch(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
 	if m.GetByEpochFunc != nil {
 		return m.GetByEpochFunc(ctx, epoch)
 	}
@@ -165,7 +168,15 @@ func (m *mockStorage) GetByEpoch(ctx context.Context, epoch uint64) (types.RootT
 }
 
 func (m *mockStorage) Store(ctx context.Context, trustBase types.RootTrustBase) error {
-	return errors.New("not implemented")
+	if m.stored == nil {
+		m.stored = make(map[uint64]types.RootTrustBase)
+	}
+	m.stored[trustBase.GetEpoch()] = trustBase
+
+	if m.StoreFunc != nil {
+		return m.StoreFunc(ctx, trustBase)
+	}
+	return nil
 }
 
 func (m *mockStorage) GetByRound(ctx context.Context, round uint64) (types.RootTrustBase, error) {

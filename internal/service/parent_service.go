@@ -13,6 +13,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/internal/trustbase"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -23,7 +24,7 @@ type ParentAggregatorService struct {
 	storage            interfaces.Storage
 	parentRoundManager *round.ParentRoundManager
 	leaderSelector     LeaderSelector
-	trustBaseValidator *TrustBaseValidator
+	trustBaseValidator *trustbase.TrustBaseValidator
 }
 
 func (pas *ParentAggregatorService) isLeader(ctx context.Context) (bool, error) {
@@ -64,7 +65,7 @@ func NewParentAggregatorService(
 		storage:            storage,
 		parentRoundManager: parentRoundManager,
 		leaderSelector:     leaderSelector,
-		trustBaseValidator: NewTrustBaseValidator(storage.TrustBaseStorage()),
+		trustBaseValidator: trustbase.NewTrustBaseValidator(storage.TrustBaseStorage()),
 	}
 }
 
@@ -327,4 +328,12 @@ func (pas *ParentAggregatorService) PutTrustBase(ctx context.Context, trustBase 
 		return fmt.Errorf("failed to verify trust base: %w", err)
 	}
 	return pas.storage.TrustBaseStorage().Store(ctx, trustBase)
+}
+
+func (pas *ParentAggregatorService) GetTrustBases(ctx context.Context, from, to uint64) ([]*types.RootTrustBaseV1, error) {
+	return pas.storage.TrustBaseStorage().GetTrustBases(ctx, from, to)
+}
+
+func (pas *ParentAggregatorService) GetLatestTrustBase(ctx context.Context) (*types.RootTrustBaseV1, error) {
+	return pas.storage.TrustBaseStorage().GetLatest(ctx)
 }

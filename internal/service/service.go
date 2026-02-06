@@ -14,6 +14,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/internal/trustbase"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -27,11 +28,18 @@ type Service interface {
 	GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error)
 	GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error)
 	GetHealthStatus(ctx context.Context) (*api.HealthStatus, error)
-	PutTrustBase(ctx context.Context, req *types.RootTrustBaseV1) error
+
+	TrustBaseService
 
 	// Parent mode specific methods
 	SubmitShardRoot(ctx context.Context, req *api.SubmitShardRootRequest) (*api.SubmitShardRootResponse, error)
 	GetShardProof(ctx context.Context, req *api.GetShardProofRequest) (*api.GetShardProofResponse, error)
+}
+
+type TrustBaseService interface {
+	PutTrustBase(ctx context.Context, req *types.RootTrustBaseV1) error
+	GetTrustBases(ctx context.Context, from, to uint64) ([]*types.RootTrustBaseV1, error)
+	GetLatestTrustBase(ctx context.Context) (*types.RootTrustBaseV1, error)
 }
 
 // NewService creates the appropriate service based on sharding mode
@@ -65,7 +73,7 @@ type AggregatorService struct {
 	roundManager        round.Manager
 	leaderSelector      LeaderSelector
 	commitmentValidator *signing.CommitmentValidator
-	trustBaseValidator  *TrustBaseValidator
+	trustBaseValidator  *trustbase.TrustBaseValidator
 	receiptSigner       *signing.ReceiptSigner
 }
 
@@ -136,7 +144,7 @@ func NewAggregatorService(cfg *config.Config,
 		roundManager:        roundManager,
 		leaderSelector:      leaderSelector,
 		commitmentValidator: signing.NewCommitmentValidator(cfg.Sharding),
-		trustBaseValidator:  NewTrustBaseValidator(storage.TrustBaseStorage()),
+		trustBaseValidator:  trustbase.NewTrustBaseValidator(storage.TrustBaseStorage()),
 		receiptSigner:       receiptSigner,
 	}
 }
@@ -480,4 +488,13 @@ func (as *AggregatorService) PutTrustBase(ctx context.Context, trustBase *types.
 		return fmt.Errorf("failed to verify trust base: %w", err)
 	}
 	return as.storage.TrustBaseStorage().Store(ctx, trustBase)
+}
+
+func (as *AggregatorService) GetLatestTrustBase(ctx context.Context) (*types.RootTrustBaseV1, error) {
+	return as.storage.TrustBaseStorage().GetLatest(ctx)
+}
+
+// GetTrustBases retrieves trust bases within the specified range.
+func (as *AggregatorService) GetTrustBases(ctx context.Context, from, to uint64) ([]*types.RootTrustBaseV1, error) {
+	return as.storage.TrustBaseStorage().GetTrustBases(ctx, from, to)
 }

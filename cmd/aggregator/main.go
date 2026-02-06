@@ -11,6 +11,7 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/aggregator-go/internal/bft/rest"
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
@@ -23,6 +24,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/internal/trustbase"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -118,13 +120,14 @@ func main() {
 	log.WithComponent("main").Info("Database connection established")
 
 	// Store trust bases from config files
-	trustBaseValidator := service.NewTrustBaseValidator(storageInstance.TrustBaseStorage())
+	trustBaseStore := storageInstance.TrustBaseStorage()
+	trustBaseValidator := trustbase.NewTrustBaseValidator(trustBaseStore)
 	for _, tb := range cfg.BFT.TrustBases {
 		if err := trustBaseValidator.Verify(ctx, &tb); err != nil {
 			log.WithComponent("main").Error("Trust base verification failed", "error", err.Error())
 			gracefulExit(asyncLogger, 1)
 		}
-		if err := storageInstance.TrustBaseStorage().Store(ctx, &tb); err != nil {
+		if err := trustBaseStore.Store(ctx, &tb); err != nil {
 			if errors.Is(err, interfaces.ErrTrustBaseAlreadyExists) {
 				log.WithComponent("main").Warn("Trust base already exists, not overwriting it", "epoch", tb.GetEpoch())
 			} else {
@@ -176,8 +179,17 @@ func main() {
 	}
 	threadSafeSmt := smt.NewThreadSafeSMT(smtInstance)
 
+	// Create trust base manager if BFT is enabled, otherwise use trust base store as the provider
+	var trustBaseProvider interfaces.TrustBaseProvider
+	if cfg.BFT.Enabled {
+		bftRestClient := rest.NewBFTRestClient(cfg.BFT.RPCAddress)
+		trustBaseProvider = trustbase.NewTrustBaseManager(log, trustBaseStore, bftRestClient, trustBaseValidator)
+	} else {
+		trustBaseProvider = trustBaseStore
+	}
+
 	// Create round manager based on sharding mode
-	roundManager, err := round.NewManager(ctx, cfg, log, commitmentQueue, storageInstance, stateTracker, luc, eventBus, threadSafeSmt)
+	roundManager, err := round.NewManager(ctx, cfg, log, commitmentQueue, storageInstance, stateTracker, luc, eventBus, threadSafeSmt, trustBaseProvider)
 	if err != nil {
 		log.WithComponent("main").Error("Failed to create round manager", "error", err.Error())
 		gracefulExit(asyncLogger, 1)

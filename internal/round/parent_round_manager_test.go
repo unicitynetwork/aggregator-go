@@ -93,7 +93,7 @@ func (suite *ParentRoundManagerTestSuite) TestInitialization() {
 	defer cancel()
 
 	// Create parent round manager (BFT stub will be created automatically when BFT.Enabled = false)
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)), suite.storage.TrustBaseStorage())
 	suite.Require().NoError(err, "Should create parent round manager successfully")
 	suite.Require().NotNil(prm, "ParentRoundManager should not be nil")
 
@@ -113,7 +113,7 @@ func (suite *ParentRoundManagerTestSuite) TestBasicRoundLifecycle() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)), suite.storage.TrustBaseStorage())
 	suite.Require().NoError(err)
 	defer prm.Stop(ctx) // Stop round manager before cleanup to avoid disconnection errors
 
@@ -162,7 +162,7 @@ func (suite *ParentRoundManagerTestSuite) TestMultiRoundUpdates() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)), suite.storage.TrustBaseStorage())
 	suite.Require().NoError(err)
 	defer prm.Stop(ctx) // Stop round manager before cleanup to avoid disconnection errors
 
@@ -228,7 +228,7 @@ func (suite *ParentRoundManagerTestSuite) TestMultipleShards() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)), suite.storage.TrustBaseStorage())
 	suite.Require().NoError(err)
 	defer prm.Stop(ctx)
 
@@ -279,7 +279,7 @@ func (suite *ParentRoundManagerTestSuite) TestEmptyRound() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)), suite.storage.TrustBaseStorage())
 	suite.Require().NoError(err)
 	defer prm.Stop(ctx)
 
@@ -315,7 +315,7 @@ func (suite *ParentRoundManagerTestSuite) TestDuplicateShardUpdate() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)), suite.storage.TrustBaseStorage())
 	suite.Require().NoError(err)
 	defer prm.Stop(ctx)
 
@@ -360,7 +360,7 @@ func (suite *ParentRoundManagerTestSuite) TestSameShardMultipleValues() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)), suite.storage.TrustBaseStorage())
 	suite.Require().NoError(err)
 	defer prm.Stop(ctx)
 
@@ -417,7 +417,7 @@ func (suite *ParentRoundManagerTestSuite) TestBlockRootMatchesSMTRoot() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)))
+	prm, err := NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength)), suite.storage.TrustBaseStorage())
 	suite.Require().NoError(err)
 	defer prm.Stop(ctx)
 

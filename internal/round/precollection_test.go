@@ -540,6 +540,7 @@ func TestStartNewRoundWithSnapshot(t *testing.T) {
 			nil, // No BFT client for this test
 			events.NewEventBus(testLogger),
 			smtInstance,
+			nil,
 		)
 		require.NoError(t, err)
 
@@ -616,6 +617,7 @@ func TestPipelinedChildModeFlow(t *testing.T) {
 			nil, // No BFT client for child mode
 			events.NewEventBus(testLogger),
 			smtInstance,
+			nil,
 		)
 		require.NoError(t, err)
 

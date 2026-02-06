@@ -2,9 +2,11 @@ services:
   x-bft: &bft-base
     platform: linux/amd64
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
-    image: ghcr.io/unicitynetwork/bft-core:8e6f2507b8b69fc6d2d66c33fb7c4cb9dc61e8b0
+    image: ghcr.io/unicitynetwork/bft-core:8a4f7aa263ef814ef514cfd73f8a366f3a3b348e
   bft-root:
     <<: *bft-base
+    ports:
+      - "8002:8002" # expose rpc server
     volumes:
       - ./data/genesis-root:/genesis/root
       - ./data/genesis:/genesis
@@ -315,6 +317,7 @@ services:
       BFT_ENABLED: "false"
       BFT_SHARD_CONF_FILE: "/app/bft-config/shard-conf-7_0.json"
       BFT_TRUST_BASE_FILES: "/app/bft-config/trust-base.json"
+      BFT_RPC_ADDRESS: "http://127.0.0.1:8002"
       REDIS_HOST: "redis"
       REDIS_PORT: "6379"
       REDIS_PASSWORD: ""
