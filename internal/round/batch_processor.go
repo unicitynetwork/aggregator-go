@@ -44,10 +44,7 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 			continue
 		}
 
-		leaves = append(leaves, &smt.Leaf{
-			Path:  path,
-			Value: leafValue,
-		})
+		leaves = append(leaves, smt.NewLeaf(path, leafValue))
 	}
 
 	// Add leaves to the current round's SMT snapshot
@@ -321,7 +318,7 @@ func (rm *RoundManager) addBatchToPreCollection(ctx context.Context, commitments
 			continue
 		}
 
-		leaves = append(leaves, &smt.Leaf{Path: path, Value: leafValue})
+		leaves = append(leaves, smt.NewLeaf(path, leafValue))
 		validCommitments = append(validCommitments, commitment)
 	}
 
@@ -358,8 +355,8 @@ func (rm *RoundManager) addLeavesOneByOne(ctx context.Context, leaves []*smt.Lea
 				"requestID", commitments[i].StateID.String(),
 				"error", err.Error())
 			rejected = append(rejected, interfaces.CertificationRequestAck{
-				StateID: commitments[i].StateID,
-				StreamID:  commitments[i].StreamID,
+				StateID:  commitments[i].StateID,
+				StreamID: commitments[i].StreamID,
 			})
 			continue
 		}

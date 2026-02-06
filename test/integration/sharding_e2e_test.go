@@ -237,7 +237,7 @@ func waitForBlock(t *testing.T, url string, minBlock int64, timeout time.Duratio
 
 func waitForValidProof(t *testing.T, url, reqID string, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
-	reqIDObj := api.StateID(reqID)
+	reqIDObj := api.RequireNewImprintV2(reqID)
 	path, _ := reqIDObj.GetPath()
 
 	for time.Now().Before(deadline) {
@@ -263,8 +263,7 @@ func createCommitmentForShard(t *testing.T, shardID api.ShardID) (*api.Certifica
 
 	for i := 0; i < 1000; i++ {
 		c := testutil.CreateTestCertificationRequest(t, fmt.Sprintf("shard%d_%d_%d", shardID, i, time.Now().UnixNano()))
-		reqBytes, _ := c.StateID.Bytes()
-		if new(big.Int).And(new(big.Int).SetBytes(reqBytes), mask).Cmp(expected) == 0 {
+		if new(big.Int).And(new(big.Int).SetBytes(c.StateID.Bytes()), mask).Cmp(expected) == 0 {
 			certificationRequest := c.ToAPI()
 			certificationRequest.Receipt = true
 			return certificationRequest, c.StateID.String()

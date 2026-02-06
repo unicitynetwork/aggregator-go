@@ -21,10 +21,10 @@ func (s *Server) handleCertificationRequest(ctx context.Context, params json.Raw
 	}
 
 	// Validate required fields
-	if req.StateID == "" {
+	if req.StateID == nil {
 		return nil, jsonrpc.NewValidationError("stateId is required")
 	}
-	if req.CertificationData.TransactionHash == "" {
+	if req.CertificationData.TransactionHash == nil {
 		return nil, jsonrpc.NewValidationError("transactionHash is required")
 	}
 
@@ -58,7 +58,7 @@ func (s *Server) handleGetInclusionProofV2(ctx context.Context, params json.RawM
 	}
 
 	// Validate required fields
-	if req.StateID == "" {
+	if req.StateID == nil {
 		return nil, jsonrpc.NewValidationError("stateId is required")
 	}
 

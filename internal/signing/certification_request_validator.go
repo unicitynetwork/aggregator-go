@@ -87,38 +87,19 @@ func (v *CertificationRequestValidator) Validate(commitment *models.Certificatio
 		}
 	}
 
-	// Parse and validate source state hash (should be DataHash imprint: algorithm + data)
-	sourceStateHashImprint, err := commitment.CertificationData.SourceStateHash.Bytes()
-	if err != nil {
+	// Validate source state hash length
+	sourceStateHash := commitment.CertificationData.SourceStateHash
+	if len(sourceStateHash) != 32 {
 		return ValidationResult{
 			Status: ValidationStatusInvalidSourceStateHashFormat,
-			Error:  fmt.Errorf("failed to decode state hash imprint: %w", err),
+			Error: fmt.Errorf("source state hash must be exactly 32 bytes "+
+				"got %d", len(sourceStateHash)),
 		}
 	}
-
-	// Validate state hash imprint format (minimum 3 bytes: 2 for algorithm + 1 for data)
-	if len(sourceStateHashImprint) < 3 {
-		return ValidationResult{
-			Status: ValidationStatusInvalidSourceStateHashFormat,
-			Error: fmt.Errorf("source state hash imprint must have at least 3 bytes (2 algorithm + 1 data), "+
-				"got %d", len(sourceStateHashImprint)),
-		}
-	}
-
-	// Extract algorithm from state hash imprint (first 2 bytes, big-endian)
-	sourceStateHashAlgorithm := (int(sourceStateHashImprint[0]) << 8) | int(sourceStateHashImprint[1])
-	if sourceStateHashAlgorithm != 0 { // SHA256 = 0
-		return ValidationResult{
-			Status: ValidationStatusInvalidSourceStateHashFormat,
-			Error:  fmt.Errorf("source state hash algorithm must be SHA256 (0), got %d", sourceStateHashAlgorithm),
-		}
-	}
-
-	// Validate State ID matches expected value
 	// StateID should be SHA256(CBOR[sourceStateHash, ownerPredicate])
 	isValidStateID, err := api.ValidateStateID(
 		commitment.StateID,
-		sourceStateHashImprint,
+		sourceStateHash,
 		commitment.CertificationData.OwnerPredicate,
 	)
 	if err != nil {
@@ -143,34 +124,6 @@ func (v *CertificationRequestValidator) Validate(commitment *models.Certificatio
 		}
 	}
 
-	// Parse transaction hash (should be DataHash imprint: algorithm + data)
-	// TransactionHashImprint is a string type, so we need to decode it
-	transactionHashImprint, err := commitment.CertificationData.TransactionHash.Imprint()
-	if err != nil {
-		return ValidationResult{
-			Status: ValidationStatusInvalidTransactionHashFormat,
-			Error:  fmt.Errorf("failed to decode transaction hash: %w", err),
-		}
-	}
-
-	// Validate transaction hash imprint format (minimum 3 bytes: 2 for algorithm + 1 for data)
-	if len(transactionHashImprint) < 3 {
-		return ValidationResult{
-			Status: ValidationStatusInvalidTransactionHashFormat,
-			Error: fmt.Errorf("transaction hash imprint must have at least 3 bytes (2 algorithm + 1 data), "+
-				"got %d", len(transactionHashImprint)),
-		}
-	}
-
-	// Extract algorithm from transaction hash imprint (first 2 bytes, big-endian)
-	transactionHashAlgorithm := (int(transactionHashImprint[0]) << 8) | int(transactionHashImprint[1])
-	if transactionHashAlgorithm != 0 { // SHA256 = 0
-		return ValidationResult{
-			Status: ValidationStatusInvalidTransactionHashFormat,
-			Error:  fmt.Errorf("transaction hash algorithm must be SHA256 (0), got %d", transactionHashAlgorithm),
-		}
-	}
-
 	// Verify signature
 	// Validate signature format (must be 65 bytes for secp256k1)
 	signatureBytes := commitment.CertificationData.Witness
@@ -181,7 +134,17 @@ func (v *CertificationRequestValidator) Validate(commitment *models.Certificatio
 		}
 	}
 
-	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionHashImprint)
+	// Validate transaction hash length
+	transactionHash := commitment.CertificationData.TransactionHash
+	if len(transactionHash) != 32 {
+		return ValidationResult{
+			Status: ValidationStatusInvalidTransactionHashFormat,
+			Error: fmt.Errorf("transaction hash imprint must have at least 3 bytes (2 algorithm + 1 data), "+
+				"got %d", len(transactionHash)),
+		}
+	}
+
+	sigDataHash := api.SigDataHash(sourceStateHash, transactionHash)
 	isValidSignature, err := v.signingService.VerifyDataHashWithPublicKey(
 		sigDataHash,
 		signatureBytes,

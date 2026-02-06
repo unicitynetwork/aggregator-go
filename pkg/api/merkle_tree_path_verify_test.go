@@ -219,12 +219,12 @@ func TestMerkleTreePathVerify(t *testing.T) {
 		stateID1 := "00007d535ade796772c5088b095e79a18e282437ee8d8238f5aa9d9c61694948ba9e"
 		stateID2 := "00006478ca42f6949cfbd4b9e4a41b9a384ea78261c1776808da70cf21e98c345700"
 
-		req1, err := api.NewImprintHexString(stateID1)
+		req1, err := api.NewImprintV2(stateID1)
 		require.NoError(t, err)
 		path1, err := req1.GetPath()
 		require.NoError(t, err)
 
-		req2, err := api.NewImprintHexString(stateID2)
+		req2, err := api.NewImprintV2(stateID2)
 		require.NoError(t, err)
 		path2, err := req2.GetPath()
 		require.NoError(t, err)

@@ -300,10 +300,7 @@ func (prm *ParentRoundManager) processRound(ctx context.Context, round *ParentRo
 		for _, update := range round.ProcessedShardUpdates {
 			path := update.GetPath()
 
-			leaf := &smt.Leaf{
-				Path:  path,
-				Value: update.RootHash,
-			}
+			leaf := smt.NewLeaf(path, update.RootHash)
 			leaves = append(leaves, leaf)
 		}
 
@@ -607,10 +604,7 @@ func (prm *ParentRoundManager) reconstructParentSMT(ctx context.Context) error {
 	for _, node := range smtNodes {
 		path := new(big.Int).SetBytes(node.Key)
 
-		leaf := &smt.Leaf{
-			Path:  path,
-			Value: node.Value,
-		}
+		leaf := smt.NewLeaf(path, node.Value)
 		leaves = append(leaves, leaf)
 	}
 

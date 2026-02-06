@@ -190,8 +190,8 @@ func selectShardIndex(requestID api.StateID, shardClients []*ShardClient) int {
 		}
 	}
 
-	imprint, err := requestID.Imprint()
-	if err != nil || len(imprint) == 0 {
+	imprint := requestID.Imprint()
+	if len(imprint) == 0 {
 		return 0
 	}
 	return int(imprint[len(imprint)-1]) % shardCount
@@ -252,7 +252,7 @@ func generateCommitmentRequest() *api.CertificationRequest {
 	// Generate random state data and create DataHash imprint
 	stateData := make([]byte, 32)
 	rand.Read(stateData)
-	sourceStateHashImprint := signing.CreateDataHashImprint(stateData)
+	sourceStateHashImprint := signing.CreateDataHash(stateData)
 
 	var stateID api.StateID
 
@@ -282,13 +282,13 @@ func generateCommitmentRequest() *api.CertificationRequest {
 		}
 		// Regenerate state hash and try again
 		rand.Read(stateData)
-		sourceStateHashImprint = signing.CreateDataHashImprint(stateData)
+		sourceStateHashImprint = signing.CreateDataHash(stateData)
 	}
 
 	// Generate random transaction data and create DataHash imprint
 	transactionData := make([]byte, 32)
 	rand.Read(transactionData)
-	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
+	transactionHashImprint := signing.CreateDataHash(transactionData)
 
 	signingService := signing.NewSigningService()
 	certData := &api.CertificationData{
@@ -375,7 +375,7 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 						if sm := metrics.shard(shardIdx); sm != nil {
 							sm.requestIdExistsErr.Add(1)
 						}
-						requestIDStr := normalizeRequestID(string(req.StateID))
+						requestIDStr := normalizeRequestID(req.StateID.String())
 						metrics.submittedRequestIDs.Store(requestIDStr, true)
 					}
 					return
@@ -401,7 +401,7 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 					if sm := metrics.shard(shardIdx); sm != nil {
 						sm.successfulRequests.Add(1)
 					}
-					requestIDStr := normalizeRequestID(string(req.StateID))
+					requestIDStr := normalizeRequestID(req.StateID.String())
 					metrics.submittedRequestIDs.Store(requestIDStr, true)
 
 					if proofQueue != nil {
@@ -510,7 +510,7 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 						return
 					}
 
-					if proofResp.InclusionProof == nil || proofResp.InclusionProof.CertificationData == nil || proofResp.InclusionProof.CertificationData.TransactionHash == "" {
+					if proofResp.InclusionProof == nil || proofResp.InclusionProof.CertificationData == nil || proofResp.InclusionProof.CertificationData.TransactionHash == nil {
 						time.Sleep(proofRetryDelay)
 						continue
 					}
@@ -543,7 +543,7 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 						}
 					}
 
-					requestIDPath, err := api.RequestID(reqID).GetPath()
+					requestIDPath, err := api.RequireNewImprintV2(reqID).GetPath()
 					if err != nil {
 						metrics.recordError(fmt.Sprintf("Failed to get path for request ID: %v", err))
 						atomic.AddInt64(&metrics.proofVerifyFailed, 1)

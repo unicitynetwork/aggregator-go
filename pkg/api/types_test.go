@@ -9,7 +9,7 @@ import (
 )
 
 func TestStateIDMarshalJSON(t *testing.T) {
-	stateID := StateID("0000cfe84a1828e2edd0a7d9533b23e519f746069a938d549a150e07e14dc0f9cf00")
+	stateID := RequireNewImprintV2("0000cfe84a1828e2edd0a7d9533b23e519f746069a938d549a150e07e14dc0f9cf00")
 
 	data, err := json.Marshal(stateID)
 	require.NoError(t, err, "Failed to marshal StateID")
@@ -39,12 +39,12 @@ func TestHexBytesMarshalJSON(t *testing.T) {
 }
 
 func TestImprintHexStringMarshalJSON(t *testing.T) {
-	imprint := ImprintHexString("0000cd60")
+	imprint := RequireNewImprintV2("0000cd60")
 
 	data, err := json.Marshal(imprint)
 	require.NoError(t, err, "Failed to marshal ImprintHexString")
 
-	var unmarshaledImprint ImprintHexString
+	var unmarshaledImprint ImprintV2
 	err = json.Unmarshal(data, &unmarshaledImprint)
 	require.NoError(t, err, "Failed to unmarshal ImprintHexString")
 

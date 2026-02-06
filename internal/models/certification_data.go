@@ -56,14 +56,22 @@ func (ab *CertificationDataBSON) FromBSON() (*CertificationData, error) {
 		return nil, fmt.Errorf("failed to parse signature: %w", err)
 	}
 
+	sourceStateHash, err := api.NewImprintV2(ab.SourceStateHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse source state hash: %w", err)
+	}
+	transactionHash, err := api.NewImprintV2(ab.TransactionHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse transaction hash: %w", err)
+	}
 	return &CertificationData{
 		OwnerPredicate: api.Predicate{
 			Engine: ab.OwnerPredicate.Engine,
 			Code:   ab.OwnerPredicate.Code,
 			Params: ab.OwnerPredicate.Params,
 		},
-		SourceStateHash: api.SourceStateHash(ab.SourceStateHash),
-		TransactionHash: api.TransactionHash(ab.TransactionHash),
+		SourceStateHash: sourceStateHash,
+		TransactionHash: transactionHash,
 		Witness:         signature,
 	}, nil
 }

@@ -95,7 +95,7 @@ type RoundManager struct {
 	roundMutex   sync.RWMutex
 	// Guards the window where SMT root advances before block finalization is persisted.
 	finalizationMu sync.RWMutex
-	wg           sync.WaitGroup
+	wg             sync.WaitGroup
 
 	// Round duration (configurable, default 1 second)
 	roundDuration time.Duration
@@ -622,10 +622,7 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 		for i, node := range nodes {
 			// Convert key bytes back to big.Int path
 			path := new(big.Int).SetBytes(node.Key)
-			leaves[i] = &smt.Leaf{
-				Path:  path,
-				Value: node.Value,
-			}
+			leaves[i] = smt.NewLeaf(path, node.Value)
 		}
 
 		if _, err := rm.smt.AddLeaves(leaves); err != nil {

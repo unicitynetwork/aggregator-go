@@ -11,11 +11,11 @@ import (
 func TestAggregateRequestCountSerialization(t *testing.T) {
 	t.Run("CertificationRequest CBOR serialization", func(t *testing.T) {
 		req := &CertificationRequest{
-			StateID: "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
+			StateID: RequireNewImprintV2("0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890"),
 			CertificationData: CertificationData{
 				OwnerPredicate:  NewPayToPublicKeyPredicate([]byte{0x01, 0x02, 0x03}),
-				SourceStateHash: "0000abcd",
-				TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
+				SourceStateHash: RequireNewImprintV2("0000abcd"),
+				TransactionHash: RequireNewImprintV2("0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890"),
 				Witness:         HexBytes{0x04, 0x05, 0x06},
 			},
 			AggregateRequestCount: 100,
@@ -70,12 +70,12 @@ func TestAggregateRequestCountSerialization(t *testing.T) {
 		leafIndex.SetInt64(0)
 
 		record := &AggregatorRecord{
-			StateID: "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
+			StateID: RequireNewImprintV2("0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890"),
 			CertificationData: CertificationData{
 				OwnerPredicate:  NewPayToPublicKeyPredicate([]byte{0x01, 0x02, 0x03}),
 				Witness:         HexBytes{0x04, 0x05, 0x06},
-				SourceStateHash: "0000abcd",
-				TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
+				SourceStateHash: RequireNewImprintV2("0000abcd"),
+				TransactionHash: RequireNewImprintV2("0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890"),
 			},
 			AggregateRequestCount: 500,
 			BlockNumber:           blockNumber,

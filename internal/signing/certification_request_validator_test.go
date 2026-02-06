@@ -25,9 +25,7 @@ func TestValidator_Success(t *testing.T) {
 
 	// Create test state hash
 	sourceStateHashData := []byte("test-state-hash")
-	sourceStateHash := CreateDataHashImprint(sourceStateHashData)
-	sourceStateHashImprint, err := sourceStateHash.Imprint()
-	require.NoError(t, err)
+	sourceStateHash := CreateDataHash(sourceStateHashData)
 
 	// Create state ID using the full imprint bytes (same as what validator will use)
 	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHash)
@@ -35,13 +33,12 @@ func TestValidator_Success(t *testing.T) {
 
 	// Create transaction data and sign it
 	transactionData := []byte("test-transaction-data")
-	transactionDataHash := CreateDataHashImprint(transactionData)
-	transactionDataHashImprint, err := transactionDataHash.Imprint()
-	require.NoError(t, err)
+	transactionDataHash := CreateDataHash(transactionData)
+	transactionDataHashImprint := transactionDataHash.Imprint()
 
 	// Sign the actual transaction hash bytes (what the validator expects)
 	signingService := NewSigningService()
-	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionDataHashImprint)
+	sigDataHash := api.SigDataHash(sourceStateHash, transactionDataHashImprint)
 	signatureBytes, err := signingService.SignDataHash(sigDataHash, privateKey.Serialize())
 	require.NoError(t, err, "Failed to sign transaction data")
 
@@ -74,15 +71,15 @@ func TestValidator_InvalidOwnerPredicateFormat(t *testing.T) {
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 
 	commitment := &models.CertificationRequest{
-		StateID: api.StateID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+		StateID: api.RequireNewImprintV2("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
 		CertificationData: models.CertificationData{
 			OwnerPredicate: api.Predicate{
 				Engine: 1,
 				Code:   []byte{2}, // invalid code
 				Params: publicKeyBytes,
 			},
-			SourceStateHash: CreateDataHashImprint([]byte("test-state")),
-			TransactionHash: CreateDataHashImprint([]byte("hello")),
+			SourceStateHash: CreateDataHash([]byte("test-state")),
+			TransactionHash: CreateDataHash([]byte("hello")),
 			Witness:         api.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
 		},
 	}
@@ -104,11 +101,11 @@ func TestValidator_InvalidStateHashFormat(t *testing.T) {
 	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
 	commitment := &models.CertificationRequest{
-		StateID: api.StateID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+		StateID: api.RequireNewImprintV2("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
 		CertificationData: models.CertificationData{
 			OwnerPredicate:  ownerPredicate,
-			SourceStateHash: api.ImprintHexString("invalid-hex-state-hash"), // Invalid hex
-			TransactionHash: CreateDataHashImprint([]byte("hello")),
+			SourceStateHash: api.ImprintV2("invalid-hex-state-hash"), // Invalid hex
+			TransactionHash: CreateDataHash([]byte("hello")),
 			Witness:         api.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
 		},
 	}
@@ -131,14 +128,14 @@ func TestValidator_StateIDMismatch(t *testing.T) {
 	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
 	// Create a wrong state ID (not matching the public key + state hash)
-	wrongStateID := api.StateID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	wrongStateID := api.RequireNewImprintV2("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
 	commitment := &models.CertificationRequest{
 		StateID: wrongStateID,
 		CertificationData: models.CertificationData{
 			OwnerPredicate:  ownerPredicate,
-			SourceStateHash: CreateDataHashImprint(stateHashBytes),
-			TransactionHash: CreateDataHashImprint([]byte("hello")),
+			SourceStateHash: CreateDataHash(stateHashBytes),
+			TransactionHash: CreateDataHash([]byte("hello")),
 			Witness:         api.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
 		},
 	}
@@ -238,7 +235,7 @@ func TestValidator_InvalidSignatureFormat(t *testing.T) {
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 	stateHashData := []byte("test-state-hash")
-	sourceStateHashImprint := CreateDataHashImprint(stateHashData)
+	sourceStateHashImprint := CreateDataHash(stateHashData)
 	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHashImprint)
 	require.NoError(t, err)
 
@@ -247,7 +244,7 @@ func TestValidator_InvalidSignatureFormat(t *testing.T) {
 		CertificationData: models.CertificationData{
 			OwnerPredicate:  ownerPredicate,
 			SourceStateHash: sourceStateHashImprint,
-			TransactionHash: CreateDataHashImprint([]byte("hello")),
+			TransactionHash: CreateDataHash([]byte("hello")),
 			Witness:         api.HexBytes(make([]byte, 32)), // Invalid length - should be 65 bytes
 		},
 	}
@@ -269,7 +266,7 @@ func TestValidator_InvalidTransactionHashFormat(t *testing.T) {
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 	stateHashData := []byte("test-state-hash")
-	sourceStateHashImprint := CreateDataHashImprint(stateHashData)
+	sourceStateHashImprint := CreateDataHash(stateHashData)
 	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHashImprint)
 	require.NoError(t, err)
 
@@ -278,8 +275,8 @@ func TestValidator_InvalidTransactionHashFormat(t *testing.T) {
 		CertificationData: models.CertificationData{
 			OwnerPredicate:  ownerPredicate,
 			SourceStateHash: sourceStateHashImprint,
-			TransactionHash: api.TransactionHash("invalid-hex-transaction-hash-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"), // Invalid hex but 68 chars
-			Witness:         api.HexBytes(make([]byte, 65)),                                                         // Valid length signature
+			TransactionHash: api.ImprintV2("invalid-hex-transaction-hash-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"), // Invalid hex but 68 chars
+			Witness:         api.HexBytes(make([]byte, 65)),                                                   // Valid length signature
 		},
 	}
 
@@ -299,7 +296,7 @@ func TestValidator_SignatureVerificationFailed(t *testing.T) {
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 	stateHashData := []byte("test-state-hash")
-	sourceStateHashImprint := CreateDataHashImprint(stateHashData)
+	sourceStateHashImprint := CreateDataHash(stateHashData)
 	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHashImprint)
 	require.NoError(t, err)
 
@@ -316,7 +313,7 @@ func TestValidator_SignatureVerificationFailed(t *testing.T) {
 		CertificationData: models.CertificationData{
 			OwnerPredicate:  ownerPredicate,
 			SourceStateHash: sourceStateHashImprint,
-			TransactionHash: CreateDataHashImprint(transactionData), // Different from signed data
+			TransactionHash: CreateDataHash(transactionData), // Different from signed data
 			Witness:         api.HexBytes(signatureBytes),
 		},
 	}
@@ -344,23 +341,19 @@ func TestValidator_RealSecp256k1Data(t *testing.T) {
 
 	// Create state hash
 	sourceStateData := []byte("real-state-hash-test")
-	sourceStateHashImprint := CreateDataHashImprint(sourceStateData)
-	sourceStateHashImprintBytes, err := sourceStateHashImprint.Imprint()
-	require.NoError(t, err)
+	sourceStateHashImprint := CreateDataHash(sourceStateData)
 
 	// Create proper state ID
-	stateID, err := api.CreateStateIDFromImprint(ownerPredicate, sourceStateHashImprintBytes)
+	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHashImprint)
 	require.NoError(t, err)
 
 	// Create transaction data
 	transactionData := []byte("real-transaction-data-to-sign")
-	transactionHashImprint := CreateDataHashImprint(transactionData)
-	transactionHashImprintBytes, err := transactionHashImprint.Imprint()
-	require.NoError(t, err)
+	transactionHashImprint := CreateDataHash(transactionData)
 
 	// Sign the actual transaction hash bytes (what the validator expects)
 	signingService := NewSigningService()
-	sigDataHash := api.SigDataHash(sourceStateHashImprintBytes, transactionHashImprintBytes)
+	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionHashImprint)
 	signatureBytes, err := signingService.SignDataHash(sigDataHash, privateKeyBytes)
 	if err != nil {
 		t.Fatalf("Failed to sign transaction data: %v", err)

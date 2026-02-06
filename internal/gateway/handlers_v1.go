@@ -18,10 +18,10 @@ func (s *Server) handleSubmitCommitment(ctx context.Context, params json.RawMess
 	}
 
 	// Validate required fields
-	if req.RequestID == "" {
+	if req.RequestID == nil {
 		return nil, jsonrpc.NewValidationError("requestId is required")
 	}
-	if req.TransactionHash == "" {
+	if req.TransactionHash == nil {
 		return nil, jsonrpc.NewValidationError("transactionHash is required")
 	}
 
@@ -43,7 +43,7 @@ func (s *Server) handleGetInclusionProofV1(ctx context.Context, params json.RawM
 	}
 
 	// Validate required fields
-	if req.RequestID == "" {
+	if req.RequestID == nil {
 		return nil, jsonrpc.NewValidationError("requestId is required")
 	}
 

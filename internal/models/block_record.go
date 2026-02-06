@@ -60,7 +60,11 @@ func (brb *BlockRecordsBSON) FromBSON() (*BlockRecords, error) {
 
 	stateIDs := make([]api.StateID, len(brb.StateIDs))
 	for i, r := range brb.StateIDs {
-		stateIDs[i] = api.StateID(r)
+		id, err := api.NewImprintV2(r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode stateID %s: %w", r, err)
+		}
+		stateIDs[i] = id
 	}
 
 	return &BlockRecords{

@@ -92,9 +92,17 @@ func (arb *AggregatorRecordV1BSON) FromBSON() (*AggregatorRecordV1, error) {
 		return nil, fmt.Errorf("failed to parse authenticator: %w", err)
 	}
 
+	stateID, err := api.NewImprintV2(arb.RequestID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse requestID: %w", err)
+	}
+	transactionHash, err := api.NewImprintV2(arb.TransactionHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse transactionHash: %w", err)
+	}
 	return &AggregatorRecordV1{
-		RequestID:             api.RequestID(arb.RequestID),
-		TransactionHash:       api.TransactionHash(arb.TransactionHash),
+		RequestID:             stateID,
+		TransactionHash:       transactionHash,
 		Authenticator:         *authenticatorBSON,
 		AggregateRequestCount: aggregateRequestCount,
 		BlockNumber:           blockNumber,

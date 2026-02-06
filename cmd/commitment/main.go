@@ -168,7 +168,7 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 		panic(fmt.Sprintf("failed to read random state bytes: %v", err))
 	}
 
-	stateHashImprint := signing.CreateDataHashImprint(stateData)
+	stateHashImprint := signing.CreateDataHash(stateData)
 
 	requestID, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
 	if err != nil {
@@ -180,11 +180,8 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 		panic(fmt.Sprintf("failed to read random transaction bytes: %v", err))
 	}
 
-	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
-	transactionHashBytes, err := transactionHashImprint.DataBytes()
-	if err != nil {
-		panic(fmt.Sprintf("failed to extract transaction hash bytes: %v", err))
-	}
+	transactionHashImprint := signing.CreateDataHash(transactionData)
+	transactionHashBytes := transactionHashImprint.DataBytes()
 
 	signature, err := signing.NewSigningService().SignHash(transactionHashBytes, privateKey.Serialize())
 	if err != nil {
@@ -193,13 +190,13 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 
 	receipt := true
 	return &api.SubmitCommitmentRequest{
-		RequestID:       api.RequestID(requestID),
-		TransactionHash: api.TransactionHash(transactionHashImprint),
+		RequestID:       requestID,
+		TransactionHash: transactionHashImprint,
 		Authenticator: api.Authenticator{
 			Algorithm: "secp256k1",
-			PublicKey: api.HexBytes(publicKeyBytes),
-			Signature: api.HexBytes(signature),
-			StateHash: api.SourceStateHash(stateHashImprint),
+			PublicKey: publicKeyBytes,
+			Signature: signature,
+			StateHash: stateHashImprint,
 		},
 		Receipt: &receipt,
 	}

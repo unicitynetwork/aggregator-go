@@ -161,7 +161,7 @@ func (bs *BlockSyncer) updateSMTForBlock(ctx context.Context, blockRecord *model
 	leafIDs := make([]api.HexBytes, 0, len(blockRecord.StateIDs))
 	for _, stateID := range blockRecord.StateIDs {
 		// skip duplicates
-		key := string(stateID)
+		key := stateID.String()
 		if _, exists := uniqueStateIds[key]; exists {
 			continue
 		}

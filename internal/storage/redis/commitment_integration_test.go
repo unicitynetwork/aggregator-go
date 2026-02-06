@@ -433,13 +433,13 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_NoMessageLoss() {
 
 	// Store commitments with unique IDs using StoreBatch
 	numCommitments := 1000
-	storedIDs := make(map[api.StateID]bool)
+	storedIDs := make(map[string]bool)
 
 	commitments := make([]*models.CertificationRequest, numCommitments)
 	for i := 0; i < numCommitments; i++ {
 		commitment := createTestCommitment()
 		commitments[i] = commitment
-		storedIDs[commitment.StateID] = true
+		storedIDs[commitment.StateID.String()] = true
 	}
 
 	err := suite.storage.StoreBatch(ctx, commitments)
@@ -458,13 +458,13 @@ func (suite *RedisTestSuite) TestCommitmentPipeline_NoMessageLoss() {
 	}()
 
 	// Collect all streamed commitments
-	streamedIDs := make(map[api.StateID]bool)
+	streamedIDs := make(map[string]bool)
 	timeout := time.After(3 * time.Second)
 CollectLoop:
 	for {
 		select {
 		case c := <-commitmentChan:
-			streamedIDs[c.StateID] = true
+			streamedIDs[c.StateID.String()] = true
 			if len(streamedIDs) == numCommitments {
 				break CollectLoop
 			}
@@ -534,7 +534,7 @@ func (suite *RedisTestSuite) TestCommitmentStream_ConsumerGroupRecovery() {
 		select {
 		case c := <-commitmentChan:
 			received = c
-			return c.StateID == nextCommitment.StateID
+			return c.StateID.String() == nextCommitment.StateID.String()
 		default:
 			return false
 		}
@@ -807,11 +807,11 @@ func (suite *RedisTestSuite) TestGetByRequestIDs() {
 	require.Len(t, result, 3, "Should return exactly 3 commitments")
 
 	// Verify correct ones returned
-	require.NotNil(t, result[string(commitments[0].StateID)])
-	require.NotNil(t, result[string(commitments[2].StateID)])
-	require.NotNil(t, result[string(commitments[4].StateID)])
-	require.Nil(t, result[string(commitments[1].StateID)])
-	require.Nil(t, result[string(commitments[3].StateID)])
+	require.NotNil(t, result[commitments[0].StateID.String()])
+	require.NotNil(t, result[commitments[2].StateID.String()])
+	require.NotNil(t, result[commitments[4].StateID.String()])
+	require.Nil(t, result[commitments[1].StateID.String()])
+	require.Nil(t, result[commitments[3].StateID.String()])
 }
 
 // TestGetByRequestIDs_WithMissingIDs verifies graceful handling of missing IDs.
@@ -938,5 +938,5 @@ func (suite *RedisTestSuite) TestGetByRequestIDs_FindsAcrossMultipleBatches() {
 	result, err := suite.storage.GetByRequestIDs(ctx, requestIDs)
 	require.NoError(t, err)
 	require.Len(t, result, 1, "Should find the commitment in the last batch")
-	require.NotNil(t, result[string(commitments[totalMessages-1].StateID)])
+	require.NotNil(t, result[commitments[totalMessages-1].StateID.String()])
 }

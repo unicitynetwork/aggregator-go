@@ -74,7 +74,7 @@ func TestAddLeaves_DebugInvalidPath(t *testing.T) {
 	}
 
 	{
-		req, err := api.NewImprintHexString("00006df936060e07cad29086335623b2a05afef0b05f77dcc27f6e5065abce6f061d")
+		req, err := api.NewImprintV2("00006df936060e07cad29086335623b2a05afef0b05f77dcc27f6e5065abce6f061d")
 		require.NoError(t, err, "Failed to create state ID")
 		path, err := req.GetPath()
 		require.NoError(t, err)

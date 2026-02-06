@@ -33,12 +33,7 @@ func generateCommitment(index int) (*models.CertificationRequest, error) {
 			return nil, fmt.Errorf("failed to generate random state data: %w", err)
 		}
 	}
-	sourceStateHash := signing.CreateDataHashImprint(stateData)
-	sourceStateHashImprint, err := sourceStateHash.Imprint()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create source state hash imprint: %w", err)
-	}
-
+	sourceStateHash := signing.CreateDataHash(stateData)
 	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create state ID: %w", err)
@@ -53,14 +48,9 @@ func generateCommitment(index int) (*models.CertificationRequest, error) {
 			return nil, fmt.Errorf("failed to generate random transaction data: %w", err)
 		}
 	}
-	transactionHash := signing.CreateDataHashImprint(transactionData)
-	transactionHashImprint, err := transactionHash.Bytes()
-	if err != nil {
-		return nil, fmt.Errorf("failed to extract transaction hash imprint: %w", err)
-	}
-
+	transactionHash := signing.CreateDataHash(transactionData)
 	signingService := signing.NewSigningService()
-	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionHashImprint)
+	sigDataHash := api.SigDataHash(sourceStateHash, transactionHash)
 	signatureBytes, err := signingService.SignDataHash(sigDataHash, privateKey.Serialize())
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign transaction: %w", err)
