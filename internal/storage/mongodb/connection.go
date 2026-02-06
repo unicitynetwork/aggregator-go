@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
@@ -59,6 +60,11 @@ func NewStorage(ctx context.Context, config config.Config) (*Storage, error) {
 		return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
 	}
 
+	// Verify MongoDB is running as a replica set (required for transactions)
+	if err := verifyReplicaSet(connectCtx, client); err != nil {
+		return nil, err
+	}
+
 	database := client.Database(cfg.Database)
 
 	storage := &Storage{
@@ -90,6 +96,25 @@ func NewStorage(ctx context.Context, config config.Config) (*Storage, error) {
 }
 
 func (s *Storage) Initialize(ctx context.Context) error {
+	return nil
+}
+
+// verifyReplicaSet checks if MongoDB is running as a replica set.
+// This is required for the aggregator to function correctly (transactions, change streams, etc.).
+// Uses the unprivileged 'hello' command which doesn't require admin access.
+func verifyReplicaSet(ctx context.Context, client *mongo.Client) error {
+	var result bson.M
+	if err := client.Database("admin").RunCommand(ctx, bson.D{{Key: "hello", Value: 1}}).Decode(&result); err != nil {
+		return fmt.Errorf("failed to run hello command: %w", err)
+	}
+
+	// Check if 'setName' field exists - this indicates a replica set
+	if _, ok := result["setName"]; !ok {
+		return fmt.Errorf("MongoDB is not running as a replica set. " +
+			"The aggregator requires MongoDB to be configured as a replica set for transactions and change streams. " +
+			"Please start MongoDB with --replSet flag and initialize the replica set")
+	}
+
 	return nil
 }
 

@@ -105,7 +105,7 @@ docker-run-ha-clean:
 	@echo "Rebuilding services with clean state and HA enabled as current user..."
 	@docker compose -f ha-compose.yml down
 	@rm -rf ./data
-	@mkdir -p ./data/genesis/root ./data/genesis-root ./data/mongodb_data ./data/redis_data && chmod -R 777 ./data
+	@mkdir -p ./data/genesis/root ./data/genesis-root ./data/mongodb_data/mongo1 ./data/mongodb_data/mongo2 ./data/mongodb_data/mongo3 ./data/redis_data && chmod -R 777 ./data
 	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose -f ha-compose.yml up --force-recreate -d --build
 	@echo "Services rebuilt with user UID=$$(id -u):$$(id -g)"
 
