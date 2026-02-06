@@ -405,6 +405,11 @@ func TestPreCollectionMechanism(t *testing.T) {
 		// This will trigger ErrLeafModification when trying to add as batch
 		modifiedCommitment := *commitment1
 		modifiedCommitment.CertificationData.TransactionHash = commitment2.CertificationData.TransactionHash // Different hash
+		originalLeafValue, err := commitment1.LeafValue()
+		require.NoError(t, err)
+		modifiedLeafValue, err := modifiedCommitment.LeafValue()
+		require.NoError(t, err)
+		require.NotEqual(t, originalLeafValue, modifiedLeafValue, "modified commitment must produce a different leaf value")
 
 		// Now try to add a batch with: modifiedCommitment (will fail), commitment2 (valid)
 		batch := []*models.CertificationRequest{&modifiedCommitment, commitment2}
@@ -412,8 +417,12 @@ func TestPreCollectionMechanism(t *testing.T) {
 		require.NoError(t, err) // Should succeed overall (fallback handles errors)
 
 		// Should have commitment1 and commitment2 (modifiedCommitment was skipped)
-		// Total: 2 commitments
+		// Total: 2 commitments and 2 leaves
+		assert.Len(t, rm.preCollectedLeaves, 2)
 		assert.Len(t, rm.preCollectedCommitments, 2)
+		assert.Equal(t, len(rm.preCollectedLeaves), len(rm.preCollectedCommitments))
+		assert.True(t, rm.preCollectedCommitments[0] == commitment1, "first commitment should remain the original one")
+		assert.True(t, rm.preCollectedCommitments[1] == commitment2, "second commitment should be the new valid one")
 	})
 }
 
