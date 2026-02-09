@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -45,6 +46,9 @@ func main() {
 	fmt.Printf("   State ID: %s\n", req.StateID)
 	fmt.Printf("   Owner predicate: %+v\n", req.CertificationData.OwnerPredicate)
 	fmt.Printf("   Witness: %x\n", req.CertificationData.Witness)
+
+	marshal, _ := types.Cbor.Marshal(req)
+	fmt.Printf("requst: %x\n", marshal)
 
 	// Example 2: Submit the certification request (commented out since server might not be running)
 	// fmt.Println("\n2. Submitting certification request...")
@@ -109,7 +113,6 @@ func createValidCertificationRequest() *api.CertificationRequest {
 	return &api.CertificationRequest{
 		StateID:           stateID,
 		CertificationData: *certData,
-		Receipt:           true,
 	}
 }
 

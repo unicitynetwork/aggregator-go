@@ -300,11 +300,9 @@ func generateCommitmentRequest() *api.CertificationRequest {
 		panic(fmt.Sprintf("Failed to sign transaction: %v", err))
 	}
 
-	// Create receipt flag
 	return &api.CertificationRequest{
 		StateID:           stateID,
 		CertificationData: *certData,
-		Receipt:           false,
 	}
 }
 

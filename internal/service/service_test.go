@@ -484,7 +484,6 @@ func createTestCertificationRequests(t *testing.T, count int) []*api.Certificati
 		requests[i] = &api.CertificationRequest{
 			StateID:           stateID,
 			CertificationData: *certData,
-			Receipt:           false,
 		}
 	}
 

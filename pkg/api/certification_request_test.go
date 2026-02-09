@@ -30,7 +30,7 @@ func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
 		stateID, err := certData.CreateStateID()
 		require.NoError(t, err)
 
-		// Test without receipt
+		// Test serialization
 		request1 := CertificationRequest{
 			StateID:           stateID,
 			CertificationData: certData,
@@ -45,34 +45,6 @@ func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
 		var decodedRequest1 CertificationRequest
 		require.NoError(t, types.Cbor.Unmarshal(cborBytes1, &decodedRequest1))
 		require.Equal(t, request1, decodedRequest1)
-
-		// Test with receipt = true
-		request2 := CertificationRequest{
-			StateID:           stateID,
-			CertificationData: certData,
-			Receipt:           true,
-		}
-
-		cborBytes2, err := types.Cbor.Marshal(request2)
-		require.NoError(t, err)
-
-		var decodedRequest2 CertificationRequest
-		require.NoError(t, types.Cbor.Unmarshal(cborBytes2, &decodedRequest2))
-		assert.True(t, decodedRequest2.Receipt)
-
-		// Test with receipt = false
-		request3 := CertificationRequest{
-			StateID:           stateID,
-			CertificationData: certData,
-			Receipt:           false,
-		}
-
-		cborBytes3, err := types.Cbor.Marshal(request3)
-		require.NoError(t, err)
-
-		var decodedRequest3 CertificationRequest
-		require.NoError(t, types.Cbor.Unmarshal(cborBytes3, &decodedRequest3))
-		assert.False(t, decodedRequest3.Receipt)
 	})
 
 	t.Run("should validate CBOR structure correctly", func(t *testing.T) {
@@ -92,7 +64,6 @@ func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
 				TransactionHash: transactionHash,
 				Witness:         witness,
 			},
-			Receipt: true,
 		}
 
 		// Test round-trip
@@ -106,7 +77,6 @@ func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
 		assert.Equal(t, request.StateID, roundTripRequest.StateID)
 		assert.Equal(t, request.CertificationData.OwnerPredicate, roundTripRequest.CertificationData.OwnerPredicate)
 		assert.Equal(t, request.CertificationData.TransactionHash, roundTripRequest.CertificationData.TransactionHash)
-		assert.Equal(t, request.Receipt, roundTripRequest.Receipt)
 	})
 
 	t.Run("should handle invalid CBOR gracefully", func(t *testing.T) {
@@ -126,7 +96,7 @@ func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
 
 func TestCertificationResponse_SerializeAndValidate(t *testing.T) {
 	t.Run("should encode and decode JSON to exactly same object", func(t *testing.T) {
-		// Test simple success response without receipt
+		// Test simple success response
 		response1 := &CertificationResponse{
 			Status: "SUCCESS",
 		}
@@ -149,7 +119,6 @@ func TestCertificationResponse_SerializeAndValidate(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Equal(t, "SUCCESS", decodedResponse1.Status)
-		assert.Nil(t, decodedResponse1.Receipt)
 
 		// Test error response
 		response2 := &CertificationResponse{
@@ -167,49 +136,6 @@ func TestCertificationResponse_SerializeAndValidate(t *testing.T) {
 			"status": "CERTIFICATION_DATA_VERIFICATION_FAILED",
 		}
 		assert.Equal(t, expectedJSON2, actualJSON2)
-
-		// Test response with receipt
-		publicKeyHex := "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-		signatureHex := "a0b37f8fba683cc68f6574cd43b39f0343a50008bf6ccea9d13231d9e7e2e1e411edc8d307254296264aebfc3dc76cd8b668373a072fd64665b50000e9fcce5201"
-
-		publicKeyBytes, err := hex.DecodeString(publicKeyHex)
-		require.NoError(t, err)
-
-		signatureBytes, err := hex.DecodeString(signatureHex)
-		require.NoError(t, err)
-
-		receipt := &ReceiptV2{
-			PublicKey: NewHexBytes(publicKeyBytes),
-			Signature: NewHexBytes(signatureBytes),
-		}
-
-		response3 := &CertificationResponse{
-			Status:  "SUCCESS",
-			Receipt: receipt,
-		}
-
-		jsonBytes3, err := json.Marshal(response3)
-		require.NoError(t, err)
-
-		var actualJSON3 map[string]interface{}
-		err = json.Unmarshal(jsonBytes3, &actualJSON3)
-		require.NoError(t, err)
-
-		assert.Equal(t, "SUCCESS", actualJSON3["status"])
-		assert.NotNil(t, actualJSON3["receipt"])
-
-		receiptJSON, ok := actualJSON3["receipt"].(map[string]interface{})
-		require.True(t, ok)
-		assert.Equal(t, publicKeyHex, receiptJSON["publicKey"])
-		assert.Equal(t, signatureHex, receiptJSON["signature"])
-
-		// Test deserialization with receipt
-		var decodedResponse3 CertificationResponse
-		err = json.Unmarshal(jsonBytes3, &decodedResponse3)
-		require.NoError(t, err)
-
-		assert.Equal(t, "SUCCESS", decodedResponse3.Status)
-		assert.NotNil(t, decodedResponse3.Receipt)
 	})
 
 	t.Run("should validate JSON structure correctly", func(t *testing.T) {
@@ -223,37 +149,15 @@ func TestCertificationResponse_SerializeAndValidate(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "SUCCESS", response1.Status)
 
-		// Valid JSON structure 2 with receipt
-		validJSON2 := `{
-			"status": "CERTIFICATION_DATA_VERIFICATION_FAILED",
-			"receipt": {
-				"publicKey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-				"witness": "a0b37f8fba683cc68f6574cd43b39f0343a50008bf6ccea9d13231d9e7e2e1e411edc8d307254296264aebfc3dc76cd8b668373a072fd64665b50000e9fcce5201",
-				"request": {
-					"service": "aggregator",
-					"method": "certification_request",
-					"stateId": "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40",
-					"transactionHash": "00010000000000000000000000000000000000000000000000000000000000000000",
-					"sourceStateHash": "00000000000000000000000000000000000000000000000000000000000000000000"
-				}
-			}
-		}`
-
-		var response2 CertificationResponse
-		err = json.Unmarshal([]byte(validJSON2), &response2)
-		require.NoError(t, err)
-		assert.Equal(t, "CERTIFICATION_DATA_VERIFICATION_FAILED", response2.Status)
-		assert.NotNil(t, response2.Receipt)
-
 		// Test round-trip
-		jsonBytes, err := json.Marshal(response2)
+		jsonBytes, err := json.Marshal(response1)
 		require.NoError(t, err)
 
 		var roundTripResponse CertificationResponse
 		err = json.Unmarshal(jsonBytes, &roundTripResponse)
 		require.NoError(t, err)
 
-		assert.Equal(t, response2.Status, roundTripResponse.Status)
+		assert.Equal(t, response1.Status, roundTripResponse.Status)
 	})
 
 	t.Run("should handle invalid JSON gracefully", func(t *testing.T) {
@@ -300,43 +204,6 @@ func TestCertificationResponse_SerializeAndValidate(t *testing.T) {
 
 			assert.Equal(t, status, decodedResponse.Status)
 		}
-	})
-
-	t.Run("should handle receipt serialization", func(t *testing.T) {
-		// Test receipt with all fields
-		receipt := &ReceiptV2{
-			PublicKey: NewHexBytes([]byte{0x02, 0x79}), // shortened for test
-			Signature: NewHexBytes([]byte{0xa0, 0xb3}), // shortened for test
-		}
-
-		response := &CertificationResponse{
-			Status:  "SUCCESS",
-			Receipt: receipt,
-		}
-
-		// Test JSON serialization
-		jsonBytes, err := json.Marshal(response)
-		require.NoError(t, err)
-
-		var actualJSON map[string]interface{}
-		err = json.Unmarshal(jsonBytes, &actualJSON)
-		require.NoError(t, err)
-
-		assert.Equal(t, "SUCCESS", actualJSON["status"])
-		assert.NotNil(t, actualJSON["receipt"])
-
-		receiptJSON, ok := actualJSON["receipt"].(map[string]interface{})
-		require.True(t, ok)
-		assert.Equal(t, "0279", receiptJSON["publicKey"])
-		assert.Equal(t, "a0b3", receiptJSON["signature"])
-
-		// Test deserialization preserves all fields
-		var decodedResponse CertificationResponse
-		err = json.Unmarshal(jsonBytes, &decodedResponse)
-		require.NoError(t, err)
-
-		assert.Equal(t, response.Status, decodedResponse.Status)
-		assert.NotNil(t, decodedResponse.Receipt)
 	})
 }
 

@@ -20,9 +20,6 @@ type CertificationRequest struct {
 	// CertificationData contains the necessary cryptographic data needed for the CertificationRequest.
 	CertificationData CertificationData
 
-	// Receipt optional flag that if set to true includes the receipt data in the CertificationResponse.
-	Receipt bool
-
 	AggregateRequestCount uint64
 }
 
@@ -46,8 +43,7 @@ func (c *CertificationRequest) UnmarshalJSON(data []byte) error {
 
 // CertificationResponse represents the certification_request JSON-RPC response.
 type CertificationResponse struct {
-	Status  string     `json:"status"`
-	Receipt *ReceiptV2 `json:"receipt,omitempty"`
+	Status string `json:"status"`
 }
 
 // CertificationData represents the necessary cryptographic data needed for a state transition CertificationRequest.

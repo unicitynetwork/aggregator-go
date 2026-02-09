@@ -20,7 +20,6 @@ curl -X POST http://localhost:3000/ \
       "sourceStateHash": "0000026581b5546639dc5110634df8cbbdf4150f3583fc54a0db98ef413574396dd0",
       "transactionHash": "0000d89cdfd6716717577adeb4149e22646cca3b4daf76632d35e97bd19642f8478a"
     },
-    "receipt": true
   },
   "id": 1
 }' | jq .

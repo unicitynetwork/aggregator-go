@@ -310,25 +310,7 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 
 	as.logger.WithContext(ctx).Info("CertificationData submitted successfully", "stateId", req.StateID)
 
-	response := &api.CertificationResponse{
-		Status: "SUCCESS",
-	}
-
-	// Generate receipt if requested
-	if req.Receipt {
-		if as.receiptSigner == nil {
-			as.logger.WithContext(ctx).Warn("Receipt requested but receipt signer not configured", "stateId", req.StateID)
-		} else {
-			receipt, err := as.receiptSigner.SignReceiptV2(req.CertificationData)
-			if err != nil {
-				as.logger.WithContext(ctx).Error("Failed to sign receipt", "requestId", req.StateID, "error", err.Error())
-			} else {
-				response.Receipt = receipt
-			}
-		}
-	}
-
-	return response, nil
+	return &api.CertificationResponse{Status: "SUCCESS"}, nil
 }
 
 // GetInclusionProofV1 retrieves inclusion proof for a commitment
