@@ -233,6 +233,9 @@ type BFTConfig struct {
 	HeartbeatInterval time.Duration `mapstructure:"heartbeat_interval"`
 	// InactivityTimeout duration of inactivity after which a new handshake must be sent.
 	InactivityTimeout time.Duration `mapstructure:"inactivity_timeout"`
+
+	// BFT node REST api address
+	RPCAddress string `mapstructure:"rpc_address"`
 }
 
 func (c *BFTConfig) Validate() error {
@@ -353,6 +356,7 @@ func Load() (*Config, error) {
 	config.BFT = BFTConfig{
 		Enabled:                    getEnvBoolOrDefault("BFT_ENABLED", true),
 		Address:                    getEnvOrDefault("BFT_ADDRESS", "/ip4/0.0.0.0/tcp/9000"),
+		RPCAddress:                 getEnvOrDefault("BFT_RPC_ADDRESS", "http://127.0.0.1:8002"),
 		AnnounceAddresses:          strings.Split(getEnvOrDefault("BFT_ANNOUNCE_ADDRESSES", ""), ","),
 		BootstrapAddresses:         strings.Split(getEnvOrDefault("BFT_BOOTSTRAP_ADDRESSES", ""), ","),
 		BootstrapConnectRetry:      getEnvIntOrDefault("BFT_BOOTSTRAP_CONNECT_RETRY", 3),

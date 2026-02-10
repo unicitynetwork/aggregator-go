@@ -45,10 +45,7 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 			continue
 		}
 
-		leaves = append(leaves, &smt.Leaf{
-			Path:  path,
-			Value: leafValue,
-		})
+		leaves = append(leaves, smt.NewLeaf(path, leafValue))
 		validCommitments = append(validCommitments, commitment)
 	}
 
@@ -379,7 +376,7 @@ func (rm *RoundManager) addBatchToPreCollection(ctx context.Context, commitments
 			continue
 		}
 
-		leaves = append(leaves, &smt.Leaf{Path: path, Value: leafValue})
+		leaves = append(leaves, smt.NewLeaf(path, leafValue))
 		validCommitments = append(validCommitments, commitment)
 	}
 

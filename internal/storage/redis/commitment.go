@@ -247,7 +247,7 @@ func (cs *CommitmentStorage) storeBatchSync(ctx context.Context, commitments []*
 		pipe.XAdd(ctx, &redis.XAddArgs{
 			Stream: cs.streamName,
 			Values: map[string]interface{}{
-				"stateId": string(commitment.StateID),
+				"stateId": commitment.StateID.String(),
 				"data":    serializedCommitments[i],
 			},
 		})
@@ -316,7 +316,7 @@ func (cs *CommitmentStorage) StoreBatch(ctx context.Context, commitments []*mode
 		pipe.XAdd(ctx, &redis.XAddArgs{
 			Stream: cs.streamName,
 			Values: map[string]interface{}{
-				"stateId": string(commitment.StateID),
+				"stateId": commitment.StateID.String(),
 				"data":    serializedCommitments[i],
 			},
 		})
@@ -414,7 +414,7 @@ func (cs *CommitmentStorage) GetByRequestIDs(ctx context.Context, requestIDs []a
 	// Build lookup set
 	needed := make(map[string]bool, len(requestIDs))
 	for _, reqID := range requestIDs {
-		needed[string(reqID)] = true
+		needed[reqID.String()] = true
 	}
 
 	result := make(map[string]*models.CertificationRequest, len(requestIDs))
@@ -439,7 +439,7 @@ func (cs *CommitmentStorage) GetByRequestIDs(ctx context.Context, requestIDs []a
 				continue // Skip malformed messages
 			}
 
-			reqIDStr := string(commitment.StateID)
+			reqIDStr := commitment.StateID.String()
 			if needed[reqIDStr] {
 				commitment.StreamID = msg.ID
 				result[reqIDStr] = commitment

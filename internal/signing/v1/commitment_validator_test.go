@@ -24,7 +24,7 @@ func TestValidator_Success(t *testing.T) {
 
 	// Create test state hash
 	stateHashData := []byte("test-state-hash")
-	stateHashImprint := signing.CreateDataHashImprint(stateHashData)
+	stateHashImprint := CreateDataHashImprint(stateHashData)
 
 	// Create request ID using the full imprint bytes (same as what validator will use)
 	requestID, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
@@ -32,10 +32,10 @@ func TestValidator_Success(t *testing.T) {
 
 	// Create transaction data and sign it
 	transactionData := []byte("test-transaction-data")
-	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
+	transactionHashImprint := CreateDataHashImprint(transactionData)
 
 	// Extract the transaction hash bytes from the imprint (what the validator will use for verification)
-	transactionHashBytes, err := transactionHashImprint.DataBytes()
+	transactionHashBytes := transactionHashImprint.DataBytes()
 	require.NoError(t, err, "Failed to extract transaction hash from imprint")
 
 	// Sign the actual transaction hash bytes (what the validator expects)
@@ -66,13 +66,13 @@ func TestValidator_UnsupportedAlgorithm(t *testing.T) {
 	validator := newDefaultCommitmentValidator()
 
 	commitment := &v1.Commitment{
-		RequestID:       api.RequestID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
-		TransactionHash: api.TransactionHash("000048656c6c6f576f726c640123456789abcdef0123456789abcdef0123456789abcdef"),
+		RequestID:       api.RequireNewImprintV2("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+		TransactionHash: api.RequireNewImprintV2("000048656c6c6f576f726c640123456789abcdef0123456789abcdef0123456789abcdef"),
 		Authenticator: v1.Authenticator{
 			Algorithm: "unsupported-algorithm",
 			PublicKey: api.HexBytes("test-public-key"),
 			Signature: api.HexBytes("test-signature"),
-			StateHash: signing.CreateDataHashImprint([]byte("test-state-hash")),
+			StateHash: CreateDataHashImprint([]byte("test-state-hash")),
 		},
 	}
 
@@ -86,13 +86,13 @@ func TestValidator_InvalidPublicKeyFormat(t *testing.T) {
 	validator := newDefaultCommitmentValidator()
 
 	commitment := &v1.Commitment{
-		RequestID:       api.RequestID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
-		TransactionHash: signing.CreateDataHashImprint([]byte("hello")),
+		RequestID:       api.RequireNewImprintV2("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+		TransactionHash: CreateDataHashImprint([]byte("hello")),
 		Authenticator: v1.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
 			PublicKey: api.HexBytes("invalid-hex-public-key"), // Invalid hex
 			Signature: api.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
-			StateHash: signing.CreateDataHashImprint([]byte("test-state")),
+			StateHash: CreateDataHashImprint([]byte("test-state")),
 		},
 	}
 
@@ -112,13 +112,13 @@ func TestValidator_InvalidStateHashFormat(t *testing.T) {
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 
 	commitment := &v1.Commitment{
-		RequestID:       api.RequestID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
-		TransactionHash: signing.CreateDataHashImprint([]byte("hello")),
+		RequestID:       api.RequireNewImprintV2("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+		TransactionHash: CreateDataHashImprint([]byte("hello")),
 		Authenticator: v1.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
 			PublicKey: api.HexBytes(publicKeyBytes),
 			Signature: api.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
-			StateHash: api.ImprintHexString("invalid-hex-state-hash"), // Invalid hex
+			StateHash: api.ImprintV2([]byte("invalid-hex-state-hash")), // Invalid hex
 		},
 	}
 
@@ -139,16 +139,16 @@ func TestValidator_RequestIDMismatch(t *testing.T) {
 	stateHashBytes := []byte("test-state-hash")
 
 	// Create a wrong request ID (not matching the public key + state hash)
-	wrongRequestID := api.RequestID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	wrongRequestID := api.RequireNewImprintV2("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
 	commitment := &v1.Commitment{
 		RequestID:       wrongRequestID,
-		TransactionHash: signing.CreateDataHashImprint([]byte("hello")),
+		TransactionHash: CreateDataHashImprint([]byte("hello")),
 		Authenticator: v1.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
 			PublicKey: api.HexBytes(publicKeyBytes),
 			Signature: api.HexBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"),
-			StateHash: signing.CreateDataHashImprint(stateHashBytes),
+			StateHash: CreateDataHashImprint(stateHashBytes),
 		},
 	}
 
@@ -246,13 +246,13 @@ func TestValidator_InvalidSignatureFormat(t *testing.T) {
 	privateKey, _ := btcec.NewPrivateKey()
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 	stateHashData := []byte("test-state-hash")
-	stateHashImprint := signing.CreateDataHashImprint(stateHashData)
-	stateHashImprintBytes, _ := stateHashImprint.Bytes()
+	stateHashImprint := CreateDataHashImprint(stateHashData)
+	stateHashImprintBytes := stateHashImprint.Bytes()
 	requestID, _ := api.CreateRequestIDFromBytes(publicKeyBytes, stateHashImprintBytes)
 
 	commitment := &v1.Commitment{
 		RequestID:       requestID,
-		TransactionHash: signing.CreateDataHashImprint([]byte("hello")),
+		TransactionHash: CreateDataHashImprint([]byte("hello")),
 		Authenticator: v1.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
 			PublicKey: api.HexBytes(publicKeyBytes),
@@ -276,13 +276,13 @@ func TestValidator_InvalidTransactionHashFormat(t *testing.T) {
 	privateKey, _ := btcec.NewPrivateKey()
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 	stateHashData := []byte("test-state-hash")
-	stateHashImprint := signing.CreateDataHashImprint(stateHashData)
-	stateHashImprintBytes, _ := stateHashImprint.Bytes()
+	stateHashImprint := CreateDataHashImprint(stateHashData)
+	stateHashImprintBytes := stateHashImprint.Bytes()
 	requestID, _ := api.CreateRequestIDFromBytes(publicKeyBytes, stateHashImprintBytes)
 
 	commitment := &v1.Commitment{
 		RequestID:       requestID,
-		TransactionHash: api.TransactionHash("invalid-hex-transaction-hash-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"), // Invalid hex but 68 chars
+		TransactionHash: api.ImprintV2([]byte("invalid-hex-transaction-hash-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")), // Invalid hex but 68 chars
 		Authenticator: v1.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
 			PublicKey: api.HexBytes(publicKeyBytes),
@@ -306,8 +306,8 @@ func TestValidator_SignatureVerificationFailed(t *testing.T) {
 	privateKey, _ := btcec.NewPrivateKey()
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 	stateHashData := []byte("test-state-hash")
-	stateHashImprint := signing.CreateDataHashImprint(stateHashData)
-	stateHashImprintBytes, _ := stateHashImprint.Bytes()
+	stateHashImprint := CreateDataHashImprint(stateHashData)
+	stateHashImprintBytes := stateHashImprint.Bytes()
 	requestID, _ := api.CreateRequestIDFromBytes(publicKeyBytes, stateHashImprintBytes)
 
 	// Create transaction data
@@ -320,7 +320,7 @@ func TestValidator_SignatureVerificationFailed(t *testing.T) {
 
 	commitment := &v1.Commitment{
 		RequestID:       requestID,
-		TransactionHash: signing.CreateDataHashImprint(transactionData), // Different from signed data
+		TransactionHash: CreateDataHashImprint(transactionData), // Different from signed data
 		Authenticator: v1.Authenticator{
 			Algorithm: AlgorithmSecp256k1,
 			PublicKey: api.HexBytes(publicKeyBytes),
@@ -351,23 +351,18 @@ func TestValidator_RealSecp256k1Data(t *testing.T) {
 
 	// Create state hash
 	stateHashData := []byte("real-state-hash-test")
-	stateHashImprint := signing.CreateDataHashImprint(stateHashData)
+	stateHashImprint := CreateDataHashImprint(stateHashData)
 
 	// Create proper request ID
-	stateHashImprintBytes, _ := stateHashImprint.Bytes()
+	stateHashImprintBytes := stateHashImprint.Bytes()
 	requestID, _ := api.CreateRequestIDFromBytes(publicKeyBytes, stateHashImprintBytes)
 
 	// Create transaction data
 	transactionData := []byte("real-transaction-data-to-sign")
-	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
-
-	// Extract the transaction hash bytes from the imprint (what the validator will use for verification)
-	transactionHashBytes, err := transactionHashImprint.DataBytes()
-	if err != nil {
-		t.Fatalf("Failed to extract transaction hash from imprint: %v", err)
-	}
+	transactionHashImprint := CreateDataHashImprint(transactionData)
 
 	// Sign the actual transaction hash bytes (what the validator expects)
+	transactionHashBytes := transactionHashImprint.DataBytes()
 	signingService := signing.NewSigningService()
 	signatureBytes, err := signingService.SignHash(transactionHashBytes, privateKeyBytes)
 	if err != nil {

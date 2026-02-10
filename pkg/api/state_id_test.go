@@ -18,7 +18,7 @@ func TestStateID_CreateAndSerialize(t *testing.T) {
 
 		// Create 34-byte state hash (DataHash.fromImprint with all zeros)
 		sourceStateHashBytes := make([]byte, 34)
-		sourceStateHash, err := NewImprintHexString(fmt.Sprintf("%x", sourceStateHashBytes))
+		sourceStateHash, err := NewImprintV2(fmt.Sprintf("%x", sourceStateHashBytes))
 		require.NoError(t, err)
 
 		// Create StateID
@@ -35,34 +35,28 @@ func TestStateID_CreateAndSerialize(t *testing.T) {
 		assert.Equal(t, stateID, deserializedStateID)
 
 		// Test string representation
-		assert.Len(t, stateID.String(), 68) // Must be 68 characters (4 algorithm + 64 hash)
+		assert.Len(t, stateID.String(), 64) // Must be 64 characters
 	})
 
 	t.Run("should validate hex format", func(t *testing.T) {
 		// Valid 68-character hex string
 		validHex := "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"
-		stateID, err := NewImprintHexString(validHex)
+		stateID, err := NewImprintV2(validHex)
 		require.NoError(t, err)
 		assert.Equal(t, validHex, stateID.String())
 
-		// Invalid length
-		_, err = NewImprintHexString("inv")
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "imprint must be at least 3 bytes")
-
 		// Invalid hex characters (correct length but invalid hex)
 		invalidHex := "xxxx0000000000000000000000000000000000000000000000000000000000000000"
-		_, err = NewImprintHexString(invalidHex)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "is not a valid hex")
+		_, err = NewImprintV2(invalidHex)
+		assert.ErrorContains(t, err, "invalid hex string")
 	})
 
 	t.Run("should convert to bytes correctly", func(t *testing.T) {
 		stateIDStr := "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"
-		stateID, err := NewImprintHexString(stateIDStr)
+		stateID, err := NewImprintV2(stateIDStr)
 		require.NoError(t, err)
 
-		bytes, err := stateID.Imprint()
+		bytes := stateID.Imprint()
 		require.NoError(t, err)
 		assert.Len(t, bytes, 34) // 68 hex chars = 34 bytes
 

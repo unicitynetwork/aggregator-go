@@ -107,16 +107,8 @@ func (v *CommitmentValidator) ValidateCommitment(commitment *v1.Commitment) Vali
 		}
 	}
 
-	// 3. Parse and validate state hash (should be DataHash imprint: algorithm + data)
-	stateHashImprint, err := commitment.Authenticator.StateHash.Bytes()
-	if err != nil {
-		return ValidationResult{
-			Status: ValidationStatusInvalidStateHashFormat,
-			Error:  fmt.Errorf("failed to decode state hash imprint: %w", err),
-		}
-	}
-
 	// Validate state hash imprint format (minimum 3 bytes: 2 for algorithm + 1 for data)
+	stateHashImprint := commitment.Authenticator.StateHash.Bytes()
 	if len(stateHashImprint) < 3 {
 		return ValidationResult{
 			Status: ValidationStatusInvalidStateHashFormat,
@@ -166,17 +158,8 @@ func (v *CommitmentValidator) ValidateCommitment(commitment *v1.Commitment) Vali
 		}
 	}
 
-	// 6. Parse transaction hash (should be DataHash imprint: algorithm + data)
-	// TransactionHash is a string type, so we need to decode it
-	transactionHashImprint, err := hex.DecodeString(string(commitment.TransactionHash))
-	if err != nil {
-		return ValidationResult{
-			Status: ValidationStatusInvalidTransactionHashFormat,
-			Error:  fmt.Errorf("failed to decode transaction hash: %w", err),
-		}
-	}
-
 	// Validate transaction hash imprint format (minimum 3 bytes: 2 for algorithm + 1 for data)
+	transactionHashImprint := commitment.TransactionHash
 	if len(transactionHashImprint) < 3 {
 		return ValidationResult{
 			Status: ValidationStatusInvalidTransactionHashFormat,
@@ -273,7 +256,7 @@ func verifyShardID(commitmentID string, shardBitmask int) (bool, error) {
 // CreateDataHashImprint creates a DataHash imprint in the Unicity format:
 // 2 bytes algorithm (big-endian) + actual hash bytes
 // For SHA256: algorithm = 0, so prefix is [0x00, 0x00]
-func CreateDataHashImprint(data []byte) api.ImprintHexString {
+func CreateDataHashImprint(data []byte) api.ImprintV2 {
 	// Hash the data with SHA256
 	hash := sha256.Sum256(data)
 
@@ -283,5 +266,5 @@ func CreateDataHashImprint(data []byte) api.ImprintHexString {
 	imprint[1] = 0x00 // SHA256 algorithm low byte
 	copy(imprint[2:], hash[:])
 
-	return api.ImprintHexString(hex.EncodeToString(imprint))
+	return imprint
 }

@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 
@@ -126,15 +127,9 @@ type GetBlockCommitmentsResponse struct {
 	Commitments []*AggregatorRecordV1 `json:"commitments"`
 }
 
-type RequestID = ImprintHexString
-
 // CreateRequestID creates a RequestID from public key and state hash
-func CreateRequestID(publicKey []byte, stateHash ImprintHexString) (RequestID, error) {
-	stateHashBytes, err := stateHash.Imprint()
-	if err != nil {
-		return "", fmt.Errorf("failed to convert state hash to bytes: %w", err)
-	}
-	return CreateRequestIDFromBytes(publicKey, stateHashBytes)
+func CreateRequestID(publicKey []byte, stateHash ImprintV2) (RequestID, error) {
+	return CreateRequestIDFromBytes(publicKey, stateHash.Imprint())
 }
 
 func CreateRequestIDFromBytes(publicKey []byte, stateHashBytes []byte) (RequestID, error) {
@@ -143,7 +138,7 @@ func CreateRequestIDFromBytes(publicKey []byte, stateHashBytes []byte) (RequestI
 	data = append(data, publicKey...)
 	data = append(data, stateHashBytes...)
 
-	return NewImprintHexString(fmt.Sprintf("0000%x", sha256.Sum256(data)))
+	return NewImprintV2(fmt.Sprintf("0000%x", sha256.Sum256(data)))
 }
 
 func ValidateRequestID(requestID RequestID, publicKey []byte, stateHashBytes []byte) (bool, error) {
@@ -152,7 +147,7 @@ func ValidateRequestID(requestID RequestID, publicKey []byte, stateHashBytes []b
 		return false, err
 	}
 
-	return requestID == expectedRequestID, nil
+	return bytes.Equal(requestID, expectedRequestID), nil
 }
 
 // AggregatorRecordV1 represents a finalized commitment with proof data
@@ -198,19 +193,13 @@ func (p *InclusionProofV1) Verify(v1 *Commitment) error {
 // - Hash the CBOR-encoded authenticator and transaction hash imprint using SHA256
 // - Return as DataHash imprint format (2-byte algorithm prefix + hash)
 func (c *Commitment) CreateLeafValue() ([]byte, error) {
-	// Get the state hash imprint for CBOR encoding
-	stateHashImprint, err := c.Authenticator.StateHash.Imprint()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get state hash imprint: %w", err)
-	}
-
 	// CBOR encode the authenticator as an array (matching TypeScript authenticator.toCBOR())
 	// TypeScript: [algorithm, publicKey, signature.encode(), stateHash.imprint]
 	authenticatorArray := []interface{}{
-		c.Authenticator.Algorithm,         // algorithm as text string
-		[]byte(c.Authenticator.PublicKey), // publicKey as byte string
-		[]byte(c.Authenticator.Signature), // signature as byte string
-		stateHashImprint,                  // stateHash.imprint as byte string
+		c.Authenticator.Algorithm,           // algorithm as text string
+		[]byte(c.Authenticator.PublicKey),   // publicKey as byte string
+		[]byte(c.Authenticator.Signature),   // signature as byte string
+		c.Authenticator.StateHash.Imprint(), // stateHash.imprint as byte string
 	}
 
 	authenticatorCBOR, err := types.Cbor.Marshal(authenticatorArray)
@@ -218,17 +207,11 @@ func (c *Commitment) CreateLeafValue() ([]byte, error) {
 		return nil, fmt.Errorf("failed to CBOR encode authenticator: %w", err)
 	}
 
-	// Get the transaction hash imprint
-	transactionHashImprint, err := c.TransactionHash.Imprint()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get transaction hash imprint: %w", err)
-	}
-
 	// Create SHA256 hasher and update with CBOR-encoded authenticator and transaction hash imprint
 	// This matches the TypeScript DataHasher(SHA256).update(authenticator.toCBOR()).update(transactionHash.imprint).digest()
 	hasher := sha256.New()
 	hasher.Write(authenticatorCBOR)
-	hasher.Write(transactionHashImprint)
+	hasher.Write(c.TransactionHash.Imprint())
 
 	// Get the final hash
 	hash := hasher.Sum(nil)

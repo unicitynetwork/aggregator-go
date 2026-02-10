@@ -3,10 +3,12 @@ services:
     platform: linux/amd64
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
     # https://github.com/unicitynetwork/bft-core/pkgs/container/bft-core
-    image: ghcr.io/unicitynetwork/bft-core:8e6f2507b8b69fc6d2d66c33fb7c4cb9dc61e8b0
+    image: ghcr.io/unicitynetwork/bft-core:8a4f7aa263ef814ef514cfd73f8a366f3a3b348e
 
   bft-root:
     <<: *bft-base
+    ports:
+      - "8002:8002" # expose rpc server
     volumes:
       - ./data/genesis-root:/genesis/root
       - ./data/genesis:/genesis
@@ -110,18 +112,15 @@ services:
       - "27017:27017"
     networks:
       - default
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: password
-      MONGO_INITDB_DATABASE: aggregator
     volumes:
       - ./data/mongodb_data:/data/db
-      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    command: ["--replSet", "rs0", "--bind_ip_all", "--noauth"]
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
+      test: ["CMD", "mongosh", "--eval", "try { rs.status().ok } catch(e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongodb:27017'}]}) }"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 10s
 
   aggregator:
     build:
@@ -144,7 +143,7 @@ services:
       ENABLE_CORS: "true"
 
       # Database Configuration
-      MONGODB_URI: "mongodb://admin:password@mongodb:27017/aggregator?authSource=admin"
+      MONGODB_URI: "mongodb://mongodb:27017/aggregator?replicaSet=rs0&directConnection=true"
       MONGODB_DATABASE: "aggregator"
       MONGODB_CONNECT_TIMEOUT: "10s"
       MONGODB_SERVER_SELECTION_TIMEOUT: "5s"
@@ -185,6 +184,7 @@ services:
       BFT_ENABLED: "true"
       BFT_SHARD_CONF_FILE: "/app/bft-config/shard-conf-7_0.json"
       BFT_TRUST_BASE_FILES: "/app/bft-config/trust-base.json"
+      BFT_RPC_ADDRESS: "http://127.0.0.1:8002"
       # BFT_BOOTSTRAP_ADDRESSES will be set dynamically by the entrypoint script
 
     entrypoint: ["/bin/sh", "-c"]

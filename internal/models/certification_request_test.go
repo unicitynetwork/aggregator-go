@@ -11,8 +11,8 @@ func BenchmarkCreateLeafValue(b *testing.B) {
 	// Setup test data
 	publicKey := []byte{0x02, 0x79, 0xbe, 0x66}
 	signature := []byte{0xa0, 0xb3, 0x7f, 0x8f}
-	sourceStateHash, _ := api.NewImprintHexString("0000deadbeef")
-	transactionHash, _ := api.NewImprintHexString("0000feedcafe")
+	sourceStateHash, _ := api.NewImprintV2("0000deadbeef")
+	transactionHash, _ := api.NewImprintV2("0000feedcafe")
 
 	certData := CertificationData{
 		OwnerPredicate:  api.NewPayToPublicKeyPredicate(publicKey),

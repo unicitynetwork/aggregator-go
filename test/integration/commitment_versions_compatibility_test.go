@@ -118,7 +118,7 @@ func submitCommitment(url string, commitment *api.Commitment) (*api.SubmitCommit
 // waitForProofAvailableV1 waits for a VALID inclusion proof to become available
 func waitForProofAvailableV1(t *testing.T, url, stateIDStr string, timeout time.Duration) *api.GetInclusionProofResponseV1 {
 	deadline := time.Now().Add(timeout)
-	requestID := api.RequestID(stateIDStr)
+	requestID := api.RequireNewImprintV2(stateIDStr)
 
 	for time.Now().Before(deadline) {
 		resp, err := getInclusionProofV1(t, url, stateIDStr)
@@ -136,7 +136,7 @@ func waitForProofAvailableV1(t *testing.T, url, stateIDStr string, timeout time.
 // This includes waiting for the parent proof to be received and joined
 func waitForProofAvailableV2(t *testing.T, url, stateIDStr string, timeout time.Duration) *api.GetInclusionProofResponseV2 {
 	deadline := time.Now().Add(timeout)
-	stateID := api.StateID(stateIDStr)
+	stateID := api.RequireNewImprintV2(stateIDStr)
 
 	for time.Now().Before(deadline) {
 		resp, err := getInclusionProofV2(t, url, stateIDStr)

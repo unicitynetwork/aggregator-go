@@ -50,10 +50,15 @@ func (ab *AuthenticatorBSON) FromBSON() (*Authenticator, error) {
 		return nil, fmt.Errorf("failed to parse signature: %w", err)
 	}
 
+	stateHash, err := api.NewImprintV2(ab.StateHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse stateHash: %w", err)
+	}
+
 	return &Authenticator{
 		Algorithm: ab.Algorithm,
 		PublicKey: publicKey,
 		Signature: signature,
-		StateHash: api.SourceStateHash(ab.StateHash),
+		StateHash: stateHash,
 	}, nil
 }

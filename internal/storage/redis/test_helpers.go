@@ -25,11 +25,7 @@ func createTestCommitment() *models.CertificationRequest {
 	// Generate random state data
 	stateData := make([]byte, 32)
 	rand.Read(stateData)
-	sourceStateHash := signing.CreateDataHashImprint(stateData)
-	sourceStateHashImprint, err := sourceStateHash.Imprint()
-	if err != nil {
-		panic(fmt.Sprintf("Failed to create source state imprint: %v", err))
-	}
+	sourceStateHash := signing.CreateDataHash(stateData)
 
 	// Create StateID deterministically like the performance test
 	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHash)
@@ -40,15 +36,11 @@ func createTestCommitment() *models.CertificationRequest {
 	// Generate transaction data
 	transactionData := make([]byte, 32)
 	rand.Read(transactionData)
-	transactionHash := signing.CreateDataHashImprint(transactionData)
-	transactionHashImprint, err := transactionHash.Imprint()
-	if err != nil {
-		panic(fmt.Sprintf("Failed to extract transaction hash: %v", err))
-	}
+	transactionHash := signing.CreateDataHash(transactionData)
 
 	// Sign the transaction
 	signingService := signing.NewSigningService()
-	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionHashImprint)
+	sigDataHash := api.SigDataHash(sourceStateHash, transactionHash)
 	signatureBytes, err := signingService.SignDataHash(sigDataHash, privateKey.Serialize())
 	if err != nil {
 		panic(fmt.Sprintf("Failed to sign transaction: %v", err))

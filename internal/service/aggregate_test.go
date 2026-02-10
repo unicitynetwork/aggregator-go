@@ -17,12 +17,16 @@ func TestAggregateRequestCount(t *testing.T) {
 
 		// Test creating commitments with different aggregate counts
 		commitment1 := models.NewCertificationRequest(
-			"0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
+			api.RequireNewImprintV2("0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890"),
 			models.CertificationData{},
 		)
 		require.Equal(t, uint64(1), commitment1.AggregateRequestCount)
 
-		commitment2 := models.NewCertificationRequestWithAggregate("0000c1b2c3d4e5f6789012345678901234567890123456789012345678901234567890", models.CertificationData{}, 100)
+		commitment2 := models.NewCertificationRequestWithAggregate(
+			api.RequireNewImprintV2("0000c1b2c3d4e5f6789012345678901234567890123456789012345678901234567890"),
+			models.CertificationData{},
+			100,
+		)
 		require.Equal(t, uint64(100), commitment2.AggregateRequestCount)
 	})
 }
@@ -50,7 +54,11 @@ func TestGetBlockTotalCommitments(t *testing.T) {
 
 	t.Run("AggregatorRecord preserves AggregateRequestCount", func(t *testing.T) {
 		// Test that creating an aggregator record from a certification request preserves the count
-		commitment := models.NewCertificationRequestWithAggregate("0000e1b2c3d4e5f6789012345678901234567890123456789012345678901234567890", models.CertificationData{}, 500)
+		commitment := models.NewCertificationRequestWithAggregate(
+			api.RequireNewImprintV2("0000e1b2c3d4e5f6789012345678901234567890123456789012345678901234567890"),
+			models.CertificationData{},
+			500,
+		)
 
 		blockNumber := api.NewBigInt(big.NewInt(1))
 		leafIndex := api.NewBigInt(big.NewInt(0))
@@ -62,9 +70,9 @@ func TestGetBlockTotalCommitments(t *testing.T) {
 	t.Run("API conversion preserves AggregateRequestCount", func(t *testing.T) {
 		// Test model to API conversion
 		modelRecord := &models.AggregatorRecord{
-			StateID: "0000test",
+			StateID: api.RequireNewImprintV2("0000e1b2c3d4e5f6789012345678901234567890123456789012345678901234567890"),
 			CertificationData: models.CertificationData{
-				TransactionHash: "0000hash",
+				TransactionHash: api.RequireNewImprintV2("0000e1b2c3d4e5f6789012345678901234567890123456789012345678901234567891"),
 			},
 			AggregateRequestCount: 1000,
 			BlockNumber:           api.NewBigInt(big.NewInt(1)),

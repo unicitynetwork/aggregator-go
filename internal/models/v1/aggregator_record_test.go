@@ -94,8 +94,8 @@ func TestBackwardCompatibilityV1(t *testing.T) {
 
 func TestAggregatorRecordV1Serialization(t *testing.T) {
 	// Create AggregatorRecord
-	originalRequestID := api.RequestID("0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890")
-	originalTransactionHash := api.TransactionHash("0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890")
+	originalRequestID := api.RequireNewImprintV2("0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890")
+	originalTransactionHash := api.RequireNewImprintV2("0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890")
 	originalBlockNumber, err := api.NewBigIntFromString("123")
 	require.NoError(t, err)
 	originalLeafIndex, err := api.NewBigIntFromString("456")
@@ -107,7 +107,7 @@ func TestAggregatorRecordV1Serialization(t *testing.T) {
 			Algorithm: "secp256k1",
 			PublicKey: api.HexBytes("02345678"),
 			Signature: api.HexBytes("abcdef12"),
-			StateHash: api.SourceStateHash("0000cd60"),
+			StateHash: api.RequireNewImprintV2("0000cd60"),
 		},
 		AggregateRequestCount: 1,
 		BlockNumber:           originalBlockNumber,
@@ -122,8 +122,8 @@ func TestAggregatorRecordV1Serialization(t *testing.T) {
 	require.NotNil(t, bsonRecord)
 
 	// Verify StateID and TransactionHash in BSON format
-	require.Equal(t, string(originalRequestID), bsonRecord.RequestID)
-	require.Equal(t, string(originalTransactionHash), bsonRecord.TransactionHash)
+	require.Equal(t, originalRequestID.String(), bsonRecord.RequestID)
+	require.Equal(t, originalTransactionHash.String(), bsonRecord.TransactionHash)
 
 	// Convert back from BSON
 	unmarshaledRecord, err := bsonRecord.FromBSON()

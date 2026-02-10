@@ -1,6 +1,7 @@
 package v1
 
 import (
+	"fmt"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -80,10 +81,21 @@ func (cb *CommitmentBSON) FromBSON() (*Commitment, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	requestID, err := api.NewImprintV2(cb.RequestID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode requestId: %w", err)
+	}
+
+	transactionHash, err := api.NewImprintV2(cb.TransactionHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode transactionHash: %w", err)
+	}
+
 	return &Commitment{
 		ID:                    cb.ID,
-		RequestID:             api.RequestID(cb.RequestID),
-		TransactionHash:       api.TransactionHash(cb.TransactionHash),
+		RequestID:             requestID,
+		TransactionHash:       transactionHash,
 		Authenticator:         *authenticator,
 		AggregateRequestCount: cb.AggregateRequestCount,
 		CreatedAt:             api.NewTimestamp(cb.CreatedAt),

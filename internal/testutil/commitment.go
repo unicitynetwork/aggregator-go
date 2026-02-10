@@ -11,6 +11,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	v1 "github.com/unicitynetwork/aggregator-go/internal/models/v1"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
+	signingV1 "github.com/unicitynetwork/aggregator-go/internal/signing/v1"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -27,9 +28,7 @@ func CreateTestCertificationRequest(t *testing.T, baseData string) *models.Certi
 		_, err = rand.Read(stateData[len(baseData):])
 		require.NoError(t, err, "Failed to generate random state data")
 	}
-	sourceStateHash := signing.CreateDataHashImprint(stateData)
-	sourceStateHashImprint, err := sourceStateHash.Imprint()
-	require.NoError(t, err)
+	sourceStateHash := signing.CreateDataHash(stateData)
 
 	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHash)
 	require.NoError(t, err, "Failed to create state ID")
@@ -41,12 +40,9 @@ func CreateTestCertificationRequest(t *testing.T, baseData string) *models.Certi
 		_, err = rand.Read(transactionData[len(txPrefix):])
 		require.NoError(t, err, "Failed to generate random transaction data")
 	}
-	transactionHash := signing.CreateDataHashImprint(transactionData)
-	transactionHashImprint, err := transactionHash.Bytes()
-	require.NoError(t, err, "Failed to extract transaction hash")
-
+	transactionHash := signing.CreateDataHash(transactionData)
 	signingService := signing.NewSigningService()
-	sigDataHash := api.SigDataHash(sourceStateHashImprint, transactionHashImprint)
+	sigDataHash := api.SigDataHash(sourceStateHash, transactionHash)
 	signatureBytes, err := signingService.SignDataHash(sigDataHash, privateKey.Serialize())
 	require.NoError(t, err, "Failed to sign transaction")
 
@@ -80,7 +76,7 @@ func CreateTestCommitment(t *testing.T, baseData string) *v1.Commitment {
 		_, err = rand.Read(stateData[len(baseData):])
 		require.NoError(t, err, "Failed to generate random state data")
 	}
-	stateHashImprint := signing.CreateDataHashImprint(stateData)
+	stateHashImprint := signingV1.CreateDataHashImprint(stateData)
 
 	requestID, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
 	require.NoError(t, err, "Failed to create request ID")
@@ -92,9 +88,8 @@ func CreateTestCommitment(t *testing.T, baseData string) *v1.Commitment {
 		_, err = rand.Read(transactionData[len(txPrefix):])
 		require.NoError(t, err, "Failed to generate random transaction data")
 	}
-	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
-
-	transactionHashBytes, err := transactionHashImprint.DataBytes()
+	transactionHashImprint := signingV1.CreateDataHashImprint(transactionData)
+	transactionHashBytes := transactionHashImprint.DataBytes()
 	require.NoError(t, err, "Failed to extract transaction hash")
 
 	signingService := signing.NewSigningService()

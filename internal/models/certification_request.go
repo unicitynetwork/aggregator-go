@@ -83,10 +83,15 @@ func (cb *CertificationRequestBSON) FromBSON() (*CertificationRequest, error) {
 	if err != nil {
 		return nil, err
 	}
+	stateID, err := api.NewImprintV2(cb.StateID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode stateID: %w", err)
+	}
+
 	return &CertificationRequest{
 		ID:                    cb.ID,
 		Version:               cb.Version,
-		StateID:               api.StateID(cb.StateID),
+		StateID:               stateID,
 		CertificationData:     *certData,
 		AggregateRequestCount: cb.AggregateRequestCount,
 		CreatedAt:             api.NewTimestamp(cb.CreatedAt),

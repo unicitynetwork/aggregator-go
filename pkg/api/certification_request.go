@@ -79,24 +79,16 @@ type CertificationData struct {
 // SigDataHash returns the data hash used for signature generation.
 // The hash is calculated as CBOR array of [sourceStateHashImprint, transactionHashImprint].
 func (c CertificationData) SigDataHash() (*DataHash, error) {
-	sourceStateHashImprint, err := c.SourceStateHash.Imprint()
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert source state hash to bytes: %w", err)
-	}
-	transactionHashImprint, err := c.TransactionHash.Imprint()
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert transaction hash to bytes: %w", err)
-	}
-	return SigDataHash(sourceStateHashImprint, transactionHashImprint), nil
+	return SigDataHash(c.SourceStateHash, c.TransactionHash), nil
 }
 
 // SigDataHash returns the data hash used for signature generation.
 // The hash is calculated as CBOR array of [sourceStateHashImprint, transactionHashImprint].
-func SigDataHash(sourceStateHashImprint []byte, transactionHashImprint []byte) *DataHash {
+func SigDataHash(sourceStateHash []byte, transactionHash []byte) *DataHash {
 	return NewDataHasher(SHA256).AddData(
 		CborArray(2)).
-		AddCborBytes(sourceStateHashImprint).
-		AddCborBytes(transactionHashImprint).
+		AddCborBytes(sourceStateHash).
+		AddCborBytes(transactionHash).
 		GetHash()
 }
 
@@ -104,16 +96,7 @@ func SigDataHash(sourceStateHashImprint []byte, transactionHashImprint []byte) *
 // The hash is calculated as CBOR array of [OwnerPredicate, SourceStateHashImprint, TransactionHashImprint, Witness] and
 // the value returned is in DataHash imprint format (2-byte algorithm prefix + hash of cbor array).
 func (c CertificationData) Hash() ([]byte, error) {
-	sourceStateHashImprint, err := c.SourceStateHash.Imprint()
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert source state hash to bytes: %w", err)
-	}
-	transactionHashImprint, err := c.TransactionHash.Imprint()
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert transaction hash to bytes: %w", err)
-	}
-
-	dataHash, err := CertDataHash(c.OwnerPredicate, sourceStateHashImprint, transactionHashImprint, c.Witness)
+	dataHash, err := CertDataHash(c.OwnerPredicate, c.SourceStateHash, c.TransactionHash, c.Witness)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calculate certification data hash: %w", err)
 	}
@@ -126,7 +109,7 @@ func (c CertificationData) CreateStateID() (StateID, error) {
 
 // CertDataHash returns the data hash of certification data, used as a key in the state tree.
 // The hash is calculated as CBOR array of [OwnerPredicate, SourceStateHashImprint, TransactionHashImprint, Witness].
-func CertDataHash(ownerPredicate Predicate, sourceStateHashImprint, transactionHashImprint, signature []byte) (*DataHash, error) {
+func CertDataHash(ownerPredicate Predicate, sourceStateHash, transactionHash, signature []byte) (*DataHash, error) {
 	predicateBytes, err := types.Cbor.Marshal(ownerPredicate)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal owner predicate: %w", err)
@@ -135,8 +118,8 @@ func CertDataHash(ownerPredicate Predicate, sourceStateHashImprint, transactionH
 	return NewDataHasher(SHA256).AddData(
 		CborArray(4)).
 		AddData(predicateBytes).
-		AddCborBytes(sourceStateHashImprint).
-		AddCborBytes(transactionHashImprint).
+		AddCborBytes(sourceStateHash).
+		AddCborBytes(transactionHash).
 		AddCborBytes(signature).
 		GetHash(), nil
 }

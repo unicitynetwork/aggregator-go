@@ -43,9 +43,9 @@ func TestReceiptSigner_SignReceiptV1(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create test data
-	requestID := api.RequestID("0x0001abcdef1234567890abcdef1234567890abcdef1234567890abcdef12345678")
-	transactionHash := api.TransactionHash("0x0001fedcba0987654321fedcba0987654321fedcba0987654321fedcba09876543")
-	stateHash := api.SourceStateHash("0x0001123456789abcdef123456789abcdef123456789abcdef123456789abcdef12")
+	requestID := api.RequireNewImprintV2("0x0001abcdef1234567890abcdef1234567890abcdef1234567890abcdef12345678")
+	transactionHash := api.RequireNewImprintV2("0x0001fedcba0987654321fedcba0987654321fedcba0987654321fedcba09876543")
+	stateHash := api.RequireNewImprintV2("0x0001123456789abcdef123456789abcdef123456789abcdef123456789abcdef12")
 
 	t.Run("sign receipt successfully", func(t *testing.T) {
 		receipt, err := signer.SignReceiptV1(requestID, transactionHash, stateHash)
@@ -84,7 +84,7 @@ func TestReceiptSigner_SignReceiptV1(t *testing.T) {
 		require.NoError(t, err)
 
 		// Use a different request ID
-		differentRequestID := api.RequestID("0x0001111111111111111111111111111111111111111111111111111111111111")
+		differentRequestID := api.RequireNewImprintV2("0x0001111111111111111111111111111111111111111111111111111111111111")
 		receipt2, err := signer.SignReceiptV1(differentRequestID, transactionHash, stateHash)
 		require.NoError(t, err)
 
@@ -128,8 +128,8 @@ func TestReceiptSigner_SignReceiptV2(t *testing.T) {
 	// Create test data
 	certData := api.CertificationData{
 		OwnerPredicate:  api.Predicate{},
-		SourceStateHash: "01",
-		TransactionHash: "02",
+		SourceStateHash: api.ImprintV2([]byte{1}),
+		TransactionHash: api.ImprintV2([]byte{2}),
 		Witness:         nil,
 	}
 

@@ -142,7 +142,7 @@ func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, 
 		require.NoError(t, err)
 		leafValue, err := c.CertificationData.ToAPI().Hash()
 		require.NoError(t, err)
-		leaves[i] = &smt.Leaf{Path: path, Value: leafValue}
+		leaves[i] = smt.NewLeaf(path, leafValue)
 	}
 	err := smtTree.AddLeaves(leaves)
 	require.NoError(t, err)
@@ -646,7 +646,7 @@ func (s *RecoveryTestSuite) Test11_LoadRecoveredNodesIntoSMT() {
 		require.NoError(t, err)
 		leafValue, err := c.CertificationData.ToAPI().Hash()
 		require.NoError(t, err)
-		leaves[i] = &smt.Leaf{Path: path, Value: leafValue}
+		leaves[i] = smt.NewLeaf(path, leafValue)
 	}
 	err := expectedSMT.AddLeaves(leaves)
 	require.NoError(t, err)

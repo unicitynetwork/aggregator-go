@@ -74,6 +74,7 @@ func NewParentRoundManager(
 	luc *types.UnicityCertificate,
 	eventBus *events.EventBus,
 	threadSafeSmt *smt.ThreadSafeSMT,
+	trustBaseProvider interfaces.TrustBaseProvider,
 ) (*ParentRoundManager, error) {
 	prm := &ParentRoundManager{
 		config:    cfg,
@@ -87,7 +88,7 @@ func NewParentRoundManager(
 	// Create BFT client (same logic as regular RoundManager)
 	if cfg.BFT.Enabled {
 		var err error
-		prm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, prm, storage.TrustBaseStorage(), luc, logger, eventBus)
+		prm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, prm, trustBaseProvider, luc, logger, eventBus)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create BFT client: %w", err)
 		}
@@ -300,10 +301,7 @@ func (prm *ParentRoundManager) processRound(ctx context.Context, round *ParentRo
 		for _, update := range round.ProcessedShardUpdates {
 			path := update.GetPath()
 
-			leaf := &smt.Leaf{
-				Path:  path,
-				Value: update.RootHash,
-			}
+			leaf := smt.NewLeaf(path, update.RootHash)
 			leaves = append(leaves, leaf)
 		}
 
@@ -607,10 +605,7 @@ func (prm *ParentRoundManager) reconstructParentSMT(ctx context.Context) error {
 	for _, node := range smtNodes {
 		path := new(big.Int).SetBytes(node.Key)
 
-		leaf := &smt.Leaf{
-			Path:  path,
-			Value: node.Value,
-		}
+		leaf := smt.NewLeaf(path, node.Value)
 		leaves = append(leaves, leaf)
 	}
 

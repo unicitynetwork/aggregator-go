@@ -92,9 +92,14 @@ func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
 		return nil, fmt.Errorf("failed to parse CertificationData: %w", err)
 	}
 
+	stateID, err := api.NewImprintV2(arb.StateID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode stateID: %w", err)
+	}
+
 	return &AggregatorRecord{
 		Version:               arb.Version,
-		StateID:               api.StateID(arb.StateID),
+		StateID:               stateID,
 		CertificationData:     *certDataBSON,
 		AggregateRequestCount: aggregateRequestCount,
 		BlockNumber:           blockNumber,

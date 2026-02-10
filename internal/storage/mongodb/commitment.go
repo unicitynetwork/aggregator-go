@@ -192,7 +192,7 @@ func (cs *CommitmentStorage) GetByRequestIDs(ctx context.Context, requestIDs []a
 	// Convert to strings for query
 	reqIDStrings := make([]string, len(requestIDs))
 	for i, reqID := range requestIDs {
-		reqIDStrings[i] = string(reqID)
+		reqIDStrings[i] = reqID.String()
 	}
 
 	filter := bson.M{"requestId": bson.M{"$in": reqIDStrings}}

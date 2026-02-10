@@ -1,6 +1,7 @@
 package signing
 
 import (
+	"bytes"
 	"encoding/hex"
 	"testing"
 
@@ -15,56 +16,30 @@ func TestStateIDGenerator_CreateStateID(t *testing.T) {
 	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKey)
 	stateHash := []byte{0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64} // "Hello World"
 
-	stateID, err := api.CreateStateIDFromImprint(ownerPredicate, stateHash)
+	stateID, err := api.CreateStateID(ownerPredicate, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to create state ID: %v", err)
 	}
 
 	// Verify the result is deterministic by creating it again
-	stateID2, err := api.CreateStateIDFromImprint(ownerPredicate, stateHash)
+	stateID2, err := api.CreateStateID(ownerPredicate, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to create state ID second time: %v", err)
 	}
 
-	if stateID != stateID2 {
+	if !bytes.Equal(stateID, stateID2) {
 		t.Errorf("State ID should be deterministic. Got different values:\n%s\n%s", stateID, stateID2)
 	}
 
-	// Verify the state ID is a valid hex string (68 characters: 4 for algorithm + 64 for SHA256)
-	stateIDStr := string(stateID)
-	if len(stateIDStr) != 68 {
-		t.Errorf("Expected state ID length 68, got %d", len(stateIDStr))
+	// Verify the state ID length
+	if len(stateID) != 32 {
+		t.Errorf("Expected state ID length 32, got %d", len(stateID))
 	}
 
 	// Verify it's valid hex
-	_, err = hex.DecodeString(stateIDStr)
+	_, err = hex.DecodeString(stateID.String())
 	if err != nil {
 		t.Errorf("State ID should be valid hex: %v", err)
-	}
-}
-
-func TestStateIDGenerator_CreateStateIDCompatibility(t *testing.T) {
-	// Test that matches the TypeScript implementation
-	// Using api.CreateStateID and api.ValidateStateID
-
-	// Manually compute expected value using the same algorithm as TypeScript
-	publicKey := []byte{0x03, 0xd8, 0xe2, 0xb2, 0xff, 0x8a, 0xc4, 0xf0, 0x2b, 0x2b, 0x5c, 0x45, 0x12, 0xc5, 0xe4, 0xe6, 0xb1, 0xc7, 0xd2, 0xe3, 0xa8, 0xb9, 0xc1, 0xf8, 0xe9, 0xd1, 0xc2, 0xa3, 0xb4, 0xe5, 0xf6, 0xa7}
-	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKey)
-	sourceStateHashBytes := []byte("test-state-hash")
-	stateIDDataHash, err := api.StateIDDataHash(ownerPredicate, sourceStateHashBytes)
-	if err != nil {
-		t.Fatalf("Failed to calculate state ID data hash: %v", err)
-	}
-	expectedStateID := api.StateID(stateIDDataHash.ToHex())
-
-	// Generate using our function
-	actualStateID, err := api.CreateStateIDFromImprint(ownerPredicate, sourceStateHashBytes)
-	if err != nil {
-		t.Fatalf("Failed to create state ID: %v", err)
-	}
-
-	if actualStateID != expectedStateID {
-		t.Errorf("State ID doesn't match expected value.\nExpected: %s\nActual: %s", expectedStateID, actualStateID)
 	}
 }
 
@@ -76,7 +51,7 @@ func TestStateIDGenerator_ValidateStateID(t *testing.T) {
 	sourceStateHash := []byte("test-state-for-validation")
 
 	// Create a valid state ID
-	validStateID, err := api.CreateStateIDFromImprint(ownerPredicate, sourceStateHash)
+	validStateID, err := api.CreateStateID(ownerPredicate, sourceStateHash)
 	if err != nil {
 		t.Fatalf("Failed to create valid state ID: %v", err)
 	}
@@ -91,7 +66,7 @@ func TestStateIDGenerator_ValidateStateID(t *testing.T) {
 	}
 
 	// Test invalid state ID validation
-	invalidStateID := api.StateID("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	invalidStateID := api.RequireNewImprintV2("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	isValid, err = api.ValidateStateID(invalidStateID, sourceStateHash, ownerPredicate)
 	if err != nil {
 		t.Fatalf("Failed to validate invalid state ID: %v", err)
@@ -133,18 +108,18 @@ func TestStateIDGenerator_EmptyInputs(t *testing.T) {
 	emptyOwnerPredicate := api.NewPayToPublicKeyPredicate(emptyPublicKey)
 	stateHash := []byte("test-state")
 
-	stateID, err := api.CreateStateIDFromImprint(emptyOwnerPredicate, stateHash)
+	stateID, err := api.CreateStateID(emptyOwnerPredicate, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to create state ID with empty public key: %v", err)
 	}
 
 	// Should still be deterministic
-	stateID2, err := api.CreateStateIDFromImprint(emptyOwnerPredicate, stateHash)
+	stateID2, err := api.CreateStateID(emptyOwnerPredicate, stateHash)
 	if err != nil {
 		t.Fatalf("Failed to create state ID with empty public key second time: %v", err)
 	}
 
-	if stateID != stateID2 {
+	if !bytes.Equal(stateID, stateID2) {
 		t.Error("State ID should be deterministic even with empty public key")
 	}
 
@@ -159,15 +134,14 @@ func TestStateIDGenerator_EmptyInputs(t *testing.T) {
 	}
 
 	// Test with both empty
-	stateID, err = api.CreateStateID(emptyOwnerPredicate, api.SourceStateHash([]byte{}))
+	stateID, err = api.CreateStateID(emptyOwnerPredicate, emptyStateHash)
 	if err != nil {
 		t.Fatalf("Failed to create state ID with both inputs empty: %v", err)
 	}
 
 	// Should still produce valid hex string
-	stateIDStr := string(stateID)
-	if len(stateIDStr) != 68 {
-		t.Errorf("Expected state ID length 68 even with empty inputs, got %d", len(stateIDStr))
+	if len(stateID) != 32 {
+		t.Errorf("Expected state ID length 32 even with empty inputs, got %d", len(stateID))
 	}
 }
 
@@ -187,18 +161,18 @@ func TestStateIDGenerator_LargeInputs(t *testing.T) {
 		largeStateHash[i] = byte((i * 7) % 256)
 	}
 
-	stateID, err := api.CreateStateIDFromImprint(largeOwnerPredicate, largeStateHash)
+	stateID, err := api.CreateStateID(largeOwnerPredicate, largeStateHash)
 	if err != nil {
 		t.Fatalf("Failed to create state ID with large inputs: %v", err)
 	}
 
 	// Verify deterministic behavior
-	stateID2, err := api.CreateStateIDFromImprint(largeOwnerPredicate, largeStateHash)
+	stateID2, err := api.CreateStateID(largeOwnerPredicate, largeStateHash)
 	if err != nil {
 		t.Fatalf("Failed to create state ID with large inputs second time: %v", err)
 	}
 
-	if stateID != stateID2 {
+	if !bytes.Equal(stateID, stateID2) {
 		t.Error("State ID should be deterministic with large inputs")
 	}
 

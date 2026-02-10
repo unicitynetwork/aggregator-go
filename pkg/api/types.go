@@ -15,8 +15,6 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-type SourceStateHash = ImprintHexString
-type TransactionHash = ImprintHexString
 type ShardID = int
 
 // Timestamp wraps time.Time for consistent JSON serialization

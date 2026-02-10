@@ -83,7 +83,7 @@ func createValidCertificationRequest() *api.CertificationRequest {
 	stateData := make([]byte, 32)
 	rand.Read(stateData)
 
-	stateHashImprint := signing.CreateDataHashImprint(stateData)
+	stateHashImprint := signing.CreateDataHash(stateData)
 	// Create StateID deterministically
 	stateID, err := api.CreateStateID(ownerPredicate, stateHashImprint)
 	if err != nil {
@@ -93,7 +93,7 @@ func createValidCertificationRequest() *api.CertificationRequest {
 	// Generate random transaction data and create DataHash imprint
 	transactionData := make([]byte, 32)
 	rand.Read(transactionData)
-	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
+	transactionHashImprint := signing.CreateDataHash(transactionData)
 
 	// Sign the transaction
 	signingService := signing.NewSigningService()

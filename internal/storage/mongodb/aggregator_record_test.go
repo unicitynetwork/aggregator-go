@@ -65,8 +65,8 @@ func setupAggregatorRecordTestDB(t *testing.T) *mongo.Database {
 // createTestAggregatorRecord creates a test aggregator record
 func createTestAggregatorRecord(stateID string, blockNumber int64, leafIndex int64) *models.AggregatorRecord {
 	// Create a complete certification request with all required fields
-	transactionHash, _ := api.NewImprintHexString("0x00001234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
-	sourceStateHash, _ := api.NewImprintHexString("0x0000abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
+	transactionHash := api.RequireNewImprintV2("0x00001234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+	sourceStateHash := api.RequireNewImprintV2("0x0000abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
 
 	certData := models.CertificationData{
 		OwnerPredicate:  api.NewPayToPublicKeyPredicate([]byte("test_public_key_1234567890abcdef")),
@@ -75,7 +75,7 @@ func createTestAggregatorRecord(stateID string, blockNumber int64, leafIndex int
 		Witness:         api.HexBytes("test_signature_1234567890abcdef"),
 	}
 
-	commitment := models.NewCertificationRequest(api.StateID(stateID), certData)
+	commitment := models.NewCertificationRequest(api.RequireNewImprintV2(stateID), certData)
 
 	blockIndex := api.NewBigInt(big.NewInt(blockNumber))
 	leafIdx := api.NewBigInt(big.NewInt(leafIndex))
@@ -95,15 +95,15 @@ func TestAggregatorRecordStorage_StoreBatch_DuplicateHandling(t *testing.T) {
 
 	// Create test records
 	records1 := []*models.AggregatorRecord{
-		createTestAggregatorRecord("request1", 1, 0),
-		createTestAggregatorRecord("request2", 1, 1),
-		createTestAggregatorRecord("request3", 1, 2),
+		createTestAggregatorRecord("01", 1, 0),
+		createTestAggregatorRecord("02", 1, 1),
+		createTestAggregatorRecord("03", 1, 2),
 	}
 
 	records2 := []*models.AggregatorRecord{
-		createTestAggregatorRecord("request1", 1, 0), // Duplicate of first record
-		createTestAggregatorRecord("request2", 1, 1), // Duplicate of second record
-		createTestAggregatorRecord("request4", 1, 3), // New record
+		createTestAggregatorRecord("01", 1, 0), // Duplicate of first record
+		createTestAggregatorRecord("02", 1, 1), // Duplicate of second record
+		createTestAggregatorRecord("04", 1, 3), // New record
 	}
 
 	// Store first batch
@@ -121,17 +121,17 @@ func TestAggregatorRecordStorage_StoreBatch_DuplicateHandling(t *testing.T) {
 	assert.Equal(t, int64(4), count, "Should have 4 records (3 original + 1 new, duplicates failed)")
 
 	// Test GetExistingRequestIDs to filter duplicates before inserting
-	requestIDs := []string{"request1", "request2", "request4", "request5"}
+	requestIDs := []string{"01", "02", "04", "05"}
 	existing, err := storage.GetExistingRequestIDs(ctx, requestIDs)
 	require.NoError(t, err, "GetExistingRequestIDs should not return an error")
-	assert.True(t, existing["request1"], "request1 should exist")
-	assert.True(t, existing["request2"], "request2 should exist")
-	assert.True(t, existing["request4"], "request4 should exist now")
-	assert.False(t, existing["request5"], "request5 should not exist")
+	assert.True(t, existing["01"], "request1 should exist")
+	assert.True(t, existing["02"], "request2 should exist")
+	assert.True(t, existing["04"], "request4 should exist now")
+	assert.False(t, existing["05"], "request5 should not exist")
 
 	// Insert only new records (after filtering with GetExistingRequestIDs)
 	newRecords := []*models.AggregatorRecord{
-		createTestAggregatorRecord("request5", 1, 4),
+		createTestAggregatorRecord("05", 1, 4),
 	}
 	err = storage.StoreBatch(ctx, newRecords)
 	require.NoError(t, err, "StoreBatch with only new records should succeed")
@@ -160,17 +160,17 @@ func TestAggregatorRecordStorage_GetByBlockNumber(t *testing.T) {
 
 	// Store some test records
 	records := []*models.AggregatorRecord{
-		createTestAggregatorRecord("req1-b100", 100, 0),
-		createTestAggregatorRecord("req2-b100", 100, 1),
-		createTestAggregatorRecord("req3-b100", 100, 2),
-		createTestAggregatorRecord("req1-b101", 101, 0),
-		createTestAggregatorRecord("req2-b101", 101, 1),
-		createTestAggregatorRecord("req1-b0", 0, 0),
+		createTestAggregatorRecord("0101", 100, 0),
+		createTestAggregatorRecord("0102", 100, 1),
+		createTestAggregatorRecord("0103", 100, 2),
+		createTestAggregatorRecord("0104", 101, 0),
+		createTestAggregatorRecord("0105", 101, 1),
+		createTestAggregatorRecord("0006", 0, 0),
 	}
 	err = storage.StoreBatch(ctx, records)
 	require.NoError(t, err, "StoreBatch should not return an error")
 
-	largeBlockNumberRecord := createTestAggregatorRecord("req1-large", 99999999999999999, 0)
+	largeBlockNumberRecord := createTestAggregatorRecord("1000", 99999999999999999, 0)
 	err = storage.Store(ctx, largeBlockNumberRecord)
 	require.NoError(t, err, "Store should not return an error for large block number")
 
@@ -182,13 +182,13 @@ func TestAggregatorRecordStorage_GetByBlockNumber(t *testing.T) {
 		require.Len(t, retrieved, 3)
 
 		// Check state IDs to be sure
-		stateIDs := make(map[api.StateID]bool)
+		stateIDs := make(map[string]bool)
 		for _, r := range retrieved {
-			stateIDs[r.StateID] = true
+			stateIDs[r.StateID.String()] = true
 		}
-		require.True(t, stateIDs["req1-b100"])
-		require.True(t, stateIDs["req2-b100"])
-		require.True(t, stateIDs["req3-b100"])
+		require.True(t, stateIDs["0101"])
+		require.True(t, stateIDs["0102"])
+		require.True(t, stateIDs["0103"])
 	})
 
 	t.Run("should return empty slice for non-existent block number", func(t *testing.T) {
@@ -204,6 +204,22 @@ func TestAggregatorRecordStorage_GetByBlockNumber(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, retrieved)
 		require.Len(t, retrieved, 1)
-		require.Equal(t, api.StateID("req1-b0"), retrieved[0].StateID)
+		require.Equal(t, api.RequireNewImprintV2("0006"), retrieved[0].StateID)
 	})
+}
+
+func TestAggregatorRecordStorage_RoundTrip(t *testing.T) {
+	db := setupAggregatorRecordTestDB(t)
+	storage := NewAggregatorRecordStorage(db)
+	ctx := t.Context()
+
+	stateIDHex := "00004d1b938134c52340952357dd89c4c270b9b0b523bd69c03c1774fed907f1"
+	record := createTestAggregatorRecord(stateIDHex, 500, 5)
+	require.NoError(t, storage.Store(ctx, record))
+
+	retrieved, err := storage.GetByStateID(ctx, api.RequireNewImprintV2(stateIDHex))
+	require.NoError(t, err)
+	require.NotNil(t, retrieved)
+	require.Equal(t, record.StateID, retrieved.StateID)
+	require.Equal(t, record.CertificationData.SourceStateHash, retrieved.CertificationData.SourceStateHash)
 }

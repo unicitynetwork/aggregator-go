@@ -17,14 +17,14 @@ func TestSubmitCommitmentRequest_SerializeAndValidate(t *testing.T) {
 		// Create StateID
 		publicKey := make([]byte, 20) // matches new Uint8Array(20)
 
-		stateHash := ImprintHexString("00000000000000000000000000000000000000000000000000000000000000000000")
+		stateHash := RequireNewImprintV2("00000000000000000000000000000000000000000000000000000000000000000000")
 		requestID, err := CreateRequestID(publicKey, stateHash)
 		require.NoError(t, err)
 
 		// Create transaction hash (matches new Uint8Array([0x01, ...new Uint8Array(33)]))
 		transactionHashBytes := make([]byte, 34)
 		transactionHashBytes[0] = 0x01
-		transactionHash := ImprintHexString("01000000000000000000000000000000000000000000000000000000000000000000")
+		transactionHash := RequireNewImprintV2("01000000000000000000000000000000000000000000000000000000000000000000")
 
 		// Create authenticator with test signature
 		publicKeyHex := "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
@@ -198,7 +198,7 @@ func TestSubmitCommitmentRequest_SerializeAndValidate(t *testing.T) {
 			// Should either error or create a request with empty/invalid fields
 			if err == nil {
 				// If no error, validate that required fields are missing
-				assert.True(t, request.RequestID == "" || request.TransactionHash == "" || request.Authenticator.Algorithm == "")
+				assert.True(t, request.RequestID == nil || request.TransactionHash == nil || request.Authenticator.Algorithm == "")
 			}
 		}
 	})
@@ -263,9 +263,9 @@ func TestSubmitCommitmentResponse_SerializeAndValidate(t *testing.T) {
 			PublicKey: NewHexBytes(publicKeyBytes),
 			Signature: NewHexBytes(signatureBytes),
 			Request: ReceiptRequestV1{
-				RequestID:       "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40",
-				TransactionHash: "00010000000000000000000000000000000000000000000000000000000000000000",
-				StateHash:       ImprintHexString("00000000000000000000000000000000000000000000000000000000000000000000"),
+				RequestID:       RequireNewImprintV2("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
+				TransactionHash: RequireNewImprintV2("00010000000000000000000000000000000000000000000000000000000000000000"),
+				StateHash:       RequireNewImprintV2("00000000000000000000000000000000000000000000000000000000000000000000"),
 			},
 		}
 
@@ -402,9 +402,9 @@ func TestSubmitCommitmentResponse_SerializeAndValidate(t *testing.T) {
 			PublicKey: NewHexBytes([]byte{0x02, 0x79}), // shortened for test
 			Signature: NewHexBytes([]byte{0xa0, 0xb3}), // shortened for test
 			Request: ReceiptRequestV1{
-				RequestID:       "0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40",
-				TransactionHash: "00010000000000000000000000000000000000000000000000000000000000000000",
-				StateHash:       ImprintHexString("000000"), // shortened for test, minimum 3 bytes
+				RequestID:       RequireNewImprintV2("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
+				TransactionHash: RequireNewImprintV2("00010000000000000000000000000000000000000000000000000000000000000000"),
+				StateHash:       RequireNewImprintV2("000000"), // shortened for test, minimum 3 bytes
 			},
 		}
 
@@ -445,7 +445,7 @@ func TestAuthenticator_SerializeAndValidate(t *testing.T) {
 		// Test data matching TypeScript AuthenticatorTest.ts
 		publicKeyHex := "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 		signatureHex := "a0b37f8fba683cc68f6574cd43b39f0343a50008bf6ccea9d13231d9e7e2e1e411edc8d307254296264aebfc3dc76cd8b668373a072fd64665b50000e9fcce5201"
-		stateHashHex := ImprintHexString("00000000000000000000000000000000000000000000000000000000000000000000")
+		stateHashHex := RequireNewImprintV2("00000000000000000000000000000000000000000000000000000000000000000000")
 
 		publicKey, err := hex.DecodeString(publicKeyHex)
 		require.NoError(t, err)
@@ -479,7 +479,8 @@ func TestAuthenticator_SerializeAndValidate(t *testing.T) {
 		publicKey := make([]byte, 20)
 
 		// Create StateID using the same public key and state hash
-		requestID, err := CreateRequestID(publicKey, ImprintHexString("00000000000000000000000000000000000000000000000000000000000000000000"))
+		stateHash := RequireNewImprintV2("00000000000000000000000000000000000000000000000000000000000000000000")
+		requestID, err := CreateRequestID(publicKey, stateHash)
 		require.NoError(t, err)
 
 		// Expected result from RequestIdTest.ts (matches our StateID test)
@@ -523,13 +524,13 @@ func TestAuthenticator_SerializeAndValidate(t *testing.T) {
 func TestAggregateRequestCountSerialization_V1(t *testing.T) {
 	t.Run("SubmitCommitmentRequest JSON serialization", func(t *testing.T) {
 		req := &SubmitCommitmentRequest{
-			RequestID:       "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
-			TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
+			RequestID:       RequireNewImprintV2("0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890"),
+			TransactionHash: RequireNewImprintV2("0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890"),
 			Authenticator: Authenticator{
 				Algorithm: "secp256k1",
 				PublicKey: HexBytes{0x01, 0x02, 0x03},
 				Signature: HexBytes{0x04, 0x05, 0x06},
-				StateHash: "0000abcd",
+				StateHash: RequireNewImprintV2("0000abcd"),
 			},
 			AggregateRequestCount: 100,
 		}
@@ -592,13 +593,13 @@ func TestAggregateRequestCountSerialization_V1(t *testing.T) {
 		leafIndex.SetInt64(0)
 
 		record := &AggregatorRecordV1{
-			RequestID:       "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
-			TransactionHash: "0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
+			RequestID:       RequireNewImprintV2("0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890"),
+			TransactionHash: RequireNewImprintV2("0000b1b2c3d4e5f6789012345678901234567890123456789012345678901234567890"),
 			Authenticator: Authenticator{
 				Algorithm: "secp256k1",
 				PublicKey: HexBytes{0x01, 0x02, 0x03},
 				Signature: HexBytes{0x04, 0x05, 0x06},
-				StateHash: "0000abcd",
+				StateHash: RequireNewImprintV2("0000abcd"),
 			},
 			AggregateRequestCount: 500,
 			BlockNumber:           blockNumber,
