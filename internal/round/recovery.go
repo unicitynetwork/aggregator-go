@@ -15,12 +15,12 @@ import (
 type RecoveryResult struct {
 	Recovered   bool
 	BlockNumber *api.BigInt
-	RequestIDs  []api.RequestID
+	RequestIDs  []api.StateID
 }
 
 // indexedRequestID tracks a request ID with its original position in the block
 type indexedRequestID struct {
-	reqID     api.RequestID
+	reqID     api.StateID
 	leafIndex int
 }
 
@@ -79,7 +79,7 @@ func recoverBlock(
 	storage interfaces.Storage,
 	commitmentQueue interfaces.CommitmentQueue,
 	block *models.Block,
-) ([]api.RequestID, error) {
+) ([]api.StateID, error) {
 	blockRecords, err := storage.BlockRecordsStorage().GetByBlockNumber(ctx, block.Index)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block records: %w", err)
@@ -88,7 +88,7 @@ func recoverBlock(
 		return nil, fmt.Errorf("FATAL: block records not found for block %s", block.Index.String())
 	}
 
-	requestIDs := blockRecords.RequestIDs
+	requestIDs := blockRecords.StateIDs
 	log.WithContext(ctx).Info("Block records found", "requestCount", len(requestIDs))
 
 	existingRecordIDs, err := storage.AggregatorRecordStorage().GetExistingRequestIDs(ctx, requestIDsToStrings(requestIDs))
@@ -110,9 +110,9 @@ func recoverBlock(
 	}
 
 	var missingRecords []indexedRequestID
-	var missingSmtKeys []api.RequestID
+	var missingSmtKeys []api.StateID
 	for i, reqID := range requestIDs {
-		if !existingRecordIDs[string(reqID)] {
+		if !existingRecordIDs[reqID.String()] {
 			missingRecords = append(missingRecords, indexedRequestID{reqID: reqID, leafIndex: i})
 		}
 		if !existingSmtKeys[smtKeyStrings[i]] {
@@ -142,11 +142,11 @@ func recoverBlock(
 	if err != nil {
 		log.WithContext(ctx).Warn("Failed to get commitments for acking, they may be re-processed", "error", err)
 	} else if len(commitmentMap) > 0 {
-		ackEntries := make([]interfaces.CommitmentAck, 0, len(commitmentMap))
+		ackEntries := make([]interfaces.CertificationRequestAck, 0, len(commitmentMap))
 		for _, c := range commitmentMap {
-			ackEntries = append(ackEntries, interfaces.CommitmentAck{
-				RequestID: c.RequestID,
-				StreamID:  c.StreamID,
+			ackEntries = append(ackEntries, interfaces.CertificationRequestAck{
+				StateID:  c.StateID,
+				StreamID: c.StreamID,
 			})
 		}
 		if err := commitmentQueue.MarkProcessed(ctx, ackEntries); err != nil {
@@ -166,17 +166,17 @@ func recoverMissingData(
 	commitmentQueue interfaces.CommitmentQueue,
 	blockNumber *api.BigInt,
 	missingRecords []indexedRequestID,
-	missingSmtKeys []api.RequestID,
+	missingSmtKeys []api.StateID,
 ) error {
 	// Collect all needed request IDs
-	neededIDsMap := make(map[string]api.RequestID, len(missingRecords)+len(missingSmtKeys))
+	neededIDsMap := make(map[string]api.StateID, len(missingRecords)+len(missingSmtKeys))
 	for _, missing := range missingRecords {
-		neededIDsMap[string(missing.reqID)] = missing.reqID
+		neededIDsMap[missing.reqID.String()] = missing.reqID
 	}
 	for _, reqID := range missingSmtKeys {
-		neededIDsMap[string(reqID)] = reqID
+		neededIDsMap[reqID.String()] = reqID
 	}
-	neededIDs := make([]api.RequestID, 0, len(neededIDsMap))
+	neededIDs := make([]api.StateID, 0, len(neededIDsMap))
 	for _, reqID := range neededIDsMap {
 		neededIDs = append(neededIDs, reqID)
 	}
@@ -190,9 +190,9 @@ func recoverMissingData(
 	if len(missingRecords) > 0 {
 		var records []*models.AggregatorRecord
 		for _, missing := range missingRecords {
-			commitment, ok := commitmentMap[string(missing.reqID)]
+			commitment, ok := commitmentMap[missing.reqID.String()]
 			if !ok {
-				existingRecord, err := storage.AggregatorRecordStorage().GetByRequestID(ctx, missing.reqID)
+				existingRecord, err := storage.AggregatorRecordStorage().GetByStateID(ctx, missing.reqID)
 				if err != nil {
 					return fmt.Errorf("failed to check existing record: %w", err)
 				}
@@ -217,13 +217,13 @@ func recoverMissingData(
 	if len(missingSmtKeys) > 0 {
 		var nodes []*models.SmtNode
 		for _, reqID := range missingSmtKeys {
-			commitment, ok := commitmentMap[string(reqID)]
+			commitment, ok := commitmentMap[reqID.String()]
 			if !ok {
 				path, err := reqID.GetPath()
 				if err != nil {
 					return fmt.Errorf("failed to get path for reqID: %w", err)
 				}
-				existingNode, err := storage.SmtStorage().GetByKey(ctx, api.HexBytes(path.Bytes()))
+				existingNode, err := storage.SmtStorage().GetByKey(ctx, path.Bytes())
 				if err != nil {
 					return fmt.Errorf("failed to check existing SMT node: %w", err)
 				}
@@ -233,15 +233,15 @@ func recoverMissingData(
 				return fmt.Errorf("FATAL: commitment not found for SMT key %s", reqID)
 			}
 
-			path, err := commitment.RequestID.GetPath()
+			path, err := commitment.StateID.GetPath()
 			if err != nil {
 				return fmt.Errorf("failed to get path for commitment: %w", err)
 			}
-			leafValue, err := commitment.CreateLeafValue()
+			leafValue, err := commitment.LeafValue()
 			if err != nil {
 				return fmt.Errorf("failed to create leaf value: %w", err)
 			}
-			nodes = append(nodes, models.NewSmtNode(api.HexBytes(path.Bytes()), leafValue))
+			nodes = append(nodes, models.NewSmtNode(path.Bytes(), leafValue))
 		}
 
 		if len(nodes) > 0 {
@@ -262,7 +262,7 @@ func LoadRecoveredNodesIntoSMT(
 	log *logger.Logger,
 	storage interfaces.Storage,
 	smtTree *smt.ThreadSafeSMT,
-	requestIDs []api.RequestID,
+	requestIDs []api.StateID,
 ) error {
 	if len(requestIDs) == 0 {
 		return nil
@@ -276,7 +276,7 @@ func LoadRecoveredNodesIntoSMT(
 		if err != nil {
 			return fmt.Errorf("failed to get path for requestID %s: %w", reqID, err)
 		}
-		keys[i] = api.HexBytes(path.Bytes())
+		keys[i] = path.Bytes()
 	}
 
 	nodes, err := storage.SmtStorage().GetByKeys(ctx, keys)
@@ -291,10 +291,7 @@ func LoadRecoveredNodesIntoSMT(
 	leaves := make([]*smt.Leaf, len(nodes))
 	for i, node := range nodes {
 		path := new(big.Int).SetBytes(node.Key)
-		leaves[i] = &smt.Leaf{
-			Path:  path,
-			Value: node.Value,
-		}
+		leaves[i] = smt.NewLeaf(path, node.Value)
 	}
 
 	if _, err := smtTree.AddLeaves(leaves); err != nil {
@@ -307,7 +304,7 @@ func LoadRecoveredNodesIntoSMT(
 func requestIDsToStrings(requestIDs []api.RequestID) []string {
 	result := make([]string, len(requestIDs))
 	for i, reqID := range requestIDs {
-		result[i] = string(reqID)
+		result[i] = reqID.String()
 	}
 	return result
 }
@@ -330,7 +327,7 @@ func CleanupProcessedPendingCommitments(
 
 	requestIDs := make([]string, len(pendingCommitments))
 	for i, c := range pendingCommitments {
-		requestIDs[i] = string(c.RequestID)
+		requestIDs[i] = c.StateID.String()
 	}
 
 	existingIDs, err := storage.AggregatorRecordStorage().GetExistingRequestIDs(ctx, requestIDs)
@@ -338,12 +335,12 @@ func CleanupProcessedPendingCommitments(
 		return fmt.Errorf("failed to check existing records: %w", err)
 	}
 
-	var ackEntries []interfaces.CommitmentAck
+	var ackEntries []interfaces.CertificationRequestAck
 	for _, c := range pendingCommitments {
-		if existingIDs[string(c.RequestID)] {
-			ackEntries = append(ackEntries, interfaces.CommitmentAck{
-				RequestID: c.RequestID,
-				StreamID:  c.StreamID,
+		if existingIDs[c.StateID.String()] {
+			ackEntries = append(ackEntries, interfaces.CertificationRequestAck{
+				StateID:  c.StateID,
+				StreamID: c.StreamID,
 			})
 		}
 	}

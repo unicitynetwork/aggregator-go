@@ -69,7 +69,7 @@ func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 	require.NoError(t, err)
 
 	// Generate test commitments with unique IDs
-	commitments := testutil.CreateTestCommitments(t, 5, "t1_req")
+	commitments := testutil.CreateTestCertificationRequests(t, 5, "t1_req")
 
 	// Set up the round
 	rm.currentRound = &Round{
@@ -153,7 +153,7 @@ func (s *FinalizeDuplicateTestSuite) Test2_NoDuplicates() {
 		state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
 	require.NoError(t, err)
 
-	commitments := testutil.CreateTestCommitments(t, 3, "t2_req")
+	commitments := testutil.CreateTestCertificationRequests(t, 3, "t2_req")
 
 	rm.currentRound = &Round{
 		Number:      api.NewBigInt(big.NewInt(2)),
@@ -205,7 +205,7 @@ func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 		state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
 	require.NoError(t, err)
 
-	commitments := testutil.CreateTestCommitments(t, 3, "t3_req")
+	commitments := testutil.CreateTestCertificationRequests(t, 3, "t3_req")
 
 	rm.currentRound = &Round{
 		Number:      api.NewBigInt(big.NewInt(3)),
@@ -276,7 +276,7 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
 	require.NoError(t, err)
 
-	commitments := testutil.CreateTestCommitments(t, 3, "t4_req")
+	commitments := testutil.CreateTestCertificationRequests(t, 3, "t4_req")
 
 	rm.currentRound = &Round{
 		Number:      api.NewBigInt(big.NewInt(4)),
@@ -312,9 +312,9 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 	require.NoError(t, err, "Pre-storing block should succeed")
 
 	// Also pre-store block records
-	requestIds := make([]api.RequestID, len(commitments))
+	requestIds := make([]api.StateID, len(commitments))
 	for i, c := range commitments {
-		requestIds[i] = c.RequestID
+		requestIds[i] = c.StateID
 	}
 	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds))
 	require.NoError(t, err, "Pre-storing block records should succeed")
@@ -358,7 +358,7 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
 	require.NoError(t, err)
 
-	commitments := testutil.CreateTestCommitments(t, 3, "t5_req")
+	commitments := testutil.CreateTestCertificationRequests(t, 3, "t5_req")
 
 	rm.currentRound = &Round{
 		Number:      api.NewBigInt(big.NewInt(5)),
@@ -394,9 +394,9 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	require.NoError(t, err, "Pre-storing finalized block should succeed")
 
 	// Pre-store block records
-	requestIds := make([]api.RequestID, len(commitments))
+	requestIds := make([]api.StateID, len(commitments))
 	for i, c := range commitments {
-		requestIds[i] = c.RequestID
+		requestIds[i] = c.StateID
 	}
 	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds))
 	require.NoError(t, err, "Pre-storing block records should succeed")
@@ -418,4 +418,92 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	require.NoError(t, err, "FinalizeBlock should succeed when block is already finalized")
 
 	t.Log("✓ FinalizeBlock succeeded with already-finalized block")
+}
+
+// Test6_BlockRecordsMatchPendingCommitmentsOnConflict verifies that FinalizeBlock
+// stores BlockRecords/SMT nodes/aggregator records from the filtered pending set,
+// not from all round commitments when one commitment conflicts.
+func (s *FinalizeDuplicateTestSuite) Test6_BlockRecordsMatchPendingCommitmentsOnConflict() {
+	t := s.T()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	testLogger, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
+	require.NoError(t, err)
+
+	// Create c1, conflict(c1), and c2.
+	commitment1 := testutil.CreateTestCertificationRequest(t, "t6_req_1")
+	commitment2 := testutil.CreateTestCertificationRequest(t, "t6_req_2")
+	conflictingCommitment := *commitment1
+	conflictingCommitment.CertificationData.TransactionHash = commitment2.CertificationData.TransactionHash
+
+	leafValue1, err := commitment1.LeafValue()
+	require.NoError(t, err)
+	leafValueConflict, err := conflictingCommitment.LeafValue()
+	require.NoError(t, err)
+	require.NotEqual(t, leafValue1, leafValueConflict, "conflicting commitment must produce a different leaf value")
+
+	commitments := []*models.CertificationRequest{commitment1, &conflictingCommitment, commitment2}
+	rm.currentRound = &Round{
+		Number:      api.NewBigInt(big.NewInt(6)),
+		State:       RoundStateProcessing,
+		Commitments: commitments,
+		Snapshot:    rm.smt.CreateSnapshot(),
+	}
+
+	rm.roundMutex.Lock()
+	err = rm.processMiniBatch(ctx, commitments)
+	rm.roundMutex.Unlock()
+	require.NoError(t, err)
+
+	// Pending sets should only contain c1 and c2.
+	require.Len(t, rm.currentRound.PendingLeaves, 2)
+	require.Len(t, rm.currentRound.PendingCommitments, 2)
+	require.True(t, rm.currentRound.PendingCommitments[0] == commitment1)
+	require.True(t, rm.currentRound.PendingCommitments[1] == commitment2)
+
+	smtCountBefore, err := s.storage.SmtStorage().Count(ctx)
+	require.NoError(t, err)
+	recordCountBefore, err := s.storage.AggregatorRecordStorage().Count(ctx)
+	require.NoError(t, err)
+
+	rootHash := rm.currentRound.Snapshot.GetRootHash()
+	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
+	require.NoError(t, err)
+
+	block := models.NewBlock(
+		api.NewBigInt(big.NewInt(6)),
+		"unicity",
+		0,
+		"1.0",
+		"mainnet",
+		rootHashBytes,
+		api.HexBytes{},
+		api.HexBytes{},
+		nil,
+	)
+
+	err = rm.FinalizeBlock(ctx, block)
+	require.NoError(t, err)
+
+	blockRecords, err := s.storage.BlockRecordsStorage().GetByBlockNumber(ctx, block.Index)
+	require.NoError(t, err)
+	require.NotNil(t, blockRecords)
+	require.Equal(t, []api.StateID{commitment1.StateID, commitment2.StateID}, blockRecords.StateIDs)
+
+	recordsByBlock, err := s.storage.AggregatorRecordStorage().GetByBlockNumber(ctx, block.Index)
+	require.NoError(t, err)
+	require.Len(t, recordsByBlock, 2)
+
+	smtCountAfter, err := s.storage.SmtStorage().Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, smtCountBefore+2, smtCountAfter, "should persist only filtered SMT leaves")
+
+	recordCountAfter, err := s.storage.AggregatorRecordStorage().Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, recordCountBefore+2, recordCountAfter, "should persist only filtered aggregator records")
 }

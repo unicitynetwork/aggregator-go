@@ -1,4 +1,4 @@
-package models
+package v1
 
 import (
 	"crypto/sha256"
@@ -14,7 +14,7 @@ import (
 
 // TestCreateLeafValue tests the createLeafValue function to ensure it matches
 // the TypeScript LeafValue.create() implementation exactly
-func TestCreateLeafValue(t *testing.T) {
+func TestCreateLeafValueV1(t *testing.T) {
 	t.Run("should create expected leaf value", func(t *testing.T) {
 		// Create test data
 		publicKeyHex := "02bf8d9e7687f66c7fce1e98edbc05566f7db740030722cf6cf62aca035c5035ea"
@@ -29,10 +29,10 @@ func TestCreateLeafValue(t *testing.T) {
 		signature, err := hex.DecodeString(signatureHex)
 		require.NoError(t, err)
 
-		stateHash, err := api.NewImprintHexString(stateHashHex)
+		stateHash, err := api.NewImprintV2(stateHashHex)
 		require.NoError(t, err)
 
-		transactionHash, err := api.NewImprintHexString(transactionHashHex)
+		transactionHash, err := api.NewImprintV2(transactionHashHex)
 		require.NoError(t, err)
 
 		requestID, err := api.CreateRequestID(publicKey, stateHash)
@@ -47,7 +47,7 @@ func TestCreateLeafValue(t *testing.T) {
 		}
 
 		// Create commitment
-		commitment := NewCommitment(requestID, transactionHash, authenticator)
+		commitment := NewCommitment(requestID, transactionHash, authenticator).ToAPI()
 
 		// Call createLeafValue
 		leafValue, err := commitment.CreateLeafValue()
@@ -76,11 +76,8 @@ func TestCreateLeafValue(t *testing.T) {
 		signature, err := hex.DecodeString(signatureHex)
 		require.NoError(t, err)
 
-		stateHash, err := api.NewImprintHexString(stateHashHex)
-		require.NoError(t, err)
-
-		transactionHash, err := api.NewImprintHexString(transactionHashHex)
-		require.NoError(t, err)
+		stateHash := api.RequireNewImprintV2(stateHashHex)
+		transactionHash := api.RequireNewImprintV2(transactionHashHex)
 
 		requestID, err := api.CreateRequestID(publicKey, stateHash)
 		require.NoError(t, err)
@@ -94,7 +91,7 @@ func TestCreateLeafValue(t *testing.T) {
 		}
 
 		// Create commitment
-		commitment := NewCommitment(requestID, transactionHash, authenticator)
+		commitment := NewCommitment(requestID, transactionHash, authenticator).ToAPI()
 
 		// Call createLeafValue
 		leafValue, err := commitment.CreateLeafValue()
@@ -120,16 +117,15 @@ func TestCreateLeafValue(t *testing.T) {
 			Algorithm: "secp256k1",
 			PublicKey: api.NewHexBytes([]byte{0x02, 0x79, 0xbe, 0x66}),
 			Signature: api.NewHexBytes([]byte{0xa0, 0xb3, 0x7f, 0x8f}),
-			StateHash: api.ImprintHexString("0000deadbeef"),
+			StateHash: api.RequireNewImprintV2("0000deadbeef"),
 		}
 
-		transactionHash, err := api.NewImprintHexString("0000feedcafe")
-		require.NoError(t, err)
+		transactionHash := api.RequireNewImprintV2("0000feedcafe")
 
 		requestID, err := api.CreateRequestID(authenticator.PublicKey, authenticator.StateHash)
 		require.NoError(t, err)
 
-		commitment := NewCommitment(requestID, transactionHash, authenticator)
+		commitment := NewCommitment(requestID, transactionHash, authenticator).ToAPI()
 
 		// Get leaf value from our function
 		leafValue, err := commitment.CreateLeafValue()
@@ -137,8 +133,7 @@ func TestCreateLeafValue(t *testing.T) {
 
 		// Manually replicate the expected process
 		// 1. Get state hash imprint for CBOR encoding
-		stateHashImprint, err := authenticator.StateHash.Imprint()
-		require.NoError(t, err)
+		stateHashImprint := authenticator.StateHash.Imprint()
 
 		// 2. CBOR encode the authenticator as an array (matching TypeScript)
 		authenticatorArray := []interface{}{
@@ -151,8 +146,7 @@ func TestCreateLeafValue(t *testing.T) {
 		require.NoError(t, err)
 
 		// 3. Get transaction hash imprint
-		expectedTransactionImprint, err := transactionHash.Imprint()
-		require.NoError(t, err)
+		expectedTransactionImprint := transactionHash.Imprint()
 
 		// 4. Create SHA256 hash of CBOR + transaction imprint
 		expectedHasher := sha256.New()
@@ -207,11 +201,8 @@ func TestCreateLeafValue(t *testing.T) {
 
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				stateHash, err := api.NewImprintHexString(tc.stateHash)
-				require.NoError(t, err)
-
-				transactionHash, err := api.NewImprintHexString(tc.txHash)
-				require.NoError(t, err)
+				stateHash := api.RequireNewImprintV2(tc.stateHash)
+				transactionHash := api.RequireNewImprintV2(tc.txHash)
 
 				requestID, err := api.CreateRequestID(tc.publicKey, stateHash)
 				require.NoError(t, err)
@@ -223,7 +214,7 @@ func TestCreateLeafValue(t *testing.T) {
 					StateHash: stateHash,
 				}
 
-				commitment := NewCommitment(requestID, transactionHash, authenticator)
+				commitment := NewCommitment(requestID, transactionHash, authenticator).ToAPI()
 
 				leafValue, err := commitment.CreateLeafValue()
 				require.NoError(t, err)
@@ -239,11 +230,8 @@ func TestCreateLeafValue(t *testing.T) {
 		// encode properly, this test serves as a placeholder for future edge cases
 
 		// For now, just verify normal operation
-		stateHash, err := api.NewImprintHexString("0000deadbeef")
-		require.NoError(t, err)
-
-		transactionHash, err := api.NewImprintHexString("0000feedcafe")
-		require.NoError(t, err)
+		stateHash := api.RequireNewImprintV2("0000deadbeef")
+		transactionHash := api.RequireNewImprintV2("0000feedcafe")
 
 		requestID, err := api.CreateRequestID([]byte{0x01}, stateHash)
 		require.NoError(t, err)
@@ -255,51 +243,19 @@ func TestCreateLeafValue(t *testing.T) {
 			StateHash: stateHash,
 		}
 
-		commitment := NewCommitment(requestID, transactionHash, authenticator)
+		commitment := NewCommitment(requestID, transactionHash, authenticator).ToAPI()
 
 		leafValue, err := commitment.CreateLeafValue()
 		require.NoError(t, err)
 		require.NotNil(t, leafValue)
 	})
 
-	t.Run("should handle transaction hash imprint errors", func(t *testing.T) {
-		// Test with invalid transaction hash
-		stateHash, err := api.NewImprintHexString("0000deadbeef")
-		require.NoError(t, err)
-
-		requestID, err := api.CreateRequestID([]byte{0x01}, stateHash)
-		require.NoError(t, err)
-
-		authenticator := Authenticator{
-			Algorithm: "test",
-			PublicKey: api.NewHexBytes([]byte{0x01}),
-			Signature: api.NewHexBytes([]byte{0x02}),
-			StateHash: stateHash,
-		}
-
-		// Create invalid transaction hash (contains invalid hex characters)
-		invalidTransactionHash := api.ImprintHexString("invalid")
-		commitment := NewCommitment(requestID, invalidTransactionHash, authenticator)
-
-		leafValue, err := commitment.CreateLeafValue()
-		require.Error(t, err)
-		require.Nil(t, leafValue)
-		assert.Contains(t, err.Error(), "failed to get transaction hash imprint")
-	})
-
 	t.Run("should produce different values for different inputs", func(t *testing.T) {
 		// Create two different commitments
-		stateHash1, err := api.NewImprintHexString("0000deadbeef01")
-		require.NoError(t, err)
-
-		stateHash2, err := api.NewImprintHexString("0000deadbeef02")
-		require.NoError(t, err)
-
-		transactionHash1, err := api.NewImprintHexString("0000feedcafe01")
-		require.NoError(t, err)
-
-		transactionHash2, err := api.NewImprintHexString("0000feedcafe02")
-		require.NoError(t, err)
+		stateHash1 := api.RequireNewImprintV2("0000deadbeef01")
+		stateHash2 := api.RequireNewImprintV2("0000deadbeef02")
+		transactionHash1 := api.RequireNewImprintV2("0000feedcafe01")
+		transactionHash2 := api.RequireNewImprintV2("0000feedcafe02")
 
 		requestID1, err := api.CreateRequestID([]byte{0x01}, stateHash1)
 		require.NoError(t, err)
@@ -321,8 +277,8 @@ func TestCreateLeafValue(t *testing.T) {
 			StateHash: stateHash2,
 		}
 
-		commitment1 := NewCommitment(requestID1, transactionHash1, authenticator1)
-		commitment2 := NewCommitment(requestID2, transactionHash2, authenticator2)
+		commitment1 := NewCommitment(requestID1, transactionHash1, authenticator1).ToAPI()
+		commitment2 := NewCommitment(requestID2, transactionHash2, authenticator2).ToAPI()
 
 		leafValue1, err := commitment1.CreateLeafValue()
 		require.NoError(t, err)
@@ -336,12 +292,12 @@ func TestCreateLeafValue(t *testing.T) {
 }
 
 // BenchmarkCreateLeafValue benchmarks the createLeafValue function
-func BenchmarkCreateLeafValue(b *testing.B) {
+func BenchmarkCreateLeafValueV1(b *testing.B) {
 	// Setup test data
 	publicKey := []byte{0x02, 0x79, 0xbe, 0x66}
 	signature := []byte{0xa0, 0xb3, 0x7f, 0x8f}
-	stateHash, _ := api.NewImprintHexString("0000deadbeef")
-	transactionHash, _ := api.NewImprintHexString("0000feedcafe")
+	stateHash := api.RequireNewImprintV2("0000deadbeef")
+	transactionHash := api.RequireNewImprintV2("0000feedcafe")
 	requestID, _ := api.CreateRequestID(publicKey, stateHash)
 
 	authenticator := Authenticator{
@@ -351,7 +307,7 @@ func BenchmarkCreateLeafValue(b *testing.B) {
 		StateHash: stateHash,
 	}
 
-	commitment := NewCommitment(requestID, transactionHash, authenticator)
+	commitment := NewCommitment(requestID, transactionHash, authenticator).ToAPI()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

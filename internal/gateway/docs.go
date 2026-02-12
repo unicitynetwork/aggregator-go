@@ -166,36 +166,26 @@ func GenerateDocsHTML() string {
             <p><strong>💡 How to use:</strong> Edit the JSON parameters below and click "Send Request" to test the API live!</p>
         </div>
 
-        <!-- submit_commitment -->
+        <!-- certification_request -->
         <div class="method-section">
-            <div class="method-header">submit_commitment</div>
+            <div class="method-header">certification_request</div>
             <div class="method-content">
-                <div class="description">Submit a state transition commitment to the aggregator. The example below uses a real secp256k1 signature that will pass validation. Note: All hash fields (requestId, transactionHash, stateHash) start with "0000" (SHA256 algorithm prefix).</div>
+                <div class="description">Submit a state transition certification request to the aggregator. The example below uses a real secp256k1 signature that will pass validation. Note: All hash fields (stateId, transactionHash, sourceStateHash) start with "0000" (SHA256 algorithm prefix).</div>
                 
                 <div class="params-container">
                     <div class="params-section">
                         <h3>Request Parameters</h3>
-                        <textarea id="submit_commitment_params">{
-  "requestId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122",
-  "transactionHash": "0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297",
-  "authenticator": {
-    "algorithm": "secp256k1",
-    "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
-    "signature": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
-    "stateHash": "0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647"
-  },
-  "receipt": true
-}</textarea>
+                        <textarea id="certification_request_params">"8458203e331d1f9c0265105db6173d932a419049fdbdfdd32f9e488fe48e8598a23eed8483014101582102d1a5a7bebd4118d9a46feb00686f2236bc745c8378eb54078c43003799e042395820b54d5ddf1772aca589c8fbfad03eca8d6ffaca0e1f1c1cd89ecd0afe3a73b6f05820f5c5161937726e0f24b074115e4752899a2f4d3f154764209ae11d05ec63c72e5841a000a2c83ddf683f8ca388cbd0b1bfd52bcd919641a0774d09459ca97aeeaf4e3682d863ac77afb71dc8efe0b8c1b983ee9b5231adad9adc5c27a0b97be6147c00f500"</textarea>
                         <div class="button-group">
-                            <button onclick="sendRequest('submit_commitment')">🚀 Send Request</button>
-                            <button onclick="clearResponse('submit_commitment')">🗑️ Clear</button>
-                            <button onclick="copyAsCurl('submit_commitment')">📋 Copy cURL</button>
+                            <button onclick="sendRequest('certification_request')">🚀 Send Request</button>
+                            <button onclick="clearResponse('certification_request')">🗑️ Clear</button>
+                            <button onclick="copyAsCurl('certification_request')">📋 Copy cURL</button>
                         </div>
                     </div>
                     
                     <div class="response-section">
-                        <h3>Response <span id="submit_commitment_status" class="status"></span></h3>
-                        <div id="submit_commitment_response" class="response-box">Click "Send Request" to see the response here...</div>
+                        <h3>Response <span id="certification_request_status" class="status"></span></h3>
+                        <div id="certification_request_response" class="response-box">Click "Send Request" to see the response here...</div>
                     </div>
                 </div>
             </div>
@@ -205,13 +195,13 @@ func GenerateDocsHTML() string {
         <div class="method-section">
             <div class="method-header">get_inclusion_proof</div>
             <div class="method-content">
-                <div class="description">Retrieve the inclusion proof for a submitted commitment.</div>
+                <div class="description">Retrieve the inclusion proof for a submitted certification request.</div>
                 
                 <div class="params-container">
                     <div class="params-section">
                         <h3>Request Parameters</h3>
                         <textarea id="get_inclusion_proof_params">{
-  "requestId": "0000981012b1c865f65d3d5523819cb34fa2c6827e792efd4579b4927144eb243122"
+  "stateId": "0000c7aa6962316c0eeb1469dc3d7793e39e140c005e6eea0e188dcc73035d765937"
 }</textarea>
                         <div class="button-group">
                             <button onclick="sendRequest('get_inclusion_proof')">🚀 Send Request</button>
@@ -280,28 +270,28 @@ func GenerateDocsHTML() string {
             </div>
         </div>
 
-        <!-- get_block_commitments -->
+        <!-- get_block_records -->
         <div class="method-section">
-            <div class="method-header">get_block_commitments</div>
+            <div class="method-header">get_block_records</div>
             <div class="method-content">
-                <div class="description">Get all commitments included in a specific block.</div>
+                <div class="description">Get all certification requests included in a specific block.</div>
                 
                 <div class="params-container">
                     <div class="params-section">
                         <h3>Request Parameters</h3>
-                        <textarea id="get_block_commitments_params">{
+                        <textarea id="get_block_records_params">{
   "blockNumber": 123
 }</textarea>
                         <div class="button-group">
-                            <button onclick="sendRequest('get_block_commitments')">🚀 Send Request</button>
-                            <button onclick="clearResponse('get_block_commitments')">🗑️ Clear</button>
-                            <button onclick="copyAsCurl('get_block_commitments')">📋 Copy cURL</button>
+                            <button onclick="sendRequest('get_block_records')">🚀 Send Request</button>
+                            <button onclick="clearResponse('get_block_records')">🗑️ Clear</button>
+                            <button onclick="copyAsCurl('get_block_records')">📋 Copy cURL</button>
                         </div>
                     </div>
                     
                     <div class="response-section">
-                        <h3>Response <span id="get_block_commitments_status" class="status"></span></h3>
-                        <div id="get_block_commitments_response" class="response-box">Click "Send Request" to see the response here...</div>
+                        <h3>Response <span id="get_block_records_status" class="status"></span></h3>
+                        <div id="get_block_records_response" class="response-box">Click "Send Request" to see the response here...</div>
                     </div>
                 </div>
             </div>

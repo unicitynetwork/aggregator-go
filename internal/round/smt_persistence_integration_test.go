@@ -180,7 +180,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	defer cancel()
 
 	// Create test commitments
-	testCommitments := testutil.CreateTestCommitments(t, 3, "request")
+	testCommitments := testutil.CreateTestCertificationRequests(t, 3, "request")
 
 	// Process commitments in first round manager instance
 	cfg := &config.Config{
@@ -257,8 +257,8 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 
 	// Verify inclusion proofs work after restart
 	for _, commitment := range testCommitments {
-		path, err := commitment.RequestID.GetPath()
-		require.NoError(t, err, "Should be able to get path from request ID")
+		path, err := commitment.StateID.GetPath()
+		require.NoError(t, err, "Should be able to get path from state ID")
 
 		merkleTreePath, err := newRm.smt.GetPath(path)
 		require.NoError(t, err)

@@ -168,7 +168,7 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 		panic(fmt.Sprintf("failed to read random state bytes: %v", err))
 	}
 
-	stateHashImprint := signing.CreateDataHashImprint(stateData)
+	stateHashImprint := signing.CreateDataHash(stateData)
 
 	requestID, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
 	if err != nil {
@@ -180,11 +180,8 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 		panic(fmt.Sprintf("failed to read random transaction bytes: %v", err))
 	}
 
-	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
-	transactionHashBytes, err := transactionHashImprint.DataBytes()
-	if err != nil {
-		panic(fmt.Sprintf("failed to extract transaction hash bytes: %v", err))
-	}
+	transactionHashImprint := signing.CreateDataHash(transactionData)
+	transactionHashBytes := transactionHashImprint.DataBytes()
 
 	signature, err := signing.NewSigningService().SignHash(transactionHashBytes, privateKey.Serialize())
 	if err != nil {
@@ -193,13 +190,13 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 
 	receipt := true
 	return &api.SubmitCommitmentRequest{
-		RequestID:       api.RequestID(requestID),
-		TransactionHash: api.TransactionHash(transactionHashImprint),
+		RequestID:       requestID,
+		TransactionHash: transactionHashImprint,
 		Authenticator: api.Authenticator{
 			Algorithm: "secp256k1",
-			PublicKey: api.HexBytes(publicKeyBytes),
-			Signature: api.HexBytes(signature),
-			StateHash: api.StateHash(stateHashImprint),
+			PublicKey: publicKeyBytes,
+			Signature: signature,
+			StateHash: stateHashImprint,
 		},
 		Receipt: &receipt,
 	}
@@ -241,7 +238,7 @@ func callJSONRPC(ctx context.Context, client *http.Client, url, authHeader, meth
 	return &rpcResp, nil
 }
 
-func waitForInclusionProof(ctx context.Context, client *http.Client, requestID api.RequestID, requestPath *big.Int, logger *log.Logger) (*api.GetInclusionProofResponse, *api.PathVerificationResult, int, error) {
+func waitForInclusionProof(ctx context.Context, client *http.Client, requestID api.RequestID, requestPath *big.Int, logger *log.Logger) (*api.GetInclusionProofResponseV2, *api.PathVerificationResult, int, error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(45 * time.Second)
@@ -256,8 +253,8 @@ func waitForInclusionProof(ctx context.Context, client *http.Client, requestID a
 		default:
 		}
 
-		proofResp, err := callJSONRPC(ctx, client, *flagURL, *flagAuth, "get_inclusion_proof", api.GetInclusionProofRequest{
-			RequestID: requestID,
+		proofResp, err := callJSONRPC(ctx, client, *flagURL, *flagAuth, "get_inclusion_proof", api.GetInclusionProofRequestV2{
+			StateID: requestID,
 		})
 		if err != nil {
 			logger.Printf("get_inclusion_proof attempt %d failed: %v", attempts, err)
@@ -271,7 +268,7 @@ func waitForInclusionProof(ctx context.Context, client *http.Client, requestID a
 			continue
 		}
 
-		var payload api.GetInclusionProofResponse
+		var payload api.GetInclusionProofResponseV2
 		if err := json.Unmarshal(proofResp.Result, &payload); err != nil {
 			logger.Printf("get_inclusion_proof attempt %d decode error: %v", attempts, err)
 			time.Sleep(*flagPollInterval)
@@ -303,7 +300,7 @@ func waitForInclusionProof(ctx context.Context, client *http.Client, requestID a
 	return nil, nil, attempts, fmt.Errorf("timed out waiting for inclusion proof for request %s", requestID)
 }
 
-func verifyProof(resp *api.GetInclusionProofResponse, path *big.Int) (*api.PathVerificationResult, error) {
+func verifyProof(resp *api.GetInclusionProofResponseV2, path *big.Int) (*api.PathVerificationResult, error) {
 	if resp == nil || resp.InclusionProof == nil {
 		return nil, fmt.Errorf("inclusion proof payload was empty")
 	}

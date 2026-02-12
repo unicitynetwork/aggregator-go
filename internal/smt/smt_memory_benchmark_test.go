@@ -16,12 +16,13 @@ import (
 )
 
 // generateCommitment creates a valid commitment for benchmarking without testing.T dependency
-func generateCommitment(index int) (*models.Commitment, error) {
+func generateCommitment(index int) (*models.CertificationRequest, error) {
 	privateKey, err := btcec.NewPrivateKey()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %w", err)
 	}
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
+	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
 	stateData := make([]byte, 32)
 	baseData := fmt.Sprintf("bench_%d", index)
@@ -32,11 +33,10 @@ func generateCommitment(index int) (*models.Commitment, error) {
 			return nil, fmt.Errorf("failed to generate random state data: %w", err)
 		}
 	}
-	stateHashImprint := signing.CreateDataHashImprint(stateData)
-
-	requestID, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
+	sourceStateHash := signing.CreateDataHash(stateData)
+	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHash)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request ID: %w", err)
+		return nil, fmt.Errorf("failed to create state ID: %w", err)
 	}
 
 	transactionData := make([]byte, 32)
@@ -48,27 +48,21 @@ func generateCommitment(index int) (*models.Commitment, error) {
 			return nil, fmt.Errorf("failed to generate random transaction data: %w", err)
 		}
 	}
-	transactionHashImprint := signing.CreateDataHashImprint(transactionData)
-
-	transactionHashBytes, err := transactionHashImprint.DataBytes()
-	if err != nil {
-		return nil, fmt.Errorf("failed to extract transaction hash: %w", err)
-	}
-
+	transactionHash := signing.CreateDataHash(transactionData)
 	signingService := signing.NewSigningService()
-	signatureBytes, err := signingService.SignHash(transactionHashBytes, privateKey.Serialize())
+	sigDataHash := api.SigDataHash(sourceStateHash, transactionHash)
+	signatureBytes, err := signingService.SignDataHash(sigDataHash, privateKey.Serialize())
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign transaction: %w", err)
 	}
 
-	authenticator := models.Authenticator{
-		Algorithm: "secp256k1",
-		PublicKey: publicKeyBytes,
-		Signature: signatureBytes,
-		StateHash: stateHashImprint,
+	certData := models.CertificationData{
+		OwnerPredicate:  ownerPredicate,
+		SourceStateHash: sourceStateHash,
+		TransactionHash: transactionHash,
+		Witness:         signatureBytes,
 	}
-
-	return models.NewCommitment(requestID, transactionHashImprint, authenticator), nil
+	return models.NewCertificationRequest(stateID, certData), nil
 }
 
 // BenchmarkSMTMemoryUsageRealistic measures actual memory usage with realistic commitments
@@ -93,12 +87,12 @@ func BenchmarkSMTMemoryUsageRealistic(b *testing.B) {
 					b.Fatalf("Failed to generate commitment: %v", err)
 				}
 
-				path, err := commitment.RequestID.GetPath()
+				path, err := commitment.StateID.GetPath()
 				if err != nil {
 					b.Fatalf("Failed to get path: %v", err)
 				}
 
-				leafValue, err := commitment.CreateLeafValue()
+				leafValue, err := commitment.LeafValue()
 				if err != nil {
 					b.Fatalf("Failed to create leaf value: %v", err)
 				}
@@ -165,7 +159,7 @@ func TestSMTMemoryMeasurement(t *testing.T) {
 					t.Fatalf("Failed to get path: %v", err)
 				}
 
-				leafValue, err := commitment.CreateLeafValue()
+				leafValue, err := commitment.ToAPI().CreateLeafValue()
 				if err != nil {
 					t.Fatalf("Failed to create leaf value: %v", err)
 				}
@@ -242,8 +236,8 @@ func BenchmarkSMTOperationsWithLoad(b *testing.B) {
 			b.Fatalf("Failed to generate commitment: %v", err)
 		}
 
-		path, _ := commitment.RequestID.GetPath()
-		leafValue, _ := commitment.CreateLeafValue()
+		path, _ := commitment.StateID.GetPath()
+		leafValue, _ := commitment.LeafValue()
 
 		leaves[i] = &Leaf{Path: path, Value: leafValue}
 		paths[i] = path
@@ -279,8 +273,8 @@ func BenchmarkSMTOperationsWithLoad(b *testing.B) {
 			if err != nil {
 				b.Fatalf("Failed to generate commitment: %v", err)
 			}
-			path, _ := commitment.RequestID.GetPath()
-			leafValue, _ := commitment.CreateLeafValue()
+			path, _ := commitment.StateID.GetPath()
+			leafValue, _ := commitment.LeafValue()
 			b.StartTimer()
 
 			err = snapshot.AddLeaf(path, leafValue)

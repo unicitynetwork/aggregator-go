@@ -18,49 +18,104 @@ import (
 
 // processMiniBatch processes a small batch of commitments into the SMT for efficiency
 // NOTE: The caller is expected to hold rm.roundMutex when calling this function
-func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.Commitment) error {
+func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.CertificationRequest) error {
 	if len(commitments) == 0 {
 		return nil
 	}
 
-	// Convert commitments to SMT leaves
+	// Convert commitments to SMT leaves, tracking valid commitments
 	leaves := make([]*smt.Leaf, 0, len(commitments))
+	validCommitments := make([]*models.CertificationRequest, 0, len(commitments))
 	for _, commitment := range commitments {
-		// Generate leaf path from requestID
-		path, err := commitment.RequestID.GetPath()
+		// Generate leaf path from stateID
+		path, err := commitment.StateID.GetPath()
 		if err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
-				"requestID", commitment.RequestID.String(),
+				"stateID", commitment.StateID.String(),
 				"error", err.Error())
 			continue
 		}
 
-		// Create leaf value (hash of commitment data)
-		leafValue, err := commitment.CreateLeafValue()
+		// Create leaf value (hash of certification request data)
+		leafValue, err := commitment.LeafValue()
 		if err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to create leaf value",
-				"requestID", commitment.RequestID.String(),
+				"stateID", commitment.StateID.String(),
 				"error", err.Error())
 			continue
 		}
 
-		leaves = append(leaves, &smt.Leaf{
-			Path:  path,
-			Value: leafValue,
-		})
+		leaves = append(leaves, smt.NewLeaf(path, leafValue))
+		validCommitments = append(validCommitments, commitment)
 	}
 
 	// Add leaves to the current round's SMT snapshot
 	if rm.currentRound != nil && rm.currentRound.Snapshot != nil {
 		_, err := rm.currentRound.Snapshot.AddLeaves(leaves)
 		if err != nil {
-			return fmt.Errorf("failed to add leaves to SMT snapshot: %w", err)
-		}
+			result := rm.tryAddLeavesOneByOne(ctx, rm.currentRound.Snapshot, leaves, validCommitments)
+			rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, result.successLeaves...)
+			rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, result.successCommitments...)
 
-		rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, leaves...)
+			// Mark rejected commitments as processed so they don't get re-processed
+			if len(result.rejected) > 0 && rm.commitmentQueue != nil {
+				if markErr := rm.commitmentQueue.MarkProcessed(ctx, result.rejected); markErr != nil {
+					rm.logger.WithContext(ctx).Error("Failed to mark rejected commitments as processed",
+						"count", len(result.rejected),
+						"error", markErr.Error())
+				}
+			}
+		} else {
+			rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, leaves...)
+			rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, validCommitments...)
+		}
 	}
 
 	return nil
+}
+
+// leafAddResult holds results of adding leaves one-by-one to an SMT snapshot.
+type leafAddResult struct {
+	successLeaves      []*smt.Leaf
+	successCommitments []*models.CertificationRequest
+	rejected           []interfaces.CertificationRequestAck
+}
+
+// tryAddLeavesOneByOne adds leaves one-by-one to a snapshot and returns results.
+func (rm *RoundManager) tryAddLeavesOneByOne(
+	ctx context.Context,
+	snapshot *smt.ThreadSafeSmtSnapshot,
+	leaves []*smt.Leaf,
+	commitments []*models.CertificationRequest,
+) leafAddResult {
+	result := leafAddResult{
+		successLeaves:      make([]*smt.Leaf, 0, len(leaves)),
+		successCommitments: make([]*models.CertificationRequest, 0, len(commitments)),
+		rejected:           nil,
+	}
+
+	for i, leaf := range leaves {
+		if err := snapshot.AddLeaf(leaf.Path, leaf.Value); err != nil {
+			// ErrDuplicateLeaf means already in SMT with same value - track for persistence
+			if errors.Is(err, smt.ErrDuplicateLeaf) {
+				result.successLeaves = append(result.successLeaves, leaf)
+				result.successCommitments = append(result.successCommitments, commitments[i])
+				continue
+			}
+			rm.logger.WithContext(ctx).Warn("Rejected conflicting leaf",
+				"path", leaf.Path.String(),
+				"error", err.Error())
+			result.rejected = append(result.rejected, interfaces.CertificationRequestAck{
+				StateID:  commitments[i].StateID,
+				StreamID: commitments[i].StreamID,
+			})
+			continue
+		}
+		result.successLeaves = append(result.successLeaves, leaf)
+		result.successCommitments = append(result.successCommitments, commitments[i])
+	}
+
+	return result
 }
 
 // ProposeBlock creates and proposes a new block with the given data
@@ -240,7 +295,7 @@ func (rm *RoundManager) pollWithPreCollection(ctx context.Context, rootHash stri
 	}
 
 	// Buffer for batching pre-collection
-	pendingCommitments := make([]*models.Commitment, 0, miniBatchSize)
+	pendingCommitments := make([]*models.CertificationRequest, 0, miniBatchSize)
 	flushBatch := func() {
 		if len(pendingCommitments) == 0 {
 			return
@@ -294,34 +349,34 @@ func (rm *RoundManager) pollWithPreCollection(ctx context.Context, rootHash stri
 }
 
 // addToPreCollection adds a single commitment (convenience wrapper for tests)
-func (rm *RoundManager) addToPreCollection(ctx context.Context, commitment *models.Commitment) error {
-	return rm.addBatchToPreCollection(ctx, []*models.Commitment{commitment})
+func (rm *RoundManager) addToPreCollection(ctx context.Context, commitment *models.CertificationRequest) error {
+	return rm.addBatchToPreCollection(ctx, []*models.CertificationRequest{commitment})
 }
 
-func (rm *RoundManager) addBatchToPreCollection(ctx context.Context, commitments []*models.Commitment) error {
+func (rm *RoundManager) addBatchToPreCollection(ctx context.Context, commitments []*models.CertificationRequest) error {
 	if len(commitments) == 0 {
 		return nil
 	}
 
 	leaves := make([]*smt.Leaf, 0, len(commitments))
-	validCommitments := make([]*models.Commitment, 0, len(commitments))
+	validCommitments := make([]*models.CertificationRequest, 0, len(commitments))
 
 	for _, commitment := range commitments {
-		path, err := commitment.RequestID.GetPath()
+		path, err := commitment.StateID.GetPath()
 		if err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
-				"requestID", commitment.RequestID.String(), "error", err.Error())
+				"requestID", commitment.StateID.String(), "error", err.Error())
 			continue
 		}
 
-		leafValue, err := commitment.CreateLeafValue()
+		leafValue, err := commitment.LeafValue()
 		if err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to create leaf value",
-				"requestID", commitment.RequestID.String(), "error", err.Error())
+				"requestID", commitment.StateID.String(), "error", err.Error())
 			continue
 		}
 
-		leaves = append(leaves, &smt.Leaf{Path: path, Value: leafValue})
+		leaves = append(leaves, smt.NewLeaf(path, leafValue))
 		validCommitments = append(validCommitments, commitment)
 	}
 
@@ -338,7 +393,18 @@ func (rm *RoundManager) addBatchToPreCollection(ctx context.Context, commitments
 
 	if _, err := rm.preCollectionSnapshot.AddLeaves(leaves); err != nil {
 		// Fall back to adding leaves one by one, skipping bad ones
-		rm.addLeavesOneByOne(ctx, leaves, validCommitments)
+		result := rm.tryAddLeavesOneByOne(ctx, rm.preCollectionSnapshot, leaves, validCommitments)
+		rm.preCollectedLeaves = append(rm.preCollectedLeaves, result.successLeaves...)
+		rm.preCollectedCommitments = append(rm.preCollectedCommitments, result.successCommitments...)
+
+		// Mark rejected commitments as processed in queue
+		if len(result.rejected) > 0 && rm.commitmentQueue != nil {
+			if err := rm.commitmentQueue.MarkProcessed(ctx, result.rejected); err != nil {
+				rm.logger.WithContext(ctx).Error("Failed to mark rejected commitments as processed",
+					"count", len(result.rejected),
+					"error", err.Error())
+			}
+		}
 		return nil
 	}
 
@@ -346,42 +412,6 @@ func (rm *RoundManager) addBatchToPreCollection(ctx context.Context, commitments
 	rm.preCollectedLeaves = append(rm.preCollectedLeaves, leaves...)
 
 	return nil
-}
-
-// addLeavesOneByOne adds leaves individually, skipping any that fail.
-// Must be called with preCollectionMutex held.
-func (rm *RoundManager) addLeavesOneByOne(ctx context.Context, leaves []*smt.Leaf, commitments []*models.Commitment) {
-	var rejected []interfaces.CommitmentAck
-	for i, leaf := range leaves {
-		if err := rm.preCollectionSnapshot.AddLeaf(leaf.Path, leaf.Value); err != nil {
-			rm.logger.WithContext(ctx).Warn("Rejected commitment during pre-collection",
-				"requestID", commitments[i].RequestID.String(),
-				"error", err.Error())
-			rejected = append(rejected, interfaces.CommitmentAck{
-				RequestID: commitments[i].RequestID,
-				StreamID:  commitments[i].StreamID,
-			})
-			continue
-		}
-		rm.preCollectedCommitments = append(rm.preCollectedCommitments, commitments[i])
-		rm.preCollectedLeaves = append(rm.preCollectedLeaves, leaf)
-	}
-
-	if len(rejected) == 0 {
-		return
-	}
-
-	if rm.commitmentQueue == nil {
-		rm.logger.WithContext(ctx).Warn("Commitment queue not configured, rejected commitments not marked processed",
-			"count", len(rejected))
-		return
-	}
-
-	if err := rm.commitmentQueue.MarkProcessed(ctx, rejected); err != nil {
-		rm.logger.WithContext(ctx).Error("Failed to mark rejected commitments as processed",
-			"count", len(rejected),
-			"error", err.Error())
-	}
 }
 
 func (rm *RoundManager) initPreCollection(ctx context.Context) {
@@ -398,7 +428,7 @@ func (rm *RoundManager) initPreCollection(ctx context.Context) {
 	}
 
 	rm.preCollectionSnapshot = currentSnapshot.CreateSnapshot()
-	rm.preCollectedCommitments = make([]*models.Commitment, 0)
+	rm.preCollectedCommitments = make([]*models.CertificationRequest, 0)
 	rm.preCollectedLeaves = make([]*smt.Leaf, 0)
 }
 
@@ -506,43 +536,37 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	rm.roundMutex.Unlock()
 
 	rm.roundMutex.Lock()
-	requestIds := make([]api.RequestID, 0)
-	ackEntries := make([]interfaces.CommitmentAck, 0)
+	var pendingLeaves []*smt.Leaf
+	var pendingCommitments []*models.CertificationRequest
+	var snapshot *smt.ThreadSafeSmtSnapshot
+	if rm.currentRound != nil {
+		pendingLeaves = rm.currentRound.PendingLeaves
+		pendingCommitments = rm.currentRound.PendingCommitments
+		snapshot = rm.currentRound.Snapshot
+	}
+	rm.roundMutex.Unlock()
+
+	commitmentCount = len(pendingCommitments)
+	requestIds := make([]api.StateID, commitmentCount)
+	ackEntries := make([]interfaces.CertificationRequestAck, commitmentCount)
 	var proofTimes []time.Duration
 
-	if rm.currentRound != nil {
-		commitmentCount = len(rm.currentRound.Commitments)
-		requestIds = make([]api.RequestID, commitmentCount)
-		ackEntries = make([]interfaces.CommitmentAck, commitmentCount)
+	now := time.Now()
+	for i, commitment := range pendingCommitments {
+		requestIds[i] = commitment.StateID
+		ackEntries[i] = interfaces.CertificationRequestAck{StateID: commitment.StateID, StreamID: commitment.StreamID}
 
-		now := time.Now()
-		for i, commitment := range rm.currentRound.Commitments {
-			requestIds[i] = commitment.RequestID
-			ackEntries[i] = interfaces.CommitmentAck{RequestID: commitment.RequestID, StreamID: commitment.StreamID}
-
-			if commitment.CreatedAt != nil {
-				proofReadyTime := now.Sub(commitment.CreatedAt.Time)
-				if proofReadyTime > 0 {
-					proofTimes = append(proofTimes, proofReadyTime)
-				}
+		if commitment.CreatedAt != nil {
+			proofReadyTime := now.Sub(commitment.CreatedAt.Time)
+			if proofReadyTime > 0 {
+				proofTimes = append(proofTimes, proofReadyTime)
 			}
 		}
 	}
-	rm.roundMutex.Unlock()
-
-	rm.roundMutex.Lock()
-	var pendingLeaves []*smt.Leaf
-	var commitments []*models.Commitment
-	snapshot := rm.currentRound.Snapshot
-	if rm.currentRound != nil {
-		pendingLeaves = rm.currentRound.PendingLeaves
-		commitments = rm.currentRound.Commitments
-	}
-	rm.roundMutex.Unlock()
 
 	persistDataStart = time.Now()
 	smtNodes := rm.convertLeavesToNodes(pendingLeaves)
-	records := rm.convertCommitmentsToRecords(commitments, block.Index)
+	records := rm.convertCommitmentsToRecords(pendingCommitments, block.Index)
 
 	block.Finalized = false
 	if err := rm.storeBlockAndRecords(ctx, block, requestIds); err != nil {
@@ -583,9 +607,9 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	rm.roundMutex.Lock()
 	if rm.currentRound != nil {
 		rm.currentRound.Block = block
-		rm.currentRound.PendingRecords = nil
 		rm.currentRound.PendingRootHash = ""
 		rm.currentRound.PendingLeaves = nil
+		rm.currentRound.PendingCommitments = nil
 		rm.currentRound.Snapshot = nil
 	}
 	rm.roundMutex.Unlock()
@@ -700,7 +724,7 @@ func (rm *RoundManager) convertLeavesToNodes(leaves []*smt.Leaf) []*models.SmtNo
 }
 
 // convertCommitmentsToRecords converts commitments to aggregator records
-func (rm *RoundManager) convertCommitmentsToRecords(commitments []*models.Commitment, blockIndex *api.BigInt) []*models.AggregatorRecord {
+func (rm *RoundManager) convertCommitmentsToRecords(commitments []*models.CertificationRequest, blockIndex *api.BigInt) []*models.AggregatorRecord {
 	if len(commitments) == 0 {
 		return nil
 	}
@@ -716,7 +740,7 @@ func (rm *RoundManager) convertCommitmentsToRecords(commitments []*models.Commit
 // executeBlockTransaction executes the block finalization transaction.
 // storeBlockAndRecords stores the block and block records in a mini-transaction.
 // The block is stored with finalized=false.
-func (rm *RoundManager) storeBlockAndRecords(ctx context.Context, block *models.Block, requestIds []api.RequestID) error {
+func (rm *RoundManager) storeBlockAndRecords(ctx context.Context, block *models.Block, requestIds []api.StateID) error {
 	return rm.storage.WithTransaction(ctx, func(txCtx context.Context) error {
 		if err := rm.storage.BlockStorage().Store(txCtx, block); err != nil {
 			return fmt.Errorf("failed to store block: %w", err)

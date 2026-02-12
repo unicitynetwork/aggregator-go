@@ -1,14 +1,20 @@
-package signing
+package v1
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
-	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/models/v1"
+	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
+)
+
+const (
+	AlgorithmSecp256k1 = "secp256k1"
 )
 
 // ValidationStatus represents the result of commitment validation
@@ -59,21 +65,21 @@ type ValidationResult struct {
 
 // CommitmentValidator validates commitment signatures and request IDs
 type CommitmentValidator struct {
-	signingService *SigningService
+	signingService *signing.SigningService
 	shardConfig    config.ShardingConfig
 }
 
 // NewCommitmentValidator creates a new commitment validator
 func NewCommitmentValidator(shardConfig config.ShardingConfig) *CommitmentValidator {
 	return &CommitmentValidator{
-		signingService: NewSigningService(),
+		signingService: signing.NewSigningService(),
 		shardConfig:    shardConfig,
 	}
 }
 
 // ValidateCommitment performs complete validation of a commitment
 // This mirrors the TypeScript validateCommitment function in AggregatorService
-func (v *CommitmentValidator) ValidateCommitment(commitment *models.Commitment) ValidationResult {
+func (v *CommitmentValidator) ValidateCommitment(commitment *v1.Commitment) ValidationResult {
 	// 1. Validate algorithm support
 	if commitment.Authenticator.Algorithm != AlgorithmSecp256k1 {
 		return ValidationResult{
@@ -101,16 +107,8 @@ func (v *CommitmentValidator) ValidateCommitment(commitment *models.Commitment) 
 		}
 	}
 
-	// 3. Parse and validate state hash (should be DataHash imprint: algorithm + data)
-	stateHashImprint, err := commitment.Authenticator.StateHash.Bytes()
-	if err != nil {
-		return ValidationResult{
-			Status: ValidationStatusInvalidStateHashFormat,
-			Error:  fmt.Errorf("failed to decode state hash imprint: %w", err),
-		}
-	}
-
 	// Validate state hash imprint format (minimum 3 bytes: 2 for algorithm + 1 for data)
+	stateHashImprint := commitment.Authenticator.StateHash.Bytes()
 	if len(stateHashImprint) < 3 {
 		return ValidationResult{
 			Status: ValidationStatusInvalidStateHashFormat,
@@ -128,7 +126,7 @@ func (v *CommitmentValidator) ValidateCommitment(commitment *models.Commitment) 
 	}
 
 	// 4. Validate Request ID matches expected value
-	// RequestID should be SHA256(publicKey || stateHash)
+	// StateID should be SHA256(publicKey || stateHash)
 	isValidRequestID, err := api.ValidateRequestID(
 		commitment.RequestID,
 		publicKeyBytes,
@@ -160,17 +158,8 @@ func (v *CommitmentValidator) ValidateCommitment(commitment *models.Commitment) 
 		}
 	}
 
-	// 6. Parse transaction hash (should be DataHash imprint: algorithm + data)
-	// TransactionHash is a string type, so we need to decode it
-	transactionHashImprint, err := hex.DecodeString(string(commitment.TransactionHash))
-	if err != nil {
-		return ValidationResult{
-			Status: ValidationStatusInvalidTransactionHashFormat,
-			Error:  fmt.Errorf("failed to decode transaction hash: %w", err),
-		}
-	}
-
 	// Validate transaction hash imprint format (minimum 3 bytes: 2 for algorithm + 1 for data)
+	transactionHashImprint := commitment.TransactionHash
 	if len(transactionHashImprint) < 3 {
 		return ValidationResult{
 			Status: ValidationStatusInvalidTransactionHashFormat,
@@ -238,7 +227,7 @@ func verifyShardID(commitmentID string, shardBitmask int) (bool, error) {
 	// convert to big.Ints
 	bytes, err := hex.DecodeString(commitmentID)
 	if err != nil {
-		return false, fmt.Errorf("failed to decode commitment ID: %w", err)
+		return false, fmt.Errorf("failed to decode certification state ID: %w", err)
 	}
 	commitmentIdBigInt := new(big.Int).SetBytes(bytes)
 	shardBitmaskBigInt := new(big.Int).SetInt64(int64(shardBitmask))
@@ -255,11 +244,27 @@ func verifyShardID(commitmentID string, shardBitmask int) (bool, error) {
 	// 0b111 & 0b11 = 0b11
 	expected := new(big.Int).And(shardBitmaskBigInt, compareMask)
 
-	// extract low bits from commitment e.g.
+	// extract low bits from certification request e.g.
 	// commitment=0b11111111 & 0b11 = 0b11
 	commitmentLowBits := new(big.Int).And(commitmentIdBigInt, compareMask)
 
-	// return true if the commitment low bits match bitmask bits e.g.
+	// return true if the certification request low bits match bitmask bits e.g.
 	// 0b11 == 0b11
 	return commitmentLowBits.Cmp(expected) == 0, nil
+}
+
+// CreateDataHashImprint creates a DataHash imprint in the Unicity format:
+// 2 bytes algorithm (big-endian) + actual hash bytes
+// For SHA256: algorithm = 0, so prefix is [0x00, 0x00]
+func CreateDataHashImprint(data []byte) api.ImprintV2 {
+	// Hash the data with SHA256
+	hash := sha256.Sum256(data)
+
+	// Create imprint: algorithm (0x00, 0x00 for SHA256) + hash
+	imprint := make([]byte, 2+len(hash))
+	imprint[0] = 0x00 // SHA256 algorithm high byte
+	imprint[1] = 0x00 // SHA256 algorithm low byte
+	copy(imprint[2:], hash[:])
+
+	return imprint
 }
