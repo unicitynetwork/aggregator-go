@@ -12,7 +12,9 @@ import (
 	"math"
 	"math/big"
 	"os"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,9 +35,10 @@ const (
 	httpClientPoolSize       = 4
 	defaultRequestsPerSec    = 2000
 	aggregatorLogPath        = "logs/aggregator.log"
+	aggregatorLogPathsEnv    = "AGGREGATOR_LOG_PATHS"
 	proofMaxRetries          = 10
 	proofRetryDelay          = 1000 * time.Millisecond
-	defaultProofInitialDelay = 4000 * time.Millisecond
+	defaultProofInitialDelay = 2500 * time.Millisecond
 )
 
 // Configurable via environment variables
@@ -276,7 +279,7 @@ func generateCommitmentRequest() *api.CertificationRequest {
 			break
 		}
 		// Check if the request ID matches any of the configured shard targets
-		if matchesAnyShardTarget(string(calculated)) {
+		if matchesAnyShardTarget(calculated.String()) {
 			stateID = calculated
 			break
 		}
@@ -499,7 +502,7 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 						continue
 					}
 
-					var proofResp GetInclusionProofResponseV2
+					var proofResp api.GetInclusionProofResponseV2
 					respBytes, _ := json.Marshal(resp.Result)
 					if err := json.Unmarshal(respBytes, &proofResp); err != nil {
 						metrics.recordError(fmt.Sprintf("Failed to parse proof response: %v", err))
@@ -532,16 +535,7 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 					}
 					metrics.addProofLatency(totalLatency)
 
-					apiPath := &api.MerkleTreePath{
-						Root:  proofResp.InclusionProof.MerkleTreePath.Root,
-						Steps: make([]api.MerkleTreeStep, len(proofResp.InclusionProof.MerkleTreePath.Steps)),
-					}
-					for i, step := range proofResp.InclusionProof.MerkleTreePath.Steps {
-						apiPath.Steps[i] = api.MerkleTreeStep{
-							Path: step.Path,
-							Data: step.Data,
-						}
-					}
+					apiPath := proofResp.InclusionProof.MerkleTreePath
 
 					requestIDPath, err := api.RequireNewImprintV2(reqID).GetPath()
 					if err != nil {
@@ -827,37 +821,131 @@ func parseAggregatorRoundLogs(path string, start, end time.Time) ([]aggregatorRo
 	return summaries, nil
 }
 
-func reportAggregatorServerStats(start, end time.Time) {
-	summaries, err := parseAggregatorRoundLogs(aggregatorLogPath, start, end)
-	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Printf("\nAggregator log file %s not found; skipping server stats.\n", aggregatorLogPath)
-		} else {
-			fmt.Printf("\nFailed to read aggregator logs (%s): %v\n", aggregatorLogPath, err)
+type aggregatorLogSource struct {
+	label string
+	path  string
+}
+
+func parseAggregatorLogSourcesOverride(raw string) []aggregatorLogSource {
+	entries := strings.Split(raw, ",")
+	sources := make([]aggregatorLogSource, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for i, entry := range entries {
+		token := strings.TrimSpace(entry)
+		if token == "" {
+			continue
 		}
-		return
+
+		label := ""
+		path := token
+		if idx := strings.Index(token, "="); idx > 0 {
+			label = strings.TrimSpace(token[:idx])
+			path = strings.TrimSpace(token[idx+1:])
+		}
+		if path == "" {
+			continue
+		}
+
+		cleanPath := filepath.Clean(path)
+		if _, ok := seen[cleanPath]; ok {
+			continue
+		}
+		seen[cleanPath] = struct{}{}
+
+		if label == "" {
+			label = filepath.Base(filepath.Dir(cleanPath))
+			if label == "." || label == "" {
+				label = fmt.Sprintf("source-%d", i+1)
+			}
+		}
+		sources = append(sources, aggregatorLogSource{
+			label: label,
+			path:  cleanPath,
+		})
+	}
+	return sources
+}
+
+func discoverAggregatorLogSources(shardClients []*ShardClient) []aggregatorLogSource {
+	if override := strings.TrimSpace(os.Getenv(aggregatorLogPathsEnv)); override != "" {
+		return parseAggregatorLogSourcesOverride(override)
 	}
 
+	if len(shardClients) <= 1 {
+		return []aggregatorLogSource{
+			{label: "aggregator", path: aggregatorLogPath},
+		}
+	}
+
+	// Preferred convention in sharded local setup:
+	// logs/shard1/aggregator.log, logs/shard2/aggregator.log, ...
+	preferred := make([]aggregatorLogSource, 0, len(shardClients))
+	for idx, sc := range shardClients {
+		candidate := filepath.Join("logs", fmt.Sprintf("shard%d", idx+1), "aggregator.log")
+		if _, err := os.Stat(candidate); err == nil {
+			preferred = append(preferred, aggregatorLogSource{
+				label: sc.name,
+				path:  filepath.Clean(candidate),
+			})
+		}
+	}
+	if len(preferred) > 0 {
+		return preferred
+	}
+
+	matches, err := filepath.Glob(filepath.Join("logs", "shard*", "aggregator.log"))
+	if err != nil || len(matches) == 0 {
+		return []aggregatorLogSource{
+			{label: "aggregator", path: aggregatorLogPath},
+		}
+	}
+	sort.Strings(matches)
+
+	sources := make([]aggregatorLogSource, 0, len(matches))
+	seen := make(map[string]struct{}, len(matches))
+	for _, match := range matches {
+		cleanPath := filepath.Clean(match)
+		if _, ok := seen[cleanPath]; ok {
+			continue
+		}
+		seen[cleanPath] = struct{}{}
+		label := filepath.Base(filepath.Dir(cleanPath))
+		if label == "." || label == "" {
+			label = cleanPath
+		}
+		sources = append(sources, aggregatorLogSource{
+			label: label,
+			path:  cleanPath,
+		})
+	}
+	return sources
+}
+
+func printAggregatorServerStatsSummary(header string, summaries []aggregatorRoundSummary) {
 	if len(summaries) == 0 {
-		fmt.Printf("\nNo aggregator round logs found in %s between %s and %s.\n",
-			aggregatorLogPath,
-			start.Format(time.RFC3339),
-			end.Format(time.RFC3339))
 		return
 	}
+	ordered := append([]aggregatorRoundSummary(nil), summaries...)
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].Timestamp.Before(ordered[j].Timestamp)
+	})
 
-	usable := summaries
-	if len(summaries) > 2 {
-		usable = summaries[1 : len(summaries)-1]
+	usable := ordered
+	if len(ordered) > 2 {
+		usable = ordered[1 : len(ordered)-1]
+	}
+	if len(usable) == 0 {
+		usable = ordered
 	}
 
-	var finalSum, roundSum time.Duration
+	var roundSum time.Duration
+	var finalSum time.Duration
 	var procSum, bftSum time.Duration
 	var proofMedSum, proofP95Sum, proofP99Sum time.Duration
 	totalCommitments := 0
 	for _, entry := range usable {
-		finalSum += entry.Finalization
 		roundSum += entry.RoundTime
+		finalSum += entry.Finalization
 		procSum += entry.Processing
 		bftSum += entry.BftWait
 		proofMedSum += entry.ProofMedian
@@ -867,11 +955,6 @@ func reportAggregatorServerStats(start, end time.Time) {
 	}
 
 	count := len(usable)
-	if count == 0 {
-		fmt.Printf("\nNo aggregator rounds available after filtering; showing raw entries only.\n")
-		usable = summaries
-		count = len(usable)
-	}
 
 	avgFinal := time.Duration(0)
 	avgProcessing := time.Duration(0)
@@ -899,7 +982,7 @@ func reportAggregatorServerStats(start, end time.Time) {
 		bftPct = float64(bftSum) / float64(roundSum) * 100
 	}
 
-	fmt.Printf("\nAGGREGATOR SERVER STATS (%d rounds, averages exclude first/last when possible)\n", len(summaries))
+	fmt.Printf("\nAGGREGATOR SERVER STATS [%s] (%d rounds, averages exclude first/last when possible)\n", header, len(ordered))
 	fmt.Printf("Average finalization time: %v (%.1f%% of round time)\n",
 		avgFinal.Truncate(time.Millisecond), finalPct)
 	fmt.Printf("Average commitments per round: %.0f\n", avgCommit)
@@ -912,8 +995,67 @@ func reportAggregatorServerStats(start, end time.Time) {
 		avgProofP95.Truncate(time.Millisecond),
 		avgProofP99.Truncate(time.Millisecond))
 	fmt.Printf("Log window: %s to %s\n",
-		summaries[0].Timestamp.Format(time.RFC3339),
-		summaries[len(summaries)-1].Timestamp.Format(time.RFC3339))
+		ordered[0].Timestamp.Format(time.RFC3339),
+		ordered[len(ordered)-1].Timestamp.Format(time.RFC3339))
+}
+
+func reportAggregatorServerStats(start, end time.Time, shardClients []*ShardClient) {
+	sources := discoverAggregatorLogSources(shardClients)
+	if len(sources) == 0 {
+		fmt.Printf("\nNo aggregator log sources configured; skipping server stats.\n")
+		return
+	}
+
+	foundSources := 0
+	combined := make([]aggregatorRoundSummary, 0)
+	readErrors := make([]string, 0)
+	noDataSources := make([]aggregatorLogSource, 0)
+	for _, source := range sources {
+		summaries, err := parseAggregatorRoundLogs(source.path, start, end)
+		if err != nil {
+			if os.IsNotExist(err) {
+				readErrors = append(readErrors, fmt.Sprintf("log file not found: %s (%s)", source.path, source.label))
+			} else {
+				readErrors = append(readErrors, fmt.Sprintf("failed to read %s (%s): %v", source.path, source.label, err))
+			}
+			continue
+		}
+
+		if len(summaries) == 0 {
+			noDataSources = append(noDataSources, source)
+			continue
+		}
+
+		foundSources++
+		combined = append(combined, summaries...)
+		printAggregatorServerStatsSummary(fmt.Sprintf("%s (%s)", source.label, source.path), summaries)
+	}
+
+	if foundSources == 0 {
+		for _, msg := range readErrors {
+			fmt.Printf("\n%s\n", msg)
+		}
+		for _, source := range noDataSources {
+			fmt.Printf("\nNo aggregator round logs found in %s (%s) between %s and %s.\n",
+				source.path,
+				source.label,
+				start.Format(time.RFC3339),
+				end.Format(time.RFC3339))
+		}
+	} else {
+		skippedSources := len(readErrors) + len(noDataSources)
+		if skippedSources > 0 {
+			fmt.Printf("\nSkipped %d log source(s) with no matching round data in the test window.\n", skippedSources)
+		}
+	}
+
+	if foundSources == 0 && len(shardClients) > 1 && os.Getenv(aggregatorLogPathsEnv) == "" {
+		fmt.Printf("\nSet %s to a comma-separated list of shard log files to override auto-discovery.\n", aggregatorLogPathsEnv)
+	}
+
+	if foundSources > 1 {
+		printAggregatorServerStatsSummary("combined", combined)
+	}
 }
 
 func main() {
@@ -966,7 +1108,12 @@ func main() {
 	// Test connectivity and get starting block number for each shard
 	for _, sc := range shardClients {
 		fmt.Printf("Testing connectivity to %s...\n", sc.url)
-		resp, err := sc.client.call("get_block_height", nil)
+		// Include shardId param so gateway proxies can route the request
+		var blockHeightParams interface{}
+		if sc.shardMask > 0 {
+			blockHeightParams = map[string]interface{}{"shardId": fmt.Sprintf("%d", sc.shardMask)}
+		}
+		resp, err := sc.client.call("get_block_height", blockHeightParams)
 		if err != nil {
 			log.Fatalf("Failed to connect to aggregator at %s: %v", sc.url, err)
 		}
@@ -1309,5 +1456,5 @@ func main() {
 	// Print error summary
 	metrics.printErrorSummary()
 
-	reportAggregatorServerStats(testWindowStart, time.Now())
+	reportAggregatorServerStats(testWindowStart, time.Now(), shardClients)
 }
