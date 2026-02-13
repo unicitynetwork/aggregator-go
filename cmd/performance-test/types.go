@@ -18,8 +18,6 @@ import (
 	"time"
 
 	"golang.org/x/net/http2"
-
-	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // JSON-RPC types and API requests
@@ -49,21 +47,6 @@ type GetBlockHeightResponse struct {
 
 type GetInclusionProofRequestV2 struct {
 	StateID string `json:"stateId"`
-}
-
-type GetInclusionProofResponseV2 struct {
-	InclusionProof *InclusionProofV2 `json:"inclusionProof"`
-}
-
-type InclusionProofV2 struct {
-	CertificationData  *api.CertificationData `json:"certificationData"`
-	MerkleTreePath     *api.MerkleTreePath    `json:"merkleTreePath"`
-	UnicityCertificate string                 `json:"unicityCertificate"`
-}
-
-type MerkleTreePath struct {
-	Root  string               `json:"root"`
-	Steps []api.MerkleTreeStep `json:"steps"`
 }
 
 type shardTarget struct {
@@ -508,10 +491,9 @@ func (c *JSONRPCClient) callWithContext(ctx context.Context, method string, para
 	req.Header.Set("Content-Type", "application/json")
 
 	// Add auth header if provided
-	/*if c.authHeader != "" {
+	if c.authHeader != "" {
 		req.Header.Set("Authorization", c.authHeader)
-	}*/
-	req.Header.Set("Authorization", "Bearer sk_4ae5084318574c42877d78cb0d53e5a6")
+	}
 
 	client := c.nextHTTPClient()
 	resp, err := client.Do(req)
