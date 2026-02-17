@@ -384,10 +384,19 @@ func loadCertPool(path string) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-func newHTTPClient(url string, metrics *Metrics) *http.Client {
+func newHTTPClient(targetURL string, metrics *Metrics) *http.Client {
+	// For plain http:// URLs, use http2.Transport with AllowHTTP to enable h2c
+	// (HTTP/2 cleartext). This allows multiplexing many requests over a single
+	// TCP connection instead of one connection per concurrent request.
+	if !disableH2C && strings.HasPrefix(strings.ToLower(targetURL), "http://") {
+		return &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: buildH2CTransport(metrics),
+		}
+	}
 	return &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: buildHTTPTransport(url, metrics),
+		Transport: buildHTTPTransport(targetURL, metrics),
 	}
 }
 
@@ -452,6 +461,39 @@ func buildHTTPTransport(url string, metrics *Metrics) *http.Transport {
 		}
 	}
 	return transport
+}
+
+func buildH2CTransport(metrics *Metrics) http.RoundTripper {
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	return &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			if metrics != nil {
+				metrics.recordConnectionAttempt()
+			}
+			conn, err := dialer.DialContext(ctx, network, addr)
+			if err != nil {
+				if metrics != nil {
+					metrics.incFailedConnection()
+				}
+				return nil, err
+			}
+			if metrics != nil {
+				metrics.incActiveConnection()
+			}
+			return &trackingConn{
+				Conn: conn,
+				onClose: func() {
+					if metrics != nil {
+						metrics.decActiveConnection()
+					}
+				},
+			}, nil
+		},
+	}
 }
 
 func (c *JSONRPCClient) nextHTTPClient() *http.Client {

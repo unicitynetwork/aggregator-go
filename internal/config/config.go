@@ -59,6 +59,7 @@ type ServerConfig struct {
 	TLSCertFile               string        `mapstructure:"tls_cert_file"`
 	TLSKeyFile                string        `mapstructure:"tls_key_file"`
 	EnableTLS                 bool          `mapstructure:"enable_tls"`
+	EnableH2C                 bool          `mapstructure:"enable_h2c"`
 	HTTP2MaxConcurrentStreams int           `mapstructure:"http2_max_concurrent_streams"`
 }
 
@@ -272,6 +273,7 @@ func Load() (*Config, error) {
 			TLSCertFile:               getEnvOrDefault("TLS_CERT_FILE", ""),
 			TLSKeyFile:                getEnvOrDefault("TLS_KEY_FILE", ""),
 			EnableTLS:                 getEnvBoolOrDefault("ENABLE_TLS", false),
+			EnableH2C:                 getEnvBoolOrDefault("ENABLE_H2C", true),
 			HTTP2MaxConcurrentStreams: getEnvIntOrDefault("HTTP2_MAX_CONCURRENT_STREAMS", 4096),
 		},
 		Database: DatabaseConfig{
@@ -415,8 +417,8 @@ func (c *Config) Validate() error {
 	if c.Server.EnableTLS && (c.Server.TLSCertFile == "" || c.Server.TLSKeyFile == "") {
 		return fmt.Errorf("TLS cert and key files must be provided when TLS is enabled")
 	}
-	if c.Server.EnableTLS && c.Server.HTTP2MaxConcurrentStreams <= 0 {
-		return fmt.Errorf("HTTP/2 max concurrent streams must be positive when TLS is enabled")
+	if c.Server.HTTP2MaxConcurrentStreams <= 0 {
+		return fmt.Errorf("HTTP/2 max concurrent streams must be positive")
 	}
 
 	// Validate log level

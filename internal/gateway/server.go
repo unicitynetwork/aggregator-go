@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
@@ -18,12 +19,12 @@ import (
 
 // Server represents the HTTP gateway server
 type Server struct {
-	config     *config.Config
-	logger     *logger.Logger
-	rpcServer  *jsonrpc.Server
-	httpServer *http.Server
-	router     *gin.Engine
-	service    Service
+	config      *config.Config
+	logger      *logger.Logger
+	rpcServer   *jsonrpc.Server
+	httpServer  *http.Server
+	router      *gin.Engine
+	service Service
 }
 
 // Service represents the business logic service interface
@@ -94,16 +95,22 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 		MaxHeaderBytes: 1 << 20, // 1MB
 	}
 
+	gatewayLogger := logger.WithComponent("gateway")
+	h2Config := &http2.Server{
+		MaxConcurrentStreams: uint32(cfg.Server.HTTP2MaxConcurrentStreams),
+	}
+
 	if cfg.Server.EnableTLS {
-		gatewayLogger := logger.WithComponent("gateway")
-		h2Config := &http2.Server{
-			MaxConcurrentStreams: uint32(cfg.Server.HTTP2MaxConcurrentStreams),
-		}
 		if err := http2.ConfigureServer(server.httpServer, h2Config); err != nil {
 			gatewayLogger.Warn("Failed to configure HTTP/2 server", "error", err.Error())
 		} else {
-			gatewayLogger.Info("Configured HTTP/2 server", "maxConcurrentStreams", cfg.Server.HTTP2MaxConcurrentStreams)
+			gatewayLogger.Info("Configured HTTP/2 (TLS) server", "maxConcurrentStreams", cfg.Server.HTTP2MaxConcurrentStreams)
 		}
+	} else if cfg.Server.EnableH2C {
+		server.httpServer.Handler = h2c.NewHandler(router, h2Config)
+		gatewayLogger.Info("Configured h2c (HTTP/2 cleartext) server", "maxConcurrentStreams", cfg.Server.HTTP2MaxConcurrentStreams)
+	} else {
+		gatewayLogger.Info("h2c disabled, using HTTP/1.1 only")
 	}
 
 	return server
