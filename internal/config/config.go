@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	cmdbft "github.com/unicitynetwork/bft-core/cli/ubft/cmd"
 
 	"github.com/unicitynetwork/bft-core/network"
-	"github.com/unicitynetwork/bft-core/partition"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
 
@@ -35,8 +35,8 @@ type Config struct {
 
 // SigningConfig holds the aggregator's signing key configuration
 type SigningConfig struct {
-	KeyFile string             `mapstructure:"key_file"`
-	KeyConf *partition.KeyConf `mapstructure:"key_conf"`
+	KeyFile string          `mapstructure:"key_file"`
+	KeyConf *cmdbft.KeyConf `mapstructure:"key_conf"`
 }
 
 // ChainConfig holds metadata about the current chain configuration
@@ -217,7 +217,7 @@ func (c ChildConfig) Validate() error {
 
 type BFTConfig struct {
 	Enabled    bool                              `mapstructure:"enabled"`
-	KeyConf    *partition.KeyConf                `mapstructure:"key_conf"`
+	KeyConf    *cmdbft.KeyConf                   `mapstructure:"key_conf"`
 	ShardConf  *types.PartitionDescriptionRecord `mapstructure:"shard_conf"`
 	TrustBases []types.RootTrustBaseV1           `mapstructure:"trust_bases"`
 
