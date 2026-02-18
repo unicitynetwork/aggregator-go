@@ -11,11 +11,42 @@ import (
 )
 
 var (
-	ErrDuplicateLeaf    = errors.New("smt: duplicate leaf")
-	ErrLeafModification = errors.New("smt: attempt to modify an existing leaf")
-	ErrKeyLength        = errors.New("smt: invalid key length")
-	ErrWrongShard       = errors.New("smt: key does not belong in this shard")
+	ErrDuplicateLeaf         = errors.New("smt: duplicate leaf")
+	ErrLeafModification      = errors.New("smt: attempt to modify an existing leaf")
+	ErrKeyLength             = errors.New("smt: invalid key length")
+	ErrWrongShard            = errors.New("smt: key does not belong in this shard")
+	ErrInvalidChildHashLength = errors.New("smt: child hash value length does not match hash algorithm")
 )
+
+// smtCachedHashBytes is the fixed size of the inline hash cache arrays in
+// LeafBranch and NodeBranch. All currently supported algorithms (SHA256,
+// SHA3-256) produce 32-byte digests. If a longer-digest algorithm is added,
+// increase this constant and update the struct field types.
+const smtCachedHashBytes = 32
+
+// hashLen returns the raw digest length in bytes for the given algorithm.
+// Panics for unsupported algorithms so callers get an early failure if a new
+// algorithm is added without updating the inline cache arrays.
+func hashLen(algo api.HashAlgorithm) int {
+	switch algo {
+	case api.SHA256, api.SHA3_256:
+		return 32
+	default:
+		panic(fmt.Sprintf("smt: unsupported hash algorithm %d", algo))
+	}
+}
+
+// buildImprint constructs the algorithm-prefixed hash imprint from raw bytes.
+// Used at API boundaries (GetRootHash, GetPath) where a full DataHash object
+// is not needed.
+func buildImprint(algo api.HashAlgorithm, raw []byte) []byte {
+	alg := uint(algo)
+	out := make([]byte, len(raw)+2)
+	out[0] = byte(alg >> 8)
+	out[1] = byte(alg)
+	copy(out[2:], raw)
+	return out
+}
 
 type (
 	// SparseMerkleTree implements a sparse Merkle tree compatible with Unicity SDK
@@ -39,6 +70,10 @@ func NewSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int) *SparseMerk
 	if keyLength <= 0 {
 		panic("SMT key length must be positive")
 	}
+	if hashLen(algorithm) != smtCachedHashBytes {
+		panic(fmt.Sprintf("smt: hash algorithm output (%d bytes) exceeds inline cache size (%d) — update smtCachedHashBytes",
+			hashLen(algorithm), smtCachedHashBytes))
+	}
 	return &SparseMerkleTree{
 		parentMode: false,
 		keyLength:  keyLength,
@@ -53,6 +88,10 @@ func NewSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int) *SparseMerk
 func NewChildSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int, shardID api.ShardID) *SparseMerkleTree {
 	if keyLength <= 0 {
 		panic("SMT key length must be positive")
+	}
+	if hashLen(algorithm) != smtCachedHashBytes {
+		panic(fmt.Sprintf("smt: hash algorithm output (%d bytes) exceeds inline cache size (%d) — update smtCachedHashBytes",
+			hashLen(algorithm), smtCachedHashBytes))
 	}
 	if shardID <= 1 {
 		panic("Shard ID must be positive and have at least 2 bits")
@@ -192,7 +231,7 @@ func (smt *SparseMerkleTree) cloneBranch(branch branch) branch {
 
 // Branch interface for tree nodes
 type branch interface {
-	calculateHash(hasher *api.DataHasher) *api.DataHash
+	calculateHash(hasher *api.DataHasher) []byte
 	getPath() *big.Int
 	isLeaf() bool
 }
@@ -201,17 +240,19 @@ type branch interface {
 type LeafBranch struct {
 	Path    *big.Int
 	Value   []byte
-	hash    *api.DataHash
-	isChild bool // true if this is the root hash form a child aggregator
+	rawHash [smtCachedHashBytes]byte // inline hash cache; valid when hashSet == true
+	hashSet bool
+	isChild bool // true if this is the root hash from a child aggregator
 }
 
 // NodeBranch represents an internal node
 type NodeBranch struct {
-	Path   *big.Int
-	Left   branch
-	Right  branch
-	hash   *api.DataHash
-	isRoot bool // true if this is the root node
+	Path    *big.Int
+	Left    branch
+	Right   branch
+	rawHash [smtCachedHashBytes]byte // inline hash cache; valid when hashSet == true
+	hashSet bool
+	isRoot  bool // true if this is the root node
 }
 
 // NewLeafBranch creates a regular leaf branch
@@ -237,21 +278,24 @@ func newChildLeafBranch(path *big.Int, value []byte) *LeafBranch {
 	}
 }
 
-func (l *LeafBranch) calculateHash(hasher *api.DataHasher) *api.DataHash {
-	if l.hash != nil {
-		return l.hash
+func (l *LeafBranch) calculateHash(hasher *api.DataHasher) []byte {
+	if l.hashSet {
+		return l.rawHash[:]
 	}
-
 	if l.isChild {
-		if l.Value != nil {
-			l.hash = api.NewDataHash(hasher.GetAlgorithm(), l.Value)
+		if l.Value == nil {
+			return nil // nil child: parent tree slot not yet filled
 		}
-	} else {
-		pathBytes := api.BigintEncode(l.Path)
-		l.hash = hasher.Reset().AddData(api.CborArray(2)).
-			AddCborBytes(pathBytes).AddCborBytes(l.Value).GetHash()
+		copy(l.rawHash[:], l.Value) // safe: AddLeaf enforced len(l.Value) == hashLen
+		l.hashSet = true
+		return l.rawHash[:]
 	}
-	return l.hash
+	pathBytes := api.BigintEncode(l.Path)
+	hasher.Reset().AddData(api.CborArray(2)).
+		AddCborBytes(pathBytes).AddCborBytes(l.Value)
+	hasher.SumRaw(l.rawHash[:0])
+	l.hashSet = true
+	return l.rawHash[:]
 }
 
 func (l *LeafBranch) getPath() *big.Int {
@@ -284,18 +328,16 @@ func newRootBranch(path *big.Int, left, right branch) *NodeBranch {
 	}
 }
 
-func (n *NodeBranch) calculateHash(hasher *api.DataHasher) *api.DataHash {
-	if n.hash != nil {
-		return n.hash
+func (n *NodeBranch) calculateHash(hasher *api.DataHasher) []byte {
+	if n.hashSet {
+		return n.rawHash[:]
 	}
 
 	// Get the child hashes first so we can reset and reuse the hasher object
-	var leftHash *api.DataHash
+	var leftHash, rightHash []byte
 	if n.Left != nil {
 		leftHash = n.Left.calculateHash(hasher)
 	}
-
-	var rightHash *api.DataHash
 	if n.Right != nil {
 		rightHash = n.Right.calculateHash(hasher)
 	}
@@ -316,17 +358,18 @@ func (n *NodeBranch) calculateHash(hasher *api.DataHasher) *api.DataHash {
 	if leftHash == nil {
 		hasher.AddCborNull()
 	} else {
-		hasher.AddCborBytes(leftHash.RawHash)
+		hasher.AddCborBytes(leftHash)
 	}
 
 	if rightHash == nil {
 		hasher.AddCborNull()
 	} else {
-		hasher.AddCborBytes(rightHash.RawHash)
+		hasher.AddCborBytes(rightHash)
 	}
 
-	n.hash = hasher.GetHash()
-	return n.hash
+	hasher.SumRaw(n.rawHash[:0])
+	n.hashSet = true
+	return n.rawHash[:]
 }
 
 func (n *NodeBranch) getPath() *big.Int {
@@ -344,6 +387,9 @@ func (smt *SparseMerkleTree) AddLeaf(path *big.Int, value []byte) error {
 	}
 	if calculateCommonPath(path, smt.root.Path).BitLen() != smt.root.Path.BitLen() {
 		return ErrWrongShard
+	}
+	if smt.parentMode && value != nil && len(value) != hashLen(smt.algorithm) {
+		return ErrInvalidChildHashLength
 	}
 
 	// Implement copy-on-write for snapshots only
@@ -422,14 +468,14 @@ func (smt *SparseMerkleTree) AddLeaves(leaves []*Leaf) error {
 func (smt *SparseMerkleTree) GetRootHash() []byte {
 	// Create a new hasher to ensure thread safety
 	hasher := api.NewDataHasher(smt.algorithm)
-	return smt.root.calculateHash(hasher).GetImprint()
+	return buildImprint(smt.algorithm, smt.root.calculateHash(hasher))
 }
 
 // GetRootHashHex returns the root hash as hex string
 func (smt *SparseMerkleTree) GetRootHashHex() string {
 	// Create a new hasher to ensure thread safety
 	hasher := api.NewDataHasher(smt.algorithm)
-	return smt.root.calculateHash(hasher).ToHex()
+	return fmt.Sprintf("%x", buildImprint(smt.algorithm, smt.root.calculateHash(hasher)))
 }
 
 // GetLeaf retrieves a leaf by path (for compatibility)
@@ -559,11 +605,11 @@ func (smt *SparseMerkleTree) GetPath(path *big.Int) (*api.MerkleTreePath, error)
 	// Create a new hasher to ensure thread safety
 	hasher := api.NewDataHasher(smt.algorithm)
 
-	rootHash := smt.root.calculateHash(hasher)
+	rawRoot := smt.root.calculateHash(hasher)
 	steps := smt.generatePath(hasher, path, smt.root)
 
 	return &api.MerkleTreePath{
-		Root:  rootHash.ToHex(),
+		Root:  fmt.Sprintf("%x", buildImprint(smt.algorithm, rawRoot)),
 		Steps: steps,
 	}, nil
 }
@@ -607,16 +653,14 @@ func (smt *SparseMerkleTree) generatePath(hasher *api.DataHasher, remainingPath 
 
 	var leftHash, rightHash *string
 	if currentBranch.Left != nil {
-		hash := currentBranch.Left.calculateHash(hasher)
-		if hash != nil {
-			tmp := hex.EncodeToString(hash.RawHash)
+		if raw := currentBranch.Left.calculateHash(hasher); raw != nil {
+			tmp := hex.EncodeToString(raw)
 			leftHash = &tmp
 		}
 	}
 	if currentBranch.Right != nil {
-		hash := currentBranch.Right.calculateHash(hasher)
-		if hash != nil {
-			tmp := hex.EncodeToString(hash.RawHash)
+		if raw := currentBranch.Right.calculateHash(hasher); raw != nil {
+			tmp := hex.EncodeToString(raw)
 			rightHash = &tmp
 		}
 	}

@@ -128,6 +128,12 @@ func (pas *ParentAggregatorService) SubmitShardRoot(ctx context.Context, req *ap
 	}
 
 	update := models.NewShardRootUpdate(req.ShardID, req.RootHash)
+	if err := update.Validate(); err != nil {
+		pas.logger.WithContext(ctx).Warn("Invalid shard root update", "shardId", req.ShardID, "error", err.Error())
+		return &api.SubmitShardRootResponse{
+			Status: api.ShardRootStatusInvalidRootHash,
+		}, nil
+	}
 
 	err = pas.parentRoundManager.SubmitShardRoot(ctx, update)
 	if err != nil {

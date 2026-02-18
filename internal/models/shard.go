@@ -15,6 +15,10 @@ type ShardRootUpdate struct {
 	Timestamp time.Time
 }
 
+// rawHashLen is the expected raw digest length for supported hash algorithms
+// (SHA256 and SHA3-256). Update if the protocol migrates to a longer digest.
+const rawHashLen = 32
+
 // NewShardRootUpdate creates a new shard root update
 func NewShardRootUpdate(shardID api.ShardID, rootHash api.HexBytes) *ShardRootUpdate {
 	return &ShardRootUpdate{
@@ -35,8 +39,8 @@ func (sru *ShardRootUpdate) Validate() error {
 		return fmt.Errorf("shard ID must be positive and have at least 2 bits")
 	}
 
-	if len(sru.RootHash) == 0 {
-		return fmt.Errorf("root hash cannot be empty")
+	if len(sru.RootHash) != rawHashLen {
+		return fmt.Errorf("root hash must be %d bytes, got %d", rawHashLen, len(sru.RootHash))
 	}
 
 	return nil
