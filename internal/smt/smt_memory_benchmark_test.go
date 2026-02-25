@@ -11,7 +11,6 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
-	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -133,89 +132,6 @@ func BenchmarkSMTMemoryUsageRealistic(b *testing.B) {
 
 			b.Logf("SMT with %d leaves: %.2f MB total, %.2f bytes/leaf",
 				size, memUsedMB, float64(memUsedBytes)/float64(size))
-		})
-	}
-}
-
-// TestSMTMemoryMeasurement is a test (not benchmark) for precise memory measurement
-// Run with: go test -v -run TestSMTMemoryMeasurement -timeout 30m
-func TestSMTMemoryMeasurement(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping memory measurement in short mode")
-	}
-
-	sizes := []int{10_000, 100_000, 500_000, 1_000_000}
-
-	for _, size := range sizes {
-		t.Run(fmt.Sprintf("leaves_%d", size), func(t *testing.T) {
-			// Step 1: Generate leaves first (this allocates memory for commitments)
-			t.Logf("Generating %d commitments...", size)
-			leaves := make([]*Leaf, size)
-			for i := 0; i < size; i++ {
-				commitment := testutil.CreateTestCommitment(t, fmt.Sprintf("mem_test_%d", i))
-
-				path, err := commitment.RequestID.GetPath()
-				if err != nil {
-					t.Fatalf("Failed to get path: %v", err)
-				}
-
-				leafValue, err := commitment.ToAPI().CreateLeafValue()
-				if err != nil {
-					t.Fatalf("Failed to create leaf value: %v", err)
-				}
-
-				leaves[i] = &Leaf{Path: path, Value: leafValue}
-
-				if (i+1)%50_000 == 0 {
-					t.Logf("Generated %d/%d leaves", i+1, size)
-				}
-			}
-
-			// Step 2: Force GC to get accurate baseline AFTER commitment generation
-			runtime.GC()
-			runtime.GC()
-			var memBefore runtime.MemStats
-			runtime.ReadMemStats(&memBefore)
-
-			// Step 3: Create SMT and add leaves
-			smtTree := NewSparseMerkleTree(api.SHA256, 16+256)
-			t.Logf("Adding %d leaves to SMT...", size)
-			err := smtTree.AddLeaves(leaves)
-			if err != nil {
-				t.Fatalf("Failed to add leaves: %v", err)
-			}
-
-			// Calculate root hash (materializes cached hashes)
-			rootHash := smtTree.GetRootHashHex()
-			t.Logf("Root hash: %s", rootHash[:16]+"...")
-
-			// Step 4: Measure memory BEFORE clearing leaves (SMT still holds refs)
-			var memAfterSMT runtime.MemStats
-			runtime.ReadMemStats(&memAfterSMT)
-
-			smtAllocBytes := memAfterSMT.HeapAlloc - memBefore.HeapAlloc
-			smtAllocMB := float64(smtAllocBytes) / 1024 / 1024
-
-			// Step 5: Now clear leaves and force GC to see SMT-only memory
-			leaves = nil
-			runtime.GC()
-			runtime.GC()
-
-			var memFinal runtime.MemStats
-			runtime.ReadMemStats(&memFinal)
-
-			// This is the memory held by SMT alone (after leaves slice is GC'd)
-			finalHeapMB := float64(memFinal.HeapAlloc) / 1024 / 1024
-
-			t.Logf("\n=== SMT Memory Usage for %d leaves ===", size)
-			t.Logf("SMT allocation:  %.2f MB (%.2f bytes/leaf)", smtAllocMB, float64(smtAllocBytes)/float64(size))
-			t.Logf("Final heap:      %.2f MB", finalHeapMB)
-			t.Logf("TotalAlloc:      %.2f MB (cumulative)", float64(memFinal.TotalAlloc)/1024/1024)
-			t.Logf("Sys (from OS):   %.2f MB", float64(memFinal.Sys)/1024/1024)
-			t.Logf("==========================================\n")
-
-			// Keep SMT alive to prevent optimization
-			runtime.KeepAlive(smtTree)
 		})
 	}
 }

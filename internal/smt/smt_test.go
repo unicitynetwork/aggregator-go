@@ -234,6 +234,78 @@ func TestSMTBatchOperations(t *testing.T) {
 	})
 }
 
+// TestSMTRootHashRegressionFixture pins an implementation reference root hash
+// for a fixed leaf set, so refactors cannot accidentally change hash behavior.
+func TestSMTRootHashRegressionFixture(t *testing.T) {
+	const expectedRoot = "0000273e7c3e2d1a8d9194babbff44377e27facc2007893f0dd0db09f6406e04390f"
+
+	leaves := []*Leaf{
+		NewLeaf(big.NewInt(0b110010000), []byte("value00010000")), // 400
+		NewLeaf(big.NewInt(0b100000000), []byte("value00000000")), // 256
+		NewLeaf(big.NewInt(0b100010000), []byte("value00010000")), // 272
+	}
+
+	t.Run("SequentialAddLeaf", func(t *testing.T) {
+		smt := NewSparseMerkleTree(api.SHA256, 8)
+		for _, leaf := range leaves {
+			require.NoError(t, smt.AddLeaf(leaf.Path, leaf.Value))
+		}
+		require.Equal(t, expectedRoot, smt.GetRootHashHex())
+	})
+
+	t.Run("BatchAddLeaves", func(t *testing.T) {
+		smt := NewSparseMerkleTree(api.SHA256, 8)
+		require.NoError(t, smt.AddLeaves(leaves))
+		require.Equal(t, expectedRoot, smt.GetRootHashHex())
+	})
+}
+
+// TestParentSMTRootHashRegressionFixture pins parent-mode reference roots for
+// deterministic child-root inputs.
+func TestParentSMTRootHashRegressionFixture(t *testing.T) {
+	const (
+		expectedEmpty      = "00001ef37149189b0c122d9ffc5eac0652c0d136ba71061a98dab823e4ba2544ee3f"
+		expectedOneUpdate  = "0000be056f14098551f711bcf4ed2fa9becff6467565faffeaf612602d8a3fccdc9b"
+		expectedTwoUpdates = "000062a64635665e45b753e21e0489443a8589c8561094c3137201a2c275540d1aa8"
+	)
+
+	make32 := func(start byte) []byte {
+		out := make([]byte, 32)
+		for i := range out {
+			out[i] = start + byte(i)
+		}
+		return out
+	}
+
+	t.Run("EmptyParentTree", func(t *testing.T) {
+		parent := NewParentSparseMerkleTree(api.SHA256, 2)
+		require.Equal(t, expectedEmpty, parent.GetRootHashHex())
+	})
+
+	t.Run("SingleChildUpdate", func(t *testing.T) {
+		parent := NewParentSparseMerkleTree(api.SHA256, 2)
+		require.NoError(t, parent.AddLeaf(big.NewInt(0b110), make32(0x10)))
+		require.Equal(t, expectedOneUpdate, parent.GetRootHashHex())
+	})
+
+	t.Run("TwoChildUpdatesSequential", func(t *testing.T) {
+		parent := NewParentSparseMerkleTree(api.SHA256, 2)
+		require.NoError(t, parent.AddLeaf(big.NewInt(0b110), make32(0x10)))
+		require.NoError(t, parent.AddLeaf(big.NewInt(0b101), make32(0x80)))
+		require.Equal(t, expectedTwoUpdates, parent.GetRootHashHex())
+	})
+
+	t.Run("TwoChildUpdatesBatch", func(t *testing.T) {
+		parent := NewParentSparseMerkleTree(api.SHA256, 2)
+		leaves := []*Leaf{
+			NewLeaf(big.NewInt(0b110), make32(0x10)),
+			NewLeaf(big.NewInt(0b101), make32(0x80)),
+		}
+		require.NoError(t, parent.AddLeaves(leaves))
+		require.Equal(t, expectedTwoUpdates, parent.GetRootHashHex())
+	})
+}
+
 // TestSMTErrorHandling tests error conditions
 func TestSMTErrorHandling(t *testing.T) {
 	smt := NewSparseMerkleTree(api.SHA256, 7)
@@ -1460,9 +1532,12 @@ func TestParentSMTSnapshotUpdateLeaf(t *testing.T) {
 	// Create snapshot for copy-on-write semantics
 	snapshot := parentSMT.CreateSnapshot()
 
-	// Update a pre-populated leaf (shard ID 2)
+	// Update a pre-populated leaf (shard ID 2) with a valid 32-byte child root hash
 	path := big.NewInt(2)
-	value := []byte{0x01, 0x02, 0x03}
+	value := make([]byte, 32)
+	for i := range value {
+		value[i] = byte(i + 1)
+	}
 
 	err := snapshot.AddLeaf(path, value)
 	if err != nil {
