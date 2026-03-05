@@ -10,6 +10,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
@@ -115,6 +116,8 @@ func (le *LeaderElection) startElectionPolling(ctx context.Context) {
 			if acquired {
 				le.log.WithComponent("leader-election").Info("Acquired leadership, publishing LeaderChangedEvent and starting heartbeat", "serverID", le.serverID)
 				le.isLeader.Store(true)
+				metrics.IsLeader.Set(1)
+				metrics.LeaderTransitionsTotal.Inc()
 				le.eventBus.Publish(events.TopicLeaderChanged, &events.LeaderChangedEvent{IsLeader: true})
 
 				if err := le.startHeartbeat(ctx); err != nil {
@@ -123,6 +126,8 @@ func (le *LeaderElection) startElectionPolling(ctx context.Context) {
 
 				le.log.WithComponent("leader-election").Info("Lost leadership, publishing LeaderChangedEvent and returning to polling", "serverID", le.serverID)
 				le.isLeader.Store(false)
+				metrics.IsLeader.Set(0)
+				metrics.LeaderTransitionsTotal.Inc()
 				le.eventBus.Publish(events.TopicLeaderChanged, &events.LeaderChangedEvent{IsLeader: false})
 			}
 		}

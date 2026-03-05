@@ -138,6 +138,9 @@ type SmtStorage interface {
 	// Count returns the total number of nodes
 	Count(ctx context.Context) (int64, error)
 
+	// EstimatedCount returns an approximate number of nodes using storage metadata.
+	EstimatedCount(ctx context.Context) (int64, error)
+
 	// GetAll retrieves all SMT nodes (use with caution)
 	GetAll(ctx context.Context) ([]*models.SmtNode, error)
 

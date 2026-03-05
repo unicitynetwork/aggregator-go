@@ -207,6 +207,15 @@ func (ss *SmtStorage) Count(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
+// EstimatedCount returns an estimated total number of nodes using collection metadata.
+func (ss *SmtStorage) EstimatedCount(ctx context.Context) (int64, error) {
+	count, err := ss.collection.EstimatedDocumentCount(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to estimate SMT nodes count: %w", err)
+	}
+	return count, nil
+}
+
 // GetAll retrieves all SMT nodes (use with caution)
 func (ss *SmtStorage) GetAll(ctx context.Context) ([]*models.SmtNode, error) {
 	cursor, err := ss.collection.Find(ctx, bson.M{})

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"golang.org/x/net/http2"
 
@@ -111,8 +112,9 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 
 // setupRoutes sets up HTTP routes
 func (s *Server) setupRoutes() {
-	// Health endpoint
+	// Health and metrics endpoints
 	s.router.GET("/health", s.handleHealth)
+	s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	s.router.PUT("/api/v1/trustbases", s.handlePutTrustBase)
 	s.router.GET("/api/v1/trustbases", getTrustBaseHandler(s.logger, s.service))
 

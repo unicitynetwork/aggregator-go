@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 )
 
 // HandlerFunc represents a JSON-RPC method handler
@@ -63,7 +64,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	start := time.Now()
+	recordMetrics := func(method, result string) {
+		metrics.HTTPRequestsTotal.WithLabelValues(method, result).Inc()
+		metrics.HTTPRequestDuration.WithLabelValues(method).Observe(time.Since(start).Seconds())
+	}
+
 	if r.Method != "POST" {
+		recordMetrics("unknown", "error")
 		s.writeErrorResponse(w, ErrInvalidRequest, nil)
 		return
 	}
@@ -73,6 +81,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case s.activeSemaphore <- struct{}{}:
 		defer func() { <-s.activeSemaphore }()
 	default:
+		recordMetrics("unknown", "error")
 		s.writeErrorResponse(w, ErrConcurrencyLimit, nil)
 		return
 	}
@@ -84,6 +93,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req Request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.logger.WithContext(ctx).Error("Failed to parse JSON-RPC request", "error", err.Error())
+		recordMetrics("unknown", "error")
 		s.writeErrorResponse(w, ErrParseError, nil)
 		return
 	}
@@ -91,6 +101,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Validate request
 	if err := req.IsValidRequest(); err != nil {
 		s.logger.WithContext(ctx).Error("Invalid JSON-RPC request", "error", err.Error())
+		recordMetrics("unknown", "error")
 		s.writeErrorResponse(w, ErrInvalidRequest, req.ID)
 		return
 	}
@@ -100,6 +111,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Process request
 	response := s.processRequest(ctx, &req)
+	method := metrics.NormalizeMethod(req.Method)
+	result := "success"
+	if response != nil && response.Error != nil {
+		result = "error"
+	}
+	recordMetrics(method, result)
 
 	// Write response
 	s.writeJSONResponse(w, response)
