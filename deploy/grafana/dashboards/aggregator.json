@@ -238,12 +238,12 @@
       "targets": [
         {
           "expr": "rate(aggregator_bft_errors_total[1m])",
-          "legendFormat": "BFT errors/sec",
+          "legendFormat": "{{instance}} ({{shard}}) BFT errors/sec",
           "refId": "A"
         },
         {
           "expr": "rate(aggregator_parent_proof_errors_total{role=\"child\"}[1m])",
-          "legendFormat": "parent proof errors/sec",
+          "legendFormat": "{{instance}} ({{shard}}) parent proof errors/sec",
           "refId": "B"
         }
       ],
