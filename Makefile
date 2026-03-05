@@ -134,6 +134,15 @@ docker-run-sh-clean-keep-tb:
 	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose -f sharding-compose.yml up --force-recreate -d --build
 	@echo "Services rebuilt with user UID=$$(id -u):$$(id -g)"
 
+docker-run-sh-monitoring-clean-keep-tb:
+	@echo "Rebuilding sharded services with monitoring enabled as current user..."
+	@docker compose -f sharding-compose.yml -f docker-compose.monitoring.yml down
+	@rm -rf ./data/mongodb_shard1_data ./data/mongodb_shard2_data ./data/mongodb_root_data ./data/redis_shared_data
+	@mkdir -p ./data/genesis/root ./data/genesis-root ./data/mongodb_shard1_data ./data/mongodb_shard2_data ./data/mongodb_root_data ./data/redis_shared_data && chmod -R 777 ./data
+	@mkdir -p ./logs/shard1 ./logs/shard2 ./logs/root && chmod -R 777 ./logs
+	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug PROMETHEUS_TARGETS_FILE=sharded.json docker compose -f sharding-compose.yml -f docker-compose.monitoring.yml up --force-recreate -d --build
+	@echo "Sharded services + monitoring rebuilt with user UID=$$(id -u):$$(id -g)"
+
 docker-run-sh-ha-clean-keep-tb:
 	@echo "Rebuilding services with clean state but preserving BFT config, with sharding and HA enabled as current user..."
 	@docker compose -f sharding-ha-compose.yml down
@@ -142,6 +151,15 @@ docker-run-sh-ha-clean-keep-tb:
 	@mkdir -p ./logs/shard1-1 ./logs/shard1-2 ./logs/shard2-1 ./logs/shard2-2 ./logs/root-1 && chmod -R 777 ./logs
 	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose -f sharding-ha-compose.yml up --force-recreate -d --build
 	@echo "Services rebuilt with user UID=$$(id -u):$$(id -g)"
+
+docker-run-sh-ha-monitoring-clean-keep-tb:
+	@echo "Rebuilding sharding+HA services with monitoring enabled as current user..."
+	@docker compose -f sharding-ha-compose.yml -f docker-compose.monitoring.yml down
+	@rm -rf ./data/mongodb_shard1_data_1 ./data/mongodb_shard1_data_2 ./data/mongodb_shard1_data_3 ./data/mongodb_shard2_data_1 ./data/mongodb_shard2_data_2 ./data/mongodb_shard2_data_3 ./data/mongodb_root_data_1 ./data/mongodb_root_data_2 ./data/mongodb_root_data_3 ./data/redis_data
+	@mkdir -p ./data/genesis/root ./data/genesis-root ./data/mongodb_shard1_data_1 ./data/mongodb_shard1_data_2 ./data/mongodb_shard1_data_3 ./data/mongodb_shard2_data_1 ./data/mongodb_shard2_data_2 ./data/mongodb_shard2_data_3 ./data/mongodb_root_data_1 ./data/mongodb_root_data_2 ./data/mongodb_root_data_3 ./data/redis_data && chmod -R 777 ./data
+	@mkdir -p ./logs/shard1-1 ./logs/shard1-2 ./logs/shard2-1 ./logs/shard2-2 ./logs/root-1 && chmod -R 777 ./logs
+	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug PROMETHEUS_TARGETS_FILE=sharded-ha.json docker compose -f sharding-ha-compose.yml -f docker-compose.monitoring.yml up --force-recreate -d --build
+	@echo "Sharding+HA services + monitoring rebuilt with user UID=$$(id -u):$$(id -g)"
 
 docker-restart-sh-ha:
 	@echo "Rebuilding and restarting sharding+HA aggregator services..."

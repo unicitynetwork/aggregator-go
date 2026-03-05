@@ -1,0 +1,1 @@
+[{"targets": ["aggregator-service:3000"], "labels": {"role": "standalone"}}]

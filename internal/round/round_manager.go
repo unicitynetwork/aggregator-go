@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
@@ -170,6 +171,17 @@ func NewRoundManager(
 		avgProcessingRate:   1.0,                                            // Initial estimate: 1 commitment per ms
 		avgFinalizationTime: 200 * time.Millisecond,                         // Initial estimate (conservative)
 		avgSMTUpdateTime:    5 * time.Millisecond,                           // Initial estimate per batch
+	}
+
+	if rm.storage != nil && rm.storage.SmtStorage() != nil {
+		metrics.SetSMTNodesPersistedCountFunc(func(countCtx context.Context) (int64, error) {
+			return rm.storage.SmtStorage().EstimatedCount(countCtx)
+		})
+	}
+	if rm.commitmentQueue != nil {
+		metrics.SetCommitmentQueueBacklogFunc(func(countCtx context.Context) (int64, error) {
+			return rm.commitmentQueue.CountUnprocessed(countCtx)
+		})
 	}
 
 	// create BFT client for standalone mode

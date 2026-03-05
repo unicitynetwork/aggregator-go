@@ -1,0 +1,28 @@
+services:
+  prometheus:
+    image: prom/prometheus:v3.10.0
+    container_name: aggregator-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/targets/${PROMETHEUS_TARGETS_FILE:-standalone.json}:/etc/prometheus/targets/active.json:ro
+    networks:
+      - default
+
+  grafana:
+    image: grafana/grafana:12.3.2
+    container_name: aggregator-grafana
+    restart: unless-stopped
+    ports:
+      - "3100:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/etc/grafana/dashboards:ro
+    networks:
+      - default
+    depends_on:
+      - prometheus

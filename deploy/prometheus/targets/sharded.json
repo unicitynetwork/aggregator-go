@@ -1,0 +1,5 @@
+[
+  {"targets": ["aggregator-shard1:3000"], "labels": {"role": "child", "shard": "3"}},
+  {"targets": ["aggregator-shard2:3000"], "labels": {"role": "child", "shard": "2"}},
+  {"targets": ["aggregator-root:3000"],   "labels": {"role": "parent", "shard": "root"}}
+]

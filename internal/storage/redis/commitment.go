@@ -537,9 +537,12 @@ func (cs *CommitmentStorage) Count(ctx context.Context) (int64, error) {
 	return info.Val().Length, nil
 }
 
-// CountUnprocessed returns the number of unprocessed commitments
+// CountUnprocessed returns the total unprocessed commitments for the consumer group.
+// It includes:
+// - pending: delivered but not ACKed entries (XPENDING)
+// - lag: undelivered entries still waiting in the stream for this group (XINFO GROUPS)
 func (cs *CommitmentStorage) CountUnprocessed(ctx context.Context) (int64, error) {
-	// Get pending count for the entire consumer group - this represents unprocessed items
+	// Pending entries (already delivered to the group, still unacked).
 	pendingInfo := cs.client.XPending(ctx, cs.streamName, consumerGroup)
 	if err := pendingInfo.Err(); err != nil {
 		if errors.Is(err, redis.Nil) {
@@ -562,7 +565,42 @@ func (cs *CommitmentStorage) CountUnprocessed(ctx context.Context) (int64, error
 	}
 
 	pending := pendingInfo.Val()
-	return pending.Count, nil
+	backlog := pending.Count
+
+	// Add stream lag (not yet delivered to this consumer group) so we report full unprocessed backlog.
+	groups, err := cs.client.XInfoGroups(ctx, cs.streamName).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return backlog, nil
+		}
+		if isNoGroupError(err) {
+			if ensureErr := cs.ensureConsumerGroup(ctx); ensureErr != nil {
+				return 0, fmt.Errorf("failed to ensure consumer group: %w", ensureErr)
+			}
+			groups, err = cs.client.XInfoGroups(ctx, cs.streamName).Result()
+			if err != nil {
+				if errors.Is(err, redis.Nil) {
+					return backlog, nil
+				}
+				return 0, fmt.Errorf("failed to get consumer group info after recreating group: %w", err)
+			}
+		} else {
+			return 0, fmt.Errorf("failed to get consumer group info: %w", err)
+		}
+	}
+
+	for _, group := range groups {
+		if group.Name != consumerGroup {
+			continue
+		}
+		// Redis returns -1 when lag cannot be determined; treat as unknown (0 additional backlog).
+		if group.Lag > 0 {
+			backlog += group.Lag
+		}
+		break
+	}
+
+	return backlog, nil
 }
 
 // parseCommitment parses a Redis stream message into a CertificationData
