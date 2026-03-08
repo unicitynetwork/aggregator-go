@@ -388,7 +388,7 @@ func newHTTPClient(targetURL string, metrics *Metrics) *http.Client {
 	// For plain http:// URLs, use http2.Transport with AllowHTTP to enable h2c
 	// (HTTP/2 cleartext). This allows multiplexing many requests over a single
 	// TCP connection instead of one connection per concurrent request.
-	if !disableH2C && strings.HasPrefix(strings.ToLower(targetURL), "http://") {
+	if enableH2C && strings.HasPrefix(strings.ToLower(targetURL), "http://") {
 		return &http.Client{
 			Timeout:   30 * time.Second,
 			Transport: buildH2CTransport(metrics),
