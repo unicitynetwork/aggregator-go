@@ -47,6 +47,7 @@ var (
 	requestsPerSec    = getEnvInt("REQUESTS_PER_SEC", defaultRequestsPerSec)
 	proofInitialDelay = getEnvDuration("PROOF_INITIAL_DELAY", defaultProofInitialDelay)
 	shardTargets      = getEnvShardTargets()
+	enableH2C         = os.Getenv("ENABLE_H2C") != "false"
 )
 
 func getEnvInt(key string, defaultVal int) int {
@@ -1091,6 +1092,11 @@ func main() {
 	fmt.Printf("Submission workers: %d\n", workerCount)
 	fmt.Printf("Proof workers: %d\n", proofWorkerCount)
 	fmt.Printf("HTTP client pool size: %d\n", httpClientPoolSize)
+	if enableH2C {
+		fmt.Printf("H2C: enabled (HTTP/2 cleartext for plain HTTP)\n")
+	} else {
+		fmt.Printf("H2C: disabled (HTTP/1.1 for plain HTTP)\n")
+	}
 	fmt.Printf("Target RPS: %d\n", requestsPerSec)
 	fmt.Printf("----------------------------------------\n")
 
