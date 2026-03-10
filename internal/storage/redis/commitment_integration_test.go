@@ -913,7 +913,7 @@ func (suite *RedisTestSuite) TestCountUnprocessed_IncludesPendingAndLag() {
 		Consumer: suite.storage.consumerID,
 		Streams:  []string{suite.storage.streamName, ">"},
 		Count:    3,
-		Block:    0,
+		Block:    2 * time.Second,
 	}).Result()
 	require.NoError(t, err)
 
