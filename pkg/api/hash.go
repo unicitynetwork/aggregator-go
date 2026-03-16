@@ -106,3 +106,9 @@ func (h *DataHasher) Reset() *DataHasher {
 	h.hasher.Reset()
 	return h
 }
+
+// SumRaw appends the current hash state to dst and returns the result.
+// Pass dst[:0] where dst has cap >= hash output length to write with zero allocation.
+func (h *DataHasher) SumRaw(dst []byte) []byte {
+	return h.hasher.Sum(dst)
+}

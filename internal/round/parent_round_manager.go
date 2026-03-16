@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
@@ -74,6 +75,7 @@ func NewParentRoundManager(
 	luc *types.UnicityCertificate,
 	eventBus *events.EventBus,
 	threadSafeSmt *smt.ThreadSafeSMT,
+	trustBaseProvider interfaces.TrustBaseProvider,
 ) (*ParentRoundManager, error) {
 	prm := &ParentRoundManager{
 		config:    cfg,
@@ -84,10 +86,16 @@ func NewParentRoundManager(
 		eventBus:  eventBus,
 	}
 
+	if prm.storage != nil && prm.storage.SmtStorage() != nil {
+		metrics.SetSMTNodesPersistedCountFunc(func(countCtx context.Context) (int64, error) {
+			return prm.storage.SmtStorage().EstimatedCount(countCtx)
+		})
+	}
+
 	// Create BFT client (same logic as regular RoundManager)
 	if cfg.BFT.Enabled {
 		var err error
-		prm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, prm, storage.TrustBaseStorage(), luc, logger, eventBus)
+		prm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, prm, trustBaseProvider, luc, logger, eventBus)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create BFT client: %w", err)
 		}
@@ -304,7 +312,9 @@ func (prm *ParentRoundManager) processRound(ctx context.Context, round *ParentRo
 			leaves = append(leaves, leaf)
 		}
 
+		smtStart := time.Now()
 		rootHashStr, err := round.Snapshot.AddLeaves(leaves)
+		metrics.SMTAddLeavesDuration.Observe(time.Since(smtStart).Seconds())
 		if err != nil {
 			return fmt.Errorf("failed to add shard leaves to parent SMT snapshot: %w", err)
 		}
@@ -351,6 +361,11 @@ func (prm *ParentRoundManager) processRound(ctx context.Context, round *ParentRo
 	round.State = RoundStateFinalizing
 	round.ProposalTime = time.Now()
 
+	prepStart := round.StartTime
+	if prepStart.IsZero() {
+		prepStart = startTime
+	}
+	metrics.RoundPreparationDuration.Observe(time.Since(prepStart).Seconds())
 	if err := prm.bftClient.CertificationRequest(ctx, block); err != nil {
 		prm.logger.WithContext(ctx).Error("Failed to send certification request",
 			"roundNumber", round.Number.String(),
@@ -500,6 +515,7 @@ func (prm *ParentRoundManager) FinalizeBlock(ctx context.Context, block *models.
 	var snapshot *smt.ThreadSafeSmtSnapshot
 	var proposalTime time.Time
 	var processingTime time.Duration
+	var roundStartTime time.Time
 	if prm.currentRound != nil && prm.currentRound.ProcessedShardUpdates != nil {
 		processedShardUpdates = make(map[int]*models.ShardRootUpdate)
 		for shardKey, update := range prm.currentRound.ProcessedShardUpdates {
@@ -508,6 +524,7 @@ func (prm *ParentRoundManager) FinalizeBlock(ctx context.Context, block *models.
 		snapshot = prm.currentRound.Snapshot
 		proposalTime = prm.currentRound.ProposalTime
 		processingTime = prm.currentRound.ProcessingTime
+		roundStartTime = prm.currentRound.StartTime
 	}
 	prm.roundMutex.RUnlock()
 
@@ -558,6 +575,7 @@ func (prm *ParentRoundManager) FinalizeBlock(ctx context.Context, block *models.
 	}
 
 	finalizationTime := time.Since(finalizationStart)
+	metrics.RoundFinalizationDuration.Observe(finalizationTime.Seconds())
 	var bftWait time.Duration
 	if !proposalTime.IsZero() {
 		bftWait = finalizationStart.Sub(proposalTime)
@@ -582,6 +600,11 @@ func (prm *ParentRoundManager) FinalizeBlock(ctx context.Context, block *models.
 
 	prm.logger.WithContext(ctx).Info("Parent block finalized successfully",
 		"blockNumber", block.Index.String())
+
+	metrics.SetBlockHeight(block.Index.Int)
+	if !roundStartTime.IsZero() {
+		metrics.BlockCreationDuration.Observe(time.Since(roundStartTime).Seconds())
+	}
 
 	return nil
 }

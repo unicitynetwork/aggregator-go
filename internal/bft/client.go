@@ -21,6 +21,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -62,6 +63,8 @@ type (
 
 		// timestamp when last UC was received
 		lastCertResponseTime atomic.Int64
+		// timestamp when last certification request was sent (unix nano)
+		certRequestTime atomic.Int64
 
 		trustBaseStore TrustBaseStore
 	}
@@ -80,7 +83,7 @@ type (
 	}
 
 	TrustBaseStore interface {
-		GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error)
+		GetByEpoch(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error)
 	}
 
 	status int
@@ -473,6 +476,10 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		"blockNumber", blockNum,
 		"ucRound", expectedRound)
 
+	if certStart := c.certRequestTime.Swap(0); certStart > 0 {
+		metrics.BFTCertificationDuration.Observe(float64(time.Now().UnixNano()-certStart) / 1e9)
+	}
+
 	ucCbor, err := types.Cbor.Marshal(uc)
 	if err != nil {
 		c.logger.WithContext(ctx).Error("Failed to encode unicity certificate",
@@ -485,6 +492,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		c.logger.WithContext(ctx).Error("Failed to finalize block after retries",
 			"blockNumber", c.proposedBlock.Index.String(),
 			"error", err.Error())
+		metrics.BFTErrorsTotal.Inc()
 		if c.eventBus != nil {
 			c.eventBus.Publish(events.TopicFatalError, events.FatalErrorEvent{
 				Source: "bft",
@@ -605,6 +613,7 @@ func (c *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.
 	}
 
 	c.proposedBlock = block
+	c.certRequestTime.Store(time.Now().UnixNano())
 
 	c.logger.WithContext(ctx).Debug("Sending certification request",
 		"blockNumber", c.proposedBlock.Index.String(),
@@ -614,6 +623,7 @@ func (c *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.
 		c.logger.WithContext(ctx).Error("Failed to send certification request",
 			"blockNumber", block.Index.String(),
 			"error", err.Error())
+		metrics.BFTErrorsTotal.Inc()
 		return fmt.Errorf("failed to send certification request: %w", err)
 	}
 

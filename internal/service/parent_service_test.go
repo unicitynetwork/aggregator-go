@@ -85,7 +85,7 @@ func (suite *ParentServiceTestSuite) SetupTest() {
 	// Create parent round manager
 	var err error
 	parentSMT := smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength))
-	suite.prm, err = round.NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, parentSMT)
+	suite.prm, err = round.NewParentRoundManager(ctx, suite.cfg, suite.logger, suite.storage, nil, suite.eventBus, parentSMT, suite.storage.TrustBaseStorage())
 	require.NoError(suite.T(), err, "Should create parent round manager")
 	require.NotNil(suite.T(), suite.prm, "Parent round manager should not be nil")
 

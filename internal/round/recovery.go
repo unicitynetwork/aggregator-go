@@ -270,13 +270,21 @@ func LoadRecoveredNodesIntoSMT(
 
 	log.WithContext(ctx).Info("Loading recovered SMT nodes", "count", len(requestIDs))
 
-	keys := make([]api.HexBytes, len(requestIDs))
-	for i, reqID := range requestIDs {
+	// Deduplicate request IDs (duplicates can occur when the same commitment
+	// is submitted twice in the same round)
+	seen := make(map[string]struct{}, len(requestIDs))
+	keys := make([]api.HexBytes, 0, len(requestIDs))
+	for _, reqID := range requestIDs {
+		key := string(reqID)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
 		path, err := reqID.GetPath()
 		if err != nil {
 			return fmt.Errorf("failed to get path for requestID %s: %w", reqID, err)
 		}
-		keys[i] = path.Bytes()
+		keys = append(keys, api.HexBytes(path.Bytes()))
 	}
 
 	nodes, err := storage.SmtStorage().GetByKeys(ctx, keys)

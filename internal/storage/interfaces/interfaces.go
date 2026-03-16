@@ -138,6 +138,9 @@ type SmtStorage interface {
 	// Count returns the total number of nodes
 	Count(ctx context.Context) (int64, error)
 
+	// EstimatedCount returns an approximate number of nodes using storage metadata.
+	EstimatedCount(ctx context.Context) (int64, error)
+
 	// GetAll retrieves all SMT nodes (use with caution)
 	GetAll(ctx context.Context) ([]*models.SmtNode, error)
 
@@ -193,7 +196,13 @@ var ErrTrustBaseAlreadyExists = errors.New("trust base already exists")
 
 type TrustBaseStorage interface {
 	Store(ctx context.Context, trustBase types.RootTrustBase) error
-	GetByEpoch(ctx context.Context, epoch uint64) (types.RootTrustBase, error)
+	GetByEpoch(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error)
+	GetLatest(ctx context.Context) (*types.RootTrustBaseV1, error)
+	GetTrustBases(ctx context.Context, from, to uint64) ([]*types.RootTrustBaseV1, error)
+}
+
+type TrustBaseProvider interface {
+	GetByEpoch(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error)
 }
 
 // Storage handles persistent data storage

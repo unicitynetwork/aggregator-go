@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	cmdbft "github.com/unicitynetwork/bft-core/cli/ubft/cmd"
 
 	"github.com/unicitynetwork/bft-core/network"
-	"github.com/unicitynetwork/bft-core/partition"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
 
@@ -35,8 +35,8 @@ type Config struct {
 
 // SigningConfig holds the aggregator's signing key configuration
 type SigningConfig struct {
-	KeyFile string             `mapstructure:"key_file"`
-	KeyConf *partition.KeyConf `mapstructure:"key_conf"`
+	KeyFile string          `mapstructure:"key_file"`
+	KeyConf *cmdbft.KeyConf `mapstructure:"key_conf"`
 }
 
 // ChainConfig holds metadata about the current chain configuration
@@ -59,6 +59,7 @@ type ServerConfig struct {
 	TLSCertFile               string        `mapstructure:"tls_cert_file"`
 	TLSKeyFile                string        `mapstructure:"tls_key_file"`
 	EnableTLS                 bool          `mapstructure:"enable_tls"`
+	EnableH2C                 bool          `mapstructure:"enable_h2c"`
 	HTTP2MaxConcurrentStreams int           `mapstructure:"http2_max_concurrent_streams"`
 }
 
@@ -217,7 +218,7 @@ func (c ChildConfig) Validate() error {
 
 type BFTConfig struct {
 	Enabled    bool                              `mapstructure:"enabled"`
-	KeyConf    *partition.KeyConf                `mapstructure:"key_conf"`
+	KeyConf    *cmdbft.KeyConf                   `mapstructure:"key_conf"`
 	ShardConf  *types.PartitionDescriptionRecord `mapstructure:"shard_conf"`
 	TrustBases []types.RootTrustBaseV1           `mapstructure:"trust_bases"`
 
@@ -233,6 +234,9 @@ type BFTConfig struct {
 	HeartbeatInterval time.Duration `mapstructure:"heartbeat_interval"`
 	// InactivityTimeout duration of inactivity after which a new handshake must be sent.
 	InactivityTimeout time.Duration `mapstructure:"inactivity_timeout"`
+
+	// BFT node REST api address
+	RPCAddress string `mapstructure:"rpc_address"`
 }
 
 func (c *BFTConfig) Validate() error {
@@ -269,6 +273,7 @@ func Load() (*Config, error) {
 			TLSCertFile:               getEnvOrDefault("TLS_CERT_FILE", ""),
 			TLSKeyFile:                getEnvOrDefault("TLS_KEY_FILE", ""),
 			EnableTLS:                 getEnvBoolOrDefault("ENABLE_TLS", false),
+			EnableH2C:                 getEnvBoolOrDefault("ENABLE_H2C", true),
 			HTTP2MaxConcurrentStreams: getEnvIntOrDefault("HTTP2_MAX_CONCURRENT_STREAMS", 4096),
 		},
 		Database: DatabaseConfig{
@@ -353,6 +358,7 @@ func Load() (*Config, error) {
 	config.BFT = BFTConfig{
 		Enabled:                    getEnvBoolOrDefault("BFT_ENABLED", true),
 		Address:                    getEnvOrDefault("BFT_ADDRESS", "/ip4/0.0.0.0/tcp/9000"),
+		RPCAddress:                 getEnvOrDefault("BFT_RPC_ADDRESS", "http://127.0.0.1:8002"),
 		AnnounceAddresses:          strings.Split(getEnvOrDefault("BFT_ANNOUNCE_ADDRESSES", ""), ","),
 		BootstrapAddresses:         strings.Split(getEnvOrDefault("BFT_BOOTSTRAP_ADDRESSES", ""), ","),
 		BootstrapConnectRetry:      getEnvIntOrDefault("BFT_BOOTSTRAP_CONNECT_RETRY", 3),
@@ -411,8 +417,8 @@ func (c *Config) Validate() error {
 	if c.Server.EnableTLS && (c.Server.TLSCertFile == "" || c.Server.TLSKeyFile == "") {
 		return fmt.Errorf("TLS cert and key files must be provided when TLS is enabled")
 	}
-	if c.Server.EnableTLS && c.Server.HTTP2MaxConcurrentStreams <= 0 {
-		return fmt.Errorf("HTTP/2 max concurrent streams must be positive when TLS is enabled")
+	if c.Server.HTTP2MaxConcurrentStreams <= 0 {
+		return fmt.Errorf("HTTP/2 max concurrent streams must be positive")
 	}
 
 	// Validate log level

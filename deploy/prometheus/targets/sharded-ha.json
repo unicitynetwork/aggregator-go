@@ -1,0 +1,7 @@
+[
+  {"targets": ["aggregator-shard1-1:3000"], "labels": {"role": "child", "shard": "3", "node": "1"}},
+  {"targets": ["aggregator-shard1-2:3000"], "labels": {"role": "child", "shard": "3", "node": "2"}},
+  {"targets": ["aggregator-shard2-1:3000"], "labels": {"role": "child", "shard": "2", "node": "1"}},
+  {"targets": ["aggregator-shard2-2:3000"], "labels": {"role": "child", "shard": "2", "node": "2"}},
+  {"targets": ["aggregator-root-1:3000"],   "labels": {"role": "parent", "shard": "root", "node": "1"}}
+]

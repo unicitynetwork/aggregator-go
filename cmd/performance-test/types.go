@@ -18,8 +18,6 @@ import (
 	"time"
 
 	"golang.org/x/net/http2"
-
-	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // JSON-RPC types and API requests
@@ -49,21 +47,6 @@ type GetBlockHeightResponse struct {
 
 type GetInclusionProofRequestV2 struct {
 	StateID string `json:"stateId"`
-}
-
-type GetInclusionProofResponseV2 struct {
-	InclusionProof *InclusionProofV2 `json:"inclusionProof"`
-}
-
-type InclusionProofV2 struct {
-	CertificationData  *api.CertificationData `json:"certificationData"`
-	MerkleTreePath     *api.MerkleTreePath    `json:"merkleTreePath"`
-	UnicityCertificate string                 `json:"unicityCertificate"`
-}
-
-type MerkleTreePath struct {
-	Root  string               `json:"root"`
-	Steps []api.MerkleTreeStep `json:"steps"`
 }
 
 type shardTarget struct {
@@ -401,10 +384,19 @@ func loadCertPool(path string) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-func newHTTPClient(url string, metrics *Metrics) *http.Client {
+func newHTTPClient(targetURL string, metrics *Metrics) *http.Client {
+	// For plain http:// URLs, use http2.Transport with AllowHTTP to enable h2c
+	// (HTTP/2 cleartext). This allows multiplexing many requests over a single
+	// TCP connection instead of one connection per concurrent request.
+	if enableH2C && strings.HasPrefix(strings.ToLower(targetURL), "http://") {
+		return &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: buildH2CTransport(metrics),
+		}
+	}
 	return &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: buildHTTPTransport(url, metrics),
+		Transport: buildHTTPTransport(targetURL, metrics),
 	}
 }
 
@@ -471,6 +463,39 @@ func buildHTTPTransport(url string, metrics *Metrics) *http.Transport {
 	return transport
 }
 
+func buildH2CTransport(metrics *Metrics) http.RoundTripper {
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	return &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			if metrics != nil {
+				metrics.recordConnectionAttempt()
+			}
+			conn, err := dialer.DialContext(ctx, network, addr)
+			if err != nil {
+				if metrics != nil {
+					metrics.incFailedConnection()
+				}
+				return nil, err
+			}
+			if metrics != nil {
+				metrics.incActiveConnection()
+			}
+			return &trackingConn{
+				Conn: conn,
+				onClose: func() {
+					if metrics != nil {
+						metrics.decActiveConnection()
+					}
+				},
+			}, nil
+		},
+	}
+}
+
 func (c *JSONRPCClient) nextHTTPClient() *http.Client {
 	if len(c.clients) == 1 {
 		return c.clients[0]
@@ -508,10 +533,9 @@ func (c *JSONRPCClient) callWithContext(ctx context.Context, method string, para
 	req.Header.Set("Content-Type", "application/json")
 
 	// Add auth header if provided
-	/*if c.authHeader != "" {
+	if c.authHeader != "" {
 		req.Header.Set("Authorization", c.authHeader)
-	}*/
-	req.Header.Set("Authorization", "Bearer sk_4ae5084318574c42877d78cb0d53e5a6")
+	}
 
 	client := c.nextHTTPClient()
 	resp, err := client.Do(req)

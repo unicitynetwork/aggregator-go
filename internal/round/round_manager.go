@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
@@ -53,12 +54,15 @@ type Round struct {
 	Commitments []*models.CertificationRequest
 	Block       *models.Block
 	// Track commitments that have been added to SMT but not yet finalized in a block
-	PendingRecords  []*models.AggregatorRecord
 	PendingRootHash string
 	// SMT snapshot for this round - allows accumulating changes before committing
 	Snapshot *smt.ThreadSafeSmtSnapshot
 	// Store data for persistence during FinalizeBlock
+	// PendingLeaves contains only leaves that were successfully added to the SMT
 	PendingLeaves []*smt.Leaf
+	// PendingCommitments contains only commitments whose leaves were successfully added
+	// This is used for creating aggregator records (must match PendingLeaves)
+	PendingCommitments []*models.CertificationRequest
 	// Timing metrics for this round
 	ProcessingTime     time.Duration
 	ProposalTime       time.Time     // When block was proposed to BFT
@@ -151,6 +155,7 @@ func NewRoundManager(
 	luc *types.UnicityCertificate,
 	eventBus *events.EventBus,
 	threadSafeSmt *smt.ThreadSafeSMT,
+	trustBaseProvider interfaces.TrustBaseProvider,
 ) (*RoundManager, error) {
 	rm := &RoundManager{
 		config:              cfg,
@@ -168,11 +173,22 @@ func NewRoundManager(
 		avgSMTUpdateTime:    5 * time.Millisecond,                           // Initial estimate per batch
 	}
 
+	if rm.storage != nil && rm.storage.SmtStorage() != nil {
+		metrics.SetSMTNodesPersistedCountFunc(func(countCtx context.Context) (int64, error) {
+			return rm.storage.SmtStorage().EstimatedCount(countCtx)
+		})
+	}
+	if rm.commitmentQueue != nil {
+		metrics.SetCommitmentQueueBacklogFunc(func(countCtx context.Context) (int64, error) {
+			return rm.commitmentQueue.CountUnprocessed(countCtx)
+		})
+	}
+
 	// create BFT client for standalone mode
 	if cfg.Sharding.Mode == config.ShardingModeStandalone {
 		if cfg.BFT.Enabled {
 			var err error
-			rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, storage.TrustBaseStorage(), luc, logger, eventBus)
+			rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, trustBaseProvider, luc, logger, eventBus)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create BFT client: %w", err)
 			}
@@ -363,13 +379,13 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 	}
 
 	rm.currentRound = &Round{
-		Number:         roundNumber,
-		StartTime:      time.Now(),
-		State:          RoundStateProcessing,
-		Commitments:    commitments,
-		Snapshot:       snapshot,
-		PendingLeaves:  leaves,
-		PendingRecords: make([]*models.AggregatorRecord, 0, len(commitments)),
+		Number:             roundNumber,
+		StartTime:          time.Now(),
+		State:              RoundStateProcessing,
+		Commitments:        commitments,
+		Snapshot:           snapshot,
+		PendingLeaves:      leaves,
+		PendingCommitments: commitments, // In child mode, commitments are already filtered by pre-collection
 	}
 
 	rm.roundMutex.Unlock()

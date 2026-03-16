@@ -882,15 +882,51 @@ func (suite *RedisTestSuite) TestGetAllPending_OnlyReturnsPending() {
 	}
 	require.NoError(t, suite.storage.MarkProcessed(ctx, ackEntries))
 
-	// Verify CountUnprocessed shows 2 pending
+	// Verify CountUnprocessed reports backlog=2 (pending=2, lag=0)
 	count, err := suite.storage.CountUnprocessed(ctx)
 	require.NoError(t, err)
-	require.Equal(t, int64(2), count, "Should have 2 unprocessed (pending) commitments")
+	require.Equal(t, int64(2), count, "Should have 2 unprocessed commitments")
 
 	// GetAllPending should return ONLY the 2 pending, NOT all 5
 	pending, err := suite.storage.GetAllPending(ctx)
 	require.NoError(t, err)
 	require.Len(t, pending, 2, "GetAllPending should return only 2 pending commitments, not all 5")
+}
+
+// TestCountUnprocessed_IncludesPendingAndLag verifies CountUnprocessed reports
+// full backlog as pending (delivered, unacked) + lag (undelivered).
+func (suite *RedisTestSuite) TestCountUnprocessed_IncludesPendingAndLag() {
+	ctx := suite.ctx
+	t := suite.T()
+
+	// Store 5 commitments in stream.
+	commitments := make([]*models.CertificationRequest, 5)
+	for i := 0; i < 5; i++ {
+		commitments[i] = createTestCommitment()
+	}
+	require.NoError(t, suite.storage.StoreBatch(ctx, commitments))
+	time.Sleep(100 * time.Millisecond)
+
+	// Claim only 3 entries into PEL, leaving 2 as undelivered lag.
+	streams, err := suite.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group:    consumerGroup,
+		Consumer: suite.storage.consumerID,
+		Streams:  []string{suite.storage.streamName, ">"},
+		Count:    3,
+		Block:    2 * time.Second,
+	}).Result()
+	require.NoError(t, err)
+
+	claimed := 0
+	for _, stream := range streams {
+		claimed += len(stream.Messages)
+	}
+	require.Equal(t, 3, claimed, "Should claim exactly 3 entries")
+
+	// Backlog = pending(3) + lag(2) = 5.
+	count, err := suite.storage.CountUnprocessed(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(5), count, "CountUnprocessed should include both pending and lag")
 }
 
 // TestGetByRequestIDs_BatchesCorrectly verifies XRangeN reads in batches, not entire stream.
