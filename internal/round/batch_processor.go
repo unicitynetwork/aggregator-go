@@ -53,18 +53,9 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 	if rm.currentRound != nil && rm.currentRound.Snapshot != nil {
 		_, err := rm.currentRound.Snapshot.AddLeaves(leaves)
 		if err != nil {
-			result := rm.tryAddLeavesOneByOne(ctx, rm.currentRound.Snapshot, leaves, validCommitments)
+			result := tryAddLeavesOneByOne(ctx, rm.logger, rm.commitmentQueue, rm.currentRound.Snapshot, leaves, validCommitments)
 			rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, result.successLeaves...)
 			rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, result.successCommitments...)
-
-			// Mark rejected commitments as processed so they don't get re-processed
-			if len(result.rejected) > 0 && rm.commitmentQueue != nil {
-				if markErr := rm.commitmentQueue.MarkProcessed(ctx, result.rejected); markErr != nil {
-					rm.logger.WithContext(ctx).Error("Failed to mark rejected commitments as processed",
-						"count", len(result.rejected),
-						"error", markErr.Error())
-				}
-			}
 		} else {
 			rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, leaves...)
 			rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, validCommitments...)
@@ -79,43 +70,6 @@ type leafAddResult struct {
 	successLeaves      []*smt.Leaf
 	successCommitments []*models.CertificationRequest
 	rejected           []interfaces.CertificationRequestAck
-}
-
-// tryAddLeavesOneByOne adds leaves one-by-one to a snapshot and returns results.
-func (rm *RoundManager) tryAddLeavesOneByOne(
-	ctx context.Context,
-	snapshot *smt.ThreadSafeSmtSnapshot,
-	leaves []*smt.Leaf,
-	commitments []*models.CertificationRequest,
-) leafAddResult {
-	result := leafAddResult{
-		successLeaves:      make([]*smt.Leaf, 0, len(leaves)),
-		successCommitments: make([]*models.CertificationRequest, 0, len(commitments)),
-		rejected:           nil,
-	}
-
-	for i, leaf := range leaves {
-		if err := snapshot.AddLeaf(leaf.Path, leaf.Value); err != nil {
-			// ErrDuplicateLeaf means already in SMT with same value - track for persistence
-			if errors.Is(err, smt.ErrDuplicateLeaf) {
-				result.successLeaves = append(result.successLeaves, leaf)
-				result.successCommitments = append(result.successCommitments, commitments[i])
-				continue
-			}
-			rm.logger.WithContext(ctx).Warn("Rejected conflicting leaf",
-				"path", leaf.Path.String(),
-				"error", err.Error())
-			result.rejected = append(result.rejected, interfaces.CertificationRequestAck{
-				StateID:  commitments[i].StateID,
-				StreamID: commitments[i].StreamID,
-			})
-			continue
-		}
-		result.successLeaves = append(result.successLeaves, leaf)
-		result.successCommitments = append(result.successCommitments, commitments[i])
-	}
-
-	return result
 }
 
 // ProposeBlock creates and proposes a new block with the given data
@@ -213,16 +167,9 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			"rootHash", rootHashRaw.String(),
 			"submissionDuration", submissionDuration)
 
-		var proof *api.RootShardInclusionProof
 		proofWaitStart := time.Now()
-
-		// Initialize pre-collection: create chained snapshot for next round
-		rm.initPreCollection(ctx)
-
-		// Poll for proof while pre-collecting commitments for next round
-		proof, err = rm.pollWithPreCollection(ctx, rootHashRaw.String())
+		proof, err := rm.pollForParentProof(ctx, rootHashRaw.String())
 		if err != nil {
-			rm.clearPreCollection()
 			return fmt.Errorf("failed to poll for parent shard inclusion proof: %w", err)
 		}
 		proofWait := time.Since(proofWaitStart)
@@ -249,26 +196,33 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			proof.MerkleTreePath,
 		)
 		if err := rm.FinalizeBlockWithRetry(ctx, block); err != nil {
-			rm.clearPreCollection()
 			return fmt.Errorf("failed to finalize block after retries: %w", err)
 		}
 
 		nextRoundNumber := big.NewInt(0).Add(blockNumber.Int, big.NewInt(1))
 
-		rm.preCollectionMutex.Lock()
-		preSnapshot := rm.preCollectionSnapshot
-		preCommitments := rm.preCollectedCommitments
-		preLeaves := rm.preCollectedLeaves
-		rm.preCollectionSnapshot = nil
-		rm.preCollectedCommitments = nil
-		rm.preCollectedLeaves = nil
-		rm.preCollectionMutex.Unlock()
+		// Snapshot precollector ref under lock to avoid data race with Deactivate.
+		rm.roundMutex.RLock()
+		cp := rm.precollector
+		rm.roundMutex.RUnlock()
 
-		if preSnapshot != nil && len(preCommitments) > 0 {
-			preSnapshot.SetCommitTarget(rm.smt)
-			_ = rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(nextRoundNumber), preSnapshot, preCommitments, preLeaves)
+		if cp != nil {
+			preResult, advErr := cp.AdvanceRound()
+			if advErr == nil {
+				preResult.snapshot.SetCommitTarget(rm.smt)
+				// StartNewRoundWithSnapshot atomically checks precollectorDisabled
+				// under roundMutex — no race with concurrent Deactivate.
+				if err := rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(nextRoundNumber), preResult.snapshot, preResult.commitments, preResult.leaves); err != nil && !errors.Is(err, ErrDeactivated) {
+					rm.logger.WithContext(ctx).Error("Failed to start new round with snapshot.", "error", err.Error())
+				}
+			} else {
+				rm.logger.WithContext(ctx).Warn("Failed to advance precollector", "error", advErr.Error())
+				if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); err != nil && !errors.Is(err, ErrDeactivated) {
+					rm.logger.WithContext(ctx).Error("Failed to start new round after finalization.", "error", err.Error())
+				}
+			}
 		} else {
-			if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); err != nil {
+			if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); err != nil && !errors.Is(err, ErrDeactivated) {
 				rm.logger.WithContext(ctx).Error("Failed to start new round after finalization.", "error", err.Error())
 			}
 		}
@@ -280,50 +234,21 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 	}
 }
 
-// pollWithPreCollection polls for parent proof while pre-collecting commitments for next round.
-func (rm *RoundManager) pollWithPreCollection(ctx context.Context, rootHash string) (*api.RootShardInclusionProof, error) {
+func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string) (*api.RootShardInclusionProof, error) {
 	pollingCtx, cancel := context.WithTimeout(ctx, rm.config.Sharding.Child.ParentPollTimeout)
 	defer cancel()
 
 	ticker := time.NewTicker(rm.config.Sharding.Child.ParentPollInterval)
 	defer ticker.Stop()
 
-	preCollectCount := 0
-	maxPreCollect := rm.config.Processing.MaxCommitmentsPerRound
-	if maxPreCollect <= 0 {
-		maxPreCollect = 10000
-	}
-
-	// Buffer for batching pre-collection
-	pendingCommitments := make([]*models.CertificationRequest, 0, miniBatchSize)
-	flushBatch := func() {
-		if len(pendingCommitments) == 0 {
-			return
-		}
-		if err := rm.addBatchToPreCollection(ctx, pendingCommitments); err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to add batch to pre-collection", "error", err.Error())
-			return // Don't clear - will retry on next flush
-		}
-		preCollectCount += len(pendingCommitments)
-		pendingCommitments = pendingCommitments[:0]
-	}
-
-	pollStart := time.Now()
-
 	for {
 		select {
 		case <-pollingCtx.Done():
-			flushBatch()
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			rm.logger.WithContext(ctx).Warn("Poll with pre-collection timed out",
-				"rootHash", rootHash,
-				"pollDuration", time.Since(pollStart))
 			return nil, fmt.Errorf("timed out waiting for parent shard inclusion proof %s", rootHash)
-
 		case <-ticker.C:
-			flushBatch()
 			request := &api.GetShardProofRequest{ShardID: rm.config.Sharding.Child.ShardID}
 			proof, err := rm.rootClient.GetShardProof(pollingCtx, request)
 			if err != nil {
@@ -336,109 +261,8 @@ func (rm *RoundManager) pollWithPreCollection(ctx context.Context, rootHash stri
 				continue
 			}
 			return proof, nil
-
-		case commitment := <-rm.commitmentStream:
-			if preCollectCount+len(pendingCommitments) < maxPreCollect {
-				pendingCommitments = append(pendingCommitments, commitment)
-				if len(pendingCommitments) >= miniBatchSize {
-					flushBatch()
-				}
-			}
 		}
 	}
-}
-
-// addToPreCollection adds a single commitment (convenience wrapper for tests)
-func (rm *RoundManager) addToPreCollection(ctx context.Context, commitment *models.CertificationRequest) error {
-	return rm.addBatchToPreCollection(ctx, []*models.CertificationRequest{commitment})
-}
-
-func (rm *RoundManager) addBatchToPreCollection(ctx context.Context, commitments []*models.CertificationRequest) error {
-	if len(commitments) == 0 {
-		return nil
-	}
-
-	leaves := make([]*smt.Leaf, 0, len(commitments))
-	validCommitments := make([]*models.CertificationRequest, 0, len(commitments))
-
-	for _, commitment := range commitments {
-		path, err := commitment.StateID.GetPath()
-		if err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
-				"requestID", commitment.StateID.String(), "error", err.Error())
-			continue
-		}
-
-		leafValue, err := commitment.LeafValue()
-		if err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to create leaf value",
-				"requestID", commitment.StateID.String(), "error", err.Error())
-			continue
-		}
-
-		leaves = append(leaves, smt.NewLeaf(path, leafValue))
-		validCommitments = append(validCommitments, commitment)
-	}
-
-	if len(leaves) == 0 {
-		return nil
-	}
-
-	rm.preCollectionMutex.Lock()
-	defer rm.preCollectionMutex.Unlock()
-
-	if rm.preCollectionSnapshot == nil {
-		return fmt.Errorf("pre-collection snapshot not initialized")
-	}
-
-	if _, err := rm.preCollectionSnapshot.AddLeaves(leaves); err != nil {
-		// Fall back to adding leaves one by one, skipping bad ones
-		result := rm.tryAddLeavesOneByOne(ctx, rm.preCollectionSnapshot, leaves, validCommitments)
-		rm.preCollectedLeaves = append(rm.preCollectedLeaves, result.successLeaves...)
-		rm.preCollectedCommitments = append(rm.preCollectedCommitments, result.successCommitments...)
-
-		// Mark rejected commitments as processed in queue
-		if len(result.rejected) > 0 && rm.commitmentQueue != nil {
-			if err := rm.commitmentQueue.MarkProcessed(ctx, result.rejected); err != nil {
-				rm.logger.WithContext(ctx).Error("Failed to mark rejected commitments as processed",
-					"count", len(result.rejected),
-					"error", err.Error())
-			}
-		}
-		return nil
-	}
-
-	rm.preCollectedCommitments = append(rm.preCollectedCommitments, validCommitments...)
-	rm.preCollectedLeaves = append(rm.preCollectedLeaves, leaves...)
-
-	return nil
-}
-
-func (rm *RoundManager) initPreCollection(ctx context.Context) {
-	rm.preCollectionMutex.Lock()
-	defer rm.preCollectionMutex.Unlock()
-
-	rm.roundMutex.RLock()
-	currentSnapshot := rm.currentRound.Snapshot
-	rm.roundMutex.RUnlock()
-
-	if currentSnapshot == nil {
-		rm.logger.WithContext(ctx).Warn("Cannot initialize pre-collection: current round has no snapshot")
-		return
-	}
-
-	rm.preCollectionSnapshot = currentSnapshot.CreateSnapshot()
-	rm.preCollectedCommitments = make([]*models.CertificationRequest, 0)
-	rm.preCollectedLeaves = make([]*smt.Leaf, 0)
-}
-
-func (rm *RoundManager) clearPreCollection() {
-	rm.preCollectionMutex.Lock()
-	defer rm.preCollectionMutex.Unlock()
-
-	rm.preCollectionSnapshot = nil
-	rm.preCollectedCommitments = nil
-	rm.preCollectedLeaves = nil
 }
 
 func (rm *RoundManager) submitShardRootWithRetry(ctx context.Context, req *api.SubmitShardRootRequest) error {
@@ -637,15 +461,15 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		totalRoundTime = processingTime + actualFinalizationTime
 	}
 
-	// Ensure minimum round duration for child shards
+	// Ensure minimum round duration for child shards (precollector handles collection)
 	if rm.config.Sharding.Mode.IsChild() {
 		rm.roundMutex.RLock()
 		roundStartTime := rm.currentRound.StartTime
 		rm.roundMutex.RUnlock()
 
 		elapsed := time.Since(roundStartTime)
-		if elapsed < rm.roundDuration {
-			time.Sleep(rm.roundDuration - elapsed)
+		if remaining := rm.roundDuration - elapsed; remaining > 0 {
+			time.Sleep(remaining)
 			totalRoundTime = time.Since(roundStartTime)
 		}
 	}
