@@ -266,7 +266,6 @@ func createCommitmentForShard(t *testing.T, shardID api.ShardID) (*api.Certifica
 		c := testutil.CreateTestCertificationRequest(t, fmt.Sprintf("shard%d_%d_%d", shardID, i, time.Now().UnixNano()))
 		if new(big.Int).And(new(big.Int).SetBytes(c.StateID.Bytes()), mask).Cmp(expected) == 0 {
 			certificationRequest := c.ToAPI()
-			certificationRequest.Receipt = true
 			return certificationRequest, c.StateID.String()
 		}
 	}

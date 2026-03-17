@@ -249,45 +249,43 @@ Which corresponds to Go data structures:
 // CertificationRequest represents the certification_request JSON-RPC request,
 // sometimes also referred to as StateTransitionCertificationRequest, Commitment or UnicityServiceRequest.
 type CertificationRequest struct {
-    _ struct{} `cbor:",toarray"`
-    
-    // StateID is the unique identifier of the certification request, used as a key in the state tree.
-    // Calculated as hash of CBOR array [CertificationData.OwnerPredicate, CertificationData.SourceStateHashImprint],
-    // prefixed by two bytes that define the hashing algorithm (two zero bytes in case of SHA2_256).
-    StateID StateID
-    
-    // CertificationData contains the necessary cryptographic data needed for the CertificationRequest.
-    CertificationData CertificationData
-    
-    // Receipt optional flag that if set to true includes the receipt data in the CertificationResponse.
-    Receipt bool
-    
-    AggregateRequestCount uint64
+	_ struct{} `cbor:",toarray"`
+
+	// StateID is the unique identifier of the certification request, used as a key in the state tree.
+	// Calculated as hash of CBOR array [CertificationData.OwnerPredicate, CertificationData.SourceStateHashImprint],
+	// prefixed by two bytes that define the hashing algorithm (two zero bytes in case of SHA2_256).
+	StateID StateID
+
+	// CertificationData contains the necessary cryptographic data needed for the CertificationRequest.
+	CertificationData CertificationData
+
+	AggregateRequestCount uint64
 }
 
 // CertificationData represents the necessary cryptographic data needed for a state transition CertificationRequest.
 type CertificationData struct {
-    _ struct{} `cbor:",toarray"`
-    
-    // OwnerPredicate is the owner predicate in format: CBOR[engine: uint, code: byte[], params: byte[]]
-    // In case of standard PayToPublicKey predicate the values must be:
-    // engine = 01 (plain CBOR uint value of 1)
-    // code = 4101 (byte array of length 1 containing the CBOR encoding of uint value 1)
-    // params = 5821 000102..20 (byte array of length 33 containing the raw bytes of the public key value)
-    OwnerPredicate Predicate
-    
-    // SourceStateHash is the source data (token) hash,
-    // prefixed by two bytes that define the hashing algorithm (two zero bytes in case of SHA2_256).
-    SourceStateHash SourceStateHash
-    
-    // TransactionHash is the entire transaction data hash (including the source data),
-    // prefixed by two bytes that define the hashing algorithm (two zero bytes in case of SHA2_256).
-    TransactionHash TransactionHash
-    
-    // Witness is the "unlocking part" of owner predicate. In case of PayToPublicKey owner predicate the witness must be
-    // a signature created on the hash of CBOR array[SourceStateHashImprint, TransactionHash],
-    // in Unicity's [R || S || V] format (65 bytes).
-    Witness HexBytes
+	_ struct{} `cbor:",toarray"`
+
+	// OwnerPredicate is the owner predicate in format: CBOR[engine: uint, code: byte[], params: byte[]].
+	//
+	// In case of standard PayToPublicKey predicate the values must be:
+	//  - engine = 01 (plain CBOR uint value of 1)
+	//  - code = 4101 (byte array of length 1 containing the CBOR encoding of uint value 1)
+	//  - params = 5821 000102..20 (byte array of length 33 containing the raw bytes of the public key value)
+	OwnerPredicate Predicate `json:"ownerPredicate"`
+
+	// SourceStateHash is the source data (token) hash,
+	// prefixed by two bytes that define the hashing algorithm (two zero bytes in case of SHA2_256).
+	SourceStateHash SourceStateHash `json:"sourceStateHash"`
+
+	// TransactionHash is the entire transaction data hash (including the source data),
+	// prefixed by two bytes that define the hashing algorithm (two zero bytes in case of SHA2_256).
+	TransactionHash TransactionHash `json:"transactionHash"`
+
+	// Witness is the "unlocking part" of owner predicate. In case of PayToPublicKey owner predicate the witness must be
+	// a signature created on the hash of CBOR array[SourceStateHashImprint, TransactionHash],
+	// in Unicity's [R || S || V] format (65 bytes).
+	Witness HexBytes `json:"witness"`
 }
 ```
 
@@ -296,11 +294,7 @@ type CertificationData struct {
 {
   "jsonrpc": "2.0",
   "result": {
-    "status": "SUCCESS",
-    "receipt": {
-      "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
-      "signature": "..."
-    }
+    "status": "SUCCESS"
   },
   "id": 1
 }

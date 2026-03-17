@@ -24,7 +24,6 @@ import "github.com/unicitynetwork/aggregator-go/pkg/api"
 - `api.Block` - Blockchain block information
 - `api.InclusionProof` - Merkle inclusion proof
 - `api.NoDeletionProof` - No-deletion proof
-- `api.Receipt` - Signed receipt for certification request submission
 - `api.HealthStatus` - Service health status
 
 ### JSON-RPC Request/Response Types
