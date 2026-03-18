@@ -55,8 +55,17 @@ func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.
 	}
 
 	if len(block.UnicityCertificate) == 0 {
-		// need to return valid format for CBOR
-		uc := types.UnicityCertificate{}
+		// Emit a monotonic synthetic UC so child-mode freshness checks also work
+		// when the parent runs against the local BFT stub.
+		roundNumber := block.Index.Uint64()
+		uc := types.UnicityCertificate{
+			InputRecord: &types.InputRecord{
+				RoundNumber: roundNumber,
+			},
+			UnicitySeal: &types.UnicitySeal{
+				RootChainRoundNumber: roundNumber,
+			},
+		}
 		ucBytes, err := types.Cbor.Marshal(uc)
 		if err != nil {
 			return err
