@@ -273,6 +273,30 @@ func newTestPrecollector(t *testing.T, stream chan *models.CertificationRequest,
 	return cp, smtInstance
 }
 
+func TestDrainBufferedCommitments_StopsAtRoundBoundary(t *testing.T) {
+	stream := make(chan *models.CertificationRequest, 8)
+	pending := make([]*models.CertificationRequest, 0, miniBatchSize)
+	collected := make([]*models.CertificationRequest, 0, 5)
+	count := 0
+	maxPerRound := 5
+
+	flush := func() {
+		collected = append(collected, pending...)
+		count += len(pending)
+		pending = pending[:0]
+	}
+
+	for i := 0; i < maxPerRound+2; i++ {
+		stream <- testutil.CreateTestCertificationRequest(t, "drain_boundary")
+	}
+
+	drainBufferedCommitments(stream, maxPerRound, &count, &pending, flush)
+	flush()
+
+	require.Len(t, collected, maxPerRound)
+	require.Len(t, stream, 2)
+}
+
 // --- Tests for childPrecollector ---
 
 func TestChildPrecollector_CollectsContinuouslyAcrossRound(t *testing.T) {

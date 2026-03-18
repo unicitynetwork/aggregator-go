@@ -126,6 +126,7 @@ func (cp *childPrecollector) run(ctx context.Context, baseSnapshot *smt.ThreadSa
 			}
 
 		case req := <-cp.advanceCh:
+			drainBufferedCommitments(cp.commitmentStream, cp.maxPerRound, &count, &pending, flush)
 			flush()
 			result := &preCollectionResult{
 				snapshot:    snapshot,
@@ -145,6 +146,31 @@ func (cp *childPrecollector) run(ctx context.Context, baseSnapshot *smt.ThreadSa
 
 		case <-ctx.Done():
 			flush()
+			return
+		}
+	}
+}
+
+// drainBufferedCommitments folds already-buffered commitments into the current
+// round before an advance boundary is cut.
+func drainBufferedCommitments(
+	stream <-chan *models.CertificationRequest,
+	maxPerRound int,
+	count *int,
+	pending *[]*models.CertificationRequest,
+	flush func(),
+) {
+	for *count+len(*pending) < maxPerRound {
+		select {
+		case commitment, ok := <-stream:
+			if !ok {
+				return
+			}
+			*pending = append(*pending, commitment)
+			if len(*pending) >= miniBatchSize {
+				flush()
+			}
+		default:
 			return
 		}
 	}
