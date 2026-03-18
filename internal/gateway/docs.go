@@ -175,7 +175,7 @@ func GenerateDocsHTML() string {
                 <div class="params-container">
                     <div class="params-section">
                         <h3>Request Parameters</h3>
-                        <textarea id="certification_request_params">"8458203e331d1f9c0265105db6173d932a419049fdbdfdd32f9e488fe48e8598a23eed8483014101582102d1a5a7bebd4118d9a46feb00686f2236bc745c8378eb54078c43003799e042395820b54d5ddf1772aca589c8fbfad03eca8d6ffaca0e1f1c1cd89ecd0afe3a73b6f05820f5c5161937726e0f24b074115e4752899a2f4d3f154764209ae11d05ec63c72e5841a000a2c83ddf683f8ca388cbd0b1bfd52bcd919641a0774d09459ca97aeeaf4e3682d863ac77afb71dc8efe0b8c1b983ee9b5231adad9adc5c27a0b97be6147c00f500"</textarea>
+                        <textarea id="certification_request_params">"83582032bbbc306e3a101e8fa1e4349631864957c7d84167238c85cba972943ce05ccd8483014101582102cbbbe7dc6d51dea5c5fb4d7e7da3416e5914b989c303399f31b51db090981cfa58208126936ae7bcd660a93368a8c83951e01ccbcd4af093769b1cc14f942e2a9ca85820ad8f039daf3827446a0af7ccf31b438aea079440406a07cca7374b52b4e84c2c584177ff8a78a8e59f71d03e687fa14851327babb6a4f5cafcdfc56b16b2267284247734523df030465e249734aab146ae18d65bb3c7aee570c4f53e56e779e0c4200100"</textarea>
                         <div class="button-group">
                             <button onclick="sendRequest('certification_request')">🚀 Send Request</button>
                             <button onclick="clearResponse('certification_request')">🗑️ Clear</button>

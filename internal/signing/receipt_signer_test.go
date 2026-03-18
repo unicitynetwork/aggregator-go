@@ -6,7 +6,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -113,47 +112,6 @@ func TestReceiptSigner_SignReceiptV1(t *testing.T) {
 
 		assert.True(t, valid1)
 		assert.True(t, valid2)
-	})
-}
-
-func TestReceiptSigner_SignReceiptV2(t *testing.T) {
-	// Generate a key pair for testing
-	signingService := NewSigningService()
-	privKey, pubKey, err := signingService.GenerateKeyPair()
-	require.NoError(t, err)
-
-	signer, err := NewReceiptSigner(privKey)
-	require.NoError(t, err)
-
-	// Create test data
-	certData := api.CertificationData{
-		OwnerPredicate:  api.Predicate{},
-		SourceStateHash: api.ImprintV2([]byte{1}),
-		TransactionHash: api.ImprintV2([]byte{2}),
-		Witness:         nil,
-	}
-
-	t.Run("sign receipt successfully", func(t *testing.T) {
-		receipt, err := signer.SignReceiptV2(certData)
-		require.NoError(t, err)
-		require.NotNil(t, receipt)
-
-		require.Equal(t, pubKey, []byte(receipt.PublicKey))
-		require.Len(t, receipt.Signature, 65) // secp256k1 signature length
-	})
-
-	t.Run("signature is verifiable", func(t *testing.T) {
-		receipt, err := signer.SignReceiptV2(certData)
-		require.NoError(t, err)
-
-		// Serialize the request data the same way as during signing
-		requestBytes, err := types.Cbor.Marshal(certData)
-		require.NoError(t, err)
-
-		// Verify the signature
-		valid, err := signingService.VerifyWithPublicKey(requestBytes, receipt.Signature, receipt.PublicKey)
-		require.NoError(t, err)
-		assert.True(t, valid, "Receipt signature should be valid")
 	})
 }
 

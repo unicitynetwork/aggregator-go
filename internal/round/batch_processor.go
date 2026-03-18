@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
@@ -53,7 +54,9 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 
 	// Add leaves to the current round's SMT snapshot
 	if rm.currentRound != nil && rm.currentRound.Snapshot != nil {
+		smtStart := time.Now()
 		_, err := rm.currentRound.Snapshot.AddLeaves(leaves)
+		metrics.SMTAddLeavesDuration.Observe(time.Since(smtStart).Seconds())
 		if err != nil {
 			result := tryAddLeavesOneByOne(ctx, rm.logger, rm.commitmentQueue, rm.currentRound.Snapshot, leaves, validCommitments)
 			rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, result.successLeaves...)
@@ -130,6 +133,11 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			nil,
 			nil,
 		)
+		rm.roundMutex.RLock()
+		if rm.currentRound != nil && !rm.currentRound.StartTime.IsZero() {
+			metrics.RoundPreparationDuration.Observe(time.Since(rm.currentRound.StartTime).Seconds())
+		}
+		rm.roundMutex.RUnlock()
 		rm.logger.WithContext(ctx).Info("Sending certification request to BFT client",
 			"blockNumber", blockNumber.String(),
 			"bftClientType", fmt.Sprintf("%T", rm.bftClient))
@@ -165,6 +173,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			return fmt.Errorf("failed to submit root hash to parent shard: %w", err)
 		}
 		submissionDuration := time.Since(submitStart)
+		metrics.ParentRootSubmissionDuration.Observe(submissionDuration.Seconds())
 		rm.logger.WithContext(ctx).Info("Root hash submitted to parent, polling for inclusion proof...",
 			"rootHash", rootHashRaw.String(),
 			"submissionDuration", submissionDuration)
@@ -243,6 +252,7 @@ func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string)
 
 	ticker := time.NewTicker(rm.config.Sharding.Child.ParentPollInterval)
 	defer ticker.Stop()
+	pollStart := time.Now()
 
 	for {
 		select {
@@ -250,11 +260,16 @@ func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string)
 			if ctx.Err() != nil {
 				return nil, nil, ctx.Err()
 			}
+			metrics.ParentProofErrorsTotal.Inc()
+			rm.logger.WithContext(ctx).Warn("Timed out waiting for parent shard inclusion proof",
+				"rootHash", rootHash,
+				"pollDuration", time.Since(pollStart))
 			return nil, nil, fmt.Errorf("timed out waiting for parent shard inclusion proof %s", rootHash)
 		case <-ticker.C:
 			request := &api.GetShardProofRequest{ShardID: rm.config.Sharding.Child.ShardID}
 			proof, err := rm.rootClient.GetShardProof(pollingCtx, request)
 			if err != nil {
+				metrics.ParentProofErrorsTotal.Inc()
 				rm.logger.WithContext(ctx).Warn("Failed to fetch parent shard inclusion proof, retrying",
 					"rootHash", rootHash,
 					"error", err.Error())
@@ -281,6 +296,7 @@ func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string)
 				continue
 			}
 
+			metrics.ParentProofWaitDuration.Observe(time.Since(pollStart).Seconds())
 			return proof, parentUC, nil
 		}
 	}
@@ -404,6 +420,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		if commitment.CreatedAt != nil {
 			proofReadyTime := now.Sub(commitment.CreatedAt.Time)
 			if proofReadyTime > 0 {
+				metrics.ProofReadinessDuration.Observe(proofReadyTime.Seconds())
 				proofTimes = append(proofTimes, proofReadyTime)
 			}
 		}
@@ -440,6 +457,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	}
 	rm.finalizationMu.Unlock()
 	block.Finalized = true
+	metrics.RoundFinalizationDuration.Observe(time.Since(finalizationStartTime).Seconds())
 
 	if len(ackEntries) > 0 {
 		markProcessedStart = time.Now()
@@ -513,6 +531,8 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 			"proofReadyP95", shortDur(p95),
 			"proofReadyP99", shortDur(p99),
 		)
+		metrics.ProofReadinessMedian.Set(median.Seconds())
+		metrics.ProofReadinessP95.Set(p95.Seconds())
 	}
 
 	redisTotal, _ := rm.commitmentQueue.Count(ctx)
@@ -535,6 +555,21 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		"rootHash", block.RootHash.String())
 
 	rm.stateTracker.SetLastSyncedBlock(block.Index.Int)
+
+	rm.roundMutex.RLock()
+	var roundStartTime time.Time
+	finalizedCommitments := len(pendingCommitments)
+	if rm.currentRound != nil {
+		roundStartTime = rm.currentRound.StartTime
+	}
+	rm.roundMutex.RUnlock()
+
+	metrics.SetBlockHeight(block.Index.Int)
+	metrics.CommitmentsProcessedTotal.Add(float64(finalizedCommitments))
+	metrics.RoundCommitments.Observe(float64(finalizedCommitments))
+	if !roundStartTime.IsZero() {
+		metrics.BlockCreationDuration.Observe(time.Since(roundStartTime).Seconds())
+	}
 
 	return nil
 }
