@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/unicitynetwork/bft-go-base/types"
+
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
@@ -168,7 +170,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			"submissionDuration", submissionDuration)
 
 		proofWaitStart := time.Now()
-		proof, err := rm.pollForParentProof(ctx, rootHashRaw.String())
+		proof, parentUC, err := rm.pollForParentProof(ctx, rootHashRaw.String())
 		if err != nil {
 			return fmt.Errorf("failed to poll for parent shard inclusion proof: %w", err)
 		}
@@ -198,6 +200,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		if err := rm.FinalizeBlockWithRetry(ctx, block); err != nil {
 			return fmt.Errorf("failed to finalize block after retries: %w", err)
 		}
+		rm.acceptParentUC(parentUC)
 
 		nextRoundNumber := big.NewInt(0).Add(blockNumber.Int, big.NewInt(1))
 
@@ -234,7 +237,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 	}
 }
 
-func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string) (*api.RootShardInclusionProof, error) {
+func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string) (*api.RootShardInclusionProof, *types.UnicityCertificate, error) {
 	pollingCtx, cancel := context.WithTimeout(ctx, rm.config.Sharding.Child.ParentPollTimeout)
 	defer cancel()
 
@@ -245,9 +248,9 @@ func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string)
 		select {
 		case <-pollingCtx.Done():
 			if ctx.Err() != nil {
-				return nil, ctx.Err()
+				return nil, nil, ctx.Err()
 			}
-			return nil, fmt.Errorf("timed out waiting for parent shard inclusion proof %s", rootHash)
+			return nil, nil, fmt.Errorf("timed out waiting for parent shard inclusion proof %s", rootHash)
 		case <-ticker.C:
 			request := &api.GetShardProofRequest{ShardID: rm.config.Sharding.Child.ShardID}
 			proof, err := rm.rootClient.GetShardProof(pollingCtx, request)
@@ -260,7 +263,25 @@ func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string)
 			if proof == nil || !proof.IsValid(rootHash) {
 				continue
 			}
-			return proof, nil
+
+			parentUC, err := decodeUnicityCertificate(proof.UnicityCertificate)
+			if err != nil {
+				rm.logger.WithContext(ctx).Warn("Failed to decode parent shard proof UC, retrying",
+					"rootHash", rootHash,
+					"error", err.Error())
+				continue
+			}
+
+			lastParentRound := rm.lastAcceptedParentUC()
+			if parentUC.GetRoundNumber() <= lastParentRound {
+				rm.logger.WithContext(ctx).Debug("Ignoring stale parent shard proof",
+					"rootHash", rootHash,
+					"proofParentRound", parentUC.GetRoundNumber(),
+					"lastAcceptedParentRound", lastParentRound)
+				continue
+			}
+
+			return proof, parentUC, nil
 		}
 	}
 }
@@ -459,19 +480,6 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 
 	if totalRoundTime == 0 {
 		totalRoundTime = processingTime + actualFinalizationTime
-	}
-
-	// Ensure minimum round duration for child shards (precollector handles collection)
-	if rm.config.Sharding.Mode.IsChild() {
-		rm.roundMutex.RLock()
-		roundStartTime := rm.currentRound.StartTime
-		rm.roundMutex.RUnlock()
-
-		elapsed := time.Since(roundStartTime)
-		if remaining := rm.roundDuration - elapsed; remaining > 0 {
-			time.Sleep(remaining)
-			totalRoundTime = time.Since(roundStartTime)
-		}
 	}
 
 	shortDur := func(d time.Duration) string {

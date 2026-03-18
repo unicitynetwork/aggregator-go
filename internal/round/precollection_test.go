@@ -2,6 +2,7 @@ package round
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"sync"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/events"
@@ -42,6 +44,19 @@ type countingProofRootAggregatorClient struct {
 	proofCount    int
 }
 
+type staleThenFreshRootAggregatorClient struct {
+	mu               sync.Mutex
+	submittedRoot    api.HexBytes
+	staleParentRound uint64
+	staleRootRound   uint64
+	freshParentRound uint64
+	freshRootRound   uint64
+	proofPollStarted chan struct{}
+	releaseFresh     chan struct{}
+	startOnce        sync.Once
+	proofPolls       int
+}
+
 func newSignalingRootAggregatorClient() *signalingRootAggregatorClient {
 	return &signalingRootAggregatorClient{
 		inner:              testsharding.NewRootAggregatorClientStub(),
@@ -61,6 +76,17 @@ func newCountingProofRootAggregatorClient() *countingProofRootAggregatorClient {
 	return &countingProofRootAggregatorClient{
 		inner:         testsharding.NewRootAggregatorClientStub(),
 		proofReturned: make(chan int, 16),
+	}
+}
+
+func newStaleThenFreshRootAggregatorClient(staleParentRound, staleRootRound, freshParentRound, freshRootRound uint64) *staleThenFreshRootAggregatorClient {
+	return &staleThenFreshRootAggregatorClient{
+		staleParentRound: staleParentRound,
+		staleRootRound:   staleRootRound,
+		freshParentRound: freshParentRound,
+		freshRootRound:   freshRootRound,
+		proofPollStarted: make(chan struct{}),
+		releaseFresh:     make(chan struct{}),
 	}
 }
 
@@ -126,6 +152,79 @@ func (c *countingProofRootAggregatorClient) GetShardProof(ctx context.Context, r
 
 func (c *countingProofRootAggregatorClient) CheckHealth(ctx context.Context) error {
 	return c.inner.CheckHealth(ctx)
+}
+
+func (c *staleThenFreshRootAggregatorClient) SubmitShardRoot(ctx context.Context, request *api.SubmitShardRootRequest) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.submittedRoot = request.RootHash
+	return nil
+}
+
+func (c *staleThenFreshRootAggregatorClient) GetShardProof(ctx context.Context, request *api.GetShardProofRequest) (*api.RootShardInclusionProof, error) {
+	c.startOnce.Do(func() {
+		close(c.proofPollStarted)
+	})
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.submittedRoot) == 0 {
+		return nil, nil
+	}
+
+	c.proofPolls++
+	root := c.submittedRoot.String()
+	parentRound := c.staleParentRound
+	rootRound := c.staleRootRound
+
+	select {
+	case <-c.releaseFresh:
+		parentRound = c.freshParentRound
+		rootRound = c.freshRootRound
+	default:
+	}
+
+	uc, err := testProofUC(parentRound, rootRound)
+	if err != nil {
+		return nil, err
+	}
+
+	return &api.RootShardInclusionProof{
+		UnicityCertificate: uc,
+		MerkleTreePath: &api.MerkleTreePath{
+			Steps: []api.MerkleTreeStep{{Data: &root}},
+		},
+	}, nil
+}
+
+func (c *staleThenFreshRootAggregatorClient) CheckHealth(ctx context.Context) error {
+	return nil
+}
+
+func (c *staleThenFreshRootAggregatorClient) ProofPolls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.proofPolls
+}
+
+func testProofUC(parentRound, rootRound uint64) (api.HexBytes, error) {
+	uc := types.UnicityCertificate{
+		InputRecord: &types.InputRecord{
+			RoundNumber: parentRound,
+		},
+		UnicitySeal: &types.UnicitySeal{
+			RootChainRoundNumber: rootRound,
+		},
+	}
+
+	ucBytes, err := types.Cbor.Marshal(uc)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal test proof UC: %w", err)
+	}
+
+	return api.NewHexBytes(ucBytes), nil
 }
 
 func waitForStateBlockNumber(
@@ -693,8 +792,8 @@ func TestPipelinedChildModeFlow(t *testing.T) {
 	})
 }
 
-// Regression test for the child-mode tail gap.
-// A commitment arriving after proof but before round end must still land in N+1.
+// In proof-driven child mode, once block N is finalized the next round starts immediately.
+// A commitment arriving after that point must land in the following block.
 func TestChildPreCollection_CommitmentAfterProofBeforeRoundEnd_ShouldBeInNextRound(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -712,14 +811,14 @@ func TestChildPreCollection_CommitmentAfterProofBeforeRoundEnd_ShouldBeInNextRou
 			Child: config.ChildConfig{
 				ShardID:            0b11,
 				ParentPollTimeout:  5 * time.Second,
-				ParentPollInterval: 10 * time.Millisecond,
+				ParentPollInterval: 200 * time.Millisecond,
 			},
 		},
 	}
 	storage := testutil.SetupTestStorage(t, cfg)
 
 	testLogger := newTestLogger(t)
-	rootAggregatorClient := newSignalingRootAggregatorClient()
+	rootAggregatorClient := testsharding.NewRootAggregatorClientStub()
 	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
 
 	rm, err := NewRoundManager(
@@ -746,11 +845,10 @@ func TestChildPreCollection_CommitmentAfterProofBeforeRoundEnd_ShouldBeInNextRou
 	require.NoError(t, rm.Start(ctx))
 	require.NoError(t, rm.Activate(ctx))
 
-	select {
-	case <-rootAggregatorClient.firstProofReturned:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for first parent proof")
-	}
+	require.Eventually(t, func() bool {
+		block, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(1)))
+		return err == nil && block != nil
+	}, 3*time.Second, 25*time.Millisecond, "block 1 should be finalized before injecting the late commitment")
 
 	lateCommitment := testutil.CreateTestCertificationRequest(t, "after_proof_before_round_end")
 	rm.commitmentStream <- lateCommitment
@@ -759,8 +857,100 @@ func TestChildPreCollection_CommitmentAfterProofBeforeRoundEnd_ShouldBeInNextRou
 
 	require.EqualValues(
 		t,
-		2,
+		3,
 		blockNumber.Int64(),
-		"commitment arriving after proof but before round end should land in block N+1",
+		"commitment arriving after block 1 finalization should land in block 3 because round 2 has already started",
 	)
+}
+
+func TestChildMode_RequiresFreshParentProof(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{
+			Database: "test_child_requires_fresh_parent_proof",
+		},
+		Processing: config.ProcessingConfig{
+			RoundDuration:          100 * time.Millisecond,
+			MaxCommitmentsPerRound: 1000,
+		},
+		Sharding: config.ShardingConfig{
+			Mode: config.ShardingModeChild,
+			Child: config.ChildConfig{
+				ShardID:            0b11,
+				ParentPollTimeout:  5 * time.Second,
+				ParentPollInterval: 10 * time.Millisecond,
+			},
+		},
+	}
+	storage := testutil.SetupTestStorage(t, cfg)
+
+	testLogger := newTestLogger(t)
+	rootAggregatorClient := newStaleThenFreshRootAggregatorClient(1, 10, 2, 13)
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+
+	rootHash, err := api.NewHexBytesFromString(smtInstance.GetRootHash())
+	require.NoError(t, err)
+	initialUC, err := testProofUC(1, 10)
+	require.NoError(t, err)
+	initialBlock := models.NewBlock(
+		api.NewBigInt(big.NewInt(1)),
+		"",
+		cfg.Sharding.Child.ShardID,
+		"",
+		"",
+		rootHash,
+		api.HexBytes{},
+		initialUC,
+		nil,
+	)
+	initialBlock.Finalized = true
+	require.NoError(t, storage.BlockStorage().Store(ctx, initialBlock))
+
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		storage.CommitmentQueue(),
+		storage,
+		rootAggregatorClient,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		smtInstance,
+		nil,
+	)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer shutdownCancel()
+		_ = rm.Stop(shutdownCtx)
+	})
+
+	require.NoError(t, rm.Start(ctx))
+	require.NoError(t, rm.Activate(ctx))
+
+	select {
+	case <-rootAggregatorClient.proofPollStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for child round to poll parent proof")
+	}
+
+	time.Sleep(250 * time.Millisecond)
+
+	block1, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(2)))
+	require.NoError(t, err)
+	assert.Nil(t, block1, "child must not finalize against a stale parent UC")
+	assert.Greater(t, rootAggregatorClient.ProofPolls(), 1, "child should keep polling while proof is stale")
+
+	close(rootAggregatorClient.releaseFresh)
+
+	require.Eventually(t, func() bool {
+		block, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(2)))
+		return err == nil && block != nil
+	}, 3*time.Second, 25*time.Millisecond, "block 2 should be created once a fresh parent proof is available")
+
+	assert.EqualValues(t, 2, rm.lastAcceptedParentUCRound.Load())
 }

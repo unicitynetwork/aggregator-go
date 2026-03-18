@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -121,6 +122,10 @@ type RoundManager struct {
 	// Both fields are protected by roundMutex.
 	precollector         *childPrecollector
 	precollectorDisabled bool
+
+	// Child mode tracks the newest parent UC already accepted for finalization.
+	// This prevents empty rounds from immediately reusing an older parent proof.
+	lastAcceptedParentUCRound atomic.Uint64
 
 	// Metrics
 	totalRounds      int64
@@ -740,6 +745,10 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 			return fmt.Errorf("failed to start BFT client: %w", err)
 		}
 	case config.ShardingModeChild:
+		if err := rm.restoreLastAcceptedParentUC(ctx); err != nil {
+			return fmt.Errorf("failed to restore latest parent UC from child blocks: %w", err)
+		}
+
 		latestBlockNumber, err := rm.storage.BlockStorage().GetLatestNumber(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to get latest block number: %w", err)
@@ -765,6 +774,58 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 
 	rm.startCommitmentPrefetcher(ctx)
 	return nil
+}
+
+func (rm *RoundManager) restoreLastAcceptedParentUC(ctx context.Context) error {
+	rm.lastAcceptedParentUCRound.Store(0)
+
+	if rm.storage == nil || rm.storage.BlockStorage() == nil {
+		return nil
+	}
+
+	latestBlock, err := rm.storage.BlockStorage().GetLatest(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get latest child block: %w", err)
+	}
+	if latestBlock == nil || len(latestBlock.UnicityCertificate) == 0 {
+		return nil
+	}
+
+	parentUC, err := decodeUnicityCertificate(latestBlock.UnicityCertificate)
+	if err != nil {
+		return fmt.Errorf("failed to decode parent UC from latest child block %s: %w", latestBlock.Index.String(), err)
+	}
+
+	rm.lastAcceptedParentUCRound.Store(parentUC.GetRoundNumber())
+	rm.logger.WithContext(ctx).Info("Restored latest accepted parent UC from child storage",
+		"childBlockNumber", latestBlock.Index.String(),
+		"parentRound", parentUC.GetRoundNumber())
+
+	return nil
+}
+
+func (rm *RoundManager) acceptParentUC(parentUC *types.UnicityCertificate) {
+	if parentUC == nil {
+		return
+	}
+	rm.lastAcceptedParentUCRound.Store(parentUC.GetRoundNumber())
+}
+
+func (rm *RoundManager) lastAcceptedParentUC() uint64 {
+	return rm.lastAcceptedParentUCRound.Load()
+}
+
+func decodeUnicityCertificate(raw api.HexBytes) (*types.UnicityCertificate, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("unicity certificate is empty")
+	}
+
+	var uc types.UnicityCertificate
+	if err := types.Cbor.Unmarshal(raw, &uc); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal UC: %w", err)
+	}
+
+	return &uc, nil
 }
 
 func (rm *RoundManager) Deactivate(ctx context.Context) error {
