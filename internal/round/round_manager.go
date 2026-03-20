@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -118,11 +119,14 @@ type RoundManager struct {
 	avgFinalizationTime time.Duration // Running average of finalization time
 	avgSMTUpdateTime    time.Duration // Running average of SMT update time per batch
 
-	// Pre-collection: collect commitments for next round while waiting for parent proof
-	preCollectionSnapshot   *smt.ThreadSafeSmtSnapshot
-	preCollectedCommitments []*models.CertificationRequest
-	preCollectedLeaves      []*smt.Leaf
-	preCollectionMutex      sync.Mutex
+	// Child-mode precollector: continuously collects commitments for next round.
+	// Both fields are protected by roundMutex.
+	precollector         *childPrecollector
+	precollectorDisabled bool
+
+	// Child mode tracks the newest parent UC already accepted for finalization.
+	// This prevents empty rounds from immediately reusing an older parent proof.
+	lastAcceptedParentUCRound atomic.Uint64
 
 	// Metrics
 	totalRounds      int64
@@ -348,6 +352,10 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 // StartNewRoundWithSnapshot starts a new round, optionally with pre-collected data.
 // If snapshot/commitments are nil (first round), an empty snapshot is created.
 // All rounds are processed the same way - no separate collect phase.
+// ErrDeactivated is returned by StartNewRoundWithSnapshot when the round manager
+// has been deactivated. The check and the decision not to start are atomic under roundMutex.
+var ErrDeactivated = fmt.Errorf("round manager deactivated")
+
 func (rm *RoundManager) StartNewRoundWithSnapshot(
 	ctx context.Context,
 	roundNumber *api.BigInt,
@@ -360,6 +368,13 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 		"commitments", len(commitments))
 
 	rm.roundMutex.Lock()
+
+	if rm.precollectorDisabled {
+		rm.roundMutex.Unlock()
+		rm.logger.WithContext(ctx).Info("Skipping round start — deactivated",
+			"roundNumber", roundNumber.String())
+		return ErrDeactivated
+	}
 
 	if rm.currentRound != nil {
 		rm.logger.WithContext(ctx).Info("Previous round state",
@@ -386,6 +401,19 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 		Snapshot:           snapshot,
 		PendingLeaves:      leaves,
 		PendingCommitments: commitments, // In child mode, commitments are already filtered by pre-collection
+	}
+
+	// Start precollector on the first child-mode round so it begins collecting
+	// commitments into a chained snapshot while the current round processes.
+	if rm.config.Sharding.Mode.IsChild() && rm.precollector == nil && !rm.precollectorDisabled {
+		cp := newChildPrecollector(
+			rm.commitmentStream,
+			rm.commitmentQueue,
+			rm.logger,
+			rm.config.Processing.MaxCommitmentsPerRound,
+		)
+		rm.precollector = cp
+		cp.Start(ctx, snapshot)
 	}
 
 	rm.roundMutex.Unlock()
@@ -702,6 +730,11 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 
 func (rm *RoundManager) Activate(ctx context.Context) error {
 	rm.logger.WithContext(ctx).Info("Activating round manager")
+
+	rm.roundMutex.Lock()
+	rm.precollectorDisabled = false
+	rm.roundMutex.Unlock()
+
 	if rm.config.HA.Enabled {
 		recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
 		if err != nil {
@@ -724,6 +757,10 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 			return fmt.Errorf("failed to start BFT client: %w", err)
 		}
 	case config.ShardingModeChild:
+		if err := rm.restoreLastAcceptedParentUC(ctx); err != nil {
+			return fmt.Errorf("failed to restore latest parent UC from child blocks: %w", err)
+		}
+
 		latestBlockNumber, err := rm.storage.BlockStorage().GetLatestNumber(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to get latest block number: %w", err)
@@ -751,8 +788,71 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 	return nil
 }
 
+func (rm *RoundManager) restoreLastAcceptedParentUC(ctx context.Context) error {
+	rm.lastAcceptedParentUCRound.Store(0)
+
+	if rm.storage == nil || rm.storage.BlockStorage() == nil {
+		return nil
+	}
+
+	latestBlock, err := rm.storage.BlockStorage().GetLatest(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get latest child block: %w", err)
+	}
+	if latestBlock == nil || len(latestBlock.UnicityCertificate) == 0 {
+		return nil
+	}
+
+	parentUC, err := decodeUnicityCertificate(latestBlock.UnicityCertificate)
+	if err != nil {
+		return fmt.Errorf("failed to decode parent UC from latest child block %s: %w", latestBlock.Index.String(), err)
+	}
+
+	rm.lastAcceptedParentUCRound.Store(parentUC.GetRoundNumber())
+	rm.logger.WithContext(ctx).Info("Restored latest accepted parent UC from child storage",
+		"childBlockNumber", latestBlock.Index.String(),
+		"parentRound", parentUC.GetRoundNumber())
+
+	return nil
+}
+
+func (rm *RoundManager) acceptParentUC(parentUC *types.UnicityCertificate) {
+	if parentUC == nil {
+		return
+	}
+	rm.lastAcceptedParentUCRound.Store(parentUC.GetRoundNumber())
+}
+
+func (rm *RoundManager) lastAcceptedParentUC() uint64 {
+	return rm.lastAcceptedParentUCRound.Load()
+}
+
+func decodeUnicityCertificate(raw api.HexBytes) (*types.UnicityCertificate, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("unicity certificate is empty")
+	}
+
+	var uc types.UnicityCertificate
+	if err := types.Cbor.Unmarshal(raw, &uc); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal UC: %w", err)
+	}
+
+	return &uc, nil
+}
+
 func (rm *RoundManager) Deactivate(ctx context.Context) error {
 	rm.logger.WithContext(ctx).Info("Deactivating round manager")
+
+	var cp *childPrecollector
+	rm.roundMutex.Lock()
+	rm.precollectorDisabled = true
+	cp = rm.precollector
+	rm.precollector = nil
+	rm.roundMutex.Unlock()
+
+	if cp != nil {
+		cp.Stop()
+	}
 	rm.stopCommitmentPrefetcher()
 	if rm.bftClient != nil {
 		rm.bftClient.Stop()

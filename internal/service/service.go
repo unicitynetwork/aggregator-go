@@ -370,13 +370,14 @@ func (as *AggregatorService) GetInclusionProofV1(ctx context.Context, req *api.G
 		}
 	}
 
-	// First check if commitment exists in aggregator records (finalized)
+	// Check if commitment exists in aggregator records (finalized)
 	record, err := as.storage.AggregatorRecordStorage().GetByStateID(ctx, req.RequestID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get aggregator record: %w", err)
 	}
-	if record == nil {
-		// Non-inclusion proof
+	if record == nil || record.BlockNumber.Cmp(block.Index.Int) > 0 {
+		// Non-inclusion proof: either record doesn't exist, or it belongs to a
+		// newer block whose SMT state hasn't been committed yet.
 		return &api.GetInclusionProofResponseV1{
 			InclusionProof: &api.InclusionProofV1{
 				Authenticator:      nil,
@@ -453,13 +454,14 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		}
 	}
 
-	// First check if certification request exists in aggregator records (finalized)
+	// Check if certification request exists in aggregator records (finalized)
 	record, err := as.storage.AggregatorRecordStorage().GetByStateID(ctx, req.StateID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get aggregator record: %w", err)
 	}
-	if record == nil {
-		// Non-inclusion proof
+	if record == nil || record.BlockNumber.Cmp(block.Index.Int) > 0 {
+		// Non-inclusion proof: either record doesn't exist, or it belongs to a
+		// newer block whose SMT state hasn't been committed yet.
 		return &api.GetInclusionProofResponseV2{
 			InclusionProof: &api.InclusionProofV2{
 				CertificationData:  nil,

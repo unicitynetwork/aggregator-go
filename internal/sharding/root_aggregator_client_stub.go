@@ -2,7 +2,10 @@ package sharding
 
 import (
 	"context"
+	"fmt"
 	"sync"
+
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -44,8 +47,12 @@ func (m *RootAggregatorClientStub) GetShardProof(ctx context.Context, request *a
 	if m.submissions[request.ShardID] != nil {
 		m.returnedProofCount++
 		submittedRootHash := m.submittedRootHash.String()
+		ucBytes, err := stubProofUC(uint64(m.returnedProofCount), uint64(m.returnedProofCount))
+		if err != nil {
+			return nil, err
+		}
 		return &api.RootShardInclusionProof{
-			UnicityCertificate: api.HexBytes("1234"),
+			UnicityCertificate: ucBytes,
 			MerkleTreePath: &api.MerkleTreePath{
 				Steps: []api.MerkleTreeStep{{Data: &submittedRootHash}},
 			},
@@ -82,4 +89,22 @@ func (m *RootAggregatorClientStub) SetSubmissionError(err error) {
 	defer m.mu.Unlock()
 
 	m.submissionError = err
+}
+
+func stubProofUC(parentRound, rootRound uint64) (api.HexBytes, error) {
+	uc := types.UnicityCertificate{
+		InputRecord: &types.InputRecord{
+			RoundNumber: parentRound,
+		},
+		UnicitySeal: &types.UnicitySeal{
+			RootChainRoundNumber: rootRound,
+		},
+	}
+
+	ucBytes, err := types.Cbor.Marshal(uc)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal stub proof UC: %w", err)
+	}
+
+	return api.NewHexBytes(ucBytes), nil
 }

@@ -25,7 +25,7 @@ const (
 // Logger wraps slog.Logger with additional functionality
 type Logger struct {
 	*slog.Logger
-	fileWriter io.Closer // holds reference to lumberjack for cleanup
+	fileWriter *lumberjack.Logger // holds reference to lumberjack for cleanup
 }
 
 // LogConfig holds the configuration for creating a logger

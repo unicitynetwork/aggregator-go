@@ -2,12 +2,15 @@ package round
 
 import (
 	"context"
+	"fmt"
 	"math/big"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/events"
@@ -16,11 +19,234 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	testsharding "github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-// helper to get leaf from commitment for tests
+type signalingRootAggregatorClient struct {
+	inner              *testsharding.RootAggregatorClientStub
+	firstProofReturned chan struct{}
+	firstProofOnce     sync.Once
+}
+
+type blockingProofRootAggregatorClient struct {
+	inner            *testsharding.RootAggregatorClientStub
+	proofPollStarted chan struct{}
+	releaseProof     chan struct{}
+	startOnce        sync.Once
+}
+
+type countingProofRootAggregatorClient struct {
+	inner         *testsharding.RootAggregatorClientStub
+	proofReturned chan int
+	mu            sync.Mutex
+	proofCount    int
+}
+
+type staleThenFreshRootAggregatorClient struct {
+	mu               sync.Mutex
+	submittedRoot    api.HexBytes
+	staleParentRound uint64
+	staleRootRound   uint64
+	freshParentRound uint64
+	freshRootRound   uint64
+	proofPollStarted chan struct{}
+	releaseFresh     chan struct{}
+	startOnce        sync.Once
+	proofPolls       int
+}
+
+func newSignalingRootAggregatorClient() *signalingRootAggregatorClient {
+	return &signalingRootAggregatorClient{
+		inner:              testsharding.NewRootAggregatorClientStub(),
+		firstProofReturned: make(chan struct{}),
+	}
+}
+
+func newBlockingProofRootAggregatorClient() *blockingProofRootAggregatorClient {
+	return &blockingProofRootAggregatorClient{
+		inner:            testsharding.NewRootAggregatorClientStub(),
+		proofPollStarted: make(chan struct{}),
+		releaseProof:     make(chan struct{}),
+	}
+}
+
+func newCountingProofRootAggregatorClient() *countingProofRootAggregatorClient {
+	return &countingProofRootAggregatorClient{
+		inner:         testsharding.NewRootAggregatorClientStub(),
+		proofReturned: make(chan int, 16),
+	}
+}
+
+func newStaleThenFreshRootAggregatorClient(staleParentRound, staleRootRound, freshParentRound, freshRootRound uint64) *staleThenFreshRootAggregatorClient {
+	return &staleThenFreshRootAggregatorClient{
+		staleParentRound: staleParentRound,
+		staleRootRound:   staleRootRound,
+		freshParentRound: freshParentRound,
+		freshRootRound:   freshRootRound,
+		proofPollStarted: make(chan struct{}),
+		releaseFresh:     make(chan struct{}),
+	}
+}
+
+func (c *signalingRootAggregatorClient) SubmitShardRoot(ctx context.Context, request *api.SubmitShardRootRequest) error {
+	return c.inner.SubmitShardRoot(ctx, request)
+}
+
+func (c *signalingRootAggregatorClient) GetShardProof(ctx context.Context, request *api.GetShardProofRequest) (*api.RootShardInclusionProof, error) {
+	proof, err := c.inner.GetShardProof(ctx, request)
+	if err == nil && proof != nil {
+		c.firstProofOnce.Do(func() {
+			close(c.firstProofReturned)
+		})
+	}
+	return proof, err
+}
+
+func (c *signalingRootAggregatorClient) CheckHealth(ctx context.Context) error {
+	return c.inner.CheckHealth(ctx)
+}
+
+func (c *blockingProofRootAggregatorClient) SubmitShardRoot(ctx context.Context, request *api.SubmitShardRootRequest) error {
+	return c.inner.SubmitShardRoot(ctx, request)
+}
+
+func (c *blockingProofRootAggregatorClient) GetShardProof(ctx context.Context, request *api.GetShardProofRequest) (*api.RootShardInclusionProof, error) {
+	c.startOnce.Do(func() {
+		close(c.proofPollStarted)
+	})
+
+	select {
+	case <-c.releaseProof:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	return c.inner.GetShardProof(ctx, request)
+}
+
+func (c *blockingProofRootAggregatorClient) CheckHealth(ctx context.Context) error {
+	return c.inner.CheckHealth(ctx)
+}
+
+func (c *countingProofRootAggregatorClient) SubmitShardRoot(ctx context.Context, request *api.SubmitShardRootRequest) error {
+	return c.inner.SubmitShardRoot(ctx, request)
+}
+
+func (c *countingProofRootAggregatorClient) GetShardProof(ctx context.Context, request *api.GetShardProofRequest) (*api.RootShardInclusionProof, error) {
+	proof, err := c.inner.GetShardProof(ctx, request)
+	if err == nil && proof != nil {
+		c.mu.Lock()
+		c.proofCount++
+		count := c.proofCount
+		c.mu.Unlock()
+
+		select {
+		case c.proofReturned <- count:
+		default:
+		}
+	}
+	return proof, err
+}
+
+func (c *countingProofRootAggregatorClient) CheckHealth(ctx context.Context) error {
+	return c.inner.CheckHealth(ctx)
+}
+
+func (c *staleThenFreshRootAggregatorClient) SubmitShardRoot(ctx context.Context, request *api.SubmitShardRootRequest) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.submittedRoot = request.RootHash
+	return nil
+}
+
+func (c *staleThenFreshRootAggregatorClient) GetShardProof(ctx context.Context, request *api.GetShardProofRequest) (*api.RootShardInclusionProof, error) {
+	c.startOnce.Do(func() {
+		close(c.proofPollStarted)
+	})
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.submittedRoot) == 0 {
+		return nil, nil
+	}
+
+	c.proofPolls++
+	root := c.submittedRoot.String()
+	parentRound := c.staleParentRound
+	rootRound := c.staleRootRound
+
+	select {
+	case <-c.releaseFresh:
+		parentRound = c.freshParentRound
+		rootRound = c.freshRootRound
+	default:
+	}
+
+	uc, err := testProofUC(parentRound, rootRound)
+	if err != nil {
+		return nil, err
+	}
+
+	return &api.RootShardInclusionProof{
+		UnicityCertificate: uc,
+		MerkleTreePath: &api.MerkleTreePath{
+			Steps: []api.MerkleTreeStep{{Data: &root}},
+		},
+	}, nil
+}
+
+func (c *staleThenFreshRootAggregatorClient) CheckHealth(ctx context.Context) error {
+	return nil
+}
+
+func (c *staleThenFreshRootAggregatorClient) ProofPolls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.proofPolls
+}
+
+func testProofUC(parentRound, rootRound uint64) (api.HexBytes, error) {
+	uc := types.UnicityCertificate{
+		InputRecord: &types.InputRecord{
+			RoundNumber: parentRound,
+		},
+		UnicitySeal: &types.UnicitySeal{
+			RootChainRoundNumber: rootRound,
+		},
+	}
+
+	ucBytes, err := types.Cbor.Marshal(uc)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal test proof UC: %w", err)
+	}
+
+	return api.NewHexBytes(ucBytes), nil
+}
+
+func waitForStateBlockNumber(
+	t *testing.T,
+	ctx context.Context,
+	storage interfaces.Storage,
+	stateID api.StateID,
+	timeout time.Duration,
+) *api.BigInt {
+	t.Helper()
+
+	var blockNumber *api.BigInt
+	require.Eventually(t, func() bool {
+		var err error
+		blockNumber, err = storage.BlockRecordsStorage().GetByStateID(ctx, stateID)
+		require.NoError(t, err)
+		return blockNumber != nil
+	}, timeout, 25*time.Millisecond)
+
+	return blockNumber
+}
+
 func getLeafFromCommitment(t *testing.T, commitment *models.CertificationRequest) *smt.Leaf {
 	path, err := commitment.StateID.GetPath()
 	require.NoError(t, err)
@@ -29,477 +255,344 @@ func getLeafFromCommitment(t *testing.T, commitment *models.CertificationRequest
 	return smt.NewLeaf(path, leafValue)
 }
 
-func TestPreCollectionMechanism(t *testing.T) {
-	t.Run("InitPreCollectionCreatesChainedSnapshot", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		cfg := config.Config{
-			Processing: config.ProcessingConfig{
-				RoundDuration:          100 * time.Millisecond,
-				MaxCommitmentsPerRound: 1000,
-			},
-			Sharding: config.ShardingConfig{
-				Mode: config.ShardingModeChild,
-				Child: config.ChildConfig{
-					ShardID: 0b11,
-				},
-			},
-		}
-
-		testLogger, err := logger.New("info", "text", "stdout", false)
-		require.NoError(t, err)
-
-		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
-
-		rm := &RoundManager{
-			config:           &cfg,
-			logger:           testLogger,
-			smt:              smtInstance,
-			commitmentStream: make(chan *models.CertificationRequest, 100),
-		}
-
-		// Create a round with a snapshot
-		snapshot := smtInstance.CreateSnapshot()
-		rm.currentRound = &Round{
-			Number:   api.NewBigInt(big.NewInt(1)),
-			Snapshot: snapshot,
-		}
-
-		// Initialize pre-collection
-		rm.initPreCollection(ctx)
-
-		// Verify pre-collection snapshot was created
-		assert.NotNil(t, rm.preCollectionSnapshot)
-		assert.NotNil(t, rm.preCollectedCommitments)
-		assert.NotNil(t, rm.preCollectedLeaves)
-		assert.Empty(t, rm.preCollectedCommitments)
-		assert.Empty(t, rm.preCollectedLeaves)
-
-		// Verify the pre-collection snapshot has the same root as current round
-		assert.Equal(t, snapshot.GetRootHash(), rm.preCollectionSnapshot.GetRootHash())
-	})
-
-	t.Run("AddToPreCollectionAddsCommitment", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		cfg := config.Config{
-			Processing: config.ProcessingConfig{
-				MaxCommitmentsPerRound: 1000,
-			},
-			Sharding: config.ShardingConfig{
-				Mode: config.ShardingModeChild,
-				Child: config.ChildConfig{
-					ShardID: 0b11,
-				},
-			},
-		}
-
-		testLogger, err := logger.New("info", "text", "stdout", false)
-		require.NoError(t, err)
-
-		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
-
-		rm := &RoundManager{
-			config:           &cfg,
-			logger:           testLogger,
-			smt:              smtInstance,
-			commitmentStream: make(chan *models.CertificationRequest, 100),
-		}
-
-		// Create current round and initialize pre-collection
-		snapshot := smtInstance.CreateSnapshot()
-		rm.currentRound = &Round{
-			Number:   api.NewBigInt(big.NewInt(1)),
-			Snapshot: snapshot,
-		}
-		rm.initPreCollection(ctx)
-
-		initialRootHash := rm.preCollectionSnapshot.GetRootHash()
-
-		// Create a test commitment using test utility
-		commitment := testutil.CreateTestCertificationRequest(t, "precollect_test")
-
-		// Add to pre-collection
-		err = rm.addToPreCollection(ctx, commitment)
-		require.NoError(t, err)
-
-		// Verify commitment was added
-		assert.Len(t, rm.preCollectedCommitments, 1)
-		assert.Len(t, rm.preCollectedLeaves, 1)
-		assert.Equal(t, commitment, rm.preCollectedCommitments[0])
-
-		// Verify root hash changed (data was added to SMT)
-		newRootHash := rm.preCollectionSnapshot.GetRootHash()
-		assert.NotEqual(t, initialRootHash, newRootHash)
-	})
-
-	t.Run("ClearPreCollectionResetsState", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		cfg := config.Config{
-			Processing: config.ProcessingConfig{
-				MaxCommitmentsPerRound: 1000,
-			},
-			Sharding: config.ShardingConfig{
-				Mode: config.ShardingModeChild,
-				Child: config.ChildConfig{
-					ShardID: 0b11,
-				},
-			},
-		}
-
-		testLogger, err := logger.New("info", "text", "stdout", false)
-		require.NoError(t, err)
-
-		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
-
-		rm := &RoundManager{
-			config:           &cfg,
-			logger:           testLogger,
-			smt:              smtInstance,
-			commitmentStream: make(chan *models.CertificationRequest, 100),
-		}
-
-		// Create current round and initialize pre-collection
-		snapshot := smtInstance.CreateSnapshot()
-		rm.currentRound = &Round{
-			Number:   api.NewBigInt(big.NewInt(1)),
-			Snapshot: snapshot,
-		}
-		rm.initPreCollection(ctx)
-
-		// Add a commitment using test utility
-		commitment := testutil.CreateTestCertificationRequest(t, "clear_test")
-		err = rm.addToPreCollection(ctx, commitment)
-		require.NoError(t, err)
-
-		// Verify state exists
-		assert.NotNil(t, rm.preCollectionSnapshot)
-		assert.Len(t, rm.preCollectedCommitments, 1)
-
-		// Clear pre-collection
-		rm.clearPreCollection()
-
-		// Verify state is cleared
-		assert.Nil(t, rm.preCollectionSnapshot)
-		assert.Nil(t, rm.preCollectedCommitments)
-		assert.Nil(t, rm.preCollectedLeaves)
-	})
-
-	t.Run("AddToPreCollectionFailsWithoutSnapshot", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		cfg := config.Config{}
-
-		testLogger, err := logger.New("info", "text", "stdout", false)
-		require.NoError(t, err)
-
-		rm := &RoundManager{
-			config: &cfg,
-			logger: testLogger,
-		}
-
-		// Don't initialize pre-collection - snapshot is nil
-
-		commitment := testutil.CreateTestCertificationRequest(t, "fail_test")
-
-		// Should fail because pre-collection snapshot is nil
-		err = rm.addToPreCollection(ctx, commitment)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "pre-collection snapshot not initialized")
-	})
-
-	t.Run("AddBatchToPreCollectionAddsManyCommitments", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		cfg := config.Config{
-			Processing: config.ProcessingConfig{
-				MaxCommitmentsPerRound: 1000,
-			},
-			Sharding: config.ShardingConfig{
-				Mode: config.ShardingModeChild,
-				Child: config.ChildConfig{
-					ShardID: 0b11,
-				},
-			},
-		}
-
-		testLogger, err := logger.New("info", "text", "stdout", false)
-		require.NoError(t, err)
-
-		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
-
-		rm := &RoundManager{
-			config:           &cfg,
-			logger:           testLogger,
-			smt:              smtInstance,
-			commitmentStream: make(chan *models.CertificationRequest, 100),
-		}
-
-		// Create current round and initialize pre-collection
-		snapshot := smtInstance.CreateSnapshot()
-		rm.currentRound = &Round{
-			Number:   api.NewBigInt(big.NewInt(1)),
-			Snapshot: snapshot,
-		}
-		rm.initPreCollection(ctx)
-
-		initialRootHash := rm.preCollectionSnapshot.GetRootHash()
-
-		// Create a batch of test commitments
-		batchSize := 50
-		commitments := make([]*models.CertificationRequest, batchSize)
-		for i := 0; i < batchSize; i++ {
-			commitments[i] = testutil.CreateTestCertificationRequest(t, "batch_test")
-		}
-
-		// Add batch to pre-collection
-		err = rm.addBatchToPreCollection(ctx, commitments)
-		require.NoError(t, err)
-
-		// Verify all commitments were added
-		assert.Len(t, rm.preCollectedCommitments, batchSize)
-		assert.Len(t, rm.preCollectedLeaves, batchSize)
-
-		// Verify root hash changed
-		newRootHash := rm.preCollectionSnapshot.GetRootHash()
-		assert.NotEqual(t, initialRootHash, newRootHash)
-	})
-
-	t.Run("AddBatchToPreCollectionEmptyBatchNoOp", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		cfg := config.Config{}
-
-		testLogger, err := logger.New("info", "text", "stdout", false)
-		require.NoError(t, err)
-
-		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
-
-		rm := &RoundManager{
-			config:           &cfg,
-			logger:           testLogger,
-			smt:              smtInstance,
-			commitmentStream: make(chan *models.CertificationRequest, 100),
-		}
-
-		// Create current round and initialize pre-collection
-		snapshot := smtInstance.CreateSnapshot()
-		rm.currentRound = &Round{
-			Number:   api.NewBigInt(big.NewInt(1)),
-			Snapshot: snapshot,
-		}
-		rm.initPreCollection(ctx)
-
-		// Empty batch should succeed without doing anything
-		err = rm.addBatchToPreCollection(ctx, []*models.CertificationRequest{})
-		require.NoError(t, err)
-
-		assert.Empty(t, rm.preCollectedCommitments)
-		assert.Empty(t, rm.preCollectedLeaves)
-	})
-
-	t.Run("FailedBatchCanBeRetriedAfterReinitialization", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		cfg := config.Config{
-			Processing: config.ProcessingConfig{
-				MaxCommitmentsPerRound: 1000,
-			},
-			Sharding: config.ShardingConfig{
-				Mode: config.ShardingModeChild,
-				Child: config.ChildConfig{
-					ShardID: 0b11,
-				},
-			},
-		}
-
-		testLogger, err := logger.New("info", "text", "stdout", false)
-		require.NoError(t, err)
-
-		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
-
-		rm := &RoundManager{
-			config:           &cfg,
-			logger:           testLogger,
-			smt:              smtInstance,
-			commitmentStream: make(chan *models.CertificationRequest, 100),
-		}
-
-		// Create a batch of commitments (simulating pendingCommitments in flushBatch)
-		batch := make([]*models.CertificationRequest, 5)
-		for i := 0; i < 5; i++ {
-			batch[i] = testutil.CreateTestCertificationRequest(t, "retry_test")
-		}
-
-		// First attempt: no snapshot initialized, should fail
-		err = rm.addBatchToPreCollection(ctx, batch)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "pre-collection snapshot not initialized")
-
-		// Batch is still available for retry (caller retains it on error)
-		assert.Len(t, batch, 5)
-
-		// Now initialize pre-collection properly
-		snapshot := smtInstance.CreateSnapshot()
-		rm.currentRound = &Round{
-			Number:   api.NewBigInt(big.NewInt(1)),
-			Snapshot: snapshot,
-		}
-		rm.initPreCollection(ctx)
-
-		// Retry the same batch - should succeed now
-		err = rm.addBatchToPreCollection(ctx, batch)
-		require.NoError(t, err)
-
-		// Verify all commitments were added
-		assert.Len(t, rm.preCollectedCommitments, 5)
-		assert.Len(t, rm.preCollectedLeaves, 5)
-	})
-
-	t.Run("BatchWithBadLeafFallsBackToOneByOne", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		cfg := config.Config{
-			Processing: config.ProcessingConfig{
-				MaxCommitmentsPerRound: 1000,
-			},
-			Sharding: config.ShardingConfig{
-				Mode: config.ShardingModeChild,
-				Child: config.ChildConfig{
-					ShardID: 0b11, // Shard prefix is 11
-				},
-			},
-		}
-
-		testLogger, err := logger.New("info", "text", "stdout", false)
-		require.NoError(t, err)
-
-		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
-
-		rm := &RoundManager{
-			config:           &cfg,
-			logger:           testLogger,
-			smt:              smtInstance,
-			commitmentStream: make(chan *models.CertificationRequest, 100),
-		}
-
-		// Create current round and initialize pre-collection
-		snapshot := smtInstance.CreateSnapshot()
-		rm.currentRound = &Round{
-			Number:   api.NewBigInt(big.NewInt(1)),
-			Snapshot: snapshot,
-		}
-		rm.initPreCollection(ctx)
-
-		// Create 2 valid commitments
-		commitment1 := testutil.CreateTestCertificationRequest(t, "fallback_test_1")
-		commitment2 := testutil.CreateTestCertificationRequest(t, "fallback_test_2")
-
-		// Add first commitment
-		err = rm.addBatchToPreCollection(ctx, []*models.CertificationRequest{commitment1})
-		require.NoError(t, err)
-		assert.Len(t, rm.preCollectedCommitments, 1)
-
-		// Create a modified version of commitment1 (same requestID, different value)
-		// This will trigger ErrLeafModification when trying to add as batch
-		modifiedCommitment := *commitment1
-		modifiedCommitment.CertificationData.TransactionHash = commitment2.CertificationData.TransactionHash // Different hash
-		originalLeafValue, err := commitment1.LeafValue()
-		require.NoError(t, err)
-		modifiedLeafValue, err := modifiedCommitment.LeafValue()
-		require.NoError(t, err)
-		require.NotEqual(t, originalLeafValue, modifiedLeafValue, "modified commitment must produce a different leaf value")
-
-		// Now try to add a batch with: modifiedCommitment (will fail), commitment2 (valid)
-		batch := []*models.CertificationRequest{&modifiedCommitment, commitment2}
-		err = rm.addBatchToPreCollection(ctx, batch)
-		require.NoError(t, err) // Should succeed overall (fallback handles errors)
-
-		// Should have commitment1 and commitment2 (modifiedCommitment was skipped)
-		// Total: 2 commitments and 2 leaves
-		assert.Len(t, rm.preCollectedLeaves, 2)
-		assert.Len(t, rm.preCollectedCommitments, 2)
-		assert.Equal(t, len(rm.preCollectedLeaves), len(rm.preCollectedCommitments))
-		assert.True(t, rm.preCollectedCommitments[0] == commitment1, "first commitment should remain the original one")
-		assert.True(t, rm.preCollectedCommitments[1] == commitment2, "second commitment should be the new valid one")
-	})
+func newTestLogger(t *testing.T) *logger.Logger {
+	t.Helper()
+	l, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+	return l
 }
+
+func newTestPrecollector(t *testing.T, stream chan *models.CertificationRequest, maxPerRound int) (*childPrecollector, *smt.ThreadSafeSMT) {
+	t.Helper()
+	log := newTestLogger(t)
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	if maxPerRound <= 0 {
+		maxPerRound = 10000
+	}
+	cp := newChildPrecollector(stream, nil, log, maxPerRound)
+	return cp, smtInstance
+}
+
+func TestDrainBufferedCommitments_StopsAtRoundBoundary(t *testing.T) {
+	stream := make(chan *models.CertificationRequest, 8)
+	pending := make([]*models.CertificationRequest, 0, miniBatchSize)
+	collected := make([]*models.CertificationRequest, 0, 5)
+	count := 0
+	maxPerRound := 5
+
+	flush := func() {
+		collected = append(collected, pending...)
+		count += len(pending)
+		pending = pending[:0]
+	}
+
+	for i := 0; i < maxPerRound+2; i++ {
+		stream <- testutil.CreateTestCertificationRequest(t, "drain_boundary")
+	}
+
+	drainBufferedCommitments(stream, maxPerRound, &count, &pending, flush)
+	flush()
+
+	require.Len(t, collected, maxPerRound)
+	require.Len(t, stream, 2)
+}
+
+// --- Tests for childPrecollector ---
+
+func TestChildPrecollector_CollectsContinuouslyAcrossRound(t *testing.T) {
+	stream := make(chan *models.CertificationRequest, 100)
+	cp, smtInstance := newTestPrecollector(t, stream, 10000)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	baseSnapshot := smtInstance.CreateSnapshot()
+	cp.Start(ctx, baseSnapshot)
+	defer cp.Stop()
+
+	// Send commitments for round 1
+	c1 := testutil.CreateTestCertificationRequest(t, "round1_a")
+	c2 := testutil.CreateTestCertificationRequest(t, "round1_b")
+	stream <- c1
+	stream <- c2
+
+	// Small delay to let goroutine process
+	time.Sleep(50 * time.Millisecond)
+
+	// Advance round — should return both commitments
+	result, err := cp.AdvanceRound()
+	require.NoError(t, err)
+	assert.Len(t, result.commitments, 2)
+	assert.Len(t, result.leaves, 2)
+	assert.NotNil(t, result.snapshot)
+
+	// Send commitments for round 2
+	c3 := testutil.CreateTestCertificationRequest(t, "round2_a")
+	stream <- c3
+	time.Sleep(50 * time.Millisecond)
+
+	result2, err := cp.AdvanceRound()
+	require.NoError(t, err)
+	assert.Len(t, result2.commitments, 1)
+	assert.Equal(t, c3, result2.commitments[0])
+
+	// Snapshots should be different (round 2 has round 1 data + round 2 data)
+	assert.NotEqual(t, result.snapshot.GetRootHash(), result2.snapshot.GetRootHash())
+}
+
+func TestChildPrecollector_AdvanceRound_FlushesPendingBatch(t *testing.T) {
+	stream := make(chan *models.CertificationRequest, 200)
+	cp, smtInstance := newTestPrecollector(t, stream, 10000)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	baseSnapshot := smtInstance.CreateSnapshot()
+	cp.Start(ctx, baseSnapshot)
+	defer cp.Stop()
+
+	// Send fewer than miniBatchSize commitments (pending but not flushed)
+	count := miniBatchSize - 1
+	for i := 0; i < count; i++ {
+		stream <- testutil.CreateTestCertificationRequest(t, "pending_flush")
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	result, err := cp.AdvanceRound()
+	require.NoError(t, err)
+	assert.Len(t, result.commitments, count, "AdvanceRound must flush pending batch")
+	assert.Len(t, result.leaves, count)
+}
+
+func TestChildPrecollector_AdvanceRound_NoDropAcrossBoundary(t *testing.T) {
+	stream := make(chan *models.CertificationRequest, 200)
+	cp, smtInstance := newTestPrecollector(t, stream, 10000)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	baseSnapshot := smtInstance.CreateSnapshot()
+	cp.Start(ctx, baseSnapshot)
+	defer cp.Stop()
+
+	total := 0
+	// Round 1: send some commitments
+	for i := 0; i < 5; i++ {
+		stream <- testutil.CreateTestCertificationRequest(t, "boundary_r1")
+		total++
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	r1, err := cp.AdvanceRound()
+	require.NoError(t, err)
+	r1Count := len(r1.commitments)
+
+	// Round 2: send more commitments
+	for i := 0; i < 7; i++ {
+		stream <- testutil.CreateTestCertificationRequest(t, "boundary_r2")
+		total++
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	r2, err := cp.AdvanceRound()
+	require.NoError(t, err)
+
+	// No commitments should be dropped across the boundary
+	assert.Equal(t, total, r1Count+len(r2.commitments))
+}
+
+func TestChildPrecollector_HonorsMaxCommitmentsWithoutConsumingAndDropping(t *testing.T) {
+	stream := make(chan *models.CertificationRequest, 200)
+	maxPerRound := 5
+	cp, smtInstance := newTestPrecollector(t, stream, maxPerRound)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	baseSnapshot := smtInstance.CreateSnapshot()
+	cp.Start(ctx, baseSnapshot)
+	defer cp.Stop()
+
+	// Send more than max
+	for i := 0; i < maxPerRound+3; i++ {
+		stream <- testutil.CreateTestCertificationRequest(t, "max_test")
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	result, err := cp.AdvanceRound()
+	require.NoError(t, err)
+	assert.Equal(t, maxPerRound, len(result.commitments), "should honor max per round")
+
+	// After advance, the overflow should still be in the stream (not consumed and dropped)
+	// The precollector should now collect the remaining 3 for the next round
+	time.Sleep(50 * time.Millisecond)
+	result2, err := cp.AdvanceRound()
+	require.NoError(t, err)
+	assert.Equal(t, 3, len(result2.commitments), "overflow should be collected in next round")
+}
+
+func TestChildPrecollector_ControlMessagesProgressUnderBackpressure(t *testing.T) {
+	stream := make(chan *models.CertificationRequest, 200)
+	cp, smtInstance := newTestPrecollector(t, stream, 10000)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	baseSnapshot := smtInstance.CreateSnapshot()
+	cp.Start(ctx, baseSnapshot)
+	defer cp.Stop()
+
+	// Fill the stream to create backpressure
+	for i := 0; i < 150; i++ {
+		stream <- testutil.CreateTestCertificationRequest(t, "backpressure")
+	}
+
+	// AdvanceRound should still complete even under backpressure
+	done := make(chan struct{})
+	go func() {
+		_, err := cp.AdvanceRound()
+		assert.NoError(t, err)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("AdvanceRound should complete under backpressure")
+	}
+}
+
+func TestChildPrecollector_StopCancelsCleanly(t *testing.T) {
+	stream := make(chan *models.CertificationRequest, 100)
+	cp, smtInstance := newTestPrecollector(t, stream, 10000)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	baseSnapshot := smtInstance.CreateSnapshot()
+	cp.Start(ctx, baseSnapshot)
+
+	// Send some data
+	stream <- testutil.CreateTestCertificationRequest(t, "stop_test")
+	time.Sleep(50 * time.Millisecond)
+
+	// Stop should return promptly
+	done := make(chan struct{})
+	go func() {
+		cp.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop should complete promptly")
+	}
+
+	// AdvanceRound after stop should fail
+	_, err := cp.AdvanceRound()
+	assert.Error(t, err)
+}
+
+func TestChildPrecollector_AdvanceRoundWithNoData(t *testing.T) {
+	stream := make(chan *models.CertificationRequest, 100)
+	cp, smtInstance := newTestPrecollector(t, stream, 10000)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	baseSnapshot := smtInstance.CreateSnapshot()
+	cp.Start(ctx, baseSnapshot)
+	defer cp.Stop()
+
+	// Advance with no data sent
+	result, err := cp.AdvanceRound()
+	require.NoError(t, err)
+	assert.Empty(t, result.commitments)
+	assert.Empty(t, result.leaves)
+	assert.NotNil(t, result.snapshot)
+}
+
+func TestChildPrecollector_BatchWithBadLeafFallsBackToOneByOne(t *testing.T) {
+	stream := make(chan *models.CertificationRequest, 100)
+	cp, smtInstance := newTestPrecollector(t, stream, 10000)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	baseSnapshot := smtInstance.CreateSnapshot()
+	cp.Start(ctx, baseSnapshot)
+	defer cp.Stop()
+
+	// Send first commitment
+	c1 := testutil.CreateTestCertificationRequest(t, "fallback_1")
+	stream <- c1
+	time.Sleep(50 * time.Millisecond)
+
+	// Advance to lock in c1
+	r1, err := cp.AdvanceRound()
+	require.NoError(t, err)
+	assert.Len(t, r1.commitments, 1)
+
+	// Send a modified version of c1 (same path, different value) which will conflict,
+	// plus a valid commitment c2
+	c2 := testutil.CreateTestCertificationRequest(t, "fallback_2")
+	modified := *c1
+	modified.CertificationData.TransactionHash = c2.CertificationData.TransactionHash
+	stream <- &modified
+	stream <- c2
+	time.Sleep(50 * time.Millisecond)
+
+	r2, err := cp.AdvanceRound()
+	require.NoError(t, err)
+	// modified should be rejected, c2 should succeed
+	assert.Len(t, r2.commitments, 1, "only valid commitment should be collected")
+	assert.Equal(t, c2, r2.commitments[0])
+}
+
+// --- Snapshot reparenting test (still valid with precollector) ---
 
 func TestPreCollectionReparenting(t *testing.T) {
 	t.Run("ReparentedSnapshotCommitsToMainSMT", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		cfg := config.Config{
-			Processing: config.ProcessingConfig{
-				MaxCommitmentsPerRound: 1000,
-			},
-			Sharding: config.ShardingConfig{
-				Mode: config.ShardingModeChild,
-				Child: config.ChildConfig{
-					ShardID: 0b11,
-				},
-			},
-		}
 
-		testLogger, err := logger.New("info", "text", "stdout", false)
-		require.NoError(t, err)
-
+		testLogger := newTestLogger(t)
 		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
 		initialMainRootHash := smtInstance.GetRootHash()
 
-		rm := &RoundManager{
-			config:           &cfg,
-			logger:           testLogger,
-			smt:              smtInstance,
-			commitmentStream: make(chan *models.CertificationRequest, 100),
-		}
-
-		// Create commitment for Round N
+		// Round N: Create snapshot and add a leaf
 		roundNCommitment := testutil.CreateTestCertificationRequest(t, "round_n")
 		roundNLeaf := getLeafFromCommitment(t, roundNCommitment)
 
-		// Round N: Create snapshot and add a leaf
 		roundNSnapshot := smtInstance.CreateSnapshot()
-		_, err = roundNSnapshot.AddLeaves([]*smt.Leaf{roundNLeaf})
+		_, err := roundNSnapshot.AddLeaves([]*smt.Leaf{roundNLeaf})
 		require.NoError(t, err)
 		roundNRootHash := roundNSnapshot.GetRootHash()
 
-		rm.currentRound = &Round{
-			Number:   api.NewBigInt(big.NewInt(1)),
-			Snapshot: roundNSnapshot,
-		}
-
-		// Main SMT still has initial hash
 		assert.Equal(t, initialMainRootHash, smtInstance.GetRootHash())
 
-		// Initialize pre-collection from Round N's snapshot
-		rm.initPreCollection(ctx)
+		// Start precollector from Round N's snapshot
+		stream := make(chan *models.CertificationRequest, 100)
+		cp := newChildPrecollector(stream, nil, testLogger, 10000)
+		cp.Start(ctx, roundNSnapshot)
+		defer cp.Stop()
 
-		// Add pre-collected commitment to chained snapshot
+		// Send a pre-collected commitment
 		preCollectedCommitment := testutil.CreateTestCertificationRequest(t, "precollected")
-		err = rm.addToPreCollection(ctx, preCollectedCommitment)
+		stream <- preCollectedCommitment
+		time.Sleep(50 * time.Millisecond)
+
+		result, err := cp.AdvanceRound()
 		require.NoError(t, err)
+		require.Len(t, result.commitments, 1)
 
-		preCollectedRootHash := rm.preCollectionSnapshot.GetRootHash()
-
-		// Pre-collected snapshot should differ from Round N's snapshot
+		preCollectedRootHash := result.snapshot.GetRootHash()
 		assert.NotEqual(t, roundNRootHash, preCollectedRootHash)
 
 		// Commit Round N to main SMT (simulating FinalizeBlock)
 		roundNSnapshot.Commit(smtInstance)
 		assert.Equal(t, roundNRootHash, smtInstance.GetRootHash())
 
-		// Reparent pre-collection snapshot to main SMT
-		rm.preCollectionSnapshot.SetCommitTarget(smtInstance)
+		// Reparent and commit pre-collection snapshot to main SMT
+		result.snapshot.SetCommitTarget(smtInstance)
+		result.snapshot.Commit(smtInstance)
 
-		// Commit pre-collection to main SMT
-		rm.preCollectionSnapshot.Commit(smtInstance)
-
-		// Main SMT should now have pre-collected data
 		assert.Equal(t, preCollectedRootHash, smtInstance.GetRootHash())
 
-		// Verify we can retrieve both leaves from main SMT
+		// Verify both leaves are in main SMT
 		roundNPath, err := roundNCommitment.StateID.GetPath()
 		require.NoError(t, err)
 		leaf1, err := smtInstance.GetLeaf(roundNPath)
@@ -512,6 +605,83 @@ func TestPreCollectionReparenting(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotNil(t, leaf2)
 	})
+}
+
+// TestChildPrecollector_DeactivateDuringInFlightRound deactivates while the
+// first child round is blocked waiting for the parent proof. The in-flight
+// round should still finish block 1 once the proof is released, but it must
+// not start round 2.
+func TestChildPrecollector_DeactivateDuringInFlightRound(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{
+			Database: "test_child_deactivate_inflight",
+		},
+		Processing: config.ProcessingConfig{
+			RoundDuration:          100 * time.Millisecond,
+			MaxCommitmentsPerRound: 1000,
+		},
+		Sharding: config.ShardingConfig{
+			Mode: config.ShardingModeChild,
+			Child: config.ChildConfig{
+				ShardID:            0b11,
+				ParentPollTimeout:  5 * time.Second,
+				ParentPollInterval: 10 * time.Millisecond,
+			},
+		},
+	}
+	store := testutil.SetupTestStorage(t, cfg)
+
+	testLogger := newTestLogger(t)
+	rootClient := newBlockingProofRootAggregatorClient()
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		store.CommitmentQueue(),
+		store,
+		rootClient,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		smtInstance,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, rm.Start(ctx))
+	require.NoError(t, rm.Activate(ctx))
+
+	// Wait until round 1 is actively polling for the parent proof.
+	select {
+	case <-rootClient.proofPollStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for round 1 to enter proof polling")
+	}
+
+	// Deactivate while round 1 is still in-flight.
+	require.NoError(t, rm.Deactivate(ctx))
+
+	// Let the in-flight round finish block 1.
+	close(rootClient.releaseProof)
+
+	require.Eventually(t, func() bool {
+		block, err := store.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(1)))
+		return err == nil && block != nil
+	}, 3*time.Second, 25*time.Millisecond, "block 1 should be created after proof release")
+
+	// If the bug exists, round 2 would appear shortly after block 1 finalization.
+	time.Sleep(500 * time.Millisecond)
+
+	block2, err := store.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(2)))
+	require.NoError(t, err)
+	assert.Nil(t, block2, "no block 2 should be created after Deactivate")
+
+	// Wait for goroutines to drain
+	rm.wg.Wait()
 }
 
 func TestStartNewRoundWithSnapshot(t *testing.T) {
@@ -533,9 +703,7 @@ func TestStartNewRoundWithSnapshot(t *testing.T) {
 		}
 		storage := testutil.SetupTestStorage(t, cfg)
 
-		testLogger, err := logger.New("info", "text", "stdout", false)
-		require.NoError(t, err)
-
+		testLogger := newTestLogger(t)
 		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
 
 		rm, err := NewRoundManager(
@@ -544,16 +712,15 @@ func TestStartNewRoundWithSnapshot(t *testing.T) {
 			testLogger,
 			storage.CommitmentQueue(),
 			storage,
-			nil, // No root client for standalone
+			nil,
 			state.NewSyncStateTracker(),
-			nil, // No BFT client for this test
+			nil,
 			events.NewEventBus(testLogger),
 			smtInstance,
 			nil,
 		)
 		require.NoError(t, err)
 
-		// Create pre-collected snapshot with data
 		preSnapshot := smtInstance.CreateSnapshot()
 		commitment := testutil.CreateTestCertificationRequest(t, "precollected_round")
 		leaf := getLeafFromCommitment(t, commitment)
@@ -563,22 +730,18 @@ func TestStartNewRoundWithSnapshot(t *testing.T) {
 		preCommitments := []*models.CertificationRequest{commitment}
 		preLeaves := []*smt.Leaf{leaf}
 
-		// Start round with pre-collected snapshot
 		startTime := time.Now()
 		err = rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(big.NewInt(1)), preSnapshot, preCommitments, preLeaves)
 		require.NoError(t, err)
 
-		// Verify round was created with Processing state (not Collecting)
 		rm.roundMutex.RLock()
 		roundState := rm.currentRound.State
 		roundCommitments := len(rm.currentRound.Commitments)
 		rm.roundMutex.RUnlock()
 
-		// Round should start in Processing state, skipping Collecting
 		assert.Equal(t, RoundStateProcessing, roundState)
 		assert.Equal(t, 1, roundCommitments)
 
-		// Verify it completed quickly (no 200ms collect phase wait)
 		elapsed := time.Since(startTime)
 		assert.Less(t, elapsed, 100*time.Millisecond, "Should not wait for collect phase")
 	})
@@ -608,11 +771,8 @@ func TestPipelinedChildModeFlow(t *testing.T) {
 		}
 		storage := testutil.SetupTestStorage(t, cfg)
 
-		testLogger, err := logger.New("info", "text", "stdout", false)
-		require.NoError(t, err)
-
+		testLogger := newTestLogger(t)
 		rootAggregatorClient := testsharding.NewRootAggregatorClientStub()
-
 		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
 
 		rm, err := NewRoundManager(
@@ -623,7 +783,7 @@ func TestPipelinedChildModeFlow(t *testing.T) {
 			storage,
 			rootAggregatorClient,
 			state.NewSyncStateTracker(),
-			nil, // No BFT client for child mode
+			nil,
 			events.NewEventBus(testLogger),
 			smtInstance,
 			nil,
@@ -633,19 +793,16 @@ func TestPipelinedChildModeFlow(t *testing.T) {
 		require.NoError(t, rm.Start(ctx))
 		require.NoError(t, rm.Activate(ctx))
 
-		// Wait for first block to be created
 		require.Eventually(t, func() bool {
 			block, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(1)))
 			return err == nil && block != nil
 		}, 3*time.Second, 50*time.Millisecond, "first block should be created")
 
-		// Wait for second block
 		require.Eventually(t, func() bool {
 			block, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(2)))
 			return err == nil && block != nil
 		}, 3*time.Second, 50*time.Millisecond, "second block should be created")
 
-		// Verify both blocks exist
 		block1, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(1)))
 		require.NoError(t, err)
 		assert.NotNil(t, block1)
@@ -654,8 +811,170 @@ func TestPipelinedChildModeFlow(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotNil(t, block2)
 
-		// Verify round manager used pre-collection (2 submissions, 2 proofs)
 		assert.GreaterOrEqual(t, rootAggregatorClient.SubmissionCount(), 2)
 		assert.GreaterOrEqual(t, rootAggregatorClient.ProofCount(), 2)
 	})
+}
+
+// In proof-driven child mode, once block N is finalized the next round starts immediately.
+// A commitment arriving after that point must land in the following block.
+func TestChildPreCollection_CommitmentAfterProofBeforeRoundEnd_ShouldBeInNextRound(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{
+			Database: "test_child_precollection_tail_gap",
+		},
+		Processing: config.ProcessingConfig{
+			RoundDuration:          500 * time.Millisecond,
+			MaxCommitmentsPerRound: 1000,
+		},
+		Sharding: config.ShardingConfig{
+			Mode: config.ShardingModeChild,
+			Child: config.ChildConfig{
+				ShardID:            0b11,
+				ParentPollTimeout:  5 * time.Second,
+				ParentPollInterval: 200 * time.Millisecond,
+			},
+		},
+	}
+	storage := testutil.SetupTestStorage(t, cfg)
+
+	testLogger := newTestLogger(t)
+	rootAggregatorClient := testsharding.NewRootAggregatorClientStub()
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		storage.CommitmentQueue(),
+		storage,
+		rootAggregatorClient,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		smtInstance,
+		nil,
+	)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer shutdownCancel()
+		_ = rm.Stop(shutdownCtx)
+	})
+
+	require.NoError(t, rm.Start(ctx))
+	require.NoError(t, rm.Activate(ctx))
+
+	require.Eventually(t, func() bool {
+		block, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(1)))
+		return err == nil && block != nil
+	}, 3*time.Second, 25*time.Millisecond, "block 1 should be finalized before injecting the late commitment")
+
+	lateCommitment := testutil.CreateTestCertificationRequest(t, "after_proof_before_round_end")
+	rm.commitmentStream <- lateCommitment
+
+	blockNumber := waitForStateBlockNumber(t, ctx, storage, lateCommitment.StateID, 5*time.Second)
+
+	require.EqualValues(
+		t,
+		3,
+		blockNumber.Int64(),
+		"commitment arriving after block 1 finalization should land in block 3 because round 2 has already started",
+	)
+}
+
+func TestChildMode_RequiresFreshParentProof(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{
+			Database: "test_child_requires_fresh_parent_proof",
+		},
+		Processing: config.ProcessingConfig{
+			RoundDuration:          100 * time.Millisecond,
+			MaxCommitmentsPerRound: 1000,
+		},
+		Sharding: config.ShardingConfig{
+			Mode: config.ShardingModeChild,
+			Child: config.ChildConfig{
+				ShardID:            0b11,
+				ParentPollTimeout:  5 * time.Second,
+				ParentPollInterval: 10 * time.Millisecond,
+			},
+		},
+	}
+	storage := testutil.SetupTestStorage(t, cfg)
+
+	testLogger := newTestLogger(t)
+	rootAggregatorClient := newStaleThenFreshRootAggregatorClient(1, 10, 2, 13)
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+
+	rootHash, err := api.NewHexBytesFromString(smtInstance.GetRootHash())
+	require.NoError(t, err)
+	initialUC, err := testProofUC(1, 10)
+	require.NoError(t, err)
+	initialBlock := models.NewBlock(
+		api.NewBigInt(big.NewInt(1)),
+		"",
+		cfg.Sharding.Child.ShardID,
+		"",
+		"",
+		rootHash,
+		api.HexBytes{},
+		initialUC,
+		nil,
+	)
+	initialBlock.Finalized = true
+	require.NoError(t, storage.BlockStorage().Store(ctx, initialBlock))
+
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		storage.CommitmentQueue(),
+		storage,
+		rootAggregatorClient,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		smtInstance,
+		nil,
+	)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer shutdownCancel()
+		_ = rm.Stop(shutdownCtx)
+	})
+
+	require.NoError(t, rm.Start(ctx))
+	require.NoError(t, rm.Activate(ctx))
+
+	select {
+	case <-rootAggregatorClient.proofPollStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for child round to poll parent proof")
+	}
+
+	time.Sleep(250 * time.Millisecond)
+
+	block1, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(2)))
+	require.NoError(t, err)
+	assert.Nil(t, block1, "child must not finalize against a stale parent UC")
+	assert.Greater(t, rootAggregatorClient.ProofPolls(), 1, "child should keep polling while proof is stale")
+
+	close(rootAggregatorClient.releaseFresh)
+
+	require.Eventually(t, func() bool {
+		block, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(2)))
+		return err == nil && block != nil
+	}, 3*time.Second, 25*time.Millisecond, "block 2 should be created once a fresh parent proof is available")
+
+	assert.EqualValues(t, 2, rm.lastAcceptedParentUCRound.Load())
 }
