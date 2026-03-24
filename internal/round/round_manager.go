@@ -646,7 +646,7 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 
 	rm.logger.Info("Found SMT nodes in storage, starting restoration", "totalNodes", totalCount)
 
-	const chunkSize = 1000
+	const chunkSize = 10000
 	offset := 0
 	restoredCount := 0
 
