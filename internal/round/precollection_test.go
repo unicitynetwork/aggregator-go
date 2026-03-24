@@ -684,6 +684,78 @@ func TestChildPrecollector_DeactivateDuringInFlightRound(t *testing.T) {
 	rm.wg.Wait()
 }
 
+func TestChildRound_ParentProofTimeoutIsRetriable(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{
+			Database: "test_child_parent_proof_timeout_retriable",
+		},
+		Processing: config.ProcessingConfig{
+			RoundDuration:          100 * time.Millisecond,
+			MaxCommitmentsPerRound: 1000,
+		},
+		Sharding: config.ShardingConfig{
+			Mode: config.ShardingModeChild,
+			Child: config.ChildConfig{
+				ShardID:            0b11,
+				ParentPollTimeout:  100 * time.Millisecond,
+				ParentPollInterval: 10 * time.Millisecond,
+			},
+		},
+	}
+	storage := testutil.SetupTestStorage(t, cfg)
+
+	testLogger := newTestLogger(t)
+	rootClient := newBlockingProofRootAggregatorClient()
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		storage.CommitmentQueue(),
+		storage,
+		rootClient,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		smtInstance,
+		nil,
+	)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer shutdownCancel()
+		_ = rm.Stop(shutdownCtx)
+	})
+
+	require.NoError(t, rm.Start(ctx))
+	require.NoError(t, rm.Activate(ctx))
+
+	select {
+	case <-rootClient.proofPollStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for child round to poll parent proof")
+	}
+
+	// Wait past at least one poll timeout window.
+	time.Sleep(250 * time.Millisecond)
+
+	block, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(1)))
+	require.NoError(t, err)
+	assert.Nil(t, block, "block should not be finalized before proof is released")
+
+	close(rootClient.releaseProof)
+
+	require.Eventually(t, func() bool {
+		block, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(1)))
+		return err == nil && block != nil
+	}, 3*time.Second, 25*time.Millisecond, "block 1 should be created after proof release")
+}
+
 func TestStartNewRoundWithSnapshot(t *testing.T) {
 	t.Run("SkipsCollectPhaseWithPreCollectedData", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())

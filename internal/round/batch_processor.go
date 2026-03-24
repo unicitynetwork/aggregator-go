@@ -179,8 +179,21 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			"submissionDuration", submissionDuration)
 
 		proofWaitStart := time.Now()
-		proof, parentUC, err := rm.pollForParentProof(ctx, rootHashRaw.String())
-		if err != nil {
+		var (
+			proof    *api.RootShardInclusionProof
+			parentUC *types.UnicityCertificate
+		)
+		for {
+			proof, parentUC, err = rm.pollForParentProof(ctx, rootHashRaw.String())
+			if err == nil {
+				break
+			}
+			if errors.Is(err, ErrParentProofPollTimeout) {
+				rm.logger.WithContext(ctx).Warn("Parent shard proof poll timed out, continuing to poll",
+					"rootHash", rootHashRaw.String(),
+					"timeout", rm.config.Sharding.Child.ParentPollTimeout)
+				continue
+			}
 			return fmt.Errorf("failed to poll for parent shard inclusion proof: %w", err)
 		}
 		proofWait := time.Since(proofWaitStart)
@@ -264,7 +277,7 @@ func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string)
 			rm.logger.WithContext(ctx).Warn("Timed out waiting for parent shard inclusion proof",
 				"rootHash", rootHash,
 				"pollDuration", time.Since(pollStart))
-			return nil, nil, fmt.Errorf("timed out waiting for parent shard inclusion proof %s", rootHash)
+			return nil, nil, fmt.Errorf("%w: %s", ErrParentProofPollTimeout, rootHash)
 		case <-ticker.C:
 			request := &api.GetShardProofRequest{ShardID: rm.config.Sharding.Child.ShardID}
 			proof, err := rm.rootClient.GetShardProof(pollingCtx, request)
@@ -301,6 +314,9 @@ func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string)
 		}
 	}
 }
+
+// ErrParentProofPollTimeout marks a single poll window timeout while waiting for a parent proof.
+var ErrParentProofPollTimeout = errors.New("parent shard inclusion proof poll timeout")
 
 func (rm *RoundManager) submitShardRootWithRetry(ctx context.Context, req *api.SubmitShardRootRequest) error {
 	if rm.rootClient == nil {

@@ -130,7 +130,7 @@ func TestLargeSmtRestoration(t *testing.T) {
 	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
 	require.NoError(t, err, "Should create RoundManager")
 
-	const testNodeCount = 2500 // Ensure multiple chunks (chunkSize = 1000 in round_manager.go)
+	const testNodeCount = 12000 // Ensure multiple chunks (chunkSize = 10000 in round_manager.go)
 
 	// Create large dataset with non-sequential paths to test ordering
 	testLeaves := make([]*smt.Leaf, testNodeCount)
