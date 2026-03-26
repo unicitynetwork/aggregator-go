@@ -98,7 +98,7 @@ docker-restart-aggregator:
 	@echo "Rebuilding and restarting aggregator service..."
 	@docker compose stop aggregator
 	@docker compose build aggregator
-	@LOG_LEVEL=debug docker compose up -d --force-recreate --no-deps aggregator
+	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose up -d --force-recreate --no-deps aggregator
 	@echo "Aggregator service restarted"
 
 docker-run-ha-clean:
@@ -121,7 +121,7 @@ docker-restart-ha:
 	@echo "Rebuilding and restarting HA aggregator services..."
 	@docker compose -f ha-compose.yml stop aggregator-1 aggregator-2
 	@docker compose -f ha-compose.yml build aggregator-1 aggregator-2
-	@LOG_LEVEL=debug docker compose -f ha-compose.yml up -d --force-recreate --no-deps aggregator-1 aggregator-2
+	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose -f ha-compose.yml up -d --force-recreate --no-deps aggregator-1 aggregator-2
 	@echo "HA Aggregator services restarted"
 
 
@@ -165,5 +165,5 @@ docker-restart-sh-ha:
 	@echo "Rebuilding and restarting sharding+HA aggregator services..."
 	@docker compose -f sharding-ha-compose.yml stop aggregator-shard1-1 aggregator-shard1-2 aggregator-shard2-1 aggregator-shard2-2 aggregator-root-1
 	@docker compose -f sharding-ha-compose.yml build aggregator-shard1-1 aggregator-shard1-2 aggregator-shard2-1 aggregator-shard2-2 aggregator-root-1
-	@LOG_LEVEL=debug docker compose -f sharding-ha-compose.yml up -d --force-recreate --no-deps aggregator-shard1-1 aggregator-shard1-2 aggregator-shard2-1 aggregator-shard2-2 aggregator-root-1
+	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose -f sharding-ha-compose.yml up -d --force-recreate --no-deps aggregator-shard1-1 aggregator-shard1-2 aggregator-shard2-1 aggregator-shard2-2 aggregator-root-1
 	@echo "Sharding+HA Aggregator services restarted"
