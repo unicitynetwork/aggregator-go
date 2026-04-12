@@ -16,7 +16,7 @@ import (
 // Returns the container and a cleanup function
 func CreateTestRedisContainer(ctx context.Context, t *testing.T) (testcontainers.Container, func()) {
 	req := testcontainers.ContainerRequest{
-		Image:        "redis:7-alpine",
+		Image:        "redis:7",
 		ExposedPorts: []string{"6379/tcp"},
 		WaitingFor:   wait.ForLog("Ready to accept connections"),
 		Cmd: []string{
