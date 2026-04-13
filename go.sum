@@ -590,10 +590,10 @@ github.com/twitchyliquid64/golang-asm v0.15.1 h1:SU5vSMR7hnwNxj24w34ZyCi/FmDZTkS
 github.com/twitchyliquid64/golang-asm v0.15.1/go.mod h1:a1lVb/DtPvCB8fslRZhAngC2+aY1QWCk3Cedj/Gdt08=
 github.com/ugorji/go/codec v1.2.12 h1:9LC83zGrHhuUA9l16C9AHXAqEV/2wBQ4nkvumAE65EE=
 github.com/ugorji/go/codec v1.2.12/go.mod h1:UNopzCgEMSXjBc6AOMqYvWC1ktqTAfzJZUZgYf6w6lg=
-github.com/unicitynetwork/bft-core v1.0.2-0.20260410215334-dfd75121b265 h1:pDW9AwiHkY+f+Dh0JcIY7ceTXu8UotUFLW7sG83grKE=
-github.com/unicitynetwork/bft-core v1.0.2-0.20260410215334-dfd75121b265/go.mod h1:C6E/PbwP+6KVbXC78OtlJNqOZOzYej14uysGHInNtDw=
-github.com/unicitynetwork/bft-go-base v1.0.3-0.20260410205918-1ebdc7379cd8 h1:OVpXcZFyLPGAmpsTxPCHtGJBkHP9G6Zh9S7TRpeFWQU=
-github.com/unicitynetwork/bft-go-base v1.0.3-0.20260410205918-1ebdc7379cd8/go.mod h1:hBnOG52VRy/vpgIBUulTgk7PBTwODZ2xkVjCEu5yRcQ=
+github.com/unicitynetwork/bft-core v1.1.0 h1:VBoC0XyEsQoT7FTa2r3zJ+EL/CFERvxZFFnhJbhly08=
+github.com/unicitynetwork/bft-core v1.1.0/go.mod h1:ish6bE4r7/XxhL1G9T7PSNBiRIj5W63QCYVYXoukJPc=
+github.com/unicitynetwork/bft-go-base v1.1.0 h1:x1+kX0X+n4CmNibBs0f8oWwoZ5UCW40Gaq6WYhUcUZQ=
+github.com/unicitynetwork/bft-go-base v1.1.0/go.mod h1:hBnOG52VRy/vpgIBUulTgk7PBTwODZ2xkVjCEu5yRcQ=
 github.com/urfave/cli v1.22.2/go.mod h1:Gos4lmkARVdJ6EkW0WaNv/tZAAMe9V7XWyB60NtXRu0=
 github.com/urfave/cli v1.22.10/go.mod h1:Gos4lmkARVdJ6EkW0WaNv/tZAAMe9V7XWyB60NtXRu0=
 github.com/viant/assertly v0.4.8/go.mod h1:aGifi++jvCrUaklKEKT0BU95igDNaqkvz+49uaYMPRU=
