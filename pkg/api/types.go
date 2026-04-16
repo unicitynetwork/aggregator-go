@@ -166,12 +166,6 @@ func (f *ParentInclusionFragment) Verify(shardID ShardID, keyLength int, expecte
 	}
 
 	path := big.NewInt(int64(shardID))
-	if path.Sign() <= 0 || path.BitLen() <= 1 {
-		return fmt.Errorf("invalid shard ID %d", shardID)
-	}
-	if keyLength <= 0 {
-		return fmt.Errorf("keyLength must be positive, got %d", keyLength)
-	}
 	key, err := PathToFixedBytes(path, keyLength)
 	if err != nil {
 		return fmt.Errorf("failed to derive parent fragment key: %w", err)

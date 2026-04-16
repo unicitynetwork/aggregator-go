@@ -162,6 +162,9 @@ func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.
 			pas.logger.WithContext(ctx).Debug("Serving shard proof while node is follower")
 		}
 	}
+	if !pas.parentRoundManager.IsReady() {
+		return nil, errors.New("parent round manager is not ready to serve shard proofs")
+	}
 
 	if err := pas.validateShardID(req.ShardID); err != nil {
 		pas.logger.WithContext(ctx).Warn("Invalid shard ID", "shardId", req.ShardID, "error", err.Error())
@@ -182,6 +185,9 @@ func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.
 	var unicityCertificate api.HexBytes
 	var blockNumber uint64
 	if parentFragment != nil {
+		// GetShardInclusionFragmentWithRoot snapshots fragment+root under one RLock.
+		// Finalization persists block data before committing the SMT snapshot,
+		// so a visible root is expected to have a corresponding finalized block.
 		// Blocks are stored under the raw 32-byte SMT root matching
 		// UC.IR.h, so look up the block by the raw root hash.
 		rootHash := api.HexBytes(rootHashRaw)

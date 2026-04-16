@@ -162,10 +162,8 @@ func TestValidator_RequestIDMismatch(t *testing.T) {
 
 func TestValidator_ShardID(t *testing.T) {
 	makeShardTestID := func(firstByte, lastByte byte) string {
-		key := make([]byte, api.StateTreeKeyLengthBytes+2)
-		key[0] = 0x00
-		key[1] = 0x00
-		key[2] = firstByte
+		key := make([]byte, api.StateTreeKeyLengthBytes)
+		key[0] = firstByte
 		key[len(key)-1] = lastByte
 		return hex.EncodeToString(key)
 	}
@@ -244,12 +242,29 @@ func TestValidator_ShardID(t *testing.T) {
 		// === END FOUR SHARD CONFIG ===
 	}
 	for _, tc := range tests {
-		match, err := verifyShardID(tc.commitmentID, tc.shardBitmask)
+		match, err := api.MatchesShardPrefixFromHex(tc.commitmentID, tc.shardBitmask)
 		require.NoError(t, err)
 		if match != tc.match {
 			t.Errorf("commitmentID=%s shardBitmask=%b expected %v got %v", tc.commitmentID, tc.shardBitmask, tc.match, match)
 		}
 	}
+}
+
+func TestValidator_ValidateShardID_AcceptsPrefixedRequestID(t *testing.T) {
+	key := make([]byte, api.StateTreeKeyLengthBytes)
+	key[0] = 0x01 // bit 0 set -> shard 0b11
+
+	validator := &CommitmentValidator{
+		shardConfig: config.ShardingConfig{
+			Mode: config.ShardingModeChild,
+			Child: config.ChildConfig{
+				ShardID: 0b11,
+			},
+		},
+	}
+
+	requestID := api.RequireNewImprintV2("0000" + hex.EncodeToString(key))
+	require.NoError(t, validator.ValidateShardID(requestID))
 }
 
 func TestValidator_InvalidSignatureFormat(t *testing.T) {

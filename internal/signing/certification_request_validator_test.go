@@ -230,7 +230,7 @@ func TestValidator_ShardID(t *testing.T) {
 		// === END FOUR SHARD CONFIG ===
 	}
 	for _, tc := range tests {
-		match, err := verifyShardID(tc.commitmentID, tc.shardBitmask)
+		match, err := api.MatchesShardPrefixFromHex(tc.commitmentID, tc.shardBitmask, false)
 		require.NoError(t, err)
 		if match != tc.match {
 			t.Errorf("commitmentID=%s shardBitmask=%b expected %v got %v", tc.commitmentID, tc.shardBitmask, tc.match, match)
@@ -243,7 +243,7 @@ func TestValidator_ShardIDRejectsPrefixedStateID(t *testing.T) {
 	rawKey[0] = 0x01
 	prefixed := append([]byte{0x00, 0x00}, rawKey...)
 
-	match, err := verifyShardID(hex.EncodeToString(prefixed), 0b11)
+	match, err := api.MatchesShardPrefixFromHex(hex.EncodeToString(prefixed), 0b11, false)
 	require.Error(t, err)
 	require.False(t, match)
 	require.Contains(t, err.Error(), "must be exactly 32 bytes")

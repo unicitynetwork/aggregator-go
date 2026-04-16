@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -209,15 +208,7 @@ func matchesShardMask(requestIDHex string, shardMask int) (bool, error) {
 	if shardMask <= 0 {
 		return false, nil
 	}
-
-	keyBytes, err := hex.DecodeString(requestIDHex)
-	if err != nil {
-		return false, fmt.Errorf("failed to decode request ID: %w", err)
-	}
-	if len(keyBytes) != api.StateTreeKeyLengthBytes {
-		return false, fmt.Errorf("invalid request ID length: got %d, want %d", len(keyBytes), api.StateTreeKeyLengthBytes)
-	}
-	return api.MatchesShardPrefix(keyBytes, shardMask)
+	return api.MatchesShardPrefixFromHex(requestIDHex, shardMask, false)
 }
 
 // matchesAnyShardTarget checks if a request ID matches any of the configured shard targets
@@ -403,7 +394,7 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 					if proofQueue != nil {
 						metrics.recordSubmissionTimestamp(requestIDStr)
 						select {
-						case proofQueue <- proofJob{shardIdx: shardIdx, requestID: requestIDStr, request: req}:
+						case proofQueue <- proofJob{shardIdx: shardIdx, request: req}:
 						default:
 							// Queue full, skip proof verification for this one
 						}
@@ -430,11 +421,20 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 			return
 		case job := <-proofQueue:
 			go func(job proofJob) {
-				reqID := job.requestID
+				if job.request == nil {
+					metrics.recordError("Missing original request for proof verification")
+					atomic.AddInt64(&metrics.proofVerifyFailed, 1)
+					if sm := metrics.shard(job.shardIdx); sm != nil {
+						sm.proofVerifyFailed.Add(1)
+					}
+					return
+				}
+
+				reqID := normalizeRequestID(job.request.StateID.String())
 				shardIdx := job.shardIdx
 				time.Sleep(proofInitialDelay)
 				startTime := time.Now()
-				normalizedID := normalizeRequestID(reqID)
+				normalizedID := reqID
 				client := shardClients[shardIdx].proofClient // Use separate proof client pool
 
 				for attempt := 0; attempt < proofMaxRetries; attempt++ {
@@ -529,15 +529,6 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 						totalLatency = time.Since(startTime) + proofInitialDelay
 					}
 					metrics.addProofLatency(totalLatency)
-
-					if job.request == nil {
-						metrics.recordError(fmt.Sprintf("Missing original request for proof verification: %s", reqID))
-						atomic.AddInt64(&metrics.proofVerifyFailed, 1)
-						if sm := metrics.shard(shardIdx); sm != nil {
-							sm.proofVerifyFailed.Add(1)
-						}
-						return
-					}
 
 					if err := proofResp.InclusionProof.Verify(job.request); err != nil {
 						if attempt < proofMaxRetries-1 {

@@ -2,7 +2,6 @@ package v1
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -211,7 +210,7 @@ func (v *CommitmentValidator) ValidateShardID(requestID api.RequestID) error {
 	if !v.shardConfig.Mode.IsChild() {
 		return nil
 	}
-	ok, err := verifyShardID(requestID.String(), v.shardConfig.Child.ShardID)
+	ok, err := api.MatchesShardPrefixFromHex(requestID.String(), v.shardConfig.Child.ShardID, true)
 	if err != nil {
 		return fmt.Errorf("error verifying shard id: %w", err)
 	}
@@ -219,19 +218,6 @@ func (v *CommitmentValidator) ValidateShardID(requestID api.RequestID) error {
 		return errors.New("request ID shard part does not match the current shard identifier")
 	}
 	return nil
-}
-
-// verifyShardID checks whether the raw SMT key bits of commitmentID match the
-// configured shard prefix under the SMT's LSB-first byte layout.
-func verifyShardID(commitmentID string, shardBitmask int) (bool, error) {
-	keyBytes, err := hex.DecodeString(commitmentID)
-	if err != nil {
-		return false, fmt.Errorf("failed to decode certification state ID: %w", err)
-	}
-	if len(keyBytes) == api.StateTreeKeyLengthBytes+2 {
-		keyBytes = keyBytes[2:]
-	}
-	return api.MatchesShardPrefix(keyBytes, shardBitmask)
 }
 
 // CreateDataHashImprint creates a DataHash imprint in the Unicity format:

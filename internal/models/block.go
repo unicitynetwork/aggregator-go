@@ -1,7 +1,6 @@
 package models
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -39,9 +38,15 @@ type BlockBSON struct {
 	NoDeletionProofHash string               `bson:"noDeletionProofHash,omitempty"`
 	CreatedAt           time.Time            `bson:"createdAt"`
 	UnicityCertificate  string               `bson:"unicityCertificate"`
-	ParentFragment      string               `bson:"parentFragment,omitempty"` // child mode only
-	ParentBlockNumber   string               `bson:"parentBlockNumber,omitempty"`
+	ParentFragment      *ParentFragmentBSON  `bson:"parentFragment,omitempty"` // child mode only
+	ParentBlockNumber   uint64               `bson:"parentBlockNumber,omitempty"`
 	Finalized           bool                 `bson:"finalized"`
+}
+
+// ParentFragmentBSON is the BSON representation of ParentInclusionFragment.
+type ParentFragmentBSON struct {
+	CertificateBytes []byte `bson:"certificateBytes"`
+	ShardLeafValue   []byte `bson:"shardLeafValue"`
 }
 
 // ToBSON converts Block to BlockBSON for MongoDB storage
@@ -50,17 +55,12 @@ func (b *Block) ToBSON() (*BlockBSON, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error converting block index to decimal-128: %w", err)
 	}
-	var parentFragment string
+	var parentFragment *ParentFragmentBSON
 	if b.ParentFragment != nil {
-		parentFragmentJSON, err := json.Marshal(b.ParentFragment)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal parent fragment: %w", err)
+		parentFragment = &ParentFragmentBSON{
+			CertificateBytes: append([]byte(nil), b.ParentFragment.CertificateBytes...),
+			ShardLeafValue:   append([]byte(nil), b.ParentFragment.ShardLeafValue...),
 		}
-		parentFragment = api.NewHexBytes(parentFragmentJSON).String()
-	}
-	var parentBlockNumber string
-	if b.ParentBlockNumber != 0 {
-		parentBlockNumber = fmt.Sprintf("%d", b.ParentBlockNumber)
 	}
 	return &BlockBSON{
 		Index:               indexDecimal,
@@ -74,7 +74,7 @@ func (b *Block) ToBSON() (*BlockBSON, error) {
 		CreatedAt:           b.CreatedAt.Time,
 		UnicityCertificate:  b.UnicityCertificate.String(),
 		ParentFragment:      parentFragment,
-		ParentBlockNumber:   parentBlockNumber,
+		ParentBlockNumber:   b.ParentBlockNumber,
 		Finalized:           b.Finalized,
 	}, nil
 }
@@ -102,20 +102,10 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 	}
 
 	var parentFragment *api.ParentInclusionFragment
-	if bb.ParentFragment != "" {
-		hexBytes, err := api.NewHexBytesFromString(bb.ParentFragment)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse parentFragment: %w", err)
-		}
-		parentFragment = &api.ParentInclusionFragment{}
-		if err := json.Unmarshal(hexBytes, parentFragment); err != nil {
-			return nil, fmt.Errorf("failed to parse parentFragment: %w", err)
-		}
-	}
-	var parentBlockNumber uint64
-	if bb.ParentBlockNumber != "" {
-		if _, err := fmt.Sscanf(bb.ParentBlockNumber, "%d", &parentBlockNumber); err != nil {
-			return nil, fmt.Errorf("failed to parse parentBlockNumber: %w", err)
+	if bb.ParentFragment != nil {
+		parentFragment = &api.ParentInclusionFragment{
+			CertificateBytes: append([]byte(nil), bb.ParentFragment.CertificateBytes...),
+			ShardLeafValue:   append([]byte(nil), bb.ParentFragment.ShardLeafValue...),
 		}
 	}
 
@@ -136,7 +126,7 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 		CreatedAt:           api.NewTimestamp(bb.CreatedAt),
 		UnicityCertificate:  unicityCertificate,
 		ParentFragment:      parentFragment,
-		ParentBlockNumber:   parentBlockNumber,
+		ParentBlockNumber:   bb.ParentBlockNumber,
 		Finalized:           bb.Finalized,
 	}, nil
 }
@@ -154,4 +144,12 @@ func NewBlock(index *api.BigInt, chainID string, shardID api.ShardID, version, f
 		CreatedAt:          api.Now(),
 		UnicityCertificate: uc,
 	}
+}
+
+// NewChildBlock creates a block for child mode with required parent proof metadata.
+func NewChildBlock(index *api.BigInt, chainID string, shardID api.ShardID, version, forkID string, rootHash, previousBlockHash, uc api.HexBytes, parentFragment *api.ParentInclusionFragment, parentBlockNumber uint64) *Block {
+	block := NewBlock(index, chainID, shardID, version, forkID, rootHash, previousBlockHash, uc)
+	block.ParentFragment = parentFragment
+	block.ParentBlockNumber = parentBlockNumber
+	return block
 }

@@ -202,7 +202,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			return fmt.Errorf("parent shard proof missing native parent fragment")
 		}
 
-		block := models.NewBlock(
+		block := models.NewChildBlock(
 			blockNumber,
 			rm.config.Chain.ID,
 			request.ShardID,
@@ -211,9 +211,9 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			rootHash,
 			parentHash,
 			proof.UnicityCertificate,
+			proof.ParentFragment,
+			proof.BlockNumber,
 		)
-		block.ParentFragment = proof.ParentFragment
-		block.ParentBlockNumber = proof.BlockNumber
 		if err := rm.FinalizeBlockWithRetry(ctx, block); err != nil {
 			return fmt.Errorf("failed to finalize block after retries: %w", err)
 		}
@@ -388,6 +388,10 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 
 // FinalizeBlock creates and persists a new block with the given data
 func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) error {
+	if err := rm.validateBlockForMode(block); err != nil {
+		return err
+	}
+
 	rm.logger.WithContext(ctx).Info("FinalizeBlock called",
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String(),
@@ -585,6 +589,21 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		metrics.BlockCreationDuration.Observe(time.Since(roundStartTime).Seconds())
 	}
 
+	return nil
+}
+
+func (rm *RoundManager) validateBlockForMode(block *models.Block) error {
+	if block == nil {
+		return errors.New("block is nil")
+	}
+	if rm.config.Sharding.Mode.IsChild() {
+		if block.ParentFragment == nil {
+			return errors.New("child-mode block missing parent fragment")
+		}
+		if block.ParentBlockNumber == 0 {
+			return errors.New("child-mode block missing parent block number")
+		}
+	}
 	return nil
 }
 

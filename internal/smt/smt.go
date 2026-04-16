@@ -623,6 +623,9 @@ func (smt *SparseMerkleTree) generateInclusionCertWithLeafValue(hasher *api.Data
 	}
 	if current.isLeaf() {
 		leaf := current.(*LeafBranch)
+		// Parent-mode populate() creates placeholder leaves with nil Key and nil
+		// Value. For those placeholders, key equality is validated only after the
+		// first real AddLeaf replaces them with a keyed leaf.
 		if leaf.Key != nil && !bytes.Equal(leaf.Key, key) {
 			return nil, fmt.Errorf("smt: leaf not found for key %x", key)
 		}
@@ -655,6 +658,9 @@ func (smt *SparseMerkleTree) generateInclusionCertWithLeafValue(hasher *api.Data
 
 		sibHash := sibling.calculateHash(hasher)
 		if sibHash == nil {
+			// The sibling subtree is empty (all-placeholder / no submitted leaf),
+			// so this depth is a unary passthrough: no bitmap bit and no sibling.
+			// Any already recorded shallower siblings remain valid.
 			return smt.generateInclusionCertWithLeafValue(hasher, key, child, cert)
 		}
 
@@ -947,41 +953,4 @@ func NewLeaf(path *big.Int, value []byte) *Leaf {
 		Path:  new(big.Int).Set(path),
 		Value: append([]byte(nil), value...),
 	}
-}
-
-// JoinPaths joins the hash proofs from a child and parent in sharded setting
-func JoinPaths(child, parent *api.MerkleTreePath) (*api.MerkleTreePath, error) {
-	if child == nil {
-		return nil, errors.New("nil child path")
-	}
-	if parent == nil {
-		return nil, errors.New("nil parent path")
-	}
-
-	// Root hashes are hex-encoded imprints, the first 4 characters are hash function identifiers
-	if len(child.Root) < 4 {
-		return nil, errors.New("invalid child root hash format")
-	}
-	if len(parent.Root) < 4 {
-		return nil, errors.New("invalid parent root hash format")
-	}
-	if child.Root[:4] != parent.Root[:4] {
-		return nil, errors.New("can't join paths: child hash algorithm does not match parent")
-	}
-
-	if len(parent.Steps) == 0 {
-		return nil, errors.New("empty parent hash steps")
-	}
-	if parent.Steps[0].Data == nil || *parent.Steps[0].Data != child.Root[4:] {
-		return nil, errors.New("can't join paths: child root hash does not match parent input hash")
-	}
-
-	steps := make([]api.MerkleTreeStep, len(child.Steps)+len(parent.Steps)-1)
-	copy(steps, child.Steps)
-	copy(steps[len(child.Steps):], parent.Steps[1:])
-
-	return &api.MerkleTreePath{
-		Root:  parent.Root,
-		Steps: steps,
-	}, nil
 }

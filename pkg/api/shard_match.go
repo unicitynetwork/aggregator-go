@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math/bits"
 )
@@ -26,4 +27,22 @@ func MatchesShardPrefix(keyBytes []byte, shardBitmask int) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// MatchesShardPrefixFromHex decodes a hex-encoded 32-byte state key and
+// applies MatchesShardPrefix.
+func MatchesShardPrefixFromHex(keyHex string, shardBitmask int) (bool, error) {
+	keyBytes, err := hex.DecodeString(keyHex)
+	if err != nil {
+		return false, fmt.Errorf("failed to decode state key: %w", err)
+	}
+
+	if len(keyBytes) != StateTreeKeyLengthBytes {
+		return false, fmt.Errorf(
+			"state key must be exactly %d bytes, got %d",
+			StateTreeKeyLengthBytes, len(keyBytes),
+		)
+	}
+
+	return MatchesShardPrefix(keyBytes, shardBitmask)
 }

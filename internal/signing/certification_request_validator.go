@@ -1,7 +1,6 @@
 package signing
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -184,7 +183,7 @@ func (v *CertificationRequestValidator) ValidateShardID(stateID api.StateID) err
 	if !v.shardConfig.Mode.IsChild() {
 		return nil
 	}
-	ok, err := verifyShardID(stateID.String(), v.shardConfig.Child.ShardID)
+	ok, err := api.MatchesShardPrefixFromHex(stateID.String(), v.shardConfig.Child.ShardID)
 	if err != nil {
 		return fmt.Errorf("error verifying shard id: %w", err)
 	}
@@ -192,20 +191,4 @@ func (v *CertificationRequestValidator) ValidateShardID(stateID api.StateID) err
 		return errors.New("state ID shard part does not match the current shard identifier")
 	}
 	return nil
-}
-
-// verifyShardID checks whether the raw SMT key bits of commitmentID match the
-// configured shard prefix under the SMT's LSB-first byte layout.
-func verifyShardID(commitmentID string, shardBitmask int) (bool, error) {
-	keyBytes, err := hex.DecodeString(commitmentID)
-	if err != nil {
-		return false, fmt.Errorf("failed to decode certification state ID: %w", err)
-	}
-	if len(keyBytes) != api.StateTreeKeyLengthBytes {
-		return false, fmt.Errorf(
-			"certification state ID must be exactly %d bytes, got %d",
-			api.StateTreeKeyLengthBytes, len(keyBytes),
-		)
-	}
-	return api.MatchesShardPrefix(keyBytes, shardBitmask)
 }

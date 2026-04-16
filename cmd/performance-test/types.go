@@ -110,9 +110,8 @@ type ShardClient struct {
 }
 
 type proofJob struct {
-	shardIdx  int
-	requestID string
-	request   *api.CertificationRequest
+	shardIdx int
+	request  *api.CertificationRequest
 }
 
 // RequestRateCounters tracks per-second client-side request activity.
