@@ -2,6 +2,7 @@ package v1
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -210,7 +211,16 @@ func (v *CommitmentValidator) ValidateShardID(requestID api.RequestID) error {
 	if !v.shardConfig.Mode.IsChild() {
 		return nil
 	}
-	ok, err := api.MatchesShardPrefixFromHex(requestID.String(), v.shardConfig.Child.ShardID, true)
+	keyHex := requestID.String()
+	keyBytes, err := hex.DecodeString(keyHex)
+	if err != nil {
+		return fmt.Errorf("error decoding request ID: %w", err)
+	}
+	// V1 request IDs may carry a 2-byte algorithm prefix; strip it.
+	if len(keyBytes) == api.StateTreeKeyLengthBytes+2 {
+		keyBytes = keyBytes[2:]
+	}
+	ok, err := api.MatchesShardPrefix(keyBytes, v.shardConfig.Child.ShardID)
 	if err != nil {
 		return fmt.Errorf("error verifying shard id: %w", err)
 	}

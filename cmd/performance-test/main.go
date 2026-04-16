@@ -208,7 +208,7 @@ func matchesShardMask(requestIDHex string, shardMask int) (bool, error) {
 	if shardMask <= 0 {
 		return false, nil
 	}
-	return api.MatchesShardPrefixFromHex(requestIDHex, shardMask, false)
+	return api.MatchesShardPrefixFromHex(requestIDHex, shardMask)
 }
 
 // matchesAnyShardTarget checks if a request ID matches any of the configured shard targets
