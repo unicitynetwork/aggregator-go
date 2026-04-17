@@ -108,6 +108,32 @@ func (ts *ThreadSafeSMT) GetInclusionCert(key []byte) (*api.InclusionCert, error
 	return ts.smt.GetInclusionCert(key)
 }
 
+// GetShardInclusionFragment builds the native parent proof fragment for the
+// given shard ID. This is only valid on parent-mode SMT instances.
+func (ts *ThreadSafeSMT) GetShardInclusionFragment(shardID api.ShardID) (*api.ParentInclusionFragment, error) {
+	ts.rwMux.RLock()
+	defer ts.rwMux.RUnlock()
+	return ts.smt.GetShardInclusionFragment(shardID)
+}
+
+// GetShardInclusionFragmentWithRoot atomically reads the parent fragment and
+// the raw SMT root from the same in-memory snapshot. This avoids serving a
+// fragment from one root and looking up a block for a newer root in a later
+// read section.
+func (ts *ThreadSafeSMT) GetShardInclusionFragmentWithRoot(shardID api.ShardID) (*api.ParentInclusionFragment, []byte, error) {
+	ts.rwMux.RLock()
+	defer ts.rwMux.RUnlock()
+
+	parentFragment, err := ts.smt.GetShardInclusionFragment(shardID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if parentFragment == nil {
+		return nil, nil, nil
+	}
+	return parentFragment, ts.smt.GetRootHashRaw(), nil
+}
+
 // GetKeyLength exposes the configured SMT key length.
 func (ts *ThreadSafeSMT) GetKeyLength() int {
 	ts.rwMux.RLock()

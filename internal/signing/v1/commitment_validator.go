@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math/big"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/models/v1"
@@ -212,7 +211,16 @@ func (v *CommitmentValidator) ValidateShardID(requestID api.RequestID) error {
 	if !v.shardConfig.Mode.IsChild() {
 		return nil
 	}
-	ok, err := verifyShardID(requestID.String(), v.shardConfig.Child.ShardID)
+	keyHex := requestID.String()
+	keyBytes, err := hex.DecodeString(keyHex)
+	if err != nil {
+		return fmt.Errorf("error decoding request ID: %w", err)
+	}
+	// V1 request IDs may carry a 2-byte algorithm prefix; strip it.
+	if len(keyBytes) == api.StateTreeKeyLengthBytes+2 {
+		keyBytes = keyBytes[2:]
+	}
+	ok, err := api.MatchesShardPrefix(keyBytes, v.shardConfig.Child.ShardID)
 	if err != nil {
 		return fmt.Errorf("error verifying shard id: %w", err)
 	}
@@ -220,37 +228,6 @@ func (v *CommitmentValidator) ValidateShardID(requestID api.RequestID) error {
 		return errors.New("request ID shard part does not match the current shard identifier")
 	}
 	return nil
-}
-
-// verifyShardID Checks if commitmentID's least significant bits match the shard bitmask.
-func verifyShardID(commitmentID string, shardBitmask int) (bool, error) {
-	// convert to big.Ints
-	bytes, err := hex.DecodeString(commitmentID)
-	if err != nil {
-		return false, fmt.Errorf("failed to decode certification state ID: %w", err)
-	}
-	commitmentIdBigInt := new(big.Int).SetBytes(bytes)
-	shardBitmaskBigInt := new(big.Int).SetInt64(int64(shardBitmask))
-
-	// find position of MSB e.g.
-	// 0b111 -> BitLen=3 -> 3-1=2
-	msbPos := shardBitmaskBigInt.BitLen() - 1
-
-	// build a mask covering bits below MSB e.g.
-	// 1<<2=0b100; 0b100-1=0b11; compareMask=0b11
-	compareMask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), uint(msbPos)), big.NewInt(1))
-
-	// remove MSB from shardBitmask to get expected value e.g.
-	// 0b111 & 0b11 = 0b11
-	expected := new(big.Int).And(shardBitmaskBigInt, compareMask)
-
-	// extract low bits from certification request e.g.
-	// commitment=0b11111111 & 0b11 = 0b11
-	commitmentLowBits := new(big.Int).And(commitmentIdBigInt, compareMask)
-
-	// return true if the certification request low bits match bitmask bits e.g.
-	// 0b11 == 0b11
-	return commitmentLowBits.Cmp(expected) == 0, nil
 }
 
 // CreateDataHashImprint creates a DataHash imprint in the Unicity format:

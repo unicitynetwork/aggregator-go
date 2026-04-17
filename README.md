@@ -366,7 +366,6 @@ for d in 255..=0:
         h = H(0x01 || d || h || siblings[j])
 assert j == 0 and h == UC.IR.h
 ```
-```
 
 #### `get_block_height`
 Retrieve the current blockchain height.

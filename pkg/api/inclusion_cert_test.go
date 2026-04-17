@@ -305,7 +305,7 @@ func TestBitmapPopcount(t *testing.T) {
 func TestKeyBitAt(t *testing.T) {
 	key := make([]byte, StateTreeKeyLengthBytes)
 	key[0] = 0b1010_0101
-	key[1] = 0x01 // bit 8 set
+	key[1] = 0x01  // bit 8 set
 	key[31] = 0x80 // bit 255 set
 
 	checks := []struct {
@@ -386,5 +386,138 @@ func TestExclusionCertVerify_NotImplemented(t *testing.T) {
 	root := bytes.Repeat([]byte{0}, SiblingSize)
 	if err := cert.Verify(key, root, SHA256); !errors.Is(err, ErrExclusionNotImpl) {
 		t.Fatalf("expected ErrExclusionNotImpl, got %v", err)
+	}
+}
+
+func TestComposeInclusionCert_Success(t *testing.T) {
+	key := make([]byte, StateTreeKeyLengthBytes) // shard prefix 00, child bits also 0
+	value := []byte("leaf-value")
+
+	childSibling := bytes.Repeat([]byte{0x55}, SiblingSize)
+	parentSibling := bytes.Repeat([]byte{0x99}, SiblingSize)
+
+	leaf := hashLeafRaw(t, SHA256, key, value)
+	childRoot := hashNodeRaw(t, SHA256, 5, leaf, childSibling)
+	parentRoot := hashNodeRaw(t, SHA256, 1, childRoot, parentSibling)
+
+	child := &InclusionCert{}
+	child.Bitmap[5/8] |= 1 << (5 % 8)
+	var childS [SiblingSize]byte
+	copy(childS[:], childSibling)
+	child.Siblings = append(child.Siblings, childS)
+
+	parent := &InclusionCert{}
+	parent.Bitmap[1/8] |= 1 << (1 % 8)
+	var parentS [SiblingSize]byte
+	copy(parentS[:], parentSibling)
+	parent.Siblings = append(parent.Siblings, parentS)
+	parentBytes, err := parent.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshal parent cert: %v", err)
+	}
+
+	fragment := &ParentInclusionFragment{
+		CertificateBytes: parentBytes,
+		ShardLeafValue:   append([]byte(nil), childRoot...),
+	}
+
+	composed, err := ComposeInclusionCert(fragment, child, childRoot)
+	if err != nil {
+		t.Fatalf("compose inclusion cert: %v", err)
+	}
+	if err := composed.Verify(key, value, parentRoot, SHA256); err != nil {
+		t.Fatalf("verify composed cert: %v", err)
+	}
+	if got := len(composed.Siblings); got != 2 {
+		t.Fatalf("composed sibling count: got %d want 2", got)
+	}
+	if composed.Siblings[0] != parentS {
+		t.Fatalf("parent sibling not first in composed cert")
+	}
+	if composed.Siblings[1] != childS {
+		t.Fatalf("child sibling not second in composed cert")
+	}
+}
+
+func TestComposeInclusionCert_RejectsMalformedParentFragment(t *testing.T) {
+	child := &InclusionCert{}
+	fragment := &ParentInclusionFragment{
+		CertificateBytes: []byte{0x01, 0x02},
+		ShardLeafValue:   bytes.Repeat([]byte{0xAA}, SiblingSize),
+	}
+	_, err := ComposeInclusionCert(fragment, child, bytes.Repeat([]byte{0xAA}, SiblingSize))
+	if err == nil {
+		t.Fatal("expected malformed parent fragment to fail")
+	}
+	if !errors.Is(err, ErrCertTruncated) {
+		t.Fatalf("expected ErrCertTruncated, got %v", err)
+	}
+}
+
+func TestComposeInclusionCert_RejectsChildRootMismatch(t *testing.T) {
+	parent := &InclusionCert{}
+	parentBytes, err := parent.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshal parent cert: %v", err)
+	}
+	fragment := &ParentInclusionFragment{
+		CertificateBytes: parentBytes,
+		ShardLeafValue:   bytes.Repeat([]byte{0xAA}, SiblingSize),
+	}
+	_, err = ComposeInclusionCert(fragment, &InclusionCert{}, bytes.Repeat([]byte{0xBB}, SiblingSize))
+	if !errors.Is(err, ErrCertChildRootMismatch) {
+		t.Fatalf("expected ErrCertChildRootMismatch, got %v", err)
+	}
+}
+
+func TestComposeInclusionCert_RejectsDepthOverlap(t *testing.T) {
+	child := &InclusionCert{}
+	child.Bitmap[5/8] |= 1 << (5 % 8)
+	var childS [SiblingSize]byte
+	child.Siblings = append(child.Siblings, childS)
+
+	parent := &InclusionCert{}
+	parent.Bitmap[5/8] |= 1 << (5 % 8)
+	var parentS [SiblingSize]byte
+	parent.Siblings = append(parent.Siblings, parentS)
+	parentBytes, err := parent.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshal parent cert: %v", err)
+	}
+
+	childRoot := bytes.Repeat([]byte{0x11}, SiblingSize)
+	fragment := &ParentInclusionFragment{
+		CertificateBytes: parentBytes,
+		ShardLeafValue:   append([]byte(nil), childRoot...),
+	}
+	_, err = ComposeInclusionCert(fragment, child, childRoot)
+	if !errors.Is(err, ErrCertDepthOverlap) {
+		t.Fatalf("expected ErrCertDepthOverlap, got %v", err)
+	}
+}
+
+func TestComposeInclusionCert_RejectsParentDeeperThanChild(t *testing.T) {
+	child := &InclusionCert{}
+	child.Bitmap[3/8] |= 1 << (3 % 8)
+	var childS [SiblingSize]byte
+	child.Siblings = append(child.Siblings, childS)
+
+	parent := &InclusionCert{}
+	parent.Bitmap[7/8] |= 1 << (7 % 8)
+	var parentS [SiblingSize]byte
+	parent.Siblings = append(parent.Siblings, parentS)
+	parentBytes, err := parent.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshal parent cert: %v", err)
+	}
+
+	childRoot := bytes.Repeat([]byte{0x22}, SiblingSize)
+	fragment := &ParentInclusionFragment{
+		CertificateBytes: parentBytes,
+		ShardLeafValue:   append([]byte(nil), childRoot...),
+	}
+	_, err = ComposeInclusionCert(fragment, child, childRoot)
+	if !errors.Is(err, ErrCertDepthOrder) {
+		t.Fatalf("expected ErrCertDepthOrder, got %v", err)
 	}
 }

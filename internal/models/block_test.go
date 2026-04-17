@@ -35,8 +35,10 @@ func createTestBlock() *Block {
 		NoDeletionProofHash: randomHash,
 		CreatedAt:           api.Now(),
 		UnicityCertificate:  randomHash,
-		ParentMerkleTreePath: &api.MerkleTreePath{
-			Root: randomHash.String(),
+		ParentFragment: &api.ParentInclusionFragment{
+			CertificateBytes: randomHash,
+			ShardLeafValue:   randomHash,
 		},
+		ParentBlockNumber: 7,
 	}
 }

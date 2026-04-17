@@ -30,7 +30,8 @@ func TestParentShardIntegration_GoodCase(t *testing.T) {
 			BatchLimit:    1000,
 		},
 		Sharding: config.ShardingConfig{
-			Mode: config.ShardingModeChild,
+			Mode:          config.ShardingModeChild,
+			ShardIDLength: 1,
 			Child: config.ChildConfig{
 				ShardID:            0b11,
 				ParentPollTimeout:  5 * time.Second,
@@ -79,7 +80,8 @@ func TestParentShardIntegration_RoundProcessingError(t *testing.T) {
 			BatchLimit:    1000,
 		},
 		Sharding: config.ShardingConfig{
-			Mode: config.ShardingModeChild,
+			Mode:          config.ShardingModeChild,
+			ShardIDLength: 1,
 			Child: config.ChildConfig{
 				ShardID:            0b11,
 				ParentPollTimeout:  5 * time.Second,

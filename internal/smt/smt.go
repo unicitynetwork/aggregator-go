@@ -560,10 +560,52 @@ func (smt *SparseMerkleTree) GetInclusionCert(key []byte) (*api.InclusionCert, e
 	_ = smt.root.calculateHash(hasher)
 
 	var cert api.InclusionCert
-	if err := smt.generateInclusionCert(hasher, key, smt.root, &cert); err != nil {
+	if _, err := smt.generateInclusionCertWithLeafValue(hasher, key, smt.root, &cert); err != nil {
 		return nil, err
 	}
 	return &cert, nil
+}
+
+// GetShardInclusionFragment builds the native parent proof fragment used by a
+// child aggregator to later compose a full v2 proof locally. The fragment uses
+// the same bitmap+sibling wire shape as InclusionCert but only contains the
+// shallow parent-tree depths. The returned shard leaf value must equal the
+// child tree root for composition to proceed.
+func (smt *SparseMerkleTree) GetShardInclusionFragment(shardID api.ShardID) (*api.ParentInclusionFragment, error) {
+	if !smt.parentMode {
+		return nil, fmt.Errorf("smt: shard inclusion fragment only valid for parent trees")
+	}
+
+	path := big.NewInt(int64(shardID))
+	if path.BitLen()-1 != smt.keyLength {
+		return nil, ErrKeyLength
+	}
+
+	key, err := api.PathToFixedBytes(path, smt.keyLength)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive shard key bytes: %w", err)
+	}
+
+	hasher := api.NewDataHasher(smt.algorithm)
+	_ = smt.root.calculateHash(hasher)
+
+	var cert api.InclusionCert
+	leafValue, err := smt.generateInclusionCertWithLeafValue(hasher, key, smt.root, &cert)
+	if err != nil {
+		return nil, err
+	}
+	if len(leafValue) == 0 {
+		return nil, nil
+	}
+
+	certBytes, err := cert.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode parent fragment cert: %w", err)
+	}
+	return &api.ParentInclusionFragment{
+		CertificateBytes: api.NewHexBytes(certBytes),
+		ShardLeafValue:   api.NewHexBytes(leafValue),
+	}, nil
 }
 
 // generateInclusionCert recursively walks from the current node toward the
@@ -571,24 +613,34 @@ func (smt *SparseMerkleTree) GetInclusionCert(key []byte) (*api.InclusionCert, e
 // 2-child branching node along the path. Unary passthrough nodes contribute
 // nothing to either the bitmap or the sibling list.
 func (smt *SparseMerkleTree) generateInclusionCert(hasher *api.DataHasher, key []byte, current branch, cert *api.InclusionCert) error {
+	_, err := smt.generateInclusionCertWithLeafValue(hasher, key, current, cert)
+	return err
+}
+
+func (smt *SparseMerkleTree) generateInclusionCertWithLeafValue(hasher *api.DataHasher, key []byte, current branch, cert *api.InclusionCert) ([]byte, error) {
 	if current == nil {
-		return fmt.Errorf("smt: inclusion cert traversal reached nil subtree")
+		return nil, fmt.Errorf("smt: inclusion cert traversal reached nil subtree")
 	}
 	if current.isLeaf() {
 		leaf := current.(*LeafBranch)
-		if leaf.Key == nil || !bytes.Equal(leaf.Key, key) {
-			return fmt.Errorf("smt: leaf not found for key %x", key)
+		// Parent-mode populate() creates placeholder leaves with nil Key and nil
+		// Value. For those placeholders, key equality is validated only after the
+		// first real AddLeaf replaces them with a keyed leaf.
+		if leaf.Key != nil && !bytes.Equal(leaf.Key, key) {
+			return nil, fmt.Errorf("smt: leaf not found for key %x", key)
 		}
-		return nil
+		if leaf.Value == nil {
+			return nil, nil
+		}
+		return append([]byte(nil), leaf.Value...), nil
 	}
 
 	node := current.(*NodeBranch)
 	if node.Left != nil && node.Right != nil {
 		depth := int(node.Depth)
 		if depth < 0 || depth >= api.StateTreeKeyLengthBits {
-			return fmt.Errorf("smt: invalid branch depth %d", depth)
+			return nil, fmt.Errorf("smt: invalid branch depth %d", depth)
 		}
-		cert.Bitmap[depth/8] |= 1 << (uint(depth) % 8)
 
 		var sibling, child branch
 		if keyBit(key, depth) == 0 {
@@ -599,27 +651,40 @@ func (smt *SparseMerkleTree) generateInclusionCert(hasher *api.DataHasher, key [
 			child = node.Right
 		}
 
+		childHash := child.calculateHash(hasher)
+		if childHash == nil {
+			return nil, nil
+		}
+
 		sibHash := sibling.calculateHash(hasher)
+		if sibHash == nil {
+			// The sibling subtree is empty (all-placeholder / no submitted leaf),
+			// so this depth is a unary passthrough: no bitmap bit and no sibling.
+			// Any already recorded shallower siblings remain valid.
+			return smt.generateInclusionCertWithLeafValue(hasher, key, child, cert)
+		}
+
+		cert.Bitmap[depth/8] |= 1 << (uint(depth) % 8)
 		if len(sibHash) != api.SiblingSize {
-			return fmt.Errorf("smt: sibling hash unexpected length: got %d, want %d", len(sibHash), api.SiblingSize)
+			return nil, fmt.Errorf("smt: sibling hash unexpected length: got %d, want %d", len(sibHash), api.SiblingSize)
 		}
 		var sib [api.SiblingSize]byte
 		copy(sib[:], sibHash)
 		cert.Siblings = append(cert.Siblings, sib)
 
-		return smt.generateInclusionCert(hasher, key, child, cert)
+		return smt.generateInclusionCertWithLeafValue(hasher, key, child, cert)
 	}
 
 	// Unary passthrough: typically only at the root when the tree holds
 	// ≤1 leaves. The v2 rule says a single-child node's hash equals the
 	// child's hash, so no bitmap bit and no sibling are added.
 	if node.Left != nil {
-		return smt.generateInclusionCert(hasher, key, node.Left, cert)
+		return smt.generateInclusionCertWithLeafValue(hasher, key, node.Left, cert)
 	}
 	if node.Right != nil {
-		return smt.generateInclusionCert(hasher, key, node.Right, cert)
+		return smt.generateInclusionCertWithLeafValue(hasher, key, node.Right, cert)
 	}
-	return fmt.Errorf("smt: reached empty subtree in inclusion cert traversal")
+	return nil, fmt.Errorf("smt: reached empty subtree in inclusion cert traversal")
 }
 
 // keyBit returns bit d of the raw key under LSB-first byte layout.
@@ -676,7 +741,7 @@ func (smt *SparseMerkleTree) buildTree(branch branch, remainingPath *big.Int, le
 	if branch.isLeaf() && branch.getPath().Cmp(remainingPath) == 0 {
 		leafBranch := branch.(*LeafBranch)
 		if leafBranch.isChild {
-			return newChildLeafBranchWithKey(leafBranch.Path, leafBranch.Key, value), nil
+			return newChildLeafBranchWithKey(leafBranch.Path, leafKey, value), nil
 		} else if bytes.Equal(leafBranch.Value, value) {
 			return nil, ErrDuplicateLeaf
 		} else {
@@ -888,41 +953,4 @@ func NewLeaf(path *big.Int, value []byte) *Leaf {
 		Path:  new(big.Int).Set(path),
 		Value: append([]byte(nil), value...),
 	}
-}
-
-// JoinPaths joins the hash proofs from a child and parent in sharded setting
-func JoinPaths(child, parent *api.MerkleTreePath) (*api.MerkleTreePath, error) {
-	if child == nil {
-		return nil, errors.New("nil child path")
-	}
-	if parent == nil {
-		return nil, errors.New("nil parent path")
-	}
-
-	// Root hashes are hex-encoded imprints, the first 4 characters are hash function identifiers
-	if len(child.Root) < 4 {
-		return nil, errors.New("invalid child root hash format")
-	}
-	if len(parent.Root) < 4 {
-		return nil, errors.New("invalid parent root hash format")
-	}
-	if child.Root[:4] != parent.Root[:4] {
-		return nil, errors.New("can't join paths: child hash algorithm does not match parent")
-	}
-
-	if len(parent.Steps) == 0 {
-		return nil, errors.New("empty parent hash steps")
-	}
-	if parent.Steps[0].Data == nil || *parent.Steps[0].Data != child.Root[4:] {
-		return nil, errors.New("can't join paths: child root hash does not match parent input hash")
-	}
-
-	steps := make([]api.MerkleTreeStep, len(child.Steps)+len(parent.Steps)-1)
-	copy(steps, child.Steps)
-	copy(steps[len(child.Steps):], parent.Steps[1:])
-
-	return &api.MerkleTreePath{
-		Root:  parent.Root,
-		Steps: steps,
-	}, nil
 }

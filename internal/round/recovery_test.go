@@ -149,7 +149,7 @@ func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, 
 	rootHashBytes := smtTree.GetRootHash()
 
 	// Create block (unfinalized)
-	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", api.HexBytes(rootHashBytes), nil, nil, nil)
+	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", api.HexBytes(rootHashBytes), nil, nil)
 	block.Finalized = false
 
 	return commitments, block, requestIDs

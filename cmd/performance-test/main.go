@@ -5,12 +5,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math"
-	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -198,32 +196,19 @@ func selectShardIndex(requestID api.StateID, shardClients []*ShardClient) int {
 	if len(imprint) == 0 {
 		return 0
 	}
-	return int(imprint[len(imprint)-1]) % shardCount
+	keyBytes := requestID.DataBytes()
+	if len(keyBytes) == 0 {
+		return 0
+	}
+	// Fallback only: keep distribution aligned with LSB-first key layout.
+	return int(keyBytes[0]) % shardCount
 }
 
 func matchesShardMask(requestIDHex string, shardMask int) (bool, error) {
 	if shardMask <= 0 {
 		return false, nil
 	}
-
-	bytes, err := hex.DecodeString(requestIDHex)
-	if err != nil {
-		return false, fmt.Errorf("failed to decode request ID: %w", err)
-	}
-
-	requestBig := new(big.Int).SetBytes(bytes)
-	maskBig := new(big.Int).SetInt64(int64(shardMask))
-
-	msbPos := maskBig.BitLen() - 1
-	if msbPos < 0 {
-		return false, fmt.Errorf("invalid shard mask: %d", shardMask)
-	}
-
-	compareMask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), uint(msbPos)), big.NewInt(1))
-	expected := new(big.Int).And(maskBig, compareMask)
-	requestLowBits := new(big.Int).And(requestBig, compareMask)
-
-	return requestLowBits.Cmp(expected) == 0, nil
+	return api.MatchesShardPrefixFromHex(requestIDHex, shardMask)
 }
 
 // matchesAnyShardTarget checks if a request ID matches any of the configured shard targets
@@ -409,7 +394,7 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 					if proofQueue != nil {
 						metrics.recordSubmissionTimestamp(requestIDStr)
 						select {
-						case proofQueue <- proofJob{shardIdx: shardIdx, requestID: requestIDStr}:
+						case proofQueue <- proofJob{shardIdx: shardIdx, request: req}:
 						default:
 							// Queue full, skip proof verification for this one
 						}
@@ -435,10 +420,21 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 		case <-ctx.Done():
 			return
 		case job := <-proofQueue:
-			go func(reqID string, shardIdx int) {
+			go func(job proofJob) {
+				if job.request == nil {
+					metrics.recordError("Missing original request for proof verification")
+					atomic.AddInt64(&metrics.proofVerifyFailed, 1)
+					if sm := metrics.shard(job.shardIdx); sm != nil {
+						sm.proofVerifyFailed.Add(1)
+					}
+					return
+				}
+
+				reqID := normalizeRequestID(job.request.StateID.String())
+				shardIdx := job.shardIdx
 				time.Sleep(proofInitialDelay)
 				startTime := time.Now()
-				normalizedID := normalizeRequestID(reqID)
+				normalizedID := reqID
 				client := shardClients[shardIdx].proofClient // Use separate proof client pool
 
 				for attempt := 0; attempt < proofMaxRetries; attempt++ {
@@ -534,16 +530,12 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 					}
 					metrics.addProofLatency(totalLatency)
 
-					// TODO: Wire api.InclusionProofV2.Verify(*CertificationRequest)
-					// verification here. For now we only check that the response carries a
-					// non-empty inclusion cert; perf tests care about throughput, not
-					// cryptographic verification correctness.
-					if len(proofResp.InclusionProof.CertificateBytes) == 0 {
+					if err := proofResp.InclusionProof.Verify(job.request); err != nil {
 						if attempt < proofMaxRetries-1 {
 							time.Sleep(proofRetryDelay)
 							continue
 						}
-						metrics.recordError(fmt.Sprintf("Empty certificate bytes for request %s", reqID))
+						metrics.recordError(fmt.Sprintf("Proof verification failed for request %s: %v", reqID, err))
 						atomic.AddInt64(&metrics.proofVerifyFailed, 1)
 						if sm := metrics.shard(shardIdx); sm != nil {
 							sm.proofVerifyFailed.Add(1)
@@ -563,7 +555,7 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 				if sm := metrics.shard(shardIdx); sm != nil {
 					sm.proofFailed.Add(1)
 				}
-			}(job.requestID, job.shardIdx)
+			}(job)
 		}
 	}
 }

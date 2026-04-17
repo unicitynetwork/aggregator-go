@@ -345,7 +345,6 @@ func (prm *ParentRoundManager) processRound(ctx context.Context, round *ParentRo
 		parentRootHash,
 		previousBlockHash,
 		nil,
-		nil,
 	)
 
 	round.Block = block

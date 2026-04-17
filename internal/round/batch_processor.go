@@ -127,7 +127,6 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			rootHash,
 			parentHash,
 			nil,
-			nil,
 		)
 		rm.roundMutex.RLock()
 		if rm.currentRound != nil && !rm.currentRound.StartTime.IsZero() {
@@ -175,7 +174,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			err      error
 		)
 		for {
-			proof, parentUC, err = rm.pollForParentProof(ctx, rootHash.String())
+			proof, parentUC, err = rm.pollForParentProof(ctx, rootHash)
 			if err == nil {
 				break
 			}
@@ -199,7 +198,11 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		}
 		rm.roundMutex.Unlock()
 
-		block := models.NewBlock(
+		if proof.ParentFragment == nil {
+			return fmt.Errorf("parent shard proof missing native parent fragment")
+		}
+
+		block := models.NewChildBlock(
 			blockNumber,
 			rm.config.Chain.ID,
 			request.ShardID,
@@ -208,7 +211,8 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			rootHash,
 			parentHash,
 			proof.UnicityCertificate,
-			proof.MerkleTreePath,
+			proof.ParentFragment,
+			proof.BlockNumber,
 		)
 		if err := rm.FinalizeBlockWithRetry(ctx, block); err != nil {
 			return fmt.Errorf("failed to finalize block after retries: %w", err)
@@ -250,7 +254,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 	}
 }
 
-func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string) (*api.RootShardInclusionProof, *types.UnicityCertificate, error) {
+func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash api.HexBytes) (*api.RootShardInclusionProof, *types.UnicityCertificate, error) {
 	pollingCtx, cancel := context.WithTimeout(ctx, rm.config.Sharding.Child.ParentPollTimeout)
 	defer cancel()
 
@@ -266,27 +270,27 @@ func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string)
 			}
 			metrics.ParentProofErrorsTotal.Inc()
 			rm.logger.WithContext(ctx).Warn("Timed out waiting for parent shard inclusion proof",
-				"rootHash", rootHash,
+				"rootHash", rootHash.String(),
 				"pollDuration", time.Since(pollStart))
-			return nil, nil, fmt.Errorf("%w: %s", ErrParentProofPollTimeout, rootHash)
+			return nil, nil, fmt.Errorf("%w: %s", ErrParentProofPollTimeout, rootHash.String())
 		case <-ticker.C:
 			request := &api.GetShardProofRequest{ShardID: rm.config.Sharding.Child.ShardID}
 			proof, err := rm.rootClient.GetShardProof(pollingCtx, request)
 			if err != nil {
 				metrics.ParentProofErrorsTotal.Inc()
 				rm.logger.WithContext(ctx).Warn("Failed to fetch parent shard inclusion proof, retrying",
-					"rootHash", rootHash,
+					"rootHash", rootHash.String(),
 					"error", err.Error())
 				continue
 			}
-			if proof == nil || !proof.IsValid(rootHash) {
+			if proof == nil || !proof.IsValid(rm.config.Sharding.Child.ShardID, rm.config.Sharding.ShardIDLength, rootHash) {
 				continue
 			}
 
 			parentUC, err := decodeUnicityCertificate(proof.UnicityCertificate)
 			if err != nil {
 				rm.logger.WithContext(ctx).Warn("Failed to decode parent shard proof UC, retrying",
-					"rootHash", rootHash,
+					"rootHash", rootHash.String(),
 					"error", err.Error())
 				continue
 			}
@@ -294,7 +298,7 @@ func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string)
 			lastParentRound := rm.lastAcceptedParentUC()
 			if parentUC.GetRoundNumber() <= lastParentRound {
 				rm.logger.WithContext(ctx).Debug("Ignoring stale parent shard proof",
-					"rootHash", rootHash,
+					"rootHash", rootHash.String(),
 					"proofParentRound", parentUC.GetRoundNumber(),
 					"lastAcceptedParentRound", lastParentRound)
 				continue
@@ -384,6 +388,10 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 
 // FinalizeBlock creates and persists a new block with the given data
 func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) error {
+	if err := rm.validateBlockForMode(block); err != nil {
+		return err
+	}
+
 	rm.logger.WithContext(ctx).Info("FinalizeBlock called",
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String(),
@@ -581,6 +589,21 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		metrics.BlockCreationDuration.Observe(time.Since(roundStartTime).Seconds())
 	}
 
+	return nil
+}
+
+func (rm *RoundManager) validateBlockForMode(block *models.Block) error {
+	if block == nil {
+		return errors.New("block is nil")
+	}
+	if rm.config.Sharding.Mode.IsChild() {
+		if block.ParentFragment == nil {
+			return errors.New("child-mode block missing parent fragment")
+		}
+		if block.ParentBlockNumber == 0 {
+			return errors.New("child-mode block missing parent block number")
+		}
+	}
 	return nil
 }
 

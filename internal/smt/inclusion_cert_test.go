@@ -1,8 +1,10 @@
 package smt
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"math/big"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -265,6 +267,32 @@ func TestGetInclusionCert_WrongKeyLength(t *testing.T) {
 			require.Nil(t, cert)
 		})
 	}
+}
+
+// TestGetShardInclusionFragment_SkipsNilSiblingAfterNonNilSibling exercises
+// the parent-tree traversal branch where a shallower sibling exists but a
+// deeper sibling subtree is empty (nil hash). That depth must be skipped as a
+// unary passthrough while keeping previously recorded siblings valid.
+func TestGetShardInclusionFragment_SkipsNilSiblingAfterNonNilSibling(t *testing.T) {
+	parent := NewParentSparseMerkleTree(api.SHA256, 2)
+
+	// Update two shards on opposite root sides so root-level sibling is present.
+	leaf4 := bytes.Repeat([]byte{0xA4}, api.SiblingSize)
+	leaf5 := bytes.Repeat([]byte{0xB5}, api.SiblingSize)
+	require.NoError(t, parent.AddLeaf(big.NewInt(0b100), leaf4))
+	require.NoError(t, parent.AddLeaf(big.NewInt(0b101), leaf5))
+
+	fragment, err := parent.GetShardInclusionFragment(0b100)
+	require.NoError(t, err)
+	require.NotNil(t, fragment)
+
+	var cert api.InclusionCert
+	require.NoError(t, cert.UnmarshalBinary(fragment.CertificateBytes))
+	require.Equal(t, 1, bitmapPopcountForTest(&cert.Bitmap), "one deeper depth should be skipped as unary passthrough")
+	require.Len(t, cert.Siblings, 1, "only the non-empty shallower sibling should be present")
+
+	root := parent.GetRootHashRaw()
+	require.NoError(t, fragment.Verify(0b100, 2, leaf4, root, api.SHA256))
 }
 
 // TestGetRootHashRaw_MatchesHex confirms that GetRootHashRaw produces

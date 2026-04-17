@@ -47,7 +47,6 @@ func TestBFTClientStub_CertificationRequest_PopulatesSyntheticUC(t *testing.T) {
 		api.HexBytes("0123"),
 		nil,
 		nil,
-		nil,
 	)
 
 	err = client.CertificationRequest(t.Context(), block)

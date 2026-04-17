@@ -104,6 +104,25 @@ func (c *InclusionCert) Verify(key, value, expectedRoot []byte, algo HashAlgorit
 	if len(key) != StateTreeKeyLengthBytes {
 		return fmt.Errorf("%w: got %d, want %d", ErrCertKeyLength, len(key), StateTreeKeyLengthBytes)
 	}
+
+	// Leaf hash: H(0x00 || key || value).
+	hasher := NewDataHasher(algo)
+	if hasher == nil {
+		return fmt.Errorf("%w: %d", ErrCertUnknownAlgo, algo)
+	}
+	hasher.Reset().
+		AddData([]byte{0x00}).
+		AddData(key).
+		AddData(value)
+	h := hasher.GetHash().RawHash
+
+	return verifyBitmapPath(&c.Bitmap, c.Siblings, key, h, expectedRoot, algo)
+}
+
+func verifyBitmapPath(bitmap *[BitmapSize]byte, siblings [][SiblingSize]byte, key, startHash, expectedRoot []byte, algo HashAlgorithm) error {
+	if len(startHash) != SiblingSize {
+		return fmt.Errorf("%w: got %d, want %d", ErrCertRootLength, len(startHash), SiblingSize)
+	}
 	if len(expectedRoot) != SiblingSize {
 		return fmt.Errorf("%w: got %d, want %d", ErrCertRootLength, len(expectedRoot), SiblingSize)
 	}
@@ -112,26 +131,23 @@ func (c *InclusionCert) Verify(key, value, expectedRoot []byte, algo HashAlgorit
 		return fmt.Errorf("%w: %d", ErrCertUnknownAlgo, algo)
 	}
 
-	// Leaf hash: H(0x00 || key || value).
-	hasher.Reset().
-		AddData([]byte{0x00}).
-		AddData(key).
-		AddData(value)
-	h := hasher.GetHash().RawHash
-
 	// Walk depths from deepest to shallowest, consuming siblings from
 	// the end of the slice. Depths with bitmap bit clear are skipped
 	// (unary passthrough or off-path).
-	j := len(c.Siblings)
+	h := append([]byte(nil), startHash...)
+	j := len(siblings)
 	for d := maxDepth - 1; d >= 0; d-- {
-		if (c.Bitmap[d/8]>>(uint(d)%8))&1 == 0 {
+		if ((*bitmap)[d/8]>>(uint(d)%8))&1 == 0 {
 			continue
+		}
+		if d/8 >= len(key) {
+			return fmt.Errorf("%w: key too short for depth %d", ErrCertKeyLength, d)
 		}
 		if j == 0 {
 			return ErrCertSiblingUnderflow
 		}
 		j--
-		sibling := c.Siblings[j][:]
+		sibling := siblings[j][:]
 
 		hasher.Reset().AddData([]byte{0x01, byte(d)})
 		if keyBitAt(key, d) == 1 {

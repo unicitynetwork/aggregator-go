@@ -136,7 +136,7 @@ func (suite *ParentServiceTestSuite) waitForShardToExist(ctx context.Context, sh
 			suite.T().Fatalf("Timeout waiting for shard %d to be processed", shardID)
 		case <-ticker.C:
 			response, err := suite.service.GetShardProof(ctx, &api.GetShardProofRequest{ShardID: shardID})
-			if err == nil && response.MerkleTreePath != nil {
+			if err == nil && response.ParentFragment != nil {
 				return // Shard exists and has a proof!
 			}
 			// Continue polling
@@ -283,7 +283,8 @@ func (suite *ParentServiceTestSuite) TestSubmitShardRoot_UpdateQueued() {
 	suite.T().Log("✓ Shard update was queued and processed correctly")
 }
 
-// GetShardProof - Success - Full E2E test with child SMT, proof joining, and verification
+// GetShardProof - Success - Full E2E test with child SMT root submission and
+// native parent fragment verification.
 func (suite *ParentServiceTestSuite) TestGetShardProof_Success() {
 	ctx := context.Background()
 
@@ -298,16 +299,9 @@ func (suite *ParentServiceTestSuite) TestGetShardProof_Success() {
 	err := childSMT.AddLeaf(testLeafPath, testLeafValue)
 	suite.Require().NoError(err, "Should add leaf to child SMT")
 
-	// 2. Extract child root hash (what child aggregator would submit to parent)
-	childRootHash := childSMT.GetRootHash()
-	suite.Require().NotEmpty(childRootHash, "Child SMT should have root hash")
-	suite.T().Logf("Child SMT root hash: %x", childRootHash)
-
-	// 3. Submit child root to parent (strip algorithm prefix - first 2 bytes)
-	// This is required for JoinPaths to work: parent stores raw 32-byte hashes
-	childRootRaw := childRootHash[2:] // Remove algorithm identifier (2 bytes)
-	suite.Require().True(len(childRootRaw) == 32, "Root hash should be 32 bytes after stripping prefix")
-	suite.T().Logf("Sending %d bytes to parent (WITHOUT algorithm prefix)", len(childRootRaw))
+	// 2. Extract child root hash (what child aggregator submits to the parent).
+	childRootRaw := childSMT.GetRootHashRaw()
+	suite.Require().Len(childRootRaw, 32, "Child SMT raw root hash must be 32 bytes")
 
 	submitReq := &api.SubmitShardRootRequest{
 		ShardID:  shard0ID,
@@ -319,42 +313,27 @@ func (suite *ParentServiceTestSuite) TestGetShardProof_Success() {
 	// 4. Wait for round to process
 	suite.waitForShardToExist(ctx, shard0ID)
 
-	// 5. Get child proof from child SMT
-	childProof, err := childSMT.GetPath(testLeafPath)
-	suite.Require().NoError(err, "Should get child proof")
-	suite.Require().NotNil(childProof, "Child proof should not be nil")
-	suite.T().Logf("Child proof has %d steps", len(childProof.Steps))
-
-	// 6. Request parent proof from parent aggregator
+	// 5. Request parent proof from parent aggregator
 	proofReq := &api.GetShardProofRequest{
 		ShardID: shard0ID,
 	}
 	parentResponse, err := suite.service.GetShardProof(ctx, proofReq)
 	suite.Require().NoError(err, "Should get parent proof successfully")
 	suite.Require().NotNil(parentResponse, "Parent response should not be nil")
-	suite.Require().NotNil(parentResponse.MerkleTreePath, "Parent proof should not be nil")
-	suite.T().Logf("Parent proof has %d steps", len(parentResponse.MerkleTreePath.Steps))
+	suite.Require().NotNil(parentResponse.ParentFragment, "Parent fragment should not be nil")
 
-	// 7. Join child and parent proofs
-	joinedProof, err := smt.JoinPaths(childProof, parentResponse.MerkleTreePath)
-	suite.Require().NoError(err, "Should join proofs successfully")
-	suite.Require().NotNil(joinedProof, "Joined proof should not be nil")
-	suite.T().Logf("Joined proof has %d steps", len(joinedProof.Steps))
+	// 6. Verify the native parent fragment against the returned parent UC root.
+	suite.Assert().Equal(api.NewHexBytes(childRootRaw), parentResponse.ParentFragment.ShardLeafValue)
+	suite.Assert().True((&api.RootShardInclusionProof{
+		ParentFragment:     parentResponse.ParentFragment,
+		UnicityCertificate: parentResponse.UnicityCertificate,
+		BlockNumber:        parentResponse.BlockNumber,
+	}).IsValid(shard0ID, suite.cfg.Sharding.ShardIDLength, api.NewHexBytes(childRootRaw)))
 
-	// 8. Verify the joined proof
-	result, err := joinedProof.Verify(testLeafPath)
-	suite.Require().NoError(err, "Proof verification should not error")
-	suite.Require().NotNil(result, "Verification result should not be nil")
-
-	// Both PathValid and PathIncluded should be true
-	suite.Assert().True(result.PathValid, "Joined proof path must be valid")
-	suite.Assert().True(result.PathIncluded, "Joined proof should show path is included")
-	suite.Assert().True(result.Result, "Overall verification result should be true")
-
-	suite.T().Log("✓ End-to-end test: child SMT → parent submission → proof joining → verification SUCCESS")
+	suite.T().Log("✓ End-to-end test: child SMT → parent submission → native parent fragment verification SUCCESS")
 }
 
-// GetShardProof - Non-existent Shard (returns nil MerkleTreePath)
+// GetShardProof - Non-existent Shard (returns nil fragment)
 func (suite *ParentServiceTestSuite) TestGetShardProof_NonExistentShard() {
 	ctx := context.Background()
 
@@ -379,9 +358,9 @@ func (suite *ParentServiceTestSuite) TestGetShardProof_NonExistentShard() {
 	response, err := suite.service.GetShardProof(ctx, proofReq)
 	suite.Require().NoError(err, "Should not return error for non-existent shard")
 	suite.Require().NotNil(response, "Response should not be nil")
-	suite.Assert().Nil(response.MerkleTreePath, "MerkleTreePath should be nil for non-existent shard")
+	suite.Assert().Nil(response.ParentFragment, "Parent fragment should be nil for non-existent shard")
 
-	suite.T().Log("✓ GetShardProof returns nil MerkleTreePath for non-existent shard")
+	suite.T().Log("✓ GetShardProof returns nil parent fragment for non-existent shard")
 }
 
 // GetShardProof - Empty Tree (no shards submitted yet)
@@ -397,9 +376,9 @@ func (suite *ParentServiceTestSuite) TestGetShardProof_EmptyTree() {
 	response, err := suite.service.GetShardProof(ctx, proofReq)
 	suite.Require().NoError(err, "Should not return error for empty tree")
 	suite.Require().NotNil(response, "Response should not be nil")
-	suite.Assert().Nil(response.MerkleTreePath, "MerkleTreePath should be nil when no shards submitted")
+	suite.Assert().Nil(response.ParentFragment, "Parent fragment should be nil when no shards submitted")
 
-	suite.T().Log("✓ GetShardProof returns nil MerkleTreePath for empty tree")
+	suite.T().Log("✓ GetShardProof returns nil parent fragment for empty tree")
 }
 
 // GetShardProof - Multiple Shards (verify each has correct proof)
@@ -437,21 +416,33 @@ func (suite *ParentServiceTestSuite) TestGetShardProof_MultipleShards() {
 	// Get proofs for all 3 shards
 	proof0, err := suite.service.GetShardProof(ctx, &api.GetShardProofRequest{ShardID: shard0ID})
 	suite.Require().NoError(err, "Should get proof for shard 0")
-	suite.Assert().NotNil(proof0.MerkleTreePath, "Proof 0 should not be nil")
+	suite.Assert().NotNil(proof0.ParentFragment, "Fragment 0 should not be nil")
 
 	proof1, err := suite.service.GetShardProof(ctx, &api.GetShardProofRequest{ShardID: shard1ID})
 	suite.Require().NoError(err, "Should get proof for shard 1")
-	suite.Assert().NotNil(proof1.MerkleTreePath, "Proof 1 should not be nil")
+	suite.Assert().NotNil(proof1.ParentFragment, "Fragment 1 should not be nil")
 
 	proof2, err := suite.service.GetShardProof(ctx, &api.GetShardProofRequest{ShardID: shard2ID})
 	suite.Require().NoError(err, "Should get proof for shard 2")
-	suite.Assert().NotNil(proof2.MerkleTreePath, "Proof 2 should not be nil")
+	suite.Assert().NotNil(proof2.ParentFragment, "Fragment 2 should not be nil")
 
-	// All proofs should have the same root (same parent SMT)
-	suite.Assert().Equal(proof0.MerkleTreePath.Root, proof1.MerkleTreePath.Root, "All proofs should have same root")
-	suite.Assert().Equal(proof0.MerkleTreePath.Root, proof2.MerkleTreePath.Root, "All proofs should have same root")
+	suite.Assert().True((&api.RootShardInclusionProof{
+		ParentFragment:     proof0.ParentFragment,
+		UnicityCertificate: proof0.UnicityCertificate,
+		BlockNumber:        proof0.BlockNumber,
+	}).IsValid(shard0ID, suite.cfg.Sharding.ShardIDLength, makeTestHash(0xAA)))
+	suite.Assert().True((&api.RootShardInclusionProof{
+		ParentFragment:     proof1.ParentFragment,
+		UnicityCertificate: proof1.UnicityCertificate,
+		BlockNumber:        proof1.BlockNumber,
+	}).IsValid(shard1ID, suite.cfg.Sharding.ShardIDLength, makeTestHash(0xBB)))
+	suite.Assert().True((&api.RootShardInclusionProof{
+		ParentFragment:     proof2.ParentFragment,
+		UnicityCertificate: proof2.UnicityCertificate,
+		BlockNumber:        proof2.BlockNumber,
+	}).IsValid(shard2ID, suite.cfg.Sharding.ShardIDLength, makeTestHash(0xCC)))
 
-	suite.T().Log("✓ GetShardProof returns valid proofs for multiple shards with same root")
+	suite.T().Log("✓ GetShardProof returns valid parent fragments for multiple shards")
 }
 
 // TestParentServiceSuite runs the test suite

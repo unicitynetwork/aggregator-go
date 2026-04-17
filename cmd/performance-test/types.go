@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"golang.org/x/net/http2"
 )
 
@@ -109,8 +110,8 @@ type ShardClient struct {
 }
 
 type proofJob struct {
-	shardIdx  int
-	requestID string
+	shardIdx int
+	request  *api.CertificationRequest
 }
 
 // RequestRateCounters tracks per-second client-side request activity.

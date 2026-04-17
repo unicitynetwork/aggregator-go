@@ -149,6 +149,13 @@ func TestValidator_StateIDMismatch(t *testing.T) {
 }
 
 func TestValidator_ShardID(t *testing.T) {
+	makeShardTestID := func(firstByte, lastByte byte) string {
+		key := make([]byte, api.StateTreeKeyLengthBytes)
+		key[0] = firstByte
+		key[len(key)-1] = lastByte
+		return hex.EncodeToString(key)
+	}
+
 	tests := []struct {
 		commitmentID string
 		shardBitmask int
@@ -158,25 +165,29 @@ func TestValidator_ShardID(t *testing.T) {
 		// shard1=bitmask 0b10
 		// shard2=bitmask 0b11
 
-		// certification request ending with 0b00000000 belongs to shard1
-		{"00000000000000000000000000000000000000000000000000000000000000000000", 0b10, true},
-		{"00000000000000000000000000000000000000000000000000000000000000000000", 0b11, false},
+		// certification request with key bit 0 = 0 belongs to shard1
+		{makeShardTestID(0x00, 0x00), 0b10, true},
+		{makeShardTestID(0x00, 0x00), 0b11, false},
 
-		// certification request ending with 0b00000001 belongs to shard2
-		{"00000000000000000000000000000000000000000000000000000000000000000001", 0b10, false},
-		{"00000000000000000000000000000000000000000000000000000000000000000001", 0b11, true},
+		// certification request with key bit 0 = 1 belongs to shard2
+		{makeShardTestID(0x01, 0x00), 0b10, false},
+		{makeShardTestID(0x01, 0x00), 0b11, true},
 
-		// certification request ending with 0b00000010 belongs to shard1
-		{"00000000000000000000000000000000000000000000000000000000000000000002", 0b10, true},
-		{"00000000000000000000000000000000000000000000000000000000000000000002", 0b11, false},
+		// certification request with first byte 0b00000010 still belongs to shard1
+		{makeShardTestID(0x02, 0x00), 0b10, true},
+		{makeShardTestID(0x02, 0x00), 0b11, false},
 
-		// certification request ending with 0b00000011 belongs to shard2
-		{"00000000000000000000000000000000000000000000000000000000000000000003", 0b10, false},
-		{"00000000000000000000000000000000000000000000000000000000000000000003", 0b11, true},
+		// certification request with first byte 0b00000011 belongs to shard2
+		{makeShardTestID(0x03, 0x00), 0b10, false},
+		{makeShardTestID(0x03, 0x00), 0b11, true},
 
-		// certification request ending with 0b11111111 belongs to shard2
-		{"000000000000000000000000000000000000000000000000000000000000000000FF", 0b10, false},
-		{"000000000000000000000000000000000000000000000000000000000000000000FF", 0b11, true},
+		// certification request with first byte 0b11111111 belongs to shard2
+		{makeShardTestID(0xFF, 0x00), 0b10, false},
+		{makeShardTestID(0xFF, 0x00), 0b11, true},
+
+		// the last byte no longer affects shard routing under LSB-first byte order
+		{makeShardTestID(0x00, 0xFF), 0b10, true},
+		{makeShardTestID(0x00, 0xFF), 0b11, false},
 
 		// === END TWO SHARD CONFIG ===
 
@@ -186,45 +197,56 @@ func TestValidator_ShardID(t *testing.T) {
 		// shard3=0b101
 		// shard4=0b111
 
-		// certification request ending with 0b00000000 belongs to shard1
-		{"00000000000000000000000000000000000000000000000000000000000000000000", 0b111, false},
-		{"00000000000000000000000000000000000000000000000000000000000000000000", 0b101, false},
-		{"00000000000000000000000000000000000000000000000000000000000000000000", 0b110, false},
-		{"00000000000000000000000000000000000000000000000000000000000000000000", 0b100, true},
+		// key bits 1:0 = 00 belong to shard1
+		{makeShardTestID(0x00, 0x00), 0b111, false},
+		{makeShardTestID(0x00, 0x00), 0b101, false},
+		{makeShardTestID(0x00, 0x00), 0b110, false},
+		{makeShardTestID(0x00, 0x00), 0b100, true},
 
-		// certification request ending with 0b00000010 belongs to shard2
-		{"00000000000000000000000000000000000000000000000000000000000000000002", 0b111, false},
-		{"00000000000000000000000000000000000000000000000000000000000000000002", 0b100, false},
-		{"00000000000000000000000000000000000000000000000000000000000000000002", 0b101, false},
-		{"00000000000000000000000000000000000000000000000000000000000000000002", 0b110, true},
+		// key bits 1:0 = 10 belong to shard2
+		{makeShardTestID(0x02, 0x00), 0b111, false},
+		{makeShardTestID(0x02, 0x00), 0b100, false},
+		{makeShardTestID(0x02, 0x00), 0b101, false},
+		{makeShardTestID(0x02, 0x00), 0b110, true},
 
-		// certification request ending with 0b00000001 belongs to shard3
-		{"00000000000000000000000000000000000000000000000000000000000000000001", 0b111, false},
-		{"00000000000000000000000000000000000000000000000000000000000000000001", 0b101, true},
-		{"00000000000000000000000000000000000000000000000000000000000000000001", 0b110, false},
-		{"00000000000000000000000000000000000000000000000000000000000000000001", 0b100, false},
+		// key bits 1:0 = 01 belong to shard3
+		{makeShardTestID(0x01, 0x00), 0b111, false},
+		{makeShardTestID(0x01, 0x00), 0b101, true},
+		{makeShardTestID(0x01, 0x00), 0b110, false},
+		{makeShardTestID(0x01, 0x00), 0b100, false},
 
-		// certification request ending with 0b00000011 belongs to shard4
-		{"00000000000000000000000000000000000000000000000000000000000000000003", 0b111, true},
-		{"00000000000000000000000000000000000000000000000000000000000000000003", 0b101, false},
-		{"00000000000000000000000000000000000000000000000000000000000000000003", 0b110, false},
-		{"00000000000000000000000000000000000000000000000000000000000000000003", 0b100, false},
+		// key bits 1:0 = 11 belong to shard4
+		{makeShardTestID(0x03, 0x00), 0b111, true},
+		{makeShardTestID(0x03, 0x00), 0b101, false},
+		{makeShardTestID(0x03, 0x00), 0b110, false},
+		{makeShardTestID(0x03, 0x00), 0b100, false},
 
-		// certification request ending with 0b11111111 belongs to shard4
-		{"000000000000000000000000000000000000000000000000000000000000000000FF", 0b111, true},
-		{"000000000000000000000000000000000000000000000000000000000000000000FF", 0b101, false},
-		{"000000000000000000000000000000000000000000000000000000000000000000FF", 0b110, false},
-		{"000000000000000000000000000000000000000000000000000000000000000000FF", 0b100, false},
+		// key bits 1:0 = 11 still belong to shard4 when the whole first byte is set
+		{makeShardTestID(0xFF, 0x00), 0b111, true},
+		{makeShardTestID(0xFF, 0x00), 0b101, false},
+		{makeShardTestID(0xFF, 0x00), 0b110, false},
+		{makeShardTestID(0xFF, 0x00), 0b100, false},
 
 		// === END FOUR SHARD CONFIG ===
 	}
 	for _, tc := range tests {
-		match, err := verifyShardID(tc.commitmentID, tc.shardBitmask)
+		match, err := api.MatchesShardPrefixFromHex(tc.commitmentID, tc.shardBitmask)
 		require.NoError(t, err)
 		if match != tc.match {
 			t.Errorf("commitmentID=%s shardBitmask=%b expected %v got %v", tc.commitmentID, tc.shardBitmask, tc.match, match)
 		}
 	}
+}
+
+func TestValidator_ShardIDRejectsPrefixedStateID(t *testing.T) {
+	rawKey := make([]byte, api.StateTreeKeyLengthBytes)
+	rawKey[0] = 0x01
+	prefixed := append([]byte{0x00, 0x00}, rawKey...)
+
+	match, err := api.MatchesShardPrefixFromHex(hex.EncodeToString(prefixed), 0b11)
+	require.Error(t, err)
+	require.False(t, match)
+	require.Contains(t, err.Error(), "must be exactly 32 bytes")
 }
 
 func TestValidator_InvalidSignatureFormat(t *testing.T) {

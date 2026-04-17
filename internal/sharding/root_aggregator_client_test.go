@@ -59,7 +59,11 @@ func TestRootAggregatorClient_GetShardProof(t *testing.T) {
 		require.Equal(t, float64(4), params["shardId"])
 
 		proof := &api.RootShardInclusionProof{
-			MerkleTreePath:     &api.MerkleTreePath{Root: "0x1234"},
+			ParentFragment: &api.ParentInclusionFragment{
+				CertificateBytes: api.NewHexBytes(make([]byte, api.BitmapSize)),
+				ShardLeafValue:   api.HexBytes("0x1234"),
+			},
+			BlockNumber:        9,
 			UnicityCertificate: api.HexBytes("0xabcdef"),
 		}
 
@@ -80,7 +84,8 @@ func TestRootAggregatorClient_GetShardProof(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, proof)
-	require.Equal(t, "0x1234", proof.MerkleTreePath.Root)
+	require.Equal(t, api.HexBytes("0x1234"), proof.ParentFragment.ShardLeafValue)
+	require.Equal(t, uint64(9), proof.BlockNumber)
 	require.Equal(t, api.HexBytes("0xabcdef"), proof.UnicityCertificate)
 }
 

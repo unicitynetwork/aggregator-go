@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,17 +23,21 @@ import (
 	"github.com/stretchr/testify/suite"
 	"github.com/testcontainers/testcontainers-go/modules/mongodb"
 	redisContainer "github.com/testcontainers/testcontainers-go/modules/redis"
+	bfttypes "github.com/unicitynetwork/bft-go-base/types"
+	bfthex "github.com/unicitynetwork/bft-go-base/types/hex"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
@@ -294,8 +299,8 @@ func TestGetInclusionProofShardMismatch(t *testing.T) {
 	tree := smt.NewChildSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits, shardingCfg.Child.ShardID)
 	service := newAggregatorServiceForTest(t, shardingCfg, tree)
 
-	// Raw 32-byte v2 stateId whose low bits don't match shard 4 (=0b100).
-	invalidShardID := api.RequireNewImprintV2(strings.Repeat("00", api.StateTreeKeyLengthBytes-1) + "01")
+	// Raw 32-byte v2 stateId whose shard-prefix bits don't match shard 4 (=0b100).
+	invalidShardID := api.RequireNewImprintV2("01" + strings.Repeat("00", api.StateTreeKeyLengthBytes-1))
 	_, err := service.GetInclusionProofV2(context.Background(), &api.GetInclusionProofRequestV2{StateID: invalidShardID})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "state ID validation failed")
@@ -325,7 +330,7 @@ func TestGetInclusionProofSMTUnavailable(t *testing.T) {
 	}
 	service := newAggregatorServiceForTest(t, shardingCfg, nil)
 
-	// Raw 32-byte v2 stateId; all-zero low bits match shard 4 (expected = 0b00).
+	// Raw 32-byte v2 stateId; all-zero shard-prefix bits match shard 4 (expected = 0b00).
 	validID := api.RequireNewImprintV2(strings.Repeat("00", api.StateTreeKeyLengthBytes))
 	_, err := service.GetInclusionProofV2(t.Context(), &api.GetInclusionProofRequestV2{StateID: validID})
 	require.Error(t, err)
@@ -348,6 +353,127 @@ func TestInclusionProofInvalidPathLength(t *testing.T) {
 	_, err := service.GetInclusionProofV2(context.Background(), &api.GetInclusionProofRequestV2{StateID: badID})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid state ID length")
+}
+
+func TestGetInclusionProofV2Child_ComposesParentFragment(t *testing.T) {
+	shardingCfg := config.ShardingConfig{
+		Mode:          config.ShardingModeChild,
+		ShardIDLength: 2,
+		Child: config.ChildConfig{
+			ShardID: 4, // shard prefix bits 00
+		},
+	}
+
+	stateID := api.RequireNewImprintV2(strings.Repeat("00", api.StateTreeKeyLengthBytes))
+	sourceStateHash := api.RequireNewImprintV2("10" + strings.Repeat("00", api.StateTreeKeyLengthBytes-1))
+	transactionHash := api.RequireNewImprintV2("20" + strings.Repeat("00", api.StateTreeKeyLengthBytes-1))
+
+	childTree := smt.NewChildSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits, shardingCfg.Child.ShardID)
+	path, err := stateID.GetPath()
+	require.NoError(t, err)
+	require.NoError(t, childTree.AddLeaf(path, transactionHash.DataBytes()))
+	childRoot := childTree.GetRootHashRaw()
+
+	parentTree := smt.NewParentSparseMerkleTree(api.SHA256, shardingCfg.ShardIDLength)
+	require.NoError(t, smt.NewThreadSafeSMT(parentTree).AddPreHashedLeaf(big.NewInt(int64(shardingCfg.Child.ShardID)), childRoot))
+	parentRoot := parentTree.GetRootHashRaw()
+	parentFragment, err := parentTree.GetShardInclusionFragment(shardingCfg.Child.ShardID)
+	require.NoError(t, err)
+	require.NotNil(t, parentFragment)
+
+	parentUC := testChildProofUC(t, 9, parentRoot)
+	block := models.NewBlock(
+		api.NewBigIntFromUint64(3),
+		"test-chain",
+		shardingCfg.Child.ShardID,
+		"v",
+		"f",
+		api.HexBytes(childRoot),
+		nil,
+		parentUC,
+	)
+	block.ParentFragment = parentFragment
+	block.ParentBlockNumber = 9
+	block.Finalized = true
+
+	record := &models.AggregatorRecord{
+		Version: 2,
+		StateID: stateID,
+		CertificationData: models.CertificationData{
+			OwnerPredicate:  api.Predicate{Engine: 1, Code: []byte{0x01}, Params: []byte{0x02}},
+			SourceStateHash: sourceStateHash,
+			TransactionHash: transactionHash,
+			Witness:         []byte{0x01, 0x02},
+		},
+		BlockNumber: api.NewBigIntFromUint64(1),
+		LeafIndex:   api.NewBigIntFromUint64(0),
+		CreatedAt:   api.Now(),
+		FinalizedAt: api.Now(),
+	}
+
+	service := newAggregatorServiceForTest(t, shardingCfg, childTree)
+	service.storage = &testStorage{
+		blockStorage: &testBlockStorage{latestByRoot: map[string]*models.Block{block.RootHash.String(): block}},
+		recordStorage: &testAggregatorRecordStorage{
+			byStateID: map[string]*models.AggregatorRecord{stateID.String(): record},
+		},
+	}
+
+	resp, err := service.GetInclusionProofV2(context.Background(), &api.GetInclusionProofRequestV2{StateID: stateID})
+	require.NoError(t, err)
+	require.Equal(t, uint64(9), resp.BlockNumber)
+	require.NotNil(t, resp.InclusionProof)
+	require.Equal(t, parentUC, api.HexBytes(resp.InclusionProof.UnicityCertificate))
+
+	req := &api.CertificationRequest{
+		StateID: stateID,
+		CertificationData: api.CertificationData{
+			OwnerPredicate:  record.CertificationData.OwnerPredicate,
+			SourceStateHash: record.CertificationData.SourceStateHash,
+			TransactionHash: record.CertificationData.TransactionHash,
+			Witness:         record.CertificationData.Witness,
+		},
+	}
+	validateInclusionProof(t, resp.InclusionProof, req)
+}
+
+func TestGetInclusionProofV2Child_NonInclusionUsesParentBundleMetadata(t *testing.T) {
+	shardingCfg := config.ShardingConfig{
+		Mode:          config.ShardingModeChild,
+		ShardIDLength: 2,
+		Child: config.ChildConfig{
+			ShardID: 4,
+		},
+	}
+
+	childTree := smt.NewChildSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits, shardingCfg.Child.ShardID)
+	parentUC := testChildProofUC(t, 12, childTree.GetRootHashRaw())
+	block := models.NewBlock(
+		api.NewBigIntFromUint64(4),
+		"test-chain",
+		shardingCfg.Child.ShardID,
+		"v",
+		"f",
+		api.HexBytes(childTree.GetRootHashRaw()),
+		nil,
+		parentUC,
+	)
+	block.ParentBlockNumber = 12
+	block.Finalized = true
+
+	service := newAggregatorServiceForTest(t, shardingCfg, childTree)
+	service.storage = &testStorage{
+		blockStorage:  &testBlockStorage{latestByRoot: map[string]*models.Block{block.RootHash.String(): block}},
+		recordStorage: &testAggregatorRecordStorage{byStateID: map[string]*models.AggregatorRecord{}},
+	}
+
+	stateID := api.RequireNewImprintV2(strings.Repeat("00", api.StateTreeKeyLengthBytes))
+	resp, err := service.GetInclusionProofV2(context.Background(), &api.GetInclusionProofRequestV2{StateID: stateID})
+	require.NoError(t, err)
+	require.Equal(t, uint64(12), resp.BlockNumber)
+	require.Nil(t, resp.InclusionProof.CertificationData)
+	require.Empty(t, resp.InclusionProof.CertificateBytes)
+	require.Equal(t, parentUC, api.HexBytes(resp.InclusionProof.UnicityCertificate))
 }
 
 // TestInclusionProof tests the complete inclusion proof workflow
@@ -493,4 +619,89 @@ func newAggregatorServiceForTest(t *testing.T, shardingCfg config.ShardingConfig
 		roundManager:                  &stubRoundManager{smt: tsmt},
 		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg),
 	}
+}
+
+type testStorage struct {
+	blockStorage  interfaces.BlockStorage
+	recordStorage interfaces.AggregatorRecordStorage
+}
+
+func (s *testStorage) AggregatorRecordStorage() interfaces.AggregatorRecordStorage {
+	return s.recordStorage
+}
+func (s *testStorage) BlockStorage() interfaces.BlockStorage               { return s.blockStorage }
+func (s *testStorage) SmtStorage() interfaces.SmtStorage                   { return nil }
+func (s *testStorage) BlockRecordsStorage() interfaces.BlockRecordsStorage { return nil }
+func (s *testStorage) LeadershipStorage() interfaces.LeadershipStorage     { return nil }
+func (s *testStorage) TrustBaseStorage() interfaces.TrustBaseStorage       { return nil }
+func (s *testStorage) Initialize(context.Context) error                    { return nil }
+func (s *testStorage) Ping(context.Context) error                          { return nil }
+func (s *testStorage) Close(context.Context) error                         { return nil }
+func (s *testStorage) WithTransaction(ctx context.Context, fn func(context.Context) error) error {
+	return fn(ctx)
+}
+
+type testBlockStorage struct {
+	latestByRoot map[string]*models.Block
+}
+
+func (s *testBlockStorage) Store(context.Context, *models.Block) error { return nil }
+func (s *testBlockStorage) GetByNumber(context.Context, *api.BigInt) (*models.Block, error) {
+	return nil, nil
+}
+func (s *testBlockStorage) GetLatest(context.Context) (*models.Block, error)     { return nil, nil }
+func (s *testBlockStorage) GetLatestNumber(context.Context) (*api.BigInt, error) { return nil, nil }
+func (s *testBlockStorage) Count(context.Context) (int64, error)                 { return 0, nil }
+func (s *testBlockStorage) GetRange(context.Context, *api.BigInt, *api.BigInt) ([]*models.Block, error) {
+	return nil, nil
+}
+func (s *testBlockStorage) SetFinalized(context.Context, *api.BigInt, bool) error { return nil }
+func (s *testBlockStorage) GetUnfinalized(context.Context) ([]*models.Block, error) {
+	return nil, nil
+}
+func (s *testBlockStorage) GetLatestByRootHash(ctx context.Context, rootHash api.HexBytes) (*models.Block, error) {
+	if s == nil {
+		return nil, nil
+	}
+	return s.latestByRoot[rootHash.String()], nil
+}
+
+type testAggregatorRecordStorage struct {
+	byStateID map[string]*models.AggregatorRecord
+}
+
+func (s *testAggregatorRecordStorage) Store(context.Context, *models.AggregatorRecord) error {
+	return nil
+}
+func (s *testAggregatorRecordStorage) StoreBatch(context.Context, []*models.AggregatorRecord) error {
+	return nil
+}
+func (s *testAggregatorRecordStorage) GetByBlockNumber(context.Context, *api.BigInt) ([]*models.AggregatorRecord, error) {
+	return nil, nil
+}
+func (s *testAggregatorRecordStorage) Count(context.Context) (int64, error) { return 0, nil }
+func (s *testAggregatorRecordStorage) GetExistingRequestIDs(context.Context, []string) (map[string]bool, error) {
+	return nil, nil
+}
+func (s *testAggregatorRecordStorage) GetByStateID(ctx context.Context, stateID api.StateID) (*models.AggregatorRecord, error) {
+	if s == nil {
+		return nil, nil
+	}
+	return s.byStateID[stateID.String()], nil
+}
+
+func testChildProofUC(t *testing.T, roundNumber uint64, rootHash []byte) api.HexBytes {
+	t.Helper()
+	uc := bfttypes.UnicityCertificate{
+		InputRecord: &bfttypes.InputRecord{
+			RoundNumber: roundNumber,
+			Hash:        bfthex.Bytes(rootHash),
+		},
+		UnicitySeal: &bfttypes.UnicitySeal{
+			RootChainRoundNumber: roundNumber,
+		},
+	}
+	ucBytes, err := bfttypes.Cbor.Marshal(uc)
+	require.NoError(t, err)
+	return api.NewHexBytes(ucBytes)
 }

@@ -68,17 +68,18 @@ type AggregatorRecord struct {
 
 // Block represents a blockchain block
 type Block struct {
-	Index                *BigInt         `json:"index"`
-	ChainID              string          `json:"chainId"`
-	ShardID              ShardID         `json:"shardId"`
-	Version              string          `json:"version"`
-	ForkID               string          `json:"forkId"`
-	RootHash             HexBytes        `json:"rootHash"`
-	PreviousBlockHash    HexBytes        `json:"previousBlockHash"`
-	NoDeletionProofHash  HexBytes        `json:"noDeletionProofHash"`
-	CreatedAt            *Timestamp      `json:"createdAt"`
-	UnicityCertificate   HexBytes        `json:"unicityCertificate"`
-	ParentMerkleTreePath *MerkleTreePath `json:"parentMerkleTreePath,omitempty"` // child mode only
+	Index               *BigInt                  `json:"index"`
+	ChainID             string                   `json:"chainId"`
+	ShardID             ShardID                  `json:"shardId"`
+	Version             string                   `json:"version"`
+	ForkID              string                   `json:"forkId"`
+	RootHash            HexBytes                 `json:"rootHash"`
+	PreviousBlockHash   HexBytes                 `json:"previousBlockHash"`
+	NoDeletionProofHash HexBytes                 `json:"noDeletionProofHash"`
+	CreatedAt           *Timestamp               `json:"createdAt"`
+	UnicityCertificate  HexBytes                 `json:"unicityCertificate"`
+	ParentFragment      *ParentInclusionFragment `json:"parentFragment,omitempty"`    // child mode only
+	ParentBlockNumber   uint64                   `json:"parentBlockNumber,omitempty"` // child mode only
 }
 
 // NoDeletionProof represents a no-deletion proof
@@ -138,9 +139,45 @@ type InclusionProofV2 struct {
 	UnicityCertificate types.RawCBOR      `json:"unicityCertificate"`
 }
 
+// ParentInclusionFragment is the internal parent-tree proof fragment stored on
+// finalized child blocks and returned by get_shard_proof. CertificateBytes
+// uses the same bitmap+sibling wire shape as InclusionCert; ShardLeafValue is
+// the parent leaf value proven by that fragment and must equal the child SMT
+// root before later composition.
+type ParentInclusionFragment struct {
+	CertificateBytes HexBytes `json:"certificateBytes"`
+	ShardLeafValue   HexBytes `json:"shardLeafValue"`
+}
+
+func (f *ParentInclusionFragment) Verify(shardID ShardID, keyLength int, expectedLeafValue, expectedRoot []byte, algo HashAlgorithm) error {
+	if f == nil {
+		return errors.New("missing parent fragment")
+	}
+	if len(f.ShardLeafValue) != SiblingSize {
+		return fmt.Errorf("invalid parent fragment shard leaf value length: got %d, want %d", len(f.ShardLeafValue), SiblingSize)
+	}
+	if !bytes.Equal(f.ShardLeafValue, expectedLeafValue) {
+		return errors.New("parent fragment shard leaf value does not match expected child root")
+	}
+
+	var cert InclusionCert
+	if err := cert.UnmarshalBinary(f.CertificateBytes); err != nil {
+		return fmt.Errorf("failed to decode parent fragment cert: %w", err)
+	}
+
+	path := big.NewInt(int64(shardID))
+	key, err := PathToFixedBytes(path, keyLength)
+	if err != nil {
+		return fmt.Errorf("failed to derive parent fragment key: %w", err)
+	}
+
+	return verifyBitmapPath(&cert.Bitmap, cert.Siblings, key, f.ShardLeafValue, expectedRoot, algo)
+}
+
 type RootShardInclusionProof struct {
-	MerkleTreePath     *MerkleTreePath `json:"merkleTreePath"`
-	UnicityCertificate HexBytes        `json:"unicityCertificate"`
+	ParentFragment     *ParentInclusionFragment `json:"parentFragment,omitempty"`
+	UnicityCertificate HexBytes                 `json:"unicityCertificate"`
+	BlockNumber        uint64                   `json:"blockNumber,omitempty"`
 }
 
 // GetNoDeletionProofResponse represents the get_no_deletion_proof JSON-RPC response
@@ -209,8 +246,9 @@ type GetShardProofRequest struct {
 
 // GetShardProofResponse represents the get_shard_proof JSON-RPC response
 type GetShardProofResponse struct {
-	MerkleTreePath     *MerkleTreePath `json:"merkleTreePath"`     // Proof path for the shard
-	UnicityCertificate HexBytes        `json:"unicityCertificate"` // Unicity Certificate from the finalized block
+	ParentFragment     *ParentInclusionFragment `json:"parentFragment,omitempty"` // native parent fragment for child v2 composition
+	UnicityCertificate HexBytes                 `json:"unicityCertificate"`       // Unicity Certificate from the finalized block
+	BlockNumber        uint64                   `json:"blockNumber,omitempty"`
 }
 
 // HealthStatus represents the health status of the service
@@ -240,9 +278,15 @@ func (h *HealthStatus) AddDetail(key, value string) {
 	h.Details[key] = value
 }
 
-func (r *RootShardInclusionProof) IsValid(shardRootHash string) bool {
-	return r.MerkleTreePath != nil && len(r.UnicityCertificate) > 0 &&
-		len(r.MerkleTreePath.Steps) > 0 && r.MerkleTreePath.Steps[0].Data != nil && *r.MerkleTreePath.Steps[0].Data == shardRootHash
+func (r *RootShardInclusionProof) IsValid(shardID ShardID, keyLength int, shardRootHash HexBytes) bool {
+	if r == nil || len(r.UnicityCertificate) == 0 || r.ParentFragment == nil {
+		return false
+	}
+	rootRaw, err := ucInputRecordHashRaw(r.UnicityCertificate)
+	if err != nil {
+		return false
+	}
+	return r.ParentFragment.Verify(shardID, keyLength, shardRootHash, rootRaw, InclusionProofV2HashAlgorithm) == nil
 }
 
 type Sharding struct {
@@ -320,11 +364,15 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest) error {
 // UCInputRecordHashRaw decodes the embedded Unicity Certificate and
 // returns UC.IR.h as a raw 32-byte hash. Any other length is rejected.
 func (p *InclusionProofV2) UCInputRecordHashRaw() ([]byte, error) {
-	if len(p.UnicityCertificate) == 0 {
+	return ucInputRecordHashRaw(p.UnicityCertificate)
+}
+
+func ucInputRecordHashRaw(raw []byte) ([]byte, error) {
+	if len(raw) == 0 {
 		return nil, errors.New("missing unicity certificate")
 	}
 	var uc types.UnicityCertificate
-	if err := types.Cbor.Unmarshal(p.UnicityCertificate, &uc); err != nil {
+	if err := types.Cbor.Unmarshal(raw, &uc); err != nil {
 		return nil, fmt.Errorf("failed to decode unicity certificate: %w", err)
 	}
 	if uc.InputRecord == nil {

@@ -14,7 +14,6 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	signingV1 "github.com/unicitynetwork/aggregator-go/internal/signing/v1"
-	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/internal/trustbase"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -126,17 +125,18 @@ func modelToAPIAggregatorRecordV1(modelRecord *models.AggregatorRecord) *api.Agg
 
 func modelToAPIBlock(modelBlock *models.Block) *api.Block {
 	return &api.Block{
-		Index:                modelBlock.Index,
-		ChainID:              modelBlock.ChainID,
-		ShardID:              modelBlock.ShardID,
-		Version:              modelBlock.Version,
-		ForkID:               modelBlock.ForkID,
-		RootHash:             modelBlock.RootHash,
-		PreviousBlockHash:    modelBlock.PreviousBlockHash,
-		NoDeletionProofHash:  modelBlock.NoDeletionProofHash,
-		CreatedAt:            modelBlock.CreatedAt,
-		UnicityCertificate:   modelBlock.UnicityCertificate,
-		ParentMerkleTreePath: modelBlock.ParentMerkleTreePath,
+		Index:               modelBlock.Index,
+		ChainID:             modelBlock.ChainID,
+		ShardID:             modelBlock.ShardID,
+		Version:             modelBlock.Version,
+		ForkID:              modelBlock.ForkID,
+		RootHash:            modelBlock.RootHash,
+		PreviousBlockHash:   modelBlock.PreviousBlockHash,
+		NoDeletionProofHash: modelBlock.NoDeletionProofHash,
+		CreatedAt:           modelBlock.CreatedAt,
+		UnicityCertificate:  modelBlock.UnicityCertificate,
+		ParentFragment:      modelBlock.ParentFragment,
+		ParentBlockNumber:   modelBlock.ParentBlockNumber,
 	}
 }
 
@@ -326,6 +326,10 @@ func (as *AggregatorService) GetInclusionProofV1(ctx context.Context, req *api.G
 	unlock := as.roundManager.FinalizationReadLock()
 	defer unlock()
 
+	if as.config.Sharding.Mode == config.ShardingModeChild {
+		return nil, fmt.Errorf("legacy inclusion proof v1 is not supported in child mode")
+	}
+
 	// verify that the request ID matches the shard ID of this aggregator
 	if err := as.commitmentValidator.ValidateShardID(req.RequestID); err != nil {
 		return nil, fmt.Errorf("request ID validation failed: %w", err)
@@ -358,14 +362,6 @@ func (as *AggregatorService) GetInclusionProofV1(ctx context.Context, req *api.G
 	}
 	if block == nil {
 		return nil, fmt.Errorf("no block found with root hash %s", rootHash.String())
-	}
-
-	// Join parent and child SMT paths if sharding mode is enabled
-	if as.config.Sharding.Mode == config.ShardingModeChild {
-		merkleTreePath, err = smt.JoinPaths(merkleTreePath, block.ParentMerkleTreePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to join parent and child aggregator paths: %w", err)
-		}
 	}
 
 	// Check if commitment exists in aggregator records (finalized)
@@ -404,8 +400,9 @@ func (as *AggregatorService) GetInclusionProofV1(ctx context.Context, req *api.G
 }
 
 // GetInclusionProofV2 retrieves a v2 inclusion proof for the given stateId.
-// In standalone mode it returns an InclusionCert bound to the current SMT
-// root via UC.IR.h. Child mode is not implemented yet.
+// Both standalone and child mode serve proofs against the current certified
+// SMT root. In child mode, the local child cert is composed with the stored
+// parent fragment and bound to the parent UC.IR.h.
 func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.GetInclusionProofRequestV2) (*api.GetInclusionProofResponseV2, error) {
 	unlock := as.roundManager.FinalizationReadLock()
 	defer unlock()
@@ -432,10 +429,6 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		return nil, fmt.Errorf("unexpected SMT key length: got %d bits, want %d", keyLen, api.StateTreeKeyLengthBits)
 	}
 
-	if as.config.Sharding.Mode == config.ShardingModeChild {
-		return nil, fmt.Errorf("inclusion proof v2 not yet migrated for child mode")
-	}
-
 	// Bind the UC via the block whose stored rootHash matches the current
 	// raw 32-byte SMT root (which also lives in UC.IR.h).
 	rootHashRaw := api.HexBytes(smtInstance.GetRootHashRaw())
@@ -446,6 +439,10 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 	if block == nil {
 		return nil, fmt.Errorf("no block found with root hash %s", rootHashRaw.String())
 	}
+	responseBlockNumber, err := proofBundleBlockNumber(as.config.Sharding.Mode, block)
+	if err != nil {
+		return nil, err
+	}
 
 	record, err := as.storage.AggregatorRecordStorage().GetByStateID(ctx, req.StateID)
 	if err != nil {
@@ -455,7 +452,7 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		// Non-inclusion is not implemented yet. Return an empty v2 proof
 		// payload so verifiers short-circuit with ErrExclusionNotImpl.
 		return &api.GetInclusionProofResponseV2{
-			BlockNumber: block.Index.Uint64(),
+			BlockNumber: responseBlockNumber,
 			InclusionProof: &api.InclusionProofV2{
 				CertificationData:  nil,
 				CertificateBytes:   nil,
@@ -467,26 +464,57 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		return nil, fmt.Errorf("invalid aggregator record version got %d expected 2", record.Version)
 	}
 
-	cert, err := smtInstance.GetInclusionCert(key)
+	childCert, err := smtInstance.GetInclusionCert(key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build inclusion cert for state ID %s: %w", req.StateID, err)
 	}
+
+	cert := childCert
+	if as.config.Sharding.Mode == config.ShardingModeChild {
+		if block.ParentFragment == nil {
+			return nil, fmt.Errorf("current child block %s is missing parent fragment", block.Index.String())
+		}
+		childRoot := smtInstance.GetRootHashRaw()
+		cert, err = api.ComposeInclusionCert(block.ParentFragment, childCert, childRoot)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compose child and parent inclusion certs: %w", err)
+		}
+	}
+
 	certBytes, err := cert.MarshalBinary()
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal inclusion cert: %w", err)
 	}
 
+	proof := &api.InclusionProofV2{
+		CertificationData:  record.CertificationData.ToAPI(),
+		CertificateBytes:   certBytes,
+		UnicityCertificate: types.RawCBOR(block.UnicityCertificate),
+	}
+	if err := proof.Verify(&api.CertificationRequest{
+		StateID:           req.StateID,
+		CertificationData: *record.CertificationData.ToAPI(),
+	}); err != nil {
+		return nil, fmt.Errorf("generated inclusion proof failed self-verification: %w", err)
+	}
+
 	return &api.GetInclusionProofResponseV2{
-		// BlockNumber must describe the returned proof bundle
-		// (CertificateBytes + UnicityCertificate), which is bound to the
-		// current SMT root looked up above.
-		BlockNumber: block.Index.Uint64(),
-		InclusionProof: &api.InclusionProofV2{
-			CertificationData:  record.CertificationData.ToAPI(),
-			CertificateBytes:   certBytes,
-			UnicityCertificate: types.RawCBOR(block.UnicityCertificate),
-		},
+		BlockNumber:    responseBlockNumber,
+		InclusionProof: proof,
 	}, nil
+}
+
+func proofBundleBlockNumber(mode config.ShardingMode, block *models.Block) (uint64, error) {
+	if block == nil {
+		return 0, fmt.Errorf("missing block for proof bundle")
+	}
+	if mode != config.ShardingModeChild {
+		return block.Index.Uint64(), nil
+	}
+	if block.ParentBlockNumber == 0 {
+		return 0, fmt.Errorf("current child block %s is missing parent block number", block.Index.String())
+	}
+	return block.ParentBlockNumber, nil
 }
 
 // GetNoDeletionProof retrieves the global no-deletion proof

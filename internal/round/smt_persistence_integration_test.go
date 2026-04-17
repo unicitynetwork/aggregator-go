@@ -229,7 +229,6 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 		rootHashBytes,
 		api.HexBytes{},
 		nil,
-		nil,
 	)
 
 	err = rm.FinalizeBlock(ctx, block)
@@ -296,18 +295,17 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 
 	// Create a block with the expected raw root hash
 	block := &models.Block{
-		Index:                api.NewBigInt(big.NewInt(1)),
-		ChainID:              "test-chain",
-		ShardID:              0,
-		Version:              "1.0.0",
-		ForkID:               "test-fork",
-		RootHash:             api.HexBytes(expectedRootHashRaw),
-		PreviousBlockHash:    api.HexBytes("0000000000000000000000000000000000000000000000000000000000000000"),
-		NoDeletionProofHash:  api.HexBytes(""),
-		CreatedAt:            api.NewTimestamp(time.Now()),
-		UnicityCertificate:   api.HexBytes("certificate_data"),
-		ParentMerkleTreePath: nil,
-		Finalized:            true, // Mark as finalized for test
+		Index:               api.NewBigInt(big.NewInt(1)),
+		ChainID:             "test-chain",
+		ShardID:             0,
+		Version:             "1.0.0",
+		ForkID:              "test-fork",
+		RootHash:            api.HexBytes(expectedRootHashRaw),
+		PreviousBlockHash:   api.HexBytes("0000000000000000000000000000000000000000000000000000000000000000"),
+		NoDeletionProofHash: api.HexBytes(""),
+		CreatedAt:           api.NewTimestamp(time.Now()),
+		UnicityCertificate:  api.HexBytes("certificate_data"),
+		Finalized:           true, // Mark as finalized for test
 	}
 
 	// Store the block
@@ -345,18 +343,17 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 	t.Run("FailedVerification", func(t *testing.T) {
 		// Create a block with a different root hash to simulate mismatch
 		wrongBlock := &models.Block{
-			Index:                api.NewBigInt(big.NewInt(2)),
-			ChainID:              "test-chain",
-			ShardID:              0,
-			Version:              "1.0.0",
-			ForkID:               "test-fork",
-			RootHash:             api.HexBytes("wrong_root_hash_value"), // Intentionally wrong hash
-			PreviousBlockHash:    api.HexBytes("0000000000000000000000000000000000000000000000000000000000000001"),
-			NoDeletionProofHash:  api.HexBytes(""),
-			CreatedAt:            api.NewTimestamp(time.Now()),
-			UnicityCertificate:   api.HexBytes("certificate_data"),
-			ParentMerkleTreePath: nil,
-			Finalized:            true, // Mark as finalized for test
+			Index:               api.NewBigInt(big.NewInt(2)),
+			ChainID:             "test-chain",
+			ShardID:             0,
+			Version:             "1.0.0",
+			ForkID:              "test-fork",
+			RootHash:            api.HexBytes("wrong_root_hash_value"), // Intentionally wrong hash
+			PreviousBlockHash:   api.HexBytes("0000000000000000000000000000000000000000000000000000000000000001"),
+			NoDeletionProofHash: api.HexBytes(""),
+			CreatedAt:           api.NewTimestamp(time.Now()),
+			UnicityCertificate:  api.HexBytes("certificate_data"),
+			Finalized:           true, // Mark as finalized for test
 		}
 
 		// Store the wrong block (this will become the "latest" block)
