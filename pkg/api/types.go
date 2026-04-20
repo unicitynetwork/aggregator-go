@@ -133,10 +133,27 @@ type GetInclusionProofResponseV2 struct {
 //
 // See docs/inclusion-proof-wire.md for the frozen specification.
 type InclusionProofV2 struct {
-	_                  struct{}           `cbor:",toarray"`
+	_                  struct{} `cbor:",toarray"`
+	Version            types.Version
 	CertificationData  *CertificationData `json:"certificationData"`
 	CertificateBytes   HexBytes           `json:"certificateBytes"`
 	UnicityCertificate types.RawCBOR      `json:"unicityCertificate"`
+}
+
+func (p *InclusionProofV2) GetVersion() types.Version { return 1 }
+
+func (p *InclusionProofV2) MarshalCBOR() ([]byte, error) {
+	type alias InclusionProofV2
+	cp := *p
+	if cp.Version == 0 {
+		cp.Version = p.GetVersion()
+	}
+	return types.Cbor.MarshalTaggedValue(InclusionProofTag, (*alias)(&cp))
+}
+
+func (p *InclusionProofV2) UnmarshalCBOR(data []byte) error {
+	type alias InclusionProofV2
+	return types.UnmarshalTaggedVersioned(InclusionProofTag, p.GetVersion(), data, (*alias)(p), p)
 }
 
 // ParentInclusionFragment is the internal parent-tree proof fragment stored on

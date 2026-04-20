@@ -32,6 +32,7 @@ func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
 
 		// Test serialization
 		request1 := CertificationRequest{
+			Version:           1,
 			StateID:           stateID,
 			CertificationData: certData,
 		}
@@ -209,8 +210,10 @@ func TestCertificationResponse_SerializeAndValidate(t *testing.T) {
 
 func TestCertificationRequestCBOR(t *testing.T) {
 	req := &CertificationRequest{
+		Version: 1,
 		StateID: RequireNewImprintV2("0000cfe84a1828e2edd0a7d9533b23e519f746069a938d549a150e07e14dc0f9cf00"),
 		CertificationData: CertificationData{
+			Version:         1,
 			OwnerPredicate:  NewPayToPublicKeyPredicate([]byte{0x03, 0x20, 0x44, 0xf2}),
 			SourceStateHash: RequireNewImprintV2("0000cd60"),
 			TransactionHash: RequireNewImprintV2("00008a51b5b84171e6c7c345bf3610cc18fa1b61bad33908e1522520c001b0e7fd1d"),
@@ -242,6 +245,7 @@ func createCertData(t *testing.T) CertificationData {
 	require.NoError(t, err)
 
 	return CertificationData{
+		Version:         1,
 		OwnerPredicate:  NewPayToPublicKeyPredicate(publicKey),
 		SourceStateHash: sourceStateHashHex,
 		TransactionHash: transactionHashHex,

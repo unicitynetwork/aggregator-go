@@ -10,7 +10,8 @@ import (
 // CertificationRequest represents the certification_request JSON-RPC request,
 // sometimes also referred to as StateTransitionCertificationRequest, Commitment or UnicityServiceRequest.
 type CertificationRequest struct {
-	_ struct{} `cbor:",toarray"`
+	_       struct{} `cbor:",toarray"`
+	Version types.Version
 
 	// StateID is the unique identifier of the certification request, used as a
 	// key in the state tree. In v2 it is the raw 32-byte hash of the CBOR array
@@ -21,6 +22,22 @@ type CertificationRequest struct {
 	CertificationData CertificationData
 
 	AggregateRequestCount uint64
+}
+
+func (c *CertificationRequest) GetVersion() types.Version { return 1 }
+
+func (c *CertificationRequest) MarshalCBOR() ([]byte, error) {
+	type alias CertificationRequest
+	cp := *c
+	if cp.Version == 0 {
+		cp.Version = c.GetVersion()
+	}
+	return types.Cbor.MarshalTaggedValue(CertificationRequestTag, (*alias)(&cp))
+}
+
+func (c *CertificationRequest) UnmarshalCBOR(data []byte) error {
+	type alias CertificationRequest
+	return types.UnmarshalTaggedVersioned(CertificationRequestTag, c.GetVersion(), data, (*alias)(c), c)
 }
 
 // MarshalJSON marshals the request to CBOR and then hex encodes it, returning the result as a JSON string.
@@ -48,7 +65,8 @@ type CertificationResponse struct {
 
 // CertificationData represents the necessary cryptographic data needed for a state transition CertificationRequest.
 type CertificationData struct {
-	_ struct{} `cbor:",toarray"`
+	_       struct{} `cbor:",toarray"`
+	Version types.Version
 
 	// OwnerPredicate is the owner predicate in format: CBOR[engine: uint, code: byte[], params: byte[]].
 	//
@@ -68,6 +86,22 @@ type CertificationData struct {
 	// a signature created on the hash of CBOR array[SourceStateHashImprint, TransactionHash],
 	// in Unicity's [R || S || V] format (65 bytes).
 	Witness HexBytes `json:"witness"`
+}
+
+func (c *CertificationData) GetVersion() types.Version { return 1 }
+
+func (c *CertificationData) MarshalCBOR() ([]byte, error) {
+	type alias CertificationData
+	cp := *c
+	if cp.Version == 0 {
+		cp.Version = c.GetVersion()
+	}
+	return types.Cbor.MarshalTaggedValue(CertificationDataTag, (*alias)(&cp))
+}
+
+func (c *CertificationData) UnmarshalCBOR(data []byte) error {
+	type alias CertificationData
+	return types.UnmarshalTaggedVersioned(CertificationDataTag, c.GetVersion(), data, (*alias)(c), c)
 }
 
 // SigDataHash returns the data hash used for signature generation.
