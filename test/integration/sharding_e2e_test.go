@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	mongoContainer "github.com/testcontainers/testcontainers-go/modules/mongodb"
 	redisContainer "github.com/testcontainers/testcontainers-go/modules/redis"
+	bfttypes "github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/events"
@@ -248,7 +249,16 @@ func waitForValidProof(t *testing.T, url string, req *api.CertificationRequest, 
 			require.NoError(t, json.Unmarshal(result, &resp))
 			if resp.InclusionProof != nil && len(resp.InclusionProof.CertificateBytes) > 0 {
 				require.Greater(t, resp.BlockNumber, uint64(0))
-				require.NoError(t, resp.InclusionProof.Verify(req))
+				// Local verification only — this parent/child sharding e2e test
+				// does not load a trust base. Full InclusionProofV2.Verify is
+				// exercised by the bft-sharding e2e test.
+				var cert api.InclusionCert
+				require.NoError(t, cert.UnmarshalBinary(resp.InclusionProof.CertificateBytes))
+				rootRaw, err := resp.InclusionProof.UCInputRecordHashRaw()
+				require.NoError(t, err)
+				key, err := req.StateID.GetTreeKey()
+				require.NoError(t, err)
+				require.NoError(t, cert.Verify(key, req.CertificationData.TransactionHash.DataBytes(), rootRaw, api.InclusionProofV2HashAlgorithm))
 				return
 			}
 		}
@@ -258,7 +268,7 @@ func waitForValidProof(t *testing.T, url string, req *api.CertificationRequest, 
 }
 
 func createCommitmentForShard(t *testing.T, shardingCfg config.ShardingConfig) *api.CertificationRequest {
-	validator := signing.NewCertificationRequestValidator(shardingCfg)
+	validator := signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{})
 	for i := 0; i < 1000; i++ {
 		c := testutil.CreateTestCertificationRequest(t, fmt.Sprintf("shard%d_%d_%d", shardingCfg.Child.ShardID, i, time.Now().UnixNano()))
 		if err := validator.ValidateShardID(c.StateID); err == nil {

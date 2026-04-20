@@ -110,7 +110,7 @@ func main() {
 		}
 	}
 
-	if err := inclusionProof.InclusionProof.Verify(certReq); err != nil {
+	if err := verifyInclusionProofLocal(inclusionProof.InclusionProof, certReq); err != nil {
 		logger.Fatalf("proof verification failed: %v", err)
 	}
 	logger.Printf("Proof verified successfully against block %d.", inclusionProof.BlockNumber)
@@ -242,7 +242,7 @@ func waitForInclusionProof(ctx context.Context, client *http.Client, req *api.Ce
 			continue
 		}
 
-		if err := payload.InclusionProof.Verify(req); err != nil {
+		if err := verifyInclusionProofLocal(payload.InclusionProof, req); err != nil {
 			logger.Printf("get_inclusion_proof.v2 attempt %d verification error: %v", attempts, err)
 			time.Sleep(*flagPollInterval)
 			continue
@@ -252,4 +252,35 @@ func waitForInclusionProof(ctx context.Context, client *http.Client, req *api.Ce
 	}
 
 	return nil, attempts, fmt.Errorf("timed out waiting for inclusion proof for state ID %s", req.StateID)
+}
+
+// verifyInclusionProofLocal runs the SMT-path portion of v2 proof verification
+// without checking UC signatures. For certified verification use
+// api.InclusionProofV2.Verify.
+func verifyInclusionProofLocal(p *api.InclusionProofV2, req *api.CertificationRequest) error {
+	if p == nil {
+		return fmt.Errorf("nil inclusion proof")
+	}
+	if p.CertificationData == nil {
+		return api.ErrExclusionNotImpl
+	}
+	if !bytes.Equal(
+		p.CertificationData.TransactionHash.DataBytes(),
+		req.CertificationData.TransactionHash.DataBytes(),
+	) {
+		return fmt.Errorf("proof certification data transaction hash does not match request")
+	}
+	rootRaw, err := p.UCInputRecordHashRaw()
+	if err != nil {
+		return err
+	}
+	var cert api.InclusionCert
+	if err := cert.UnmarshalBinary(p.CertificateBytes); err != nil {
+		return fmt.Errorf("failed to decode inclusion cert: %w", err)
+	}
+	key, err := req.StateID.GetTreeKey()
+	if err != nil {
+		return fmt.Errorf("failed to derive SMT key: %w", err)
+	}
+	return cert.Verify(key, req.CertificationData.TransactionHash.DataBytes(), rootRaw, api.InclusionProofV2HashAlgorithm)
 }

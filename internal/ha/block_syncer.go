@@ -1,6 +1,7 @@
 package ha
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math/big"
@@ -148,7 +149,7 @@ func (bs *BlockSyncer) verifySMTForBlock(ctx context.Context, smtRootHash api.He
 		return fmt.Errorf("block not found for block number: %s", blockNumber.String())
 	}
 	expectedRootHash := block.RootHash
-	if smtRootHash.String() != expectedRootHash.String() {
+	if !bytes.Equal(smtRootHash, expectedRootHash) {
 		return fmt.Errorf("smt root hash %s does not match latest block root hash %s",
 			smtRootHash.String(), expectedRootHash.String())
 	}

@@ -301,7 +301,24 @@ func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *cer
 		return fmt.Errorf("got CertificationResponse for a wrong shard %s - %s", cr.Partition, cr.Shard)
 	}
 
+	if err := validateUCShardBinding(&cr.UC, c.ShardID()); err != nil {
+		return err
+	}
+
 	return c.handleUnicityCertificate(ctx, &cr.UC, &cr.Technical)
+}
+
+// validateUCShardBinding asserts the embedded UnicityCertificate is bound to
+// the expected shard via its ShardTreeCertificate.
+func validateUCShardBinding(uc *types.UnicityCertificate, expected types.ShardID) error {
+	if uc == nil {
+		return errors.New("nil unicity certificate")
+	}
+	if !uc.ShardTreeCertificate.Shard.Equal(expected) {
+		return fmt.Errorf("UC.ShardTreeCertificate.Shard %s does not match configured shard %s",
+			uc.ShardTreeCertificate.Shard, expected)
+	}
+	return nil
 }
 
 // isRepeatUC checks if the new UC is a repeat of the previous UC

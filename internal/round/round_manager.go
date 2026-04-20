@@ -190,8 +190,8 @@ func NewRoundManager(
 		})
 	}
 
-	// create BFT client for standalone mode
-	if cfg.Sharding.Mode == config.ShardingModeStandalone {
+	// create BFT client for modes that talk directly to BFT (standalone and bft-shard)
+	if cfg.Sharding.Mode == config.ShardingModeStandalone || cfg.Sharding.Mode == config.ShardingModeBFTShard {
 		if cfg.BFT.Enabled {
 			var err error
 			rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, trustBaseProvider, luc, logger, eventBus)
@@ -759,7 +759,7 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 	}
 
 	switch rm.config.Sharding.Mode {
-	case config.ShardingModeStandalone:
+	case config.ShardingModeStandalone, config.ShardingModeBFTShard:
 		if err := rm.bftClient.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start BFT client: %w", err)
 		}

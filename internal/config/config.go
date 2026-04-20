@@ -139,6 +139,9 @@ const (
 	ShardingModeStandalone ShardingMode = "standalone"
 	ShardingModeParent     ShardingMode = "parent"
 	ShardingModeChild      ShardingMode = "child"
+	// ShardingModeBFTShard runs the aggregator as one shard validator in a
+	// multi-shard BFT partition.
+	ShardingModeBFTShard ShardingMode = "bft-shard"
 )
 
 // String returns the string representation of the sharding mode
@@ -149,7 +152,7 @@ func (sm ShardingMode) String() string {
 // IsValid returns true if the sharding mode is valid
 func (sm ShardingMode) IsValid() bool {
 	switch sm {
-	case ShardingModeStandalone, ShardingModeParent, ShardingModeChild:
+	case ShardingModeStandalone, ShardingModeParent, ShardingModeChild, ShardingModeBFTShard:
 		return true
 	default:
 		return false
@@ -169,6 +172,11 @@ func (sm ShardingMode) IsParent() bool {
 // IsChild returns true if this is child mode
 func (sm ShardingMode) IsChild() bool {
 	return sm == ShardingModeChild
+}
+
+// IsBFTShard returns true if this is BFT-side sharding mode
+func (sm ShardingMode) IsBFTShard() bool {
+	return sm == ShardingModeBFTShard
 }
 
 // ShardingConfig holds sharding configuration
@@ -429,7 +437,7 @@ func (c *Config) Validate() error {
 
 	// Validate sharding configuration
 	if !c.Sharding.Mode.IsValid() {
-		return fmt.Errorf("invalid sharding mode: %s, must be one of: standalone, parent, child", c.Sharding.Mode)
+		return fmt.Errorf("invalid sharding mode: %s, must be one of: standalone, parent, child, bft-shard", c.Sharding.Mode)
 	}
 
 	if c.Sharding.ShardIDLength < 1 || c.Sharding.ShardIDLength > 16 {
@@ -442,6 +450,26 @@ func (c *Config) Validate() error {
 
 	if err := c.BFT.Validate(); err != nil {
 		return err
+	}
+
+	if c.Sharding.Mode == ShardingModeBFTShard {
+		if !c.BFT.Enabled {
+			return errors.New("bft-shard mode requires BFT_ENABLED=true")
+		}
+		if c.BFT.ShardConf == nil {
+			return errors.New("bft-shard mode requires BFT_SHARD_CONF_FILE")
+		}
+		if c.BFT.ShardConf.ShardID.Length() == 0 {
+			return errors.New("bft-shard mode requires a non-empty shard ID; use standalone for single-shard partitions")
+		}
+	}
+
+	// A non-empty BFT shard ID means a multi-shard partition; only bft-shard
+	// mode can admit/reject state IDs against it.
+	if c.BFT.Enabled && c.BFT.ShardConf != nil && c.BFT.ShardConf.ShardID.Length() > 0 &&
+		c.Sharding.Mode != ShardingModeBFTShard {
+		return fmt.Errorf("BFT shard conf has a non-empty shard ID but SHARDING_MODE=%s; use SHARDING_MODE=bft-shard for multi-shard BFT partitions",
+			c.Sharding.Mode)
 	}
 
 	return nil

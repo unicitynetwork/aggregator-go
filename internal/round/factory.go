@@ -41,7 +41,7 @@ func NewManager(
 	trustBaseProvider interfaces.TrustBaseProvider,
 ) (Manager, error) {
 	switch cfg.Sharding.Mode {
-	case config.ShardingModeStandalone:
+	case config.ShardingModeStandalone, config.ShardingModeBFTShard:
 		return NewRoundManager(ctx, cfg, logger, commitmentQueue, storage, nil, stateTracker, luc, eventBus, threadSafeSmt, trustBaseProvider)
 	case config.ShardingModeParent:
 		return NewParentRoundManager(ctx, cfg, logger, storage, luc, eventBus, threadSafeSmt, trustBaseProvider)

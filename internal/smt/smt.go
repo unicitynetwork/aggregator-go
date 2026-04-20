@@ -560,8 +560,12 @@ func (smt *SparseMerkleTree) GetInclusionCert(key []byte) (*api.InclusionCert, e
 	_ = smt.root.calculateHash(hasher)
 
 	var cert api.InclusionCert
-	if _, err := smt.generateInclusionCertWithLeafValue(hasher, key, smt.root, &cert); err != nil {
+	leafValue, err := smt.generateInclusionCertWithLeafValue(hasher, key, smt.root, &cert)
+	if err != nil {
 		return nil, err
+	}
+	if len(leafValue) == 0 {
+		return nil, fmt.Errorf("smt: leaf not found for key %x", key)
 	}
 	return &cert, nil
 }
@@ -606,15 +610,6 @@ func (smt *SparseMerkleTree) GetShardInclusionFragment(shardID api.ShardID) (*ap
 		CertificateBytes: api.NewHexBytes(certBytes),
 		ShardLeafValue:   api.NewHexBytes(leafValue),
 	}, nil
-}
-
-// generateInclusionCert recursively walks from the current node toward the
-// leaf matching key, appending siblings and setting bitmap bits at every
-// 2-child branching node along the path. Unary passthrough nodes contribute
-// nothing to either the bitmap or the sibling list.
-func (smt *SparseMerkleTree) generateInclusionCert(hasher *api.DataHasher, key []byte, current branch, cert *api.InclusionCert) error {
-	_, err := smt.generateInclusionCertWithLeafValue(hasher, key, current, cert)
-	return err
 }
 
 func (smt *SparseMerkleTree) generateInclusionCertWithLeafValue(hasher *api.DataHasher, key []byte, current branch, cert *api.InclusionCert) ([]byte, error) {

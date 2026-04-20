@@ -117,7 +117,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 	}
 
 	switch rm.config.Sharding.Mode {
-	case config.ShardingModeStandalone:
+	case config.ShardingModeStandalone, config.ShardingModeBFTShard:
 		block := models.NewBlock(
 			blockNumber,
 			rm.config.Chain.ID,

@@ -49,10 +49,10 @@ type TrustBaseService interface {
 // NewService creates the appropriate service based on sharding mode
 func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, roundManager round.Manager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector, receiptSigner *signing.ReceiptSigner) (Service, error) {
 	switch cfg.Sharding.Mode {
-	case config.ShardingModeStandalone:
+	case config.ShardingModeStandalone, config.ShardingModeBFTShard:
 		rm, ok := roundManager.(*round.RoundManager)
 		if !ok {
-			return nil, fmt.Errorf("invalid round manager type for standalone mode")
+			return nil, fmt.Errorf("invalid round manager type for mode %s", cfg.Sharding.Mode)
 		}
 		return NewAggregatorService(cfg, logger, rm, commitmentQueue, storage, leaderSelector, receiptSigner), nil
 	case config.ShardingModeParent:
@@ -159,6 +159,10 @@ func NewAggregatorService(cfg *config.Config,
 	leaderSelector LeaderSelector,
 	receiptSigner *signing.ReceiptSigner,
 ) *AggregatorService {
+	var bftShardID types.ShardID
+	if cfg.BFT.ShardConf != nil {
+		bftShardID = cfg.BFT.ShardConf.ShardID
+	}
 	return &AggregatorService{
 		config:                        cfg,
 		logger:                        logger,
@@ -167,7 +171,7 @@ func NewAggregatorService(cfg *config.Config,
 		roundManager:                  roundManager,
 		leaderSelector:                leaderSelector,
 		commitmentValidator:           signingV1.NewCommitmentValidator(cfg.Sharding),
-		certificationRequestValidator: signing.NewCertificationRequestValidator(cfg.Sharding),
+		certificationRequestValidator: signing.NewCertificationRequestValidator(cfg.Sharding, bftShardID),
 		trustBaseValidator:            trustbase.NewTrustBaseValidator(storage.TrustBaseStorage()),
 		receiptSigner:                 receiptSigner,
 	}
@@ -326,8 +330,9 @@ func (as *AggregatorService) GetInclusionProofV1(ctx context.Context, req *api.G
 	unlock := as.roundManager.FinalizationReadLock()
 	defer unlock()
 
-	if as.config.Sharding.Mode == config.ShardingModeChild {
-		return nil, fmt.Errorf("legacy inclusion proof v1 is not supported in child mode")
+	if as.config.Sharding.Mode == config.ShardingModeChild ||
+		as.config.Sharding.Mode == config.ShardingModeBFTShard {
+		return nil, fmt.Errorf("legacy inclusion proof v1 is not supported in mode %s", as.config.Sharding.Mode)
 	}
 
 	// verify that the request ID matches the shard ID of this aggregator
@@ -491,10 +496,22 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		CertificateBytes:   certBytes,
 		UnicityCertificate: types.RawCBOR(block.UnicityCertificate),
 	}
-	if err := proof.Verify(&api.CertificationRequest{
-		StateID:           req.StateID,
-		CertificationData: *record.CertificationData.ToAPI(),
-	}); err != nil {
+
+	// Self-check the freshly built cert against the block's UC root.
+	selfKey, err := req.StateID.GetTreeKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive SMT key for self-check: %w", err)
+	}
+	var selfCert api.InclusionCert
+	if err := selfCert.UnmarshalBinary(certBytes); err != nil {
+		return nil, fmt.Errorf("self-check: decode cert: %w", err)
+	}
+	selfRoot, err := proof.UCInputRecordHashRaw()
+	if err != nil {
+		return nil, fmt.Errorf("self-check: extract UC.IR.h: %w", err)
+	}
+	selfValue := record.CertificationData.TransactionHash.DataBytes()
+	if err := selfCert.Verify(selfKey, selfValue, selfRoot, api.InclusionProofV2HashAlgorithm); err != nil {
 		return nil, fmt.Errorf("generated inclusion proof failed self-verification: %w", err)
 	}
 
@@ -649,11 +666,7 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 		role = "standalone"
 	}
 
-	sharding := api.Sharding{
-		Mode:       as.config.Sharding.Mode.String(),
-		ShardIDLen: as.config.Sharding.ShardIDLength,
-		ShardID:    as.config.Sharding.Child.ShardID,
-	}
+	sharding := buildShardingHealth(as.config)
 	status := models.NewHealthStatus(role, as.config.HA.ServerID, sharding)
 
 	// Add database connectivity check
@@ -700,6 +713,24 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 	}
 
 	return modelToAPIHealthStatus(status), nil
+}
+
+// buildShardingHealth builds the api.Sharding health payload. In bft-shard
+// mode the shard is reported as a bit-string via BFTShardID and the legacy
+// integer fields are left at zero.
+func buildShardingHealth(cfg *config.Config) api.Sharding {
+	sharding := api.Sharding{
+		Mode: cfg.Sharding.Mode.String(),
+	}
+	if cfg.Sharding.Mode == config.ShardingModeBFTShard {
+		if cfg.BFT.ShardConf != nil {
+			sharding.BFTShardID = cfg.BFT.ShardConf.ShardID.String()
+		}
+		return sharding
+	}
+	sharding.ShardIDLen = cfg.Sharding.ShardIDLength
+	sharding.ShardID = cfg.Sharding.Child.ShardID
+	return sharding
 }
 
 // SubmitShardRoot - not supported in standalone mode
