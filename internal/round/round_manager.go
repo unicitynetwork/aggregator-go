@@ -21,6 +21,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/redis"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -881,6 +882,9 @@ func (rm *RoundManager) startCommitmentPrefetcher(ctx context.Context) {
 	rm.prefetchCancel = cancel
 
 	if rm.config.Storage.UseRedisForCommitments {
+		if cs, ok := rm.commitmentQueue.(*redis.CommitmentStorage); ok {
+			cs.ResetPendingSweep()
+		}
 		rm.logger.WithContext(ctx).Info("Starting Redis commitment streamer")
 		rm.wg.Go(func() {
 			rm.redisCommitmentStreamer(prefetcherCtx)

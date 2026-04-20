@@ -161,9 +161,34 @@ docker-run-sh-ha-monitoring-clean-keep-tb:
 	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug PROMETHEUS_TARGETS_FILE=sharded-ha.json docker compose -f sharding-ha-compose.yml -f docker-compose.monitoring.yml up --force-recreate -d --build
 	@echo "Sharding+HA services + monitoring rebuilt with user UID=$$(id -u):$$(id -g)"
 
+docker-run-bft-sh-clean:
+	@echo "Rebuilding fixed 2-shard BFT services with clean state as current user..."
+	@docker compose -f bft-sharding-compose.yml down
+	@rm -rf ./data/bft-sharding ./logs/bft-shard0 ./logs/bft-shard1
+	@mkdir -p ./data/bft-sharding/genesis ./data/bft-sharding/genesis-root ./data/bft-sharding/mongodb_data ./data/bft-sharding/redis_data && chmod -R 777 ./data/bft-sharding
+	@mkdir -p ./logs/bft-shard0 ./logs/bft-shard1 && chmod -R 777 ./logs/bft-shard0 ./logs/bft-shard1
+	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose -f bft-sharding-compose.yml up --force-recreate -d --build
+	@echo "Fixed 2-shard BFT services rebuilt with user UID=$$(id -u):$$(id -g)"
+
+docker-run-bft-sh-clean-keep-tb:
+	@echo "Rebuilding fixed 2-shard BFT services with clean DB/Redis state but preserving BFT genesis as current user..."
+	@docker compose -f bft-sharding-compose.yml down
+	@rm -rf ./data/bft-sharding/mongodb_data ./data/bft-sharding/redis_data
+	@mkdir -p ./data/bft-sharding/genesis ./data/bft-sharding/genesis-root ./data/bft-sharding/mongodb_data ./data/bft-sharding/redis_data && chmod -R 777 ./data/bft-sharding
+	@mkdir -p ./logs/bft-shard0 ./logs/bft-shard1 && chmod -R 777 ./logs/bft-shard0 ./logs/bft-shard1
+	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose -f bft-sharding-compose.yml up --force-recreate -d --build
+	@echo "Fixed 2-shard BFT services rebuilt with user UID=$$(id -u):$$(id -g)"
+
 docker-restart-sh-ha:
 	@echo "Rebuilding and restarting sharding+HA aggregator services..."
 	@docker compose -f sharding-ha-compose.yml stop aggregator-shard1-1 aggregator-shard1-2 aggregator-shard2-1 aggregator-shard2-2 aggregator-root-1
 	@docker compose -f sharding-ha-compose.yml build aggregator-shard1-1 aggregator-shard1-2 aggregator-shard2-1 aggregator-shard2-2 aggregator-root-1
 	@LOG_LEVEL=debug docker compose -f sharding-ha-compose.yml up -d --force-recreate --no-deps aggregator-shard1-1 aggregator-shard1-2 aggregator-shard2-1 aggregator-shard2-2 aggregator-root-1
 	@echo "Sharding+HA Aggregator services restarted"
+
+docker-restart-bft-sh:
+	@echo "Rebuilding and restarting fixed 2-shard BFT aggregator services..."
+	@docker compose -f bft-sharding-compose.yml stop aggregator-bft-shard0 aggregator-bft-shard1
+	@docker compose -f bft-sharding-compose.yml build aggregator-bft-shard0 aggregator-bft-shard1
+	@LOG_LEVEL=debug docker compose -f bft-sharding-compose.yml up -d --force-recreate --no-deps aggregator-bft-shard0 aggregator-bft-shard1
+	@echo "Fixed 2-shard BFT aggregator services restarted"

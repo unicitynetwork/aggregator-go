@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -959,13 +960,21 @@ func (suite *RedisTestSuite) TestGetByRequestIDs_FindsAcrossMultipleBatches() {
 	ctx := suite.ctx
 	t := suite.T()
 
-	// Store 25000 messages (requires 3 batches of 10000 to scan)
+	// Store 25000 messages (requires 3 batches of 10000 to scan).
+	// Push in sub-batches so no single Redis pipeline flush gets overlarge.
 	const totalMessages = 25000
+	const storeChunk = 5000
 	commitments := make([]*models.CertificationRequest, totalMessages)
 	for i := 0; i < totalMessages; i++ {
 		commitments[i] = createTestCommitment()
 	}
-	require.NoError(t, suite.storage.StoreBatch(ctx, commitments))
+	for start := 0; start < totalMessages; start += storeChunk {
+		end := start + storeChunk
+		if end > totalMessages {
+			end = totalMessages
+		}
+		require.NoError(t, suite.storage.StoreBatch(ctx, commitments[start:end]))
+	}
 	time.Sleep(300 * time.Millisecond)
 
 	// Request the LAST commitment - requires scanning all batches
@@ -975,4 +984,302 @@ func (suite *RedisTestSuite) TestGetByRequestIDs_FindsAcrossMultipleBatches() {
 	require.NoError(t, err)
 	require.Len(t, result, 1, "Should find the commitment in the last batch")
 	require.NotNil(t, result[commitments[totalMessages-1].StateID.String()])
+}
+
+// TestPendingExhausted_ResetOnStreamRestart: after a reset, a restarted
+// streamer on the same CommitmentStorage reclaims previously-unacked entries
+// before consuming new ones.
+func (suite *RedisTestSuite) TestPendingExhausted_ResetOnStreamRestart() {
+	ctx := suite.ctx
+	t := suite.T()
+
+	firstBatch := []*models.CertificationRequest{
+		createTestCommitment(),
+		createTestCommitment(),
+		createTestCommitment(),
+	}
+	require.NoError(t, suite.storage.StoreBatch(ctx, firstBatch))
+
+	stream1Ctx, cancel1 := context.WithCancel(ctx)
+	stream1Ch := make(chan *models.CertificationRequest, 10)
+	stream1Done := make(chan struct{})
+	go func() {
+		_ = suite.storage.StreamCertificationRequests(stream1Ctx, stream1Ch)
+		close(stream1Done)
+	}()
+
+	received1 := make([]*models.CertificationRequest, 0, len(firstBatch))
+	collectDeadline := time.After(2 * time.Second)
+CollectFirst:
+	for len(received1) < len(firstBatch) {
+		select {
+		case c := <-stream1Ch:
+			received1 = append(received1, c)
+		case <-collectDeadline:
+			break CollectFirst
+		}
+	}
+	require.Len(t, received1, len(firstBatch),
+		"stream #1 must deliver all stored commitments")
+
+	cancel1()
+	<-stream1Done
+
+	secondBatch := []*models.CertificationRequest{
+		createTestCommitment(),
+		createTestCommitment(),
+	}
+	require.NoError(t, suite.storage.StoreBatch(ctx, secondBatch))
+
+	suite.storage.ResetPendingSweep()
+
+	stream2Ctx, cancel2 := context.WithCancel(ctx)
+	defer cancel2()
+	stream2Ch := make(chan *models.CertificationRequest, 10)
+	go func() {
+		_ = suite.storage.StreamCertificationRequests(stream2Ctx, stream2Ch)
+	}()
+
+	received2 := make([]*models.CertificationRequest, 0, len(firstBatch)+len(secondBatch))
+	windowDeadline := time.After(1 * time.Second)
+Collect2:
+	for {
+		select {
+		case c := <-stream2Ch:
+			received2 = append(received2, c)
+		case <-windowDeadline:
+			break Collect2
+		}
+	}
+
+	require.Len(t, received2, len(firstBatch)+len(secondBatch),
+		"stream #2 must drain the %d pending entries and then deliver the %d new entries",
+		len(firstBatch), len(secondBatch))
+
+	firstIDs := make(map[string]struct{}, len(received1))
+	for _, c := range received1 {
+		firstIDs[c.StateID.String()] = struct{}{}
+	}
+	secondIDs := make(map[string]struct{}, len(received2))
+	for _, c := range received2 {
+		secondIDs[c.StateID.String()] = struct{}{}
+	}
+	for id := range firstIDs {
+		_, found := secondIDs[id]
+		assert.True(t, found, "pending commitment not redelivered (stateID=%s)", id)
+	}
+	for _, c := range secondBatch {
+		_, found := secondIDs[c.StateID.String()]
+		assert.True(t, found, "new commitment not delivered (stateID=%s)", c.StateID.String())
+	}
+}
+
+// TestPendingSweep_DeliversEachEntryExactlyOnce: the pending sweep delivers
+// each PEL entry to commitmentChan exactly once, regardless of ack timing.
+func (suite *RedisTestSuite) TestPendingSweep_DeliversEachEntryExactlyOnce() {
+	ctx := suite.ctx
+	t := suite.T()
+
+	// Seed the PEL with 3 entries: store + stream without acking.
+	commitments := []*models.CertificationRequest{
+		createTestCommitment(),
+		createTestCommitment(),
+		createTestCommitment(),
+	}
+	require.NoError(t, suite.storage.StoreBatch(ctx, commitments))
+
+	stream1Ctx, cancel1 := context.WithCancel(ctx)
+	ch1 := make(chan *models.CertificationRequest, 10)
+	done1 := make(chan struct{})
+	go func() {
+		_ = suite.storage.StreamCertificationRequests(stream1Ctx, ch1)
+		close(done1)
+	}()
+
+	got := 0
+	deadline := time.After(2 * time.Second)
+CollectPhase1:
+	for got < len(commitments) {
+		select {
+		case <-ch1:
+			got++
+		case <-deadline:
+			break CollectPhase1
+		}
+	}
+	require.Equal(t, len(commitments), got, "phase 1 must deliver all stored commitments")
+	cancel1()
+	<-done1
+
+	// Fresh instance starts with pendingExhausted=false and sweeps the PEL.
+	log, _ := logger.New("info", "text", "stdout", false)
+	storage2 := NewCommitmentStorage(suite.client, "commitments", "test-server", DefaultBatchConfig(), log)
+	require.NoError(t, storage2.Initialize(ctx))
+	defer storage2.Close(ctx)
+
+	stream2Ctx, cancel2 := context.WithCancel(ctx)
+	defer cancel2()
+	ch2 := make(chan *models.CertificationRequest, 100)
+	go func() {
+		_ = storage2.StreamCertificationRequests(stream2Ctx, ch2)
+	}()
+
+	deliveries := 0
+	seen := map[string]int{}
+	windowDeadline := time.After(500 * time.Millisecond)
+Collect2:
+	for {
+		select {
+		case c := <-ch2:
+			deliveries++
+			seen[c.StateID.String()]++
+		case <-windowDeadline:
+			break Collect2
+		}
+	}
+
+	require.Equal(t, len(commitments), deliveries,
+		"want %d deliveries, got %d", len(commitments), deliveries)
+	require.Len(t, seen, len(commitments))
+	for id, n := range seen {
+		require.Equal(t, 1, n, "stateID=%s delivered %d times", id, n)
+	}
+}
+
+// TestPendingSweep_DrainsMultipleBatches: the sweep drains a PEL larger than
+// one XREADGROUP page exactly once.
+func (suite *RedisTestSuite) TestPendingSweep_DrainsMultipleBatches() {
+	if testing.Short() {
+		suite.T().Skip("skipping multi-batch drain test in short mode")
+	}
+	ctx := suite.ctx
+	t := suite.T()
+
+	const total = 2500
+	commitments := make([]*models.CertificationRequest, total)
+	for i := 0; i < total; i++ {
+		commitments[i] = createTestCommitment()
+	}
+	require.NoError(t, suite.storage.StoreBatch(ctx, commitments))
+
+	stream1Ctx, cancel1 := context.WithCancel(ctx)
+	ch1 := make(chan *models.CertificationRequest, total+100)
+	done1 := make(chan struct{})
+	go func() {
+		_ = suite.storage.StreamCertificationRequests(stream1Ctx, ch1)
+		close(done1)
+	}()
+
+	got := 0
+	deadline := time.After(30 * time.Second)
+CollectPhase1:
+	for got < total {
+		select {
+		case <-ch1:
+			got++
+		case <-deadline:
+			break CollectPhase1
+		}
+	}
+	require.Equal(t, total, got)
+	cancel1()
+	<-done1
+
+	log, _ := logger.New("info", "text", "stdout", false)
+	storage2 := NewCommitmentStorage(suite.client, "commitments", "test-server", DefaultBatchConfig(), log)
+	require.NoError(t, storage2.Initialize(ctx))
+	defer storage2.Close(ctx)
+
+	stream2Ctx, cancel2 := context.WithCancel(ctx)
+	defer cancel2()
+	ch2 := make(chan *models.CertificationRequest, total+100)
+	go func() {
+		_ = storage2.StreamCertificationRequests(stream2Ctx, ch2)
+	}()
+
+	seen := make(map[string]int, total)
+	windowDeadline := time.After(30 * time.Second)
+Collect2:
+	for len(seen) < total {
+		select {
+		case c := <-ch2:
+			seen[c.StateID.String()]++
+		case <-windowDeadline:
+			break Collect2
+		}
+	}
+
+	require.Len(t, seen, total, "want %d unique, got %d", total, len(seen))
+	for id, n := range seen {
+		require.Equal(t, 1, n, "stateID=%s delivered %d times", id, n)
+	}
+}
+
+// TestXReadGroupHistory_IDBoundary pins the assumption that XREADGROUP in
+// history mode returns entries strictly greater than the supplied ID, which
+// the cursor walk in drainPendingForConsumer relies on.
+func (suite *RedisTestSuite) TestXReadGroupHistory_IDBoundary() {
+	ctx := suite.ctx
+	t := suite.T()
+
+	commitments := []*models.CertificationRequest{
+		createTestCommitment(),
+		createTestCommitment(),
+		createTestCommitment(),
+	}
+	require.NoError(t, suite.storage.StoreBatch(ctx, commitments))
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	ch := make(chan *models.CertificationRequest, 10)
+	done := make(chan struct{})
+	go func() {
+		_ = suite.storage.StreamCertificationRequests(streamCtx, ch)
+		close(done)
+	}()
+	got := 0
+	deadline := time.After(2 * time.Second)
+	for got < len(commitments) {
+		select {
+		case <-ch:
+			got++
+		case <-deadline:
+			t.Fatal("setup: failed to move commitments into PEL")
+		}
+	}
+	cancel()
+	<-done
+
+	probe := func(id string) int {
+		res, err := suite.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+			Group:    consumerGroup,
+			Consumer: "processor",
+			Streams:  []string{"commitments", id},
+			Count:    10,
+			Block:    0,
+		}).Result()
+		if errors.Is(err, redis.Nil) {
+			return 0
+		}
+		require.NoError(t, err)
+		if len(res) == 0 {
+			return 0
+		}
+		return len(res[0].Messages)
+	}
+
+	require.Equal(t, 3, probe("0"), "PEL should hold all 3 entries")
+
+	full, err := suite.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group:    consumerGroup,
+		Consumer: "processor",
+		Streams:  []string{"commitments", "0"},
+		Count:    10,
+		Block:    0,
+	}).Result()
+	require.NoError(t, err)
+	firstID := full[0].Messages[0].ID
+	lastID := full[0].Messages[2].ID
+
+	require.Equal(t, 2, probe(firstID), "strict-greater: ID=first should return 2 entries")
+	require.Equal(t, 0, probe(lastID), "strict-greater: ID=last should return 0 entries")
 }
