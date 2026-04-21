@@ -24,20 +24,25 @@ type CertificationRequest struct {
 	AggregateRequestCount uint64
 }
 
-func (c *CertificationRequest) GetVersion() types.Version { return 1 }
+func (c *CertificationRequest) GetVersion() types.Version {
+	if c != nil && c.Version > 0 {
+		return c.Version
+	}
+	return 1
+}
 
 func (c *CertificationRequest) MarshalCBOR() ([]byte, error) {
 	type alias CertificationRequest
 	cp := *c
 	if cp.Version == 0 {
-		cp.Version = c.GetVersion()
+		cp.Version = 1
 	}
 	return types.Cbor.MarshalTaggedValue(CertificationRequestTag, (*alias)(&cp))
 }
 
 func (c *CertificationRequest) UnmarshalCBOR(data []byte) error {
 	type alias CertificationRequest
-	return types.UnmarshalTaggedVersioned(CertificationRequestTag, c.GetVersion(), data, (*alias)(c), c)
+	return types.UnmarshalTaggedVersioned(CertificationRequestTag, 1, data, (*alias)(c), c)
 }
 
 // MarshalJSON marshals the request to CBOR and then hex encodes it, returning the result as a JSON string.
@@ -65,8 +70,8 @@ type CertificationResponse struct {
 
 // CertificationData represents the necessary cryptographic data needed for a state transition CertificationRequest.
 type CertificationData struct {
-	_       struct{} `cbor:",toarray"`
-	Version types.Version
+	_       struct{}      `cbor:",toarray"`
+	Version types.Version `json:"version"`
 
 	// OwnerPredicate is the owner predicate in format: CBOR[engine: uint, code: byte[], params: byte[]].
 	//
@@ -88,20 +93,25 @@ type CertificationData struct {
 	Witness HexBytes `json:"witness"`
 }
 
-func (c *CertificationData) GetVersion() types.Version { return 1 }
+func (c *CertificationData) GetVersion() types.Version {
+	if c != nil && c.Version > 0 {
+		return c.Version
+	}
+	return 1
+}
 
 func (c *CertificationData) MarshalCBOR() ([]byte, error) {
 	type alias CertificationData
 	cp := *c
 	if cp.Version == 0 {
-		cp.Version = c.GetVersion()
+		cp.Version = 1
 	}
 	return types.Cbor.MarshalTaggedValue(CertificationDataTag, (*alias)(&cp))
 }
 
 func (c *CertificationData) UnmarshalCBOR(data []byte) error {
 	type alias CertificationData
-	return types.UnmarshalTaggedVersioned(CertificationDataTag, c.GetVersion(), data, (*alias)(c), c)
+	return types.UnmarshalTaggedVersioned(CertificationDataTag, 1, data, (*alias)(c), c)
 }
 
 // SigDataHash returns the data hash used for signature generation.

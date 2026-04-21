@@ -112,13 +112,14 @@ type GetInclusionProofResponseV2 struct {
 
 // InclusionProofV2 is the canonical v2 inclusion proof payload.
 //
-// Wire form (CBOR toarray):
+// Wire form: CBOR tag InclusionProofTag wrapping a 4-element toarray:
 //
-//	[
+//	#InclusionProofTag ([
+//	  version: uint,
 //	  certificationDataOrNull,
 //	  certificateBytes: bstr,   // InclusionCert or ExclusionCert raw wire form
 //	  unicityCertificate: raw CBOR
-//	]
+//	])
 //
 // Discriminator:
 //   - CertificationData != nil → inclusion. CertificateBytes is an
@@ -133,27 +134,32 @@ type GetInclusionProofResponseV2 struct {
 //
 // See docs/inclusion-proof-wire.md for the frozen specification.
 type InclusionProofV2 struct {
-	_                  struct{} `cbor:",toarray"`
-	Version            types.Version
+	_                  struct{}           `cbor:",toarray"`
+	Version            types.Version      `json:"version"`
 	CertificationData  *CertificationData `json:"certificationData"`
 	CertificateBytes   HexBytes           `json:"certificateBytes"`
 	UnicityCertificate types.RawCBOR      `json:"unicityCertificate"`
 }
 
-func (p *InclusionProofV2) GetVersion() types.Version { return 1 }
+func (p *InclusionProofV2) GetVersion() types.Version {
+	if p != nil && p.Version > 0 {
+		return p.Version
+	}
+	return 1
+}
 
 func (p *InclusionProofV2) MarshalCBOR() ([]byte, error) {
 	type alias InclusionProofV2
 	cp := *p
 	if cp.Version == 0 {
-		cp.Version = p.GetVersion()
+		cp.Version = 1
 	}
 	return types.Cbor.MarshalTaggedValue(InclusionProofTag, (*alias)(&cp))
 }
 
 func (p *InclusionProofV2) UnmarshalCBOR(data []byte) error {
 	type alias InclusionProofV2
-	return types.UnmarshalTaggedVersioned(InclusionProofTag, p.GetVersion(), data, (*alias)(p), p)
+	return types.UnmarshalTaggedVersioned(InclusionProofTag, 1, data, (*alias)(p), p)
 }
 
 // ParentInclusionFragment is the internal parent-tree proof fragment stored on

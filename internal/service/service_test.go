@@ -88,7 +88,7 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	mongoURI += "&directConnection=true"
 
 	// Start Redis container
-	redis, err := redisContainer.Run(ctx, "redis:7")
+	redis, err := redisContainer.Run(ctx, "redis:7-alpine")
 	require.NoError(t, err)
 	redisURI, err := redis.ConnectionString(ctx)
 	require.NoError(t, err)
