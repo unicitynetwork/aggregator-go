@@ -22,7 +22,7 @@ func shardIDFromHex(t *testing.T, h string) types.ShardID {
 }
 
 // stateIDWithMSB returns a 32-byte state ID whose first byte holds topBits in
-// its top topBitCount bits (remaining bits zeroed).
+// its topBitCount most-significant bits (remaining bits zeroed).
 func stateIDWithMSB(topBits byte, topBitCount int) api.StateID {
 	key := make([]byte, api.StateTreeKeyLengthBytes)
 	mask := byte(0xFF << (8 - topBitCount))

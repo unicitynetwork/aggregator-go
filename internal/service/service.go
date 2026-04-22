@@ -179,6 +179,11 @@ func NewAggregatorService(cfg *config.Config,
 
 // SubmitCommitment handles commitment submission
 func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error) {
+	if as.config.Sharding.Mode == config.ShardingModeChild ||
+		as.config.Sharding.Mode == config.ShardingModeBFTShard {
+		return nil, fmt.Errorf("legacy submit_commitment is not supported in mode %s", as.config.Sharding.Mode)
+	}
+
 	// Create commitment with aggregate count
 	aggregateCount := req.AggregateRequestCount
 	if aggregateCount == 0 {
@@ -497,21 +502,8 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		UnicityCertificate: types.RawCBOR(block.UnicityCertificate),
 	}
 
-	// Self-check the freshly built cert against the block's UC root.
-	selfKey, err := req.StateID.GetTreeKey()
-	if err != nil {
-		return nil, fmt.Errorf("failed to derive SMT key for self-check: %w", err)
-	}
-	var selfCert api.InclusionCert
-	if err := selfCert.UnmarshalBinary(certBytes); err != nil {
-		return nil, fmt.Errorf("self-check: decode cert: %w", err)
-	}
-	selfRoot, err := proof.UCInputRecordHashRaw()
-	if err != nil {
-		return nil, fmt.Errorf("self-check: extract UC.IR.h: %w", err)
-	}
 	selfValue := record.CertificationData.TransactionHash.DataBytes()
-	if err := selfCert.Verify(selfKey, selfValue, selfRoot, api.InclusionProofV2HashAlgorithm); err != nil {
+	if err := childCert.Verify(key, selfValue, block.RootHash, api.InclusionProofV2HashAlgorithm); err != nil {
 		return nil, fmt.Errorf("generated inclusion proof failed self-verification: %w", err)
 	}
 

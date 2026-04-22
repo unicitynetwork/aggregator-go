@@ -23,6 +23,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	bfttypes "github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/aggregator-go/internal/proofverify"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -658,7 +659,7 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 					}
 					metrics.addProofLatency(totalLatency)
 
-					if err := verifyInclusionProofLocal(proofResp.InclusionProof, job.request); err != nil {
+					if err := proofverify.VerifyInclusionProofLocal(proofResp.InclusionProof, job.request); err != nil {
 						if attempt < proofMaxRetries-1 {
 							time.Sleep(proofRetryDelay)
 							continue
@@ -1568,37 +1569,4 @@ func main() {
 	metrics.printErrorSummary()
 
 	reportAggregatorServerStats(testWindowStart, time.Now(), shardClients)
-}
-
-// verifyInclusionProofLocal does the local (non-certified) portion of v2
-// inclusion-proof verification: checks the SMT path cert against UC.IR.h and
-// the request/proof transaction-hash consistency. UC seal signatures are NOT
-// validated — this load-test tool does not carry a trust base. For the full
-// certified verifier contract, use api.InclusionProofV2.Verify(req, vctx).
-func verifyInclusionProofLocal(p *api.InclusionProofV2, req *api.CertificationRequest) error {
-	if p == nil {
-		return fmt.Errorf("nil inclusion proof")
-	}
-	if p.CertificationData == nil {
-		return api.ErrExclusionNotImpl
-	}
-	if !bytes.Equal(
-		p.CertificationData.TransactionHash.DataBytes(),
-		req.CertificationData.TransactionHash.DataBytes(),
-	) {
-		return fmt.Errorf("proof certification data transaction hash does not match request")
-	}
-	rootRaw, err := p.UCInputRecordHashRaw()
-	if err != nil {
-		return err
-	}
-	var cert api.InclusionCert
-	if err := cert.UnmarshalBinary(p.CertificateBytes); err != nil {
-		return fmt.Errorf("failed to decode inclusion cert: %w", err)
-	}
-	key, err := req.StateID.GetTreeKey()
-	if err != nil {
-		return fmt.Errorf("failed to derive SMT key: %w", err)
-	}
-	return cert.Verify(key, req.CertificationData.TransactionHash.DataBytes(), rootRaw, api.InclusionProofV2HashAlgorithm)
 }

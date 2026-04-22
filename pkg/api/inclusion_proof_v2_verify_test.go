@@ -366,5 +366,5 @@ func TestInclusionProofV2Verify_ShardMismatch_Rejected(t *testing.T) {
 	}
 	err := proof.Verify(req, vctx)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "does not match expected shard")
+	require.Contains(t, err.Error(), "invalid shard ID")
 }

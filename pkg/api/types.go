@@ -393,13 +393,6 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 		return fmt.Errorf("unicity certificate verification failed: %w", err)
 	}
 
-	// uc.Verify currently ignores its shardID parameter, so enforce shard
-	// equality here.
-	if !uc.ShardTreeCertificate.Shard.Equal(vctx.ExpectedShardID) {
-		return fmt.Errorf("unicity certificate shard %s does not match expected shard %s",
-			uc.ShardTreeCertificate.Shard, vctx.ExpectedShardID)
-	}
-
 	return nil
 }
 

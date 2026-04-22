@@ -462,6 +462,9 @@ func (c *Config) Validate() error {
 		if c.BFT.ShardConf.ShardID.Length() == 0 {
 			return errors.New("bft-shard mode requires a non-empty shard ID; use standalone for single-shard partitions")
 		}
+		if c.Sharding.Child.ShardID != 0 {
+			return fmt.Errorf("bft-shard mode must not set SHARDING_CHILD_SHARD_ID (got %d); it is an app-sharding field and has no meaning in bft-shard", c.Sharding.Child.ShardID)
+		}
 	}
 
 	// A non-empty BFT shard ID means a multi-shard partition; only bft-shard

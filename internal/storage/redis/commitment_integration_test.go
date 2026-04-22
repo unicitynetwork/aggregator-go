@@ -908,8 +908,14 @@ CollectFirst:
 	stream2Ctx, cancel2 := context.WithCancel(ctx)
 	defer cancel2()
 	stream2Ch := make(chan *models.CertificationRequest, 10)
+	stream2Done := make(chan struct{})
 	go func() {
 		_ = suite.storage.StreamCertificationRequests(stream2Ctx, stream2Ch)
+		close(stream2Done)
+	}()
+	defer func() {
+		cancel2()
+		<-stream2Done
 	}()
 
 	received2 := make([]*models.CertificationRequest, 0, len(firstBatch)+len(secondBatch))

@@ -547,8 +547,10 @@ func (smt *SparseMerkleTree) GetRootHashRaw() []byte {
 // given raw 32-byte key. Verifier consumes bitmap + siblings in root-to-leaf
 // wire order.
 //
-// Returns an error if no leaf exists at the key. Non-inclusion certificates
-// are produced by a separate path (not yet implemented).
+// Returns an error if no leaf exists at the key. A placeholder leaf with a
+// nil value (as used in parent-mode trees for yet-unpopulated shards) counts
+// as not-found. Non-inclusion certificates are produced by a separate path
+// (not yet implemented).
 func (smt *SparseMerkleTree) GetInclusionCert(key []byte) (*api.InclusionCert, error) {
 	if len(key) != api.StateTreeKeyLengthBytes {
 		return nil, fmt.Errorf("%w: got %d, want %d", api.ErrCertKeyLength, len(key), api.StateTreeKeyLengthBytes)

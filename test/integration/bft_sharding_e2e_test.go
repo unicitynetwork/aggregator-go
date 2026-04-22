@@ -159,7 +159,7 @@ func TestBFTShardingE2E(t *testing.T) {
 			ExpectedShardID: sid1,
 		})
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "does not match expected shard")
+		require.Contains(t, err.Error(), "invalid shard ID")
 	})
 
 	t.Run("verifier_rejects_wrong_partition", func(t *testing.T) {
