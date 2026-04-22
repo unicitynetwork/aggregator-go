@@ -83,8 +83,7 @@ func TestBFTShardingE2E(t *testing.T) {
 	uploadShardConf(t, root.restURL, shard0Conf)
 	uploadShardConf(t, root.restURL, shard1Conf)
 
-	// Distinct libp2p listen addresses — PeerConf() uses cfg.BFT.Address for
-	// binding, so two aggregators in the same process MUST use different ports.
+	// Each in-process aggregator needs its own libp2p listen port.
 	agg0 := startBFTShardAggregator(ctx, t, bftAggregatorOpts{
 		name:            "shard0",
 		port:            "9100",
@@ -210,23 +209,13 @@ type bftRootInfo struct {
 	trustBase     bfttypes.RootTrustBase
 }
 
-// startBFTRoot starts a bft-core root node container, waits until it is
-// actually ready to accept RPC uploads, and returns the info callers need
-// to dial it.
-//
-// Genesis files live only inside the container — we read trust-base.json
-// back via `docker cp` (CopyFromContainer) to avoid bind-mount portability
-// problems (Docker Desktop restricts bind mounts on /tmp unless explicitly
-// configured in File Sharing).
+// startBFTRoot starts a bft-core root node container, waits for RPC
+// readiness, and returns the dial info plus the generated trust base.
 func startBFTRoot(ctx context.Context, t *testing.T) *bftRootInfo {
 	t.Helper()
 
-	// The entrypoint mirrors the one in scripts/local-bft-sharding/
-	// infra-compose.yml, except genesis lives under /tmp because the image's
-	// default user (`nonroot`, uid 65532) cannot mkdir in /. The compose file
-	// gets away with /genesis because bind mounts auto-create the target
-	// path; testcontainers here is bind-mount-free by design (see
-	// copyTrustBaseFromContainer).
+	// Keep genesis under /tmp because the image runs as nonroot in this
+	// testcontainers setup.
 	cmdScript := `
         mkdir -p /tmp/genesis/root
         if [ -f /tmp/genesis/root/node-info.json ] && [ -f /tmp/genesis/trust-base.json ] && [ -f /tmp/genesis/root/trust-base-signed.json ]; then
@@ -249,9 +238,8 @@ func startBFTRoot(ctx context.Context, t *testing.T) *bftRootInfo {
 		ExposedPorts:  []string{"8000/tcp", "8002/tcp"},
 		Entrypoint:    []string{"/busybox/sh", "-c"},
 		Cmd:           []string{cmdScript},
-		// WaitingFor here is a coarse readiness signal ("Starting root
-		// node..." is logged). Real RPC availability is polled below via
-		// waitForBFTRPC before any shard conf upload happens.
+		// The log line is only a coarse signal; waitForBFTRPC does the real
+		// readiness check before configuration upload.
 		WaitingFor: wait.ForLog("Starting root node"),
 	}
 
@@ -299,9 +287,8 @@ func startBFTRoot(ctx context.Context, t *testing.T) *bftRootInfo {
 	return info
 }
 
-// copyTrustBaseFromContainer copies the signed trust base JSON out of the
-// running container and unmarshals it. Retries while the file is still being
-// written by the init entrypoint.
+// copyTrustBaseFromContainer reads the signed trust base JSON out of the
+// running container, retrying until init has finished writing it.
 func copyTrustBaseFromContainer(ctx context.Context, t *testing.T, c testcontainers.Container, path string, timeout time.Duration) bfttypes.RootTrustBase {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -393,8 +380,7 @@ func generateShardKeys(t *testing.T) *shardKeys {
 	authPriv, err := authSigner.MarshalPrivateKey()
 	require.NoError(t, err)
 
-	// Derive the libp2p peer ID from the auth key. Matches KeyConf.NodeID() in
-	// bft-core/cli/ubft/cmd/key_conf.go.
+	// Match bft-core KeyConf.NodeID() derivation.
 	libp2pPriv, err := p2pcrypto.UnmarshalSecp256k1PrivateKey(authPriv)
 	require.NoError(t, err)
 	peerID, err := peer.IDFromPrivateKey(libp2pPriv)
@@ -500,11 +486,10 @@ type bftAggregator struct {
 	stop func()
 }
 
-// startBFTShardAggregator builds a *config.Config in memory (NOT via
-// config.Load — see reviewer finding #1: env-var file knobs are only honored
-// by Load) and wires it into the real BFT client. This mirrors the way
-// cmd/aggregator/main.go puts the pieces together after Load has populated
-// the config struct.
+// startBFTShardAggregator builds a *config.Config in memory and wires it into
+// the real BFT client. Because this test does not call config.Load, every
+// config field that production would normally derive during load must be set
+// explicitly here.
 func startBFTShardAggregator(ctx context.Context, t *testing.T, opts bftAggregatorOpts) *bftAggregator {
 	t.Helper()
 
@@ -588,7 +573,7 @@ func startBFTShardAggregator(ctx context.Context, t *testing.T, opts bftAggregat
 	)
 	require.NoError(t, err)
 
-	// Persist the genesis trust base so the BFT client's GetByEpoch(0) succeeds.
+	// Seed epoch 0 trust base for the real BFT client.
 	require.NoError(t, stor.TrustBaseStorage().Store(aggCtx, tb))
 
 	require.NoError(t, mgr.Start(aggCtx))
@@ -599,7 +584,7 @@ func startBFTShardAggregator(ctx context.Context, t *testing.T, opts bftAggregat
 	srv := gateway.NewServer(cfg, log, svc)
 	go func() { _ = srv.Start() }()
 
-	// Give the HTTP server a moment to bind; callers gate on waitForBlock before real work.
+	// HTTP bind is async; waitForBlock below is the real readiness gate.
 	time.Sleep(200 * time.Millisecond)
 
 	return &bftAggregator{
