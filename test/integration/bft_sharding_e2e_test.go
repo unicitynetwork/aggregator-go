@@ -1,23 +1,14 @@
 //go:build e2e_bft
 
-// Package integration — end-to-end smoke test for BFT-side sharding.
+// Package integration contains end-to-end smoke tests, including BFT-side
+// sharding coverage.
 //
-// This test brings up a full multi-shard BFT partition in-process:
-//   - MongoDB + Redis + a real bft-core root node via testcontainers.
-//   - Two aggregator instances wired with SHARDING_MODE=bft-shard, each
-//     validating a 1-bit shard ("0" / "1").
-//   - Shard confs + validator keys are generated directly in Go and uploaded
-//     to the root node via PUT /api/v1/configurations (no ubft shell-out).
+// TestBFTShardingE2E brings up a real multi-shard BFT partition with two
+// aggregators in `SHARDING_MODE=bft-shard`, so it is gated behind
+// `//go:build e2e_bft`.
 //
-// It's gated behind `//go:build e2e_bft` because:
-//   - It pulls a linux/amd64 image (bft-core) — slow on arm64 via qemu.
-//   - Real BFT certification has cert-round latency, so the test takes
-//     tens of seconds rather than milliseconds.
-//
-// Run with:   go test -tags=e2e_bft ./test/integration/... -run TestBFTShardingE2E -v
-//
-// The test pins the public InclusionProofV2.Verify(req, vctx) contract only —
-// it does not hand-roll UC.Verify or ShardTreeCertificate equality checks.
+// Run with:
+//   go test -tags=e2e_bft ./test/integration/... -run TestBFTShardingE2E -v
 
 package integration
 
