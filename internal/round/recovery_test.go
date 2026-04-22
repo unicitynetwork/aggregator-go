@@ -43,7 +43,7 @@ func (s *RecoveryTestSuite) SetupSuite() {
 	s.ctx = context.Background()
 
 	// Start Redis container
-	redisC, err := redisContainer.Run(s.ctx, "redis:7")
+	redisC, err := redisContainer.Run(s.ctx, "redis:7-alpine")
 	s.Require().NoError(err)
 	s.redisCleanup = func() {
 		_ = redisC.Terminate(s.ctx)

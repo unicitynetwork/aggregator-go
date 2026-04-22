@@ -36,7 +36,7 @@ func TestShardingE2E(t *testing.T) {
 	ctx := t.Context()
 
 	// Start containers (shared MongoDB with different databases per aggregator)
-	redis, err := redisContainer.Run(ctx, "redis:7")
+	redis, err := redisContainer.Run(ctx, "redis:7-alpine")
 	require.NoError(t, err)
 	defer redis.Terminate(ctx)
 	redisURI, _ := redis.ConnectionString(ctx)
