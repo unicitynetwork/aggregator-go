@@ -1,9 +1,7 @@
 x-bft-base: &bft-base
   platform: linux/amd64
   user: "${USER_UID:-1001}:${USER_GID:-1001}"
-  # Use the locally built image until the multi-shard proposal-block dedup fix
-  # is published upstream. Override with BFT_CORE_IMAGE=ghcr.io/... later.
-  image: "${BFT_CORE_IMAGE:-bft-core:local-bft-shard}"
+  image: "${BFT_CORE_IMAGE:-ghcr.io/unicitynetwork/bft-core:ceceacd11b7a735de74ce17884a3a45e0db1748d}"
   pull_policy: missing
 
 services:

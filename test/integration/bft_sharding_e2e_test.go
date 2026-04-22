@@ -56,8 +56,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-// TODO: switch to the upstream bft-core image once the multi-shard fix is released.
-const bftCoreImage = "bft-core:local-bft-shard"
+const bftCoreImage = "ghcr.io/unicitynetwork/bft-core:ceceacd11b7a735de74ce17884a3a45e0db1748d"
 
 const (
 	bftNetworkID       bfttypes.NetworkID       = 3
@@ -682,4 +681,3 @@ func mustRPCCall(t *testing.T, url, method string, params interface{}) json.RawM
 	require.NoError(t, err, "%s failed", method)
 	return raw
 }
-
