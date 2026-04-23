@@ -502,11 +502,6 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		UnicityCertificate: types.RawCBOR(block.UnicityCertificate),
 	}
 
-	selfValue := record.CertificationData.TransactionHash.DataBytes()
-	if err := childCert.Verify(key, selfValue, block.RootHash, api.InclusionProofV2HashAlgorithm); err != nil {
-		return nil, fmt.Errorf("generated inclusion proof failed self-verification: %w", err)
-	}
-
 	return &api.GetInclusionProofResponseV2{
 		BlockNumber:    responseBlockNumber,
 		InclusionProof: proof,
