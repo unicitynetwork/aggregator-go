@@ -44,10 +44,10 @@ const (
 
 // Sharding modes for routing generated state IDs to shard endpoints.
 // In app mode the SHARD_TARGETS field is an LSB-first sentinel-int mask;
-// in bft mode it is an MSB-first binary bit string (e.g. "0", "10", "101").
+// in bft-shard mode it is an MSB-first binary bit string (e.g. "0", "10", "101").
 const (
 	shardingModeApp = "app"
-	shardingModeBFT = "bft"
+	shardingModeBFT = "bft-shard"
 )
 
 // Configurable via environment variables
@@ -65,10 +65,10 @@ func getShardingMode() string {
 	switch val {
 	case "", shardingModeApp:
 		return shardingModeApp
-	case shardingModeBFT, "bft-shard":
+	case shardingModeBFT:
 		return shardingModeBFT
 	default:
-		log.Fatalf("invalid SHARDING_MODE=%q (expected 'app' or 'bft')", val)
+		log.Fatalf("invalid SHARDING_MODE=%q (expected 'app' or 'bft-shard')", val)
 		return shardingModeApp
 	}
 }
@@ -97,16 +97,16 @@ func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
 
 // getEnvShardTargets parses SHARD_TARGETS. Each comma-separated entry is
 // URL:mask where mask is interpreted by the active sharding mode (decimal
-// sentinel-int in app mode, MSB-first binary in bft mode). The last colon
+// sentinel-int in app mode, MSB-first binary in bft-shard mode). The last colon
 // in each entry is the delimiter, so URLs with ports still parse correctly.
 func getEnvShardTargets() []shardTarget {
 	val := os.Getenv("SHARD_TARGETS")
 	if val == "" {
-		// Default targets keep app-mode backward compatibility. In bft mode
+		// Default targets keep app-mode backward compatibility. In bft-shard mode
 		// the user must set SHARD_TARGETS explicitly; there is no useful
 		// default bit pattern without knowing the partition's shard scheme.
 		if shardingMode == shardingModeBFT {
-			log.Fatal("SHARDING_MODE=bft requires SHARD_TARGETS (e.g. 'https://localhost:3001:0,https://localhost:3002:1')")
+			log.Fatal("SHARDING_MODE=bft-shard requires SHARD_TARGETS (e.g. 'https://localhost:3001:0,https://localhost:3002:1')")
 		}
 		return []shardTarget{
 			{name: "shard-7", url: "https://localhost:3001", shardMask: 7},
@@ -145,7 +145,7 @@ func getEnvShardTargets() []shardTarget {
 			// "single-shard partition" (accepts every stateID).
 			for _, r := range field {
 				if r != '0' && r != '1' {
-					log.Printf("Warning: invalid shard bits '%s' (bft mode expects binary 0/1 string)", field)
+					log.Printf("Warning: invalid shard bits '%s' (bft-shard mode expects binary 0/1 string)", field)
 					field = "__invalid__"
 					break
 				}
@@ -363,7 +363,7 @@ func generateCommitmentRequest() *api.CertificationRequest {
 	var stateID api.StateID
 
 	// Only rejection-sample when at least one target actually constrains the
-	// state-ID prefix. In bft mode an empty shardBits string means
+	// state-ID prefix. In bft-shard mode an empty shardBits string means
 	// "single-shard partition", which accepts everything and therefore
 	// imposes no constraint.
 	hasActiveShardPredicate := false

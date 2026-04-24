@@ -672,6 +672,15 @@ The service implements a MongoDB-based leader election system:
 
 ## Sharding
 
+The aggregator supports two orthogonal sharding strategies, selected by `SHARDING_MODE`:
+
+- **Application-level sharding** (`parent` / `child`) — aggregator-layer split: one parent aggregator aggregates the SMTs of multiple children. Described in the rest of this section.
+- **BFT-side sharding** (`bft-shard`) — BFT-layer split: multiple aggregators act as shard validators of a single multi-shard BFT partition, and shard-inclusion is proved directly by the `ShardTreeCertificate` embedded in the `UnicityCertificate`. Described in [BFT-side sharding](#bft-side-sharding-sharding_modebft-shard).
+
+The two modes use different routing inputs and different shard-ID semantics; they are not interchangeable.
+
+### Application-level sharding (`SHARDING_MODE=parent` / `child`)
+
 To support horizontal scaling, the aggregators can be run in a sharded configuration consisting of one parent aggregator 
 and multiple child aggregators. In this mode, the global Sparse Merkle Tree (SMT) is split across the child nodes, and 
 agents must submit their certification requests to the correct child node.
@@ -755,6 +764,89 @@ environment:
   SHARDING_CHILD_SHARD_ID: 3 # (binary 0b11)
   SHARDING_CHILD_PARENT_RPC_ADDR: http://aggregator-root:3000
 ```
+
+### BFT-side sharding (`SHARDING_MODE=bft-shard`)
+
+In `bft-shard` mode, multiple aggregators are deployed as shard validators of a single multi-shard BFT partition. Each aggregator owns one shard, talks directly to the BFT rootchain, and the `UnicityCertificate` it receives embeds a `ShardTreeCertificate` that binds its local SMT root into the partition root. There is no parent aggregator — shard-inclusion is proved by the embedded certificate rather than by a per-round polling loop.
+
+This mode is orthogonal to `parent`/`child`: it uses a different routing key (raw 32-byte `stateId`), a different shard-ID encoding (bit-strings, MSB-first), and a different admission rule.
+
+#### Routing semantics
+
+- Routing key: the raw 32-byte `stateId`.
+- Shard identifiers are **bit-strings**, e.g. `"0"`, `"1"`, `"101"`. The first N bits of `stateId` (bit 7 of byte 0 first, descending to bit 0 of byte 31) must equal the shard's bit-string. This matches `types.ShardID.Comparator()` in `bft-go-base`.
+- A request whose `stateId` does not match the local shard's prefix is rejected with `INVALID_SHARD`.
+- Shard prefixes must form a prefix-free covering set: every possible `stateId` maps to exactly one shard.
+
+#### Example: 1-bit split
+
+```text
+                        +---------------------+
+                        |  BFT rootchain      |
+                        |  (partition id 7)   |
+                        +---------------------+
+                         /                   \
+                        /                     \
++---------------------------+    +---------------------------+
+| aggregator-bft-shard0     |    | aggregator-bft-shard1     |
+| SHARDING_MODE=bft-shard   |    | SHARDING_MODE=bft-shard   |
+| shard-id = 0x40 ("0")     |    | shard-id = 0xC0 ("1")     |
+| accepts stateId with MSB=0|    | accepts stateId with MSB=1|
+| listens on :3001          |    | listens on :3002          |
++---------------------------+    +---------------------------+
+```
+
+Note on shard-conf hex values: `0x40` encodes the bit-string `"0"` under the trailing-`1` end-marker convention in `bft-go-base/types/bitstring.go`; `0x80` is the length-0 empty shard. The two children of the empty-shard root split are `0x40` and `0xC0`.
+
+#### Configuration
+
+A bft-shard aggregator is configured with:
+
+```yaml
+environment:
+  SHARDING_MODE: "bft-shard"
+  BFT_ENABLED: "true"
+  BFT_SHARD_CONF_FILE: "/app/bft-config/shard_0/shard-conf-7_0.json"
+  BFT_TRUST_BASE_FILES: "/app/bft-config/trust-base.json"
+  BFT_RPC_ADDRESS: "http://bft-root:8002"
+  # plus the standard BFT_ADDRESS / BFT_BOOTSTRAP_ADDRESSES / BFT_ANNOUNCE_ADDRESSES
+```
+
+Shard identity (partition ID, shard ID, genesis epoch) is loaded from `BFT_SHARD_CONF_FILE`, produced by `ubft shard-conf generate ... --shard-id 0x40 ...`. All shard confs in the partition must be pre-provisioned to the rootchain; the aggregator does not register dynamically.
+
+A `bft-shard` config must have a non-empty shard ID (length ≥ 1 bit). For a single-shard deployment, use `SHARDING_MODE=standalone`.
+
+#### Quickstart (local Docker)
+
+```bash
+# Spin up 1 BFT rootchain + 2 shard aggregators + MongoDB + Redis.
+make docker-run-bft-sh-clean
+
+# Tail shard logs:
+docker logs -f aggregator-bft-shard0   # serves on :3001 (shard "0")
+docker logs -f aggregator-bft-shard1   # serves on :3002 (shard "1")
+
+# Teardown:
+docker compose -f bft-sharding-compose.yml down
+```
+
+Other make targets:
+
+- `make docker-run-bft-sh-clean-keep-tb` — preserves BFT genesis/trust-base across restarts; reinitializes MongoDB/Redis only.
+- `make docker-restart-bft-sh` — rebuilds and restarts only the aggregators, leaving BFT nodes running.
+
+#### Driving test traffic
+
+`cmd/commitment` submits individual v2 certification requests to a chosen endpoint. `cmd/performance-test` with `SHARDING_MODE=bft-shard` and `SHARD_TARGETS` of the form `http://localhost:3001:0,http://localhost:3002:1` drives both shards in parallel and generates stateIds whose leading bits match each shard's prefix. Cross-shard traffic is rejected with `INVALID_SHARD`.
+
+#### Client-side proof verification
+
+Returned inclusion proofs should be verified on the client side. The Go API exposes the strict verifier as `pkg/api.InclusionProofV2.Verify(req, vctx)`, which checks the proof against the trust base and expected shard/partition context.
+
+#### Observability
+
+- `/health` reports the bft-shard identity via `bftShardId` (MSB-first bit-string; empty in non-bft-shard modes). The legacy `shardIdLen` / `shardId` fields are zero in bft-shard mode.
+- Wrong-shard submissions return `INVALID_SHARD` at admission; the rejecting aggregator's log records the mismatch.
 
 ## Error Handling
 
