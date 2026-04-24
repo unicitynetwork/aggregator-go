@@ -66,7 +66,7 @@ func TestDocumentationExamplePayload(t *testing.T) {
 			Witness:         certData.Witness,
 		},
 	}
-	validator := signing.NewCertificationRequestValidator(config.ShardingConfig{Mode: config.ShardingModeStandalone})
+	validator := signing.NewCertificationRequestValidator(config.ShardingConfig{Mode: config.ShardingModeStandalone}, types.ShardID{})
 	result := validator.Validate(&request)
 
 	require.Equal(t, signing.ValidationStatusSuccess, result.Status,

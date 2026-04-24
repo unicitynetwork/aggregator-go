@@ -252,11 +252,21 @@ func validateInclusionProof(t *testing.T, proof *api.InclusionProofV2, req *api.
 	var decodedAuth api.CertificationData
 	require.NoError(t, cbor.Unmarshal(certDataBytes, &decodedAuth))
 
-	// Wire-decode the inclusion certificate and perform full v2 verification.
+	// Wire-decode the inclusion certificate and verify the local path: the
+	// SMT cert applied to (key, tx hash) reproduces UC.IR.h. This test does
+	// not load a trust base, so it exercises only the local side of the v2
+	// contract; the full certified path (uc.Verify + shard-ID equality) is
+	// covered by the bft-sharding e2e integration test.
 	var cert api.InclusionCert
 	require.NoError(t, cert.UnmarshalBinary(proof.CertificateBytes), "InclusionCert must decode")
 
-	require.NoError(t, proof.Verify(req), "v2 inclusion proof must verify")
+	rootRaw, err := proof.UCInputRecordHashRaw()
+	require.NoError(t, err, "UC.IR.h must be extractable")
+	key, err := req.StateID.GetTreeKey()
+	require.NoError(t, err)
+	require.NoError(t,
+		cert.Verify(key, req.CertificationData.TransactionHash.DataBytes(), rootRaw, api.InclusionProofV2HashAlgorithm),
+		"v2 inclusion cert must verify against UC.IR.h")
 }
 
 // TestInclusionProofMissingRecord tests getting inclusion proof for non-existent record
@@ -617,7 +627,7 @@ func newAggregatorServiceForTest(t *testing.T, shardingCfg config.ShardingConfig
 		config:                        &config.Config{Sharding: shardingCfg},
 		logger:                        log,
 		roundManager:                  &stubRoundManager{smt: tsmt},
-		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg),
+		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
 	}
 }
 

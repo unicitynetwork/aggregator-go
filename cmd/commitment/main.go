@@ -15,6 +15,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 
+	"github.com/unicitynetwork/aggregator-go/internal/proofverify"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -110,7 +111,7 @@ func main() {
 		}
 	}
 
-	if err := inclusionProof.InclusionProof.Verify(certReq); err != nil {
+	if err := proofverify.VerifyInclusionProofLocal(inclusionProof.InclusionProof, certReq); err != nil {
 		logger.Fatalf("proof verification failed: %v", err)
 	}
 	logger.Printf("Proof verified successfully against block %d.", inclusionProof.BlockNumber)
@@ -242,7 +243,7 @@ func waitForInclusionProof(ctx context.Context, client *http.Client, req *api.Ce
 			continue
 		}
 
-		if err := payload.InclusionProof.Verify(req); err != nil {
+		if err := proofverify.VerifyInclusionProofLocal(payload.InclusionProof, req); err != nil {
 			logger.Printf("get_inclusion_proof.v2 attempt %d verification error: %v", attempts, err)
 			time.Sleep(*flagPollInterval)
 			continue

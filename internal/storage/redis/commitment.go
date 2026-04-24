@@ -94,6 +94,13 @@ func NewCommitmentStorage(client *redis.Client, streamName string, serverID stri
 	return cs
 }
 
+// ResetPendingSweep re-enables the pending-entry sweep for the next
+// StreamCertificationRequests invocation. Call before (re)starting the
+// streamer so a restarted consumer reclaims entries left unacked.
+func (cs *CommitmentStorage) ResetPendingSweep() {
+	cs.pendingExhausted.Store(false)
+}
+
 // Initialize creates the consumer group and starts background goroutines
 func (cs *CommitmentStorage) Initialize(ctx context.Context) error {
 	if err := cs.ensureConsumerGroup(ctx); err != nil {
@@ -708,6 +715,12 @@ func (cs *CommitmentStorage) StreamCertificationRequests(ctx context.Context, co
 	windowStart := time.Now()
 	countThisWindow := 0
 
+	if !cs.pendingExhausted.Load() {
+		if err := cs.drainPendingForConsumer(ctx, commitmentChan); err != nil {
+			return err
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -715,48 +728,13 @@ func (cs *CommitmentStorage) StreamCertificationRequests(ctx context.Context, co
 		case <-cs.stopChan:
 			return nil
 		default:
-			var streams *redis.XStreamSliceCmd
-
-			// On startup: exhaust all pending messages first
-			// Once exhausted, switch to reading new messages
-			if !cs.pendingExhausted.Load() {
-				// Check for pending messages
-				pendingStreams := cs.client.XReadGroup(ctx, &redis.XReadGroupArgs{
-					Group:    consumerGroup,
-					Consumer: cs.consumerID,
-					Streams:  []string{cs.streamName, "0"}, // "0" = read pending for this consumer
-					Count:    1000,
-					Block:    0, // Don't block
-				})
-
-				if err := pendingStreams.Err(); err != nil && !errors.Is(err, redis.Nil) {
-					if isNoGroupError(err) {
-						if ensureErr := cs.ensureConsumerGroup(ctx); ensureErr != nil {
-							return fmt.Errorf("failed to ensure consumer group: %w", ensureErr)
-						}
-						continue
-					}
-					return fmt.Errorf("failed to check pending messages: %w", err)
-				}
-
-				// If we got pending, keep reading them
-				if pendingStreams.Err() == nil && len(pendingStreams.Val()) > 0 && len(pendingStreams.Val()[0].Messages) > 0 {
-					streams = pendingStreams
-				} else {
-					// No more pending! Switch to new messages mode
-					cs.pendingExhausted.Store(true)
-					continue // Next iteration will read new messages
-				}
-			} else {
-				// Normal operation: read new messages only
-				streams = cs.client.XReadGroup(ctx, &redis.XReadGroupArgs{
-					Group:    consumerGroup,
-					Consumer: cs.consumerID,
-					Streams:  []string{cs.streamName, ">"}, // ">" = new messages only
-					Count:    1000,
-					Block:    100 * time.Millisecond,
-				})
-			}
+			streams := cs.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+				Group:    consumerGroup,
+				Consumer: cs.consumerID,
+				Streams:  []string{cs.streamName, ">"}, // ">" = new messages only
+				Count:    1000,
+				Block:    100 * time.Millisecond,
+			})
 
 			if err := streams.Err(); err != nil {
 				if errors.Is(err, redis.Nil) {
@@ -813,4 +791,67 @@ func (cs *CommitmentStorage) StreamCertificationRequests(ctx context.Context, co
 			}
 		}
 	}
+}
+
+// drainPendingForConsumer walks the consumer's PEL with an advancing cursor
+// and pushes each pending entry to commitmentChan exactly once, then sets
+// pendingExhausted so the caller switches to new-messages mode.
+func (cs *CommitmentStorage) drainPendingForConsumer(ctx context.Context, commitmentChan chan<- *models.CertificationRequest) error {
+	nextPendingID := "0"
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-cs.stopChan:
+			return nil
+		default:
+		}
+
+		pendingRes := cs.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+			Group:    consumerGroup,
+			Consumer: cs.consumerID,
+			Streams:  []string{cs.streamName, nextPendingID},
+			Count:    1000,
+			Block:    0,
+		})
+		if err := pendingRes.Err(); err != nil {
+			if errors.Is(err, redis.Nil) {
+				break
+			}
+			if isNoGroupError(err) {
+				if ensureErr := cs.ensureConsumerGroup(ctx); ensureErr != nil {
+					return fmt.Errorf("failed to ensure consumer group: %w", ensureErr)
+				}
+				continue
+			}
+			return fmt.Errorf("failed to read pending: %w", err)
+		}
+
+		vals := pendingRes.Val()
+		if len(vals) == 0 || len(vals[0].Messages) == 0 {
+			break
+		}
+
+		for _, message := range vals[0].Messages {
+			// Advance the cursor for every message so a bad entry can't stall the sweep.
+			nextPendingID = message.ID
+
+			commitment, err := cs.parseCommitment(message)
+			if err != nil || commitment == nil {
+				continue
+			}
+			commitment.StreamID = message.ID
+
+			select {
+			case commitmentChan <- commitment:
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-cs.stopChan:
+				return nil
+			}
+		}
+	}
+
+	cs.pendingExhausted.Store(true)
+	return nil
 }

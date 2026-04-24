@@ -167,7 +167,7 @@ func main() {
 	// Create SMT instance based on sharding mode
 	var smtInstance *smt.SparseMerkleTree
 	switch cfg.Sharding.Mode {
-	case config.ShardingModeStandalone:
+	case config.ShardingModeStandalone, config.ShardingModeBFTShard:
 		smtInstance = smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
 	case config.ShardingModeChild:
 		smtInstance = smt.NewChildSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits, cfg.Sharding.Child.ShardID)

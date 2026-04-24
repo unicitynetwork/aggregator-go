@@ -242,6 +242,18 @@ func TestGetInclusionCert_EmptyTree(t *testing.T) {
 	require.Nil(t, cert)
 }
 
+// TestGetInclusionCert_PlaceholderLeaf ensures parent-mode placeholder leaves
+// are treated as missing entries rather than returning an empty partial cert.
+func TestGetInclusionCert_PlaceholderLeaf(t *testing.T) {
+	tree := NewParentSparseMerkleTree(api.SHA256, 2)
+	key, err := api.PathToFixedBytes(big.NewInt(0b100), 2)
+	require.NoError(t, err)
+
+	cert, err := tree.GetInclusionCert(key)
+	require.Error(t, err)
+	require.Nil(t, cert)
+}
+
 // TestGetInclusionCert_WrongKeyLength ensures short/long keys are rejected
 // by the Go SMT generator before any traversal starts.
 func TestGetInclusionCert_WrongKeyLength(t *testing.T) {

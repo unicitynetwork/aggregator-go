@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/unicitynetwork/bft-go-base/types"
+
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -57,13 +59,17 @@ type ValidationResult struct {
 type CertificationRequestValidator struct {
 	signingService *SigningService
 	shardConfig    config.ShardingConfig
+	// bftShardID is used only in bft-shard mode; zero-value otherwise.
+	bftShardID types.ShardID
 }
 
-// NewCertificationRequestValidator creates a new certification request validator
-func NewCertificationRequestValidator(shardConfig config.ShardingConfig) *CertificationRequestValidator {
+// NewCertificationRequestValidator creates a new certification request
+// validator. Pass types.ShardID{} for bftShardID outside bft-shard mode.
+func NewCertificationRequestValidator(shardConfig config.ShardingConfig, bftShardID types.ShardID) *CertificationRequestValidator {
 	return &CertificationRequestValidator{
 		signingService: NewSigningService(),
 		shardConfig:    shardConfig,
+		bftShardID:     bftShardID,
 	}
 }
 
@@ -178,8 +184,18 @@ func (v *CertificationRequestValidator) verifyPayToPublicKeyPredicate(pred api.P
 	return pred.Params, nil
 }
 
-// ValidateShardID verifies if the state id belongs to the configured shard
+// ValidateShardID checks that the state ID belongs to the configured shard.
 func (v *CertificationRequestValidator) ValidateShardID(stateID api.StateID) error {
+	if v.shardConfig.Mode == config.ShardingModeBFTShard {
+		keyBytes, err := stateID.GetTreeKey()
+		if err != nil {
+			return fmt.Errorf("invalid state ID: %w", err)
+		}
+		if !v.bftShardID.Comparator()(keyBytes) {
+			return errors.New("state ID does not match configured BFT shard prefix")
+		}
+		return nil
+	}
 	if !v.shardConfig.Mode.IsChild() {
 		return nil
 	}

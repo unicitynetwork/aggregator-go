@@ -4,6 +4,7 @@ package api
 
 import (
 	"bytes"
+	"crypto"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -316,6 +317,10 @@ type Sharding struct {
 	Mode       string `json:"mode"`
 	ShardIDLen int    `json:"shardIdLen"`
 	ShardID    int    `json:"shardId"`
+	// BFTShardID is the MSB-first bit-string (e.g. "0" or "101") of the BFT
+	// shard in bft-shard mode; empty in other modes. Populated separately
+	// from ShardIDLen/ShardID because a bit-string does not fit in an int.
+	BFTShardID string `json:"bftShardId,omitempty"`
 }
 
 // MarshalJSON marshals the request to CBOR and then hex encodes it, returning the result as a JSON string.
@@ -341,17 +346,35 @@ func (c *GetInclusionProofResponseV2) UnmarshalJSON(data []byte) error {
 // requires a format version bump.
 const InclusionProofV2HashAlgorithm = SHA256
 
-// Verify checks a v2 inclusion proof against the outer
-// CertificationRequest. The expected SMT root is sourced exclusively from
-// UC.IR.h (strictly 32 raw bytes); CertificateBytes never carries a root.
-// Non-inclusion proofs short-circuit with ErrExclusionNotImpl — v2
-// exclusion verification is not yet implemented in Go.
-func (p *InclusionProofV2) Verify(v2 *CertificationRequest) error {
+// VerifierContext carries the trust base and expected partition/shard
+// identity a verifier needs to certify a v2 inclusion proof. TrustBase,
+// PartitionID, and ExpectedShardID are required; ShardConfHash is optional
+// (nil skips the cross-check against UC.ShardConfHash).
+type VerifierContext struct {
+	TrustBase       types.RootTrustBase
+	PartitionID     types.PartitionID
+	ExpectedShardID types.ShardID
+	ShardConfHash   []byte
+}
+
+// Verify checks a v2 inclusion proof end-to-end against the outer
+// CertificationRequest and VerifierContext: local SMT path, UnicityCertificate
+// (shard tree → unicity tree → seal), and ShardTreeCertificate.Shard equality.
+//
+// The nil-guard error strings below are part of the public contract so
+// reference verifiers in other languages can pin them.
+func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContext) error {
 	if p == nil {
 		return errors.New("nil inclusion proof")
 	}
 	if v2 == nil {
 		return errors.New("nil certification request")
+	}
+	if vctx == nil {
+		return errors.New("nil verifier context")
+	}
+	if vctx.TrustBase == nil {
+		return errors.New("nil trust base")
 	}
 	if p.CertificationData == nil {
 		return ErrExclusionNotImpl
@@ -381,7 +404,19 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest) error {
 	}
 	// v2 leaf value is the raw transaction hash.
 	value := v2.CertificationData.TransactionHash.DataBytes()
-	return cert.Verify(key, value, rootRaw, InclusionProofV2HashAlgorithm)
+	if err := cert.Verify(key, value, rootRaw, InclusionProofV2HashAlgorithm); err != nil {
+		return err
+	}
+
+	var uc types.UnicityCertificate
+	if err := types.Cbor.Unmarshal(p.UnicityCertificate, &uc); err != nil {
+		return fmt.Errorf("failed to decode unicity certificate: %w", err)
+	}
+	if err := uc.Verify(vctx.TrustBase, crypto.SHA256, vctx.PartitionID, vctx.ExpectedShardID, vctx.ShardConfHash); err != nil {
+		return fmt.Errorf("unicity certificate verification failed: %w", err)
+	}
+
+	return nil
 }
 
 // UCInputRecordHashRaw decodes the embedded Unicity Certificate and

@@ -261,17 +261,18 @@ func (suite *ParentServiceTestSuite) TestSubmitShardRoot_OutOfRange() {
 func (suite *ParentServiceTestSuite) TestSubmitShardRoot_UpdateQueued() {
 	ctx := context.Background()
 
-	shard0ID := 0
-	shard0Root := makeTestHash(0xAA)
+	shardID := 4
+	shardRoot := makeTestHash(0xAA)
 
 	request := &api.SubmitShardRootRequest{
-		ShardID:  shard0ID,
-		RootHash: shard0Root,
+		ShardID:  shardID,
+		RootHash: shardRoot,
 	}
 
 	response, err := suite.service.SubmitShardRoot(ctx, request)
 	suite.Require().NoError(err, "Submission should succeed")
 	suite.Require().NotNil(response, "Response should not be nil")
+	suite.Require().Equal(api.ShardRootStatusSuccess, response.Status, "Valid shard submission should be accepted")
 
 	// Wait for round to process
 	time.Sleep(150 * time.Millisecond)

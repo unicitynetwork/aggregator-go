@@ -51,9 +51,12 @@ type GetInclusionProofRequestV2 struct {
 }
 
 type shardTarget struct {
-	name      string
-	url       string
+	name string
+	url string
+	// shardMask: LSB-first sentinel-int, set in app mode.
 	shardMask int
+	// shardBits: MSB-first binary bit string, set in bft mode.
+	shardBits string
 }
 
 // Metrics aggregates counters across submissions and proof checks.
@@ -103,7 +106,8 @@ type ShardMetrics struct {
 type ShardClient struct {
 	name          string
 	url           string
-	shardMask     int
+	shardMask     int            // app mode
+	shardBits     string         // bft mode, MSB-first binary
 	client        *JSONRPCClient // For submissions
 	proofClient   *JSONRPCClient // Separate pool for proof requests
 	startingBlock int64
