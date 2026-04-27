@@ -24,7 +24,7 @@ type CertificationRequest struct {
 // CertificationRequestBSON represents the BSON version of CertificationRequest for MongoDB storage
 type CertificationRequestBSON struct {
 	ID                    primitive.ObjectID    `bson:"_id,omitempty"`
-	Version               uint32                `json:"version"`
+	Version               uint32                `bson:"version"`
 	StateID               string                `bson:"stateId"`
 	TransactionHash       string                `bson:"transactionHash"`
 	CertificationData     CertificationDataBSON `bson:"certificationData"`
