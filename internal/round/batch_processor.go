@@ -423,13 +423,13 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	rm.roundMutex.Unlock()
 
 	commitmentCount = len(pendingCommitments)
-	requestIds := make([]api.StateID, commitmentCount)
+	stateIDs := make([]api.StateID, commitmentCount)
 	ackEntries := make([]interfaces.CertificationRequestAck, commitmentCount)
 	var proofTimes []time.Duration
 
 	now := time.Now()
 	for i, commitment := range pendingCommitments {
-		requestIds[i] = commitment.StateID
+		stateIDs[i] = commitment.StateID
 		ackEntries[i] = interfaces.CertificationRequestAck{StateID: commitment.StateID, StreamID: commitment.StreamID}
 
 		if commitment.CreatedAt != nil {
@@ -449,7 +449,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	records := rm.convertCommitmentsToRecords(pendingCommitments, block.Index)
 
 	block.Finalized = false
-	if err := rm.storeBlockAndRecords(ctx, block, requestIds); err != nil {
+	if err := rm.storeBlockAndRecords(ctx, block, stateIDs); err != nil {
 		if !errors.Is(err, interfaces.ErrDuplicateKey) {
 			return fmt.Errorf("failed to store block and records: %w", err)
 		}
@@ -644,12 +644,12 @@ func (rm *RoundManager) convertCommitmentsToRecords(commitments []*models.Certif
 // executeBlockTransaction executes the block finalization transaction.
 // storeBlockAndRecords stores the block and block records in a mini-transaction.
 // The block is stored with finalized=false.
-func (rm *RoundManager) storeBlockAndRecords(ctx context.Context, block *models.Block, requestIds []api.StateID) error {
+func (rm *RoundManager) storeBlockAndRecords(ctx context.Context, block *models.Block, stateIDs []api.StateID) error {
 	return rm.storage.WithTransaction(ctx, func(txCtx context.Context) error {
 		if err := rm.storage.BlockStorage().Store(txCtx, block); err != nil {
 			return fmt.Errorf("failed to store block: %w", err)
 		}
-		if err := rm.storage.BlockRecordsStorage().Store(txCtx, models.NewBlockRecords(block.Index, requestIds)); err != nil {
+		if err := rm.storage.BlockRecordsStorage().Store(txCtx, models.NewBlockRecords(block.Index, stateIDs)); err != nil {
 			return fmt.Errorf("failed to store block records: %w", err)
 		}
 		return nil

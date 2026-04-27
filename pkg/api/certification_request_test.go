@@ -52,9 +52,9 @@ func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
 		// Create a valid request
 		publicKey := make([]byte, 20)
 		ownerPredicate := NewPayToPublicKeyPredicate(publicKey)
-		sourceStateHash := RequireNewImprintV2("00000000000000000000000000000000000000000000000000000000000000000000")
+		sourceStateHash := RequireNewImprintV2("0000000000000000000000000000000000000000000000000000000000000000")
 		stateID, _ := CreateStateID(ownerPredicate, sourceStateHash)
-		transactionHash := RequireNewImprintV2("00010000000000000000000000000000000000000000000000000000000000000000")
+		transactionHash := RequireNewImprintV2("0100000000000000000000000000000000000000000000000000000000000000")
 		witness := NewHexBytes([]byte{0x01, 0x02, 0x03})
 
 		request := &CertificationRequest{
@@ -211,12 +211,12 @@ func TestCertificationResponse_SerializeAndValidate(t *testing.T) {
 func TestCertificationRequestCBOR(t *testing.T) {
 	req := &CertificationRequest{
 		Version: 1,
-		StateID: RequireNewImprintV2("0000cfe84a1828e2edd0a7d9533b23e519f746069a938d549a150e07e14dc0f9cf00"),
+		StateID: RequireNewImprintV2("cfe84a1828e2edd0a7d9533b23e519f746069a938d549a150e07e14dc0f9cf00"),
 		CertificationData: CertificationData{
 			Version:         1,
 			OwnerPredicate:  NewPayToPublicKeyPredicate([]byte{0x03, 0x20, 0x44, 0xf2}),
-			SourceStateHash: RequireNewImprintV2("0000cd60"),
-			TransactionHash: RequireNewImprintV2("00008a51b5b84171e6c7c345bf3610cc18fa1b61bad33908e1522520c001b0e7fd1d"),
+			SourceStateHash: RequireNewImprintV2("cd60000000000000000000000000000000000000000000000000000000000000"),
+			TransactionHash: RequireNewImprintV2("8a51b5b84171e6c7c345bf3610cc18fa1b61bad33908e1522520c001b0e7fd1d"),
 			Witness:         HexBytes{0x41, 0x67, 0x51, 0xe8},
 		},
 	}
@@ -235,8 +235,8 @@ func TestCertificationRequestCBOR(t *testing.T) {
 func createCertData(t *testing.T) CertificationData {
 	publicKeyHex := "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 	witnessHex := "a0b37f8fba683cc68f6574cd43b39f0343a50008bf6ccea9d13231d9e7e2e1e411edc8d307254296264aebfc3dc76cd8b668373a072fd64665b50000e9fcce5201"
-	sourceStateHashHex := RequireNewImprintV2("00000000000000000000000000000000000000000000000000000000000000000000")
-	transactionHashHex := RequireNewImprintV2("00000000000000000000000000000000000000000000000000000000000000000001")
+	sourceStateHashHex := RequireNewImprintV2("0000000000000000000000000000000000000000000000000000000000000000")
+	transactionHashHex := RequireNewImprintV2("0000000000000000000000000000000000000000000000000000000000000001")
 
 	publicKey, err := hex.DecodeString(publicKeyHex)
 	require.NoError(t, err)

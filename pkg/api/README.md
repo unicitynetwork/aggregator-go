@@ -11,8 +11,8 @@ import "github.com/unicitynetwork/aggregator-go/pkg/api"
 ## Types
 
 ### Core Types
-- `api.StateID` - 68-character hex state ID with algorithm prefix
-- `api.TransactionHash` - 68-character hex transaction hash with algorithm prefix  
+- `api.StateID` - 64-character hex state ID, encoded as raw 32 bytes
+- `api.TransactionHash` - 64-character hex transaction hash, encoded as raw 32 bytes
 - `api.HexBytes` - Byte array that serializes to/from hex strings
 - `api.BigInt` - Big integer with JSON string serialization
 - `api.Timestamp` - Unix timestamp in milliseconds
@@ -49,11 +49,11 @@ import (
 func main() {
 	// Create a certification request
 	req := &api.CertificationRequest{
-		StateID: "0000b1333daf3261d9bfa9d6dd98f170c0e756c26dbe284b5f90b27df900f6a77c04",
+		StateID: api.RequireNewImprintV2("b1333daf3261d9bfa9d6dd98f170c0e756c26dbe284b5f90b27df900f6a77c04"),
 		CertificationData: api.CertificationData{
 			OwnerPredicate:  api.NewPayToPublicKeyPredicate([]byte{0x03, 0x20, 0x44, 0xf2}),
-			SourceStateHash: api.SourceStateHash(hex.EncodeToString([]byte{0x00, 0x00, 0xcd, 0x60})),
-			TransactionHash: api.TransactionHash(hex.EncodeToString([]byte{0x00, 0x00, 0xcd, 0x61})),
+			SourceStateHash: api.RequireNewImprintV2("cd60000000000000000000000000000000000000000000000000000000000000"),
+			TransactionHash: api.RequireNewImprintV2("cd61000000000000000000000000000000000000000000000000000000000000"),
 			Witness:         []byte{0x41, 0x67, 0x51, 0xe8}},
 	}
 

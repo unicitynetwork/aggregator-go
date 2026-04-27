@@ -52,7 +52,7 @@ type GetInclusionProofRequestV2 struct {
 
 type shardTarget struct {
 	name string
-	url string
+	url  string
 	// shardMask: LSB-first sentinel-int, set in app mode.
 	shardMask int
 	// shardBits: MSB-first binary bit string, set in bft mode.
@@ -64,11 +64,11 @@ type Metrics struct {
 	totalRequests       int64
 	successfulRequests  int64
 	failedRequests      int64
-	requestIdExistsErr  int64
+	stateIdExistsErr    int64
 	startTime           time.Time
 	submissionStartTime time.Time
 	submissionEndTime   time.Time
-	submittedRequestIDs sync.Map
+	submittedStateIDs   sync.Map
 	submissionTimes     sync.Map
 	errorCounts         sync.Map
 	activeConnections   atomic.Int64
@@ -94,7 +94,7 @@ type ShardMetrics struct {
 	totalRequests      atomic.Int64
 	successfulRequests atomic.Int64
 	failedRequests     atomic.Int64
-	requestIdExistsErr atomic.Int64
+	stateIdExistsErr   atomic.Int64
 	proofAttempts      atomic.Int64
 	proofSuccess       atomic.Int64
 	proofFailed        atomic.Int64

@@ -102,9 +102,9 @@ func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
 func getEnvShardTargets() []shardTarget {
 	val := os.Getenv("SHARD_TARGETS")
 	if val == "" {
-		// Default targets keep app-mode backward compatibility. In bft-shard mode
-		// the user must set SHARD_TARGETS explicitly; there is no useful
-		// default bit pattern without knowing the partition's shard scheme.
+		// Default targets are for app-mode local runs. In bft-shard mode the
+		// user must set SHARD_TARGETS explicitly; there is no useful default
+		// bit pattern without knowing the partition's shard scheme.
 		if shardingMode == shardingModeBFT {
 			log.Fatal("SHARDING_MODE=bft-shard requires SHARD_TARGETS (e.g. 'https://localhost:3001:0,https://localhost:3002:1')")
 		}
@@ -176,7 +176,7 @@ func getEnvShardTargets() []shardTarget {
 // 4 shards (2-bit): "https://localhost:3001:7,https://localhost:3002:6,https://localhost:3003:5,https://localhost:3004:4"
 // 2 shards (1-bit): "https://localhost:3001:3,https://localhost:3002:2"
 //
-// Legacy hardcoded config (for reference)
+// Example hardcoded config (for reference)
 //var shardTargets = []shardTarget{
 //	{name: "shard-7", url: "https://localhost:3001", shardMask: 7}, // 0b111
 //	{name: "shard-6", url: "https://localhost:3002", shardMask: 6}, // 0b110
@@ -186,7 +186,7 @@ func getEnvShardTargets() []shardTarget {
 //	{name: "shard-2", url: "https://localhost:3002", shardMask: 2},
 //}
 
-func normalizeRequestID(id string) string {
+func normalizeStateID(id string) string {
 	return strings.ToLower(id)
 }
 
@@ -236,28 +236,28 @@ func buildShardClients(aggregatorURL, authHeader string, metrics *Metrics) []*Sh
 	return clients
 }
 
-func selectShardIndex(requestID api.StateID, shardClients []*ShardClient) int {
+func selectShardIndex(stateID api.StateID, shardClients []*ShardClient) int {
 	shardCount := len(shardClients)
 	if shardCount <= 1 {
 		return 0
 	}
 
-	reqHex := requestID.String()
+	stateIDHex := stateID.String()
 	for idx, sc := range shardClients {
 		if sc == nil {
 			continue
 		}
-		match, err := matchesShardTarget(reqHex, sc.shardMask, sc.shardBits)
+		match, err := matchesShardTarget(stateIDHex, sc.shardMask, sc.shardBits)
 		if err == nil && match {
 			return idx
 		}
 	}
 
-	imprint := requestID.Imprint()
+	imprint := stateID.Imprint()
 	if len(imprint) == 0 {
 		return 0
 	}
-	keyBytes := requestID.DataBytes()
+	keyBytes := stateID.DataBytes()
 	if len(keyBytes) == 0 {
 		return 0
 	}
@@ -268,29 +268,29 @@ func selectShardIndex(requestID api.StateID, shardClients []*ShardClient) int {
 }
 
 // matchesShardTarget dispatches to the active sharding mode's prefix matcher.
-func matchesShardTarget(requestIDHex string, shardMask int, shardBits string) (bool, error) {
+func matchesShardTarget(stateIDHex string, shardMask int, shardBits string) (bool, error) {
 	switch shardingMode {
 	case shardingModeBFT:
-		return matchesShardBits(requestIDHex, shardBits)
+		return matchesShardBits(stateIDHex, shardBits)
 	default:
-		return matchesShardMask(requestIDHex, shardMask)
+		return matchesShardMask(stateIDHex, shardMask)
 	}
 }
 
-func matchesShardMask(requestIDHex string, shardMask int) (bool, error) {
+func matchesShardMask(stateIDHex string, shardMask int) (bool, error) {
 	if shardMask <= 0 {
 		return false, nil
 	}
-	return api.MatchesShardPrefixFromHex(requestIDHex, shardMask)
+	return api.MatchesShardPrefixFromHex(stateIDHex, shardMask)
 }
 
 // matchesShardBits is the BFT-mode prefix check. An empty bits string means
 // "single-shard partition, accepts all".
-func matchesShardBits(requestIDHex, shardBits string) (bool, error) {
+func matchesShardBits(stateIDHex, shardBits string) (bool, error) {
 	if shardBits == "" {
 		return true, nil
 	}
-	keyBytes, err := hex.DecodeString(requestIDHex)
+	keyBytes, err := hex.DecodeString(stateIDHex)
 	if err != nil {
 		return false, fmt.Errorf("decode stateId hex: %w", err)
 	}
@@ -328,8 +328,8 @@ func shardIDFromBitString(bits string) (bfttypes.ShardID, error) {
 	return sid, nil
 }
 
-// matchesAnyShardTarget checks if a request ID matches any of the configured shard targets
-func matchesAnyShardTarget(requestIDHex string) bool {
+// matchesAnyShardTarget checks if a state ID matches any of the configured shard targets.
+func matchesAnyShardTarget(stateIDHex string) bool {
 	if len(shardTargets) == 0 {
 		return true // No targets configured, accept all
 	}
@@ -337,7 +337,7 @@ func matchesAnyShardTarget(requestIDHex string) bool {
 		if shardingMode == shardingModeApp && target.shardMask <= 0 {
 			continue
 		}
-		ok, err := matchesShardTarget(requestIDHex, target.shardMask, target.shardBits)
+		ok, err := matchesShardTarget(stateIDHex, target.shardMask, target.shardBits)
 		if err == nil && ok {
 			return true
 		}
@@ -358,7 +358,7 @@ func generateCommitmentRequest() *api.CertificationRequest {
 	// Generate random state data and hash it.
 	stateData := make([]byte, 32)
 	rand.Read(stateData)
-	sourceStateHashImprint := signing.CreateDataHash(stateData)
+	sourceStateHash := signing.CreateDataHash(stateData)
 
 	var stateID api.StateID
 
@@ -384,35 +384,35 @@ func generateCommitmentRequest() *api.CertificationRequest {
 	}
 
 	for {
-		calculated, err := api.CreateStateID(ownerPredicate, sourceStateHashImprint)
+		calculated, err := api.CreateStateID(ownerPredicate, sourceStateHash)
 		if err != nil {
-			panic(fmt.Sprintf("Failed to create request ID: %v", err))
+			panic(fmt.Sprintf("Failed to create state ID: %v", err))
 		}
-		// If no shard predicate constrains us, accept any request ID.
+		// If no shard predicate constrains us, accept any state ID.
 		if !hasActiveShardPredicate {
 			stateID = calculated
 			break
 		}
-		// Check if the request ID matches any of the configured shard targets
+		// Check if the state ID matches any of the configured shard targets.
 		if matchesAnyShardTarget(calculated.String()) {
 			stateID = calculated
 			break
 		}
 		// Regenerate state hash and try again
 		rand.Read(stateData)
-		sourceStateHashImprint = signing.CreateDataHash(stateData)
+		sourceStateHash = signing.CreateDataHash(stateData)
 	}
 
 	// Generate random transaction data and hash it.
 	transactionData := make([]byte, 32)
 	rand.Read(transactionData)
-	transactionHashImprint := signing.CreateDataHash(transactionData)
+	transactionHash := signing.CreateDataHash(transactionData)
 
 	signingService := signing.NewSigningService()
 	certData := &api.CertificationData{
 		OwnerPredicate:  ownerPredicate,
-		SourceStateHash: sourceStateHashImprint,
-		TransactionHash: transactionHashImprint,
+		SourceStateHash: sourceStateHash,
+		TransactionHash: transactionHash,
 	}
 	if err = signingService.SignCertData(certData, privateKey.Serialize()); err != nil {
 		panic(fmt.Sprintf("Failed to sign transaction: %v", err))
@@ -487,12 +487,12 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 						sm.failedRequests.Add(1)
 					}
 					if resp.Error.Message == "STATE_ID_EXISTS" {
-						atomic.AddInt64(&metrics.requestIdExistsErr, 1)
+						atomic.AddInt64(&metrics.stateIdExistsErr, 1)
 						if sm := metrics.shard(shardIdx); sm != nil {
-							sm.requestIdExistsErr.Add(1)
+							sm.stateIdExistsErr.Add(1)
 						}
-						requestIDStr := normalizeRequestID(req.StateID.String())
-						metrics.submittedRequestIDs.Store(requestIDStr, true)
+						stateIDStr := normalizeStateID(req.StateID.String())
+						metrics.submittedStateIDs.Store(stateIDStr, true)
 					}
 					return
 				}
@@ -508,20 +508,20 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 				switch submitResp.Status {
 				case "SUCCESS", "STATE_ID_EXISTS":
 					if submitResp.Status == "STATE_ID_EXISTS" {
-						atomic.AddInt64(&metrics.requestIdExistsErr, 1)
+						atomic.AddInt64(&metrics.stateIdExistsErr, 1)
 						if sm := metrics.shard(shardIdx); sm != nil {
-							sm.requestIdExistsErr.Add(1)
+							sm.stateIdExistsErr.Add(1)
 						}
 					}
 					atomic.AddInt64(&metrics.successfulRequests, 1)
 					if sm := metrics.shard(shardIdx); sm != nil {
 						sm.successfulRequests.Add(1)
 					}
-					requestIDStr := normalizeRequestID(req.StateID.String())
-					metrics.submittedRequestIDs.Store(requestIDStr, true)
+					stateIDStr := normalizeStateID(req.StateID.String())
+					metrics.submittedStateIDs.Store(stateIDStr, true)
 
 					if proofQueue != nil {
-						metrics.recordSubmissionTimestamp(requestIDStr)
+						metrics.recordSubmissionTimestamp(stateIDStr)
 						select {
 						case proofQueue <- proofJob{shardIdx: shardIdx, request: req}:
 						default:
@@ -559,11 +559,11 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 					return
 				}
 
-				reqID := normalizeRequestID(job.request.StateID.String())
+				stateID := normalizeStateID(job.request.StateID.String())
 				shardIdx := job.shardIdx
 				time.Sleep(proofInitialDelay)
 				startTime := time.Now()
-				normalizedID := reqID
+				normalizedID := stateID
 				client := shardClients[shardIdx].proofClient // Use separate proof client pool
 
 				for attempt := 0; attempt < proofMaxRetries; attempt++ {
@@ -581,7 +581,7 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 						}
 					}
 
-					proofReq := GetInclusionProofRequestV2{StateID: reqID}
+					proofReq := GetInclusionProofRequestV2{StateID: stateID}
 
 					atomic.AddInt64(&metrics.proofActiveRequests, 1)
 					if counters != nil {
@@ -664,7 +664,7 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 							time.Sleep(proofRetryDelay)
 							continue
 						}
-						metrics.recordError(fmt.Sprintf("Proof verification failed for request %s: %v", reqID, err))
+						metrics.recordError(fmt.Sprintf("Proof verification failed for state ID %s: %v", stateID, err))
 						atomic.AddInt64(&metrics.proofVerifyFailed, 1)
 						if sm := metrics.shard(shardIdx); sm != nil {
 							sm.proofVerifyFailed.Add(1)
@@ -793,12 +793,12 @@ func printShardFinalReport(metrics *Metrics, shardClients []*ShardClient) {
 		total := sm.totalRequests.Load()
 		success := sm.successfulRequests.Load()
 		failed := sm.failedRequests.Load()
-		exists := sm.requestIdExistsErr.Load()
+		exists := sm.stateIdExistsErr.Load()
 		successPct := 0.0
 		if total > 0 {
 			successPct = float64(success) / float64(total) * 100
 		}
-		fmt.Printf("  - %s total=%d success=%d failed=%d request_id_exists=%d success_rate=%.2f%%\n",
+		fmt.Printf("  - %s total=%d success=%d failed=%d state_id_exists=%d success_rate=%.2f%%\n",
 			sc.name, total, success, failed, exists, successPct)
 	}
 
@@ -1321,7 +1321,7 @@ func main() {
 	var warmupSubmissionWg sync.WaitGroup
 	var warmupPoolIndex atomic.Int64
 	var warmupMetrics Metrics
-	warmupMetrics.submittedRequestIDs.Store("init", true) // Initialize map
+	warmupMetrics.submittedStateIDs.Store("init", true) // Initialize map
 	warmupMetrics.submissionStartTime = time.Now()
 
 	// Start warmup workers with separate warmup pool
@@ -1488,7 +1488,7 @@ func main() {
 	total := atomic.LoadInt64(&metrics.totalRequests)
 	successful = atomic.LoadInt64(&metrics.successfulRequests)
 	failed := atomic.LoadInt64(&metrics.failedRequests)
-	exists := atomic.LoadInt64(&metrics.requestIdExistsErr)
+	exists := atomic.LoadInt64(&metrics.stateIdExistsErr)
 
 	fmt.Printf("\n\n========================================\n")
 	fmt.Printf("PERFORMANCE TEST RESULTS\n")

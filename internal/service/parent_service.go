@@ -237,19 +237,9 @@ func (pas *ParentAggregatorService) validateShardID(shardID api.ShardID) error {
 	return nil
 }
 
-// SubmitCommitment - not used in parent mode
-func (pas *ParentAggregatorService) SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error) {
-	return nil, fmt.Errorf("submit_commitment is not supported in parent mode - use submit_shard_root instead")
-}
-
 // CertificationRequest - not used in parent mode
 func (pas *ParentAggregatorService) CertificationRequest(ctx context.Context, req *api.CertificationRequest) (*api.CertificationResponse, error) {
 	return nil, fmt.Errorf("certification_request is not supported in parent mode - use submit_shard_root instead")
-}
-
-// GetInclusionProofV1 - not used in parent mode
-func (pas *ParentAggregatorService) GetInclusionProofV1(ctx context.Context, req *api.GetInclusionProofRequestV1) (*api.GetInclusionProofResponseV1, error) {
-	return nil, fmt.Errorf("get_inclusion_proof is not supported in parent mode - use get_shard_proof instead")
 }
 
 // GetInclusionProofV2 - not used in parent mode
@@ -277,11 +267,6 @@ func (pas *ParentAggregatorService) GetBlockHeight(ctx context.Context) (*api.Ge
 // GetBlock - TODO: implement
 func (pas *ParentAggregatorService) GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error) {
 	return nil, fmt.Errorf("get_block not implemented yet in parent mode")
-}
-
-// GetBlockCommitments - TODO: implement
-func (pas *ParentAggregatorService) GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error) {
-	return nil, fmt.Errorf("get_block_commitments not implemented yet in parent mode")
 }
 
 // GetBlockRecords - TODO: implement

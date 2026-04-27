@@ -136,10 +136,9 @@ func (m *MerkleTreePath) Verify(stateID *big.Int) (*PathVerificationResult, erro
 				if currentPath.BitLen() >= 2 {
 					depth = fullKeyBits - (currentPath.BitLen() - 1)
 				} else {
-					// Legacy MerkleTreePath may encode the current branch as
-					// only a raw direction bit ("0" or "1"), not a full
-					// sentinel-encoded path. In that case derive depth from
-					// the next step path as a fallback.
+					// Some MerkleTreePath encodings use only a raw direction
+					// bit ("0" or "1") for the current branch. In that case,
+					// derive depth from the next step path as a fallback.
 					depth = stepPath.BitLen() - 1
 				}
 				if depth < 0 || depth > 255 {

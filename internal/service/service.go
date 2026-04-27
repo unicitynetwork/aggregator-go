@@ -10,10 +10,8 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
-	modelsV1 "github.com/unicitynetwork/aggregator-go/internal/models/v1"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
-	signingV1 "github.com/unicitynetwork/aggregator-go/internal/signing/v1"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/internal/trustbase"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -22,14 +20,11 @@ import (
 // Service defines the common interface that all service implementations must satisfy
 type Service interface {
 	// JSON-RPC methods
-	SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error)
 	CertificationRequest(ctx context.Context, req *api.CertificationRequest) (*api.CertificationResponse, error)
-	GetInclusionProofV1(ctx context.Context, req *api.GetInclusionProofRequestV1) (*api.GetInclusionProofResponseV1, error)
 	GetInclusionProofV2(ctx context.Context, req *api.GetInclusionProofRequestV2) (*api.GetInclusionProofResponseV2, error)
 	GetNoDeletionProof(ctx context.Context) (*api.GetNoDeletionProofResponse, error)
 	GetBlockHeight(ctx context.Context) (*api.GetBlockHeightResponse, error)
 	GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error)
-	GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error)
 	GetBlockRecords(ctx context.Context, req *api.GetBlockRecords) (*api.GetBlockRecordsResponse, error)
 	GetHealthStatus(ctx context.Context) (*api.HealthStatus, error)
 
@@ -47,14 +42,14 @@ type TrustBaseService interface {
 }
 
 // NewService creates the appropriate service based on sharding mode
-func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, roundManager round.Manager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector, receiptSigner *signing.ReceiptSigner) (Service, error) {
+func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, roundManager round.Manager, commitmentQueue interfaces.CommitmentQueue, storage interfaces.Storage, leaderSelector LeaderSelector) (Service, error) {
 	switch cfg.Sharding.Mode {
 	case config.ShardingModeStandalone, config.ShardingModeBFTShard:
 		rm, ok := roundManager.(*round.RoundManager)
 		if !ok {
 			return nil, fmt.Errorf("invalid round manager type for mode %s", cfg.Sharding.Mode)
 		}
-		return NewAggregatorService(cfg, logger, rm, commitmentQueue, storage, leaderSelector, receiptSigner), nil
+		return NewAggregatorService(cfg, logger, rm, commitmentQueue, storage, leaderSelector), nil
 	case config.ShardingModeParent:
 		prm, ok := roundManager.(*round.ParentRoundManager)
 		if !ok {
@@ -62,7 +57,7 @@ func NewService(ctx context.Context, cfg *config.Config, logger *logger.Logger, 
 		}
 		return NewParentAggregatorService(cfg, logger, prm, storage, leaderSelector), nil
 	case config.ShardingModeChild:
-		return NewAggregatorService(cfg, logger, roundManager, commitmentQueue, storage, leaderSelector, receiptSigner), nil
+		return NewAggregatorService(cfg, logger, roundManager, commitmentQueue, storage, leaderSelector), nil
 	default:
 		return nil, fmt.Errorf("unsupported sharding mode: %s", cfg.Sharding.Mode)
 	}
@@ -77,9 +72,7 @@ type AggregatorService struct {
 	roundManager                  round.Manager
 	leaderSelector                LeaderSelector
 	certificationRequestValidator *signing.CertificationRequestValidator
-	commitmentValidator           *signingV1.CommitmentValidator
 	trustBaseValidator            *trustbase.TrustBaseValidator
-	receiptSigner                 *signing.ReceiptSigner
 }
 
 type LeaderSelector interface {
@@ -96,24 +89,6 @@ func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.Aggre
 			Witness:         modelRecord.CertificationData.Witness,
 			SourceStateHash: modelRecord.CertificationData.SourceStateHash,
 			TransactionHash: modelRecord.CertificationData.TransactionHash,
-		},
-		AggregateRequestCount: modelRecord.AggregateRequestCount,
-		BlockNumber:           modelRecord.BlockNumber,
-		LeafIndex:             modelRecord.LeafIndex,
-		CreatedAt:             modelRecord.CreatedAt,
-		FinalizedAt:           modelRecord.FinalizedAt,
-	}
-}
-
-func modelToAPIAggregatorRecordV1(modelRecord *models.AggregatorRecord) *api.AggregatorRecordV1 {
-	return &api.AggregatorRecordV1{
-		RequestID:       modelRecord.StateID,
-		TransactionHash: modelRecord.CertificationData.TransactionHash,
-		Authenticator: api.Authenticator{
-			Algorithm: "secp256k1",
-			PublicKey: modelRecord.CertificationData.OwnerPredicate.Params,
-			Signature: modelRecord.CertificationData.Witness,
-			StateHash: modelRecord.CertificationData.SourceStateHash,
 		},
 		AggregateRequestCount: modelRecord.AggregateRequestCount,
 		BlockNumber:           modelRecord.BlockNumber,
@@ -157,7 +132,6 @@ func NewAggregatorService(cfg *config.Config,
 	commitmentQueue interfaces.CommitmentQueue,
 	storage interfaces.Storage,
 	leaderSelector LeaderSelector,
-	receiptSigner *signing.ReceiptSigner,
 ) *AggregatorService {
 	var bftShardID types.ShardID
 	if cfg.BFT.ShardConf != nil {
@@ -170,110 +144,9 @@ func NewAggregatorService(cfg *config.Config,
 		storage:                       storage,
 		roundManager:                  roundManager,
 		leaderSelector:                leaderSelector,
-		commitmentValidator:           signingV1.NewCommitmentValidator(cfg.Sharding),
 		certificationRequestValidator: signing.NewCertificationRequestValidator(cfg.Sharding, bftShardID),
 		trustBaseValidator:            trustbase.NewTrustBaseValidator(storage.TrustBaseStorage()),
-		receiptSigner:                 receiptSigner,
 	}
-}
-
-// SubmitCommitment handles commitment submission
-func (as *AggregatorService) SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error) {
-	if as.config.Sharding.Mode == config.ShardingModeChild ||
-		as.config.Sharding.Mode == config.ShardingModeBFTShard {
-		return nil, fmt.Errorf("legacy submit_commitment is not supported in mode %s", as.config.Sharding.Mode)
-	}
-
-	// Create commitment with aggregate count
-	aggregateCount := req.AggregateRequestCount
-	if aggregateCount == 0 {
-		aggregateCount = 1 // Default to 1 if not specified
-	}
-
-	commitment := modelsV1.NewCommitmentWithAggregate(
-		req.RequestID,
-		req.TransactionHash,
-		modelsV1.Authenticator{
-			Algorithm: req.Authenticator.Algorithm,
-			PublicKey: req.Authenticator.PublicKey,
-			Signature: req.Authenticator.Signature,
-			StateHash: req.Authenticator.StateHash,
-		},
-		aggregateCount,
-	)
-
-	// Validate commitment signature and request ID
-	validationResult := as.commitmentValidator.ValidateCommitment(commitment)
-	if validationResult.Status != signingV1.ValidationStatusSuccess {
-		errorMsg := ""
-		if validationResult.Error != nil {
-			errorMsg = validationResult.Error.Error()
-		}
-		as.logger.WithContext(ctx).Warn("Commitment validation failed",
-			"requestId", req.RequestID,
-			"validationStatus", validationResult.Status.String(),
-			"error", errorMsg)
-
-		return &api.SubmitCommitmentResponse{
-			Status: validationResult.Status.String(),
-		}, nil
-	}
-
-	// Check if commitment already processed
-	existingRecord, err := as.storage.AggregatorRecordStorage().GetByStateID(ctx, req.RequestID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check existing aggregator record: %w", err)
-	}
-
-	if existingRecord != nil {
-		return &api.SubmitCommitmentResponse{
-			Status: "REQUEST_ID_EXISTS",
-		}, nil
-	}
-
-	// Store commitment in new format but with version = 1
-	certRequest := &models.CertificationRequest{
-		Version: 1,
-		StateID: commitment.RequestID,
-		CertificationData: models.CertificationData{
-			OwnerPredicate:  api.NewPayToPublicKeyPredicate(commitment.Authenticator.PublicKey),
-			SourceStateHash: commitment.Authenticator.StateHash,
-			TransactionHash: commitment.TransactionHash,
-			Witness:         commitment.Authenticator.Signature,
-		},
-		AggregateRequestCount: commitment.AggregateRequestCount,
-		CreatedAt:             commitment.CreatedAt,
-		ProcessedAt:           commitment.ProcessedAt,
-	}
-	if err := as.commitmentQueue.Store(ctx, certRequest); err != nil {
-		return nil, fmt.Errorf("failed to store commitment: %w", err)
-	}
-
-	as.logger.WithContext(ctx).Info("Commitment submitted successfully", "requestId", req.RequestID)
-
-	response := &api.SubmitCommitmentResponse{
-		Status: "SUCCESS",
-	}
-
-	// Generate receipt if requested
-	if req.Receipt != nil && *req.Receipt {
-		if as.receiptSigner == nil {
-			as.logger.WithContext(ctx).Warn("Receipt requested but receipt signer not configured", "requestId", req.RequestID)
-		} else {
-			receipt, err := as.receiptSigner.SignReceiptV1(
-				commitment.RequestID,
-				commitment.TransactionHash,
-				commitment.Authenticator.StateHash,
-			)
-			if err != nil {
-				as.logger.WithContext(ctx).Error("Failed to sign receipt", "requestId", req.RequestID, "error", err.Error())
-			} else {
-				response.Receipt = receipt
-			}
-		}
-	}
-
-	return response, nil
 }
 
 // CertificationRequest handles certification request submission
@@ -328,85 +201,6 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 	as.logger.WithContext(ctx).Info("CertificationData submitted successfully", "stateId", req.StateID)
 
 	return &api.CertificationResponse{Status: "SUCCESS"}, nil
-}
-
-// GetInclusionProofV1 retrieves inclusion proof for a commitment
-func (as *AggregatorService) GetInclusionProofV1(ctx context.Context, req *api.GetInclusionProofRequestV1) (*api.GetInclusionProofResponseV1, error) {
-	unlock := as.roundManager.FinalizationReadLock()
-	defer unlock()
-
-	if as.config.Sharding.Mode == config.ShardingModeChild ||
-		as.config.Sharding.Mode == config.ShardingModeBFTShard {
-		return nil, fmt.Errorf("legacy inclusion proof v1 is not supported in mode %s", as.config.Sharding.Mode)
-	}
-
-	// verify that the request ID matches the shard ID of this aggregator
-	if err := as.commitmentValidator.ValidateShardID(req.RequestID); err != nil {
-		return nil, fmt.Errorf("request ID validation failed: %w", err)
-	}
-
-	path, err := req.RequestID.GetPath()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get path for request ID %s: %w", req.RequestID, err)
-	}
-
-	smtInstance := as.roundManager.GetSMT()
-	if smtInstance == nil {
-		return nil, fmt.Errorf("merkle tree not initialized")
-	}
-	if keyLen := smtInstance.GetKeyLength(); path.BitLen()-1 != keyLen {
-		return nil, fmt.Errorf("request path length %d does not match SMT key length %d", path.BitLen()-1, keyLen)
-	}
-
-	merkleTreePath, err := smtInstance.GetPath(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get inclusion proof for request ID %s: %w", req.RequestID, err)
-	}
-
-	// Find the latest block that matches the current SMT root hash. Blocks
-	// are stored under the raw 32-byte root matching UC.IR.h.
-	rootHash := api.HexBytes(smtInstance.GetRootHashRaw())
-	block, err := as.storage.BlockStorage().GetLatestByRootHash(ctx, rootHash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get latest block by root hash: %w", err)
-	}
-	if block == nil {
-		return nil, fmt.Errorf("no block found with root hash %s", rootHash.String())
-	}
-
-	// Check if commitment exists in aggregator records (finalized)
-	record, err := as.storage.AggregatorRecordStorage().GetByStateID(ctx, req.RequestID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get aggregator record: %w", err)
-	}
-	if record == nil || record.BlockNumber.Cmp(block.Index.Int) > 0 {
-		// Non-inclusion proof: either record doesn't exist, or it belongs to a
-		// newer block whose SMT state hasn't been committed yet.
-		return &api.GetInclusionProofResponseV1{
-			InclusionProof: &api.InclusionProofV1{
-				Authenticator:      nil,
-				MerkleTreePath:     merkleTreePath,
-				TransactionHash:    nil,
-				UnicityCertificate: block.UnicityCertificate,
-			},
-		}, nil
-	}
-	if record.Version != 0 && record.Version != 1 {
-		return nil, fmt.Errorf("invalid inclusion proof version got %d expected 0 or 1", record.Version)
-	}
-	return &api.GetInclusionProofResponseV1{
-		InclusionProof: &api.InclusionProofV1{
-			Authenticator: &api.Authenticator{
-				Algorithm: "secp256k1",
-				PublicKey: record.CertificationData.OwnerPredicate.Params,
-				Signature: record.CertificationData.Witness,
-				StateHash: record.CertificationData.SourceStateHash,
-			},
-			MerkleTreePath:     merkleTreePath,
-			TransactionHash:    &record.CertificationData.TransactionHash,
-			UnicityCertificate: block.UnicityCertificate,
-		},
-	}, nil
 }
 
 // GetInclusionProofV2 retrieves a v2 inclusion proof for the given stateId.
@@ -596,24 +390,6 @@ func (as *AggregatorService) GetBlock(ctx context.Context, req *api.GetBlockRequ
 	}, nil
 }
 
-// GetBlockCommitments retrieves all commitments in a block
-func (as *AggregatorService) GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error) {
-	records, err := as.storage.AggregatorRecordStorage().GetByBlockNumber(ctx, req.BlockNumber)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get block commitments: %w", err)
-	}
-
-	// Convert model records to API records
-	apiRecords := make([]*api.AggregatorRecordV1, len(records))
-	for i, record := range records {
-		apiRecords[i] = modelToAPIAggregatorRecordV1(record)
-	}
-
-	return &api.GetBlockCommitmentsResponse{
-		Commitments: apiRecords,
-	}, nil
-}
-
 // GetBlockRecords retrieves all commitments in a block
 func (as *AggregatorService) GetBlockRecords(ctx context.Context, req *api.GetBlockRecords) (*api.GetBlockRecordsResponse, error) {
 	records, err := as.storage.AggregatorRecordStorage().GetByBlockNumber(ctx, req.BlockNumber)
@@ -703,8 +479,8 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 }
 
 // buildShardingHealth builds the api.Sharding health payload. In bft-shard
-// mode the shard is reported as a bit-string via BFTShardID and the legacy
-// integer fields are left at zero.
+// mode the shard is reported as a bit-string via BFTShardID and the integer
+// shard fields are left at zero.
 func buildShardingHealth(cfg *config.Config) api.Sharding {
 	sharding := api.Sharding{
 		Mode: cfg.Sharding.Mode.String(),

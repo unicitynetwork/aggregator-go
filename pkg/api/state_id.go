@@ -14,7 +14,6 @@ type ImprintV2 HexBytes
 type StateID = ImprintV2
 type SourceStateHash = ImprintV2
 type TransactionHash = ImprintV2
-type RequestID = ImprintV2
 
 const (
 	// StateTreeKeyLengthBits is the v2 SMT key size.
@@ -42,12 +41,6 @@ func RequireNewImprintV2(s string) StateID {
 
 func (r ImprintV2) String() string {
 	return (HexBytes)(r).String()
-}
-
-func (r ImprintV2) IsV1() bool {
-	// V1 imprints are 34 bytes (2 prefix + 32 hash)
-	// V2 are 32 bytes.
-	return len(r) == 34
 }
 
 func (r ImprintV2) GetPath() (*big.Int, error) {
@@ -132,13 +125,6 @@ func FixedBytesToPath(key []byte, keyLengthBits int) (*big.Int, error) {
 	return path, nil
 }
 
-func (r ImprintV2) Algorithm() []byte {
-	if r.IsV1() {
-		return r[0:2]
-	}
-	return []byte{0, 0}
-}
-
 func (r ImprintV2) Imprint() []byte {
 	return r
 }
@@ -148,10 +134,7 @@ func (r ImprintV2) Bytes() []byte {
 }
 
 func (r ImprintV2) DataBytes() []byte {
-	if r.IsV1() {
-		return r[2:]
-	}
-	return r
+	return append([]byte(nil), r...)
 }
 
 func (r ImprintV2) MarshalJSON() ([]byte, error) {

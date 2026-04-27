@@ -28,7 +28,7 @@ The service provides **executable** interactive API documentation accessible at 
 ### Core Methods
 
 1. **`certification_request`** - Submit state transition requests
-2. **`get_inclusion_proof.v2`** - Retrieve inclusion proofs for commitments
+2. **`get_inclusion_proof.v2`** - Retrieve inclusion proofs for certification requests
 3. **`get_no_deletion_proof`** - Get global no-deletion proofs
 4. **`get_block_height`** - Get current blockchain height
 5. **`get_block`** - Retrieve block information
@@ -107,7 +107,7 @@ curl -X POST http://localhost:3333/ \
   -d '{
     "jsonrpc": "2.0",
     "method": "certification_request",
-    "params": "8458220000b1333daf3261d9bfa9d6dd98f170c0e756c26dbe284b5f90b27df900f6a77c04848301410158210299de0a2414a39fc981694b40bcb7006c6a3c70da7097a9a02877469fe1d2a62b582200002dc34763859638857585ce6aa30a43d3d7a342b51e6caee408888f3ab1c9e84b582200004c3b2c6fce3a19589cb219a0c18281696fedcbab1f28afd8aecc830cff55dacb584103ce4ef0fe3b4f53f5264daee6930c5e7a3b60f4dfd102b4d8f2420d8bbba17e446b0f855ad402437f14d00c1f27752e9aa802301ca42a57a80cb1f6f57e03eb00f500",
+    "params": "<hex-encoded CertificationRequest CBOR>",
     "id": 1
   }'
 

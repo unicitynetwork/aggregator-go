@@ -14,22 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func normalizeLegacyPath(t *testing.T, raw string) *big.Int {
-	t.Helper()
-
-	legacyPath, ok := new(big.Int).SetString(raw, 10)
-	require.True(t, ok, "failed to parse path")
-
-	key, err := api.PathToFixedBytes(legacyPath, legacyPath.BitLen()-1)
-	require.NoError(t, err)
-	key, err = api.ImprintV2(key).GetTreeKey()
-	require.NoError(t, err)
-
-	path, err := api.FixedBytesToPath(key, api.StateTreeKeyLengthBits)
-	require.NoError(t, err)
-	return path
-}
-
 // TestSMTGetRoot test basic SMT root hash computation
 func TestSMTGetRoot(t *testing.T) {
 	// v2 reference values for basic tree shapes.
@@ -554,9 +538,9 @@ func TestSMTGetPath(t *testing.T) {
 	t.Run("ExpectedPath", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
 
-		// Normalize the old 272-bit sentinel-prefixed fixture to the current
-		// 256-bit tree-key path form.
-		path := normalizeLegacyPath(t, "7588617121771513359933852905331119149238064034818011809301695587375759386505263024")
+		stateID := api.RequireNewImprintV2("563d50d4700ad7c4b9fe4e737a611ebe16c4bb8747ce4bfa4dbda3ad99930000")
+		path, err := stateID.GetPath()
+		require.NoError(t, err)
 
 		leafValue, err := hex.DecodeString("00000777e81da35187bc52073e96a10f89d7fe9aa826693982c8e748a96a3cc7d7b7")
 		require.NoError(t, err)

@@ -579,7 +579,7 @@ func startBFTShardAggregator(ctx context.Context, t *testing.T, opts bftAggregat
 	require.NoError(t, mgr.Start(aggCtx))
 	require.NoError(t, mgr.Activate(aggCtx))
 
-	svc, err := service.NewService(aggCtx, cfg, log, mgr, queue, stor, nil, nil)
+	svc, err := service.NewService(aggCtx, cfg, log, mgr, queue, stor, nil)
 	require.NoError(t, err)
 	srv := gateway.NewServer(cfg, log, svc)
 	go func() { _ = srv.Start() }()

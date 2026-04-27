@@ -24,7 +24,7 @@ type AggregatorRecord struct {
 // AggregatorRecordBSON represents the BSON version of AggregatorRecord for MongoDB storage
 type AggregatorRecordBSON struct {
 	Version               uint32                `bson:"version"`
-	StateID               string                `bson:"requestId"` // keep requestId in BSON to match V1
+	StateID               string                `bson:"stateId"`
 	CertificationData     CertificationDataBSON `bson:"certificationData"`
 	AggregateRequestCount uint64                `bson:"aggregateRequestCount"`
 	BlockNumber           primitive.Decimal128  `bson:"blockNumber"`
@@ -81,12 +81,6 @@ func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
 		return nil, fmt.Errorf("failed to parse leafIndex: %w", err)
 	}
 
-	// Default AggregateRequestCount to 1 if not present (backward compatibility)
-	aggregateRequestCount := arb.AggregateRequestCount
-	if aggregateRequestCount == 0 {
-		aggregateRequestCount = 1
-	}
-
 	certDataBSON, err := arb.CertificationData.FromBSON()
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse CertificationData: %w", err)
@@ -101,7 +95,7 @@ func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
 		Version:               arb.Version,
 		StateID:               stateID,
 		CertificationData:     *certDataBSON,
-		AggregateRequestCount: aggregateRequestCount,
+		AggregateRequestCount: arb.AggregateRequestCount,
 		BlockNumber:           blockNumber,
 		LeafIndex:             leafIndex,
 		CreatedAt:             api.NewTimestamp(arb.CreatedAt),

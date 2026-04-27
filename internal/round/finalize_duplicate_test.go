@@ -310,11 +310,11 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 	require.NoError(t, err, "Pre-storing block should succeed")
 
 	// Also pre-store block records
-	requestIds := make([]api.StateID, len(commitments))
+	stateIDs := make([]api.StateID, len(commitments))
 	for i, c := range commitments {
-		requestIds[i] = c.StateID
+		stateIDs[i] = c.StateID
 	}
-	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds))
+	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, stateIDs))
 	require.NoError(t, err, "Pre-storing block records should succeed")
 
 	// Get counts before FinalizeBlock
@@ -391,11 +391,11 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	require.NoError(t, err, "Pre-storing finalized block should succeed")
 
 	// Pre-store block records
-	requestIds := make([]api.StateID, len(commitments))
+	stateIDs := make([]api.StateID, len(commitments))
 	for i, c := range commitments {
-		requestIds[i] = c.StateID
+		stateIDs[i] = c.StateID
 	}
-	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds))
+	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, stateIDs))
 	require.NoError(t, err, "Pre-storing block records should succeed")
 
 	// Pre-store all SMT nodes and records (simulating full previous attempt)

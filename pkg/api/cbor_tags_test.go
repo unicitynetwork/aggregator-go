@@ -23,7 +23,7 @@ func cborTagPrefix(t *testing.T, tag types.CborTag, arrayLen int) []byte {
 
 func TestCertificationRequest_WireFormat(t *testing.T) {
 	req := &CertificationRequest{
-		StateID:           RequireNewImprintV2("00000000000000000000000000000000000000000000000000000000000000000000"),
+		StateID:           RequireNewImprintV2("0000000000000000000000000000000000000000000000000000000000000000"),
 		CertificationData: createCertData(t),
 	}
 
@@ -38,7 +38,7 @@ func TestCertificationRequest_WireFormat(t *testing.T) {
 
 func TestCertificationRequest_RejectsWrongTag(t *testing.T) {
 	req := &CertificationRequest{
-		StateID:           RequireNewImprintV2("00000000000000000000000000000000000000000000000000000000000000000000"),
+		StateID:           RequireNewImprintV2("0000000000000000000000000000000000000000000000000000000000000000"),
 		CertificationData: createCertData(t),
 	}
 	b, err := types.Cbor.Marshal(req)
@@ -55,7 +55,7 @@ func TestCertificationRequest_RejectsWrongTag(t *testing.T) {
 
 func TestCertificationRequest_RejectsWrongVersion(t *testing.T) {
 	req := &CertificationRequest{
-		StateID:           RequireNewImprintV2("00000000000000000000000000000000000000000000000000000000000000000000"),
+		StateID:           RequireNewImprintV2("0000000000000000000000000000000000000000000000000000000000000000"),
 		CertificationData: createCertData(t),
 	}
 	b, err := types.Cbor.Marshal(req)

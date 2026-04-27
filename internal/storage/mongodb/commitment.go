@@ -42,7 +42,7 @@ func (cs *CommitmentStorage) Store(ctx context.Context, commitment *models.Certi
 // GetByStateID retrieves a certification request by state ID
 func (cs *CommitmentStorage) GetByStateID(ctx context.Context, stateID api.StateID) (*models.CertificationRequest, error) {
 	var commitmentBSON models.CertificationRequestBSON
-	err := cs.collection.FindOne(ctx, bson.M{"requestId": stateID}).Decode(&commitmentBSON)
+	err := cs.collection.FindOne(ctx, bson.M{"stateId": stateID.String()}).Decode(&commitmentBSON)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
@@ -55,10 +55,6 @@ func (cs *CommitmentStorage) GetByStateID(ctx context.Context, stateID api.State
 		return nil, fmt.Errorf("failed to convert certification request from BSON: %w", err)
 	}
 
-	// Handle backward compatibility: default to 1 if AggregateRequestCount is 0
-	if commitment.AggregateRequestCount == 0 {
-		commitment.AggregateRequestCount = 1
-	}
 	return commitment, nil
 }
 
@@ -103,10 +99,6 @@ func (cs *CommitmentStorage) GetUnprocessedBatchWithCursor(ctx context.Context, 
 			return nil, "", fmt.Errorf("failed to convert certification request from BSON: %w", err)
 		}
 
-		// Handle backward compatibility: default to 1 if AggregateRequestCount is 0
-		if commitment.AggregateRequestCount == 0 {
-			commitment.AggregateRequestCount = 1
-		}
 		commitments = append(commitments, commitment)
 		// Update cursor to the last fetched ID
 		if commitment.ID != primitive.NilObjectID {
@@ -127,12 +119,12 @@ func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interf
 		return nil
 	}
 
-	requestIDs := make([]api.StateID, len(entries))
+	stateIDs := make([]string, len(entries))
 	for i, entry := range entries {
-		requestIDs[i] = entry.StateID
+		stateIDs[i] = entry.StateID.String()
 	}
 
-	filter := bson.M{"requestId": bson.M{"$in": requestIDs}}
+	filter := bson.M{"stateId": bson.M{"$in": stateIDs}}
 	update := bson.M{"$set": bson.M{"processedAt": time.Now()}}
 
 	_, err := cs.collection.UpdateMany(ctx, filter, update)
@@ -149,7 +141,12 @@ func (cs *CommitmentStorage) Delete(ctx context.Context, stateIDs []api.StateID)
 		return nil
 	}
 
-	filter := bson.M{"requestId": bson.M{"$in": stateIDs}}
+	stateIDStrings := make([]string, len(stateIDs))
+	for i, stateID := range stateIDs {
+		stateIDStrings[i] = stateID.String()
+	}
+
+	filter := bson.M{"stateId": bson.M{"$in": stateIDStrings}}
 	_, err := cs.collection.DeleteMany(ctx, filter)
 	if err != nil {
 		return fmt.Errorf("failed to delete commitments: %w", err)
@@ -183,19 +180,18 @@ func (cs *CommitmentStorage) GetAllPending(ctx context.Context) ([]*models.Certi
 	return cs.findCommitments(ctx, filter)
 }
 
-// GetByRequestIDs retrieves commitments matching the given request IDs.
-func (cs *CommitmentStorage) GetByRequestIDs(ctx context.Context, requestIDs []api.StateID) (map[string]*models.CertificationRequest, error) {
-	if len(requestIDs) == 0 {
+// GetByStateIDs retrieves certification requests matching the given state IDs.
+func (cs *CommitmentStorage) GetByStateIDs(ctx context.Context, stateIDs []api.StateID) (map[string]*models.CertificationRequest, error) {
+	if len(stateIDs) == 0 {
 		return make(map[string]*models.CertificationRequest), nil
 	}
 
-	// Convert to strings for query
-	reqIDStrings := make([]string, len(requestIDs))
-	for i, reqID := range requestIDs {
-		reqIDStrings[i] = reqID.String()
+	stateIDStrings := make([]string, len(stateIDs))
+	for i, stateID := range stateIDs {
+		stateIDStrings[i] = stateID.String()
 	}
 
-	filter := bson.M{"requestId": bson.M{"$in": reqIDStrings}}
+	filter := bson.M{"stateId": bson.M{"$in": stateIDStrings}}
 	commitments, err := cs.findCommitments(ctx, filter)
 	if err != nil {
 		return nil, err
@@ -203,7 +199,7 @@ func (cs *CommitmentStorage) GetByRequestIDs(ctx context.Context, requestIDs []a
 
 	result := make(map[string]*models.CertificationRequest, len(commitments))
 	for _, c := range commitments {
-		result[string(c.StateID)] = c
+		result[c.StateID.String()] = c
 	}
 	return result, nil
 }
@@ -249,7 +245,7 @@ func (cs *CommitmentStorage) Close(ctx context.Context) error {
 func (cs *CommitmentStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
 		{
-			Keys:    bson.D{{Key: "requestId", Value: 1}},
+			Keys:    bson.D{{Key: "stateId", Value: 1}},
 			Options: options.Index().SetUnique(true),
 		},
 		{

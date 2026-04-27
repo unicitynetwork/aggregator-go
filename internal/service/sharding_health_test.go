@@ -77,7 +77,7 @@ func TestBuildShardingHealth_BFTShard_PopulatesBitString(t *testing.T) {
 	s := buildShardingHealth(cfg)
 	require.Equal(t, "bft-shard", s.Mode)
 	require.Equal(t, "101", s.BFTShardID)
-	// Legacy integer fields must not leak through in bft-shard mode.
+	// Integer shard fields must not leak through in bft-shard mode.
 	require.Equal(t, 0, s.ShardIDLen)
 	require.Equal(t, 0, s.ShardID)
 }
