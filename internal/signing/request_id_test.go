@@ -66,7 +66,7 @@ func TestStateIDGenerator_ValidateStateID(t *testing.T) {
 	}
 
 	// Test invalid state ID validation
-	invalidStateID := api.RequireNewImprintV2("00000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	invalidStateID := api.RequireNewImprintV2("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	isValid, err = api.ValidateStateID(invalidStateID, sourceStateHash, ownerPredicate)
 	if err != nil {
 		t.Fatalf("Failed to validate invalid state ID: %v", err)

@@ -3,6 +3,7 @@ package mongodb
 import (
 	"context"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,11 +63,18 @@ func setupAggregatorRecordTestDB(t *testing.T) *mongo.Database {
 	return db
 }
 
+func testStateIDHex(suffix string) string {
+	if len(suffix) >= api.StateTreeKeyLengthBytes*2 {
+		return suffix
+	}
+	return strings.Repeat("0", api.StateTreeKeyLengthBytes*2-len(suffix)) + suffix
+}
+
 // createTestAggregatorRecord creates a test aggregator record
 func createTestAggregatorRecord(stateID string, blockNumber int64, leafIndex int64) *models.AggregatorRecord {
 	// Create a complete certification request with all required fields
-	transactionHash := api.RequireNewImprintV2("0x00001234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
-	sourceStateHash := api.RequireNewImprintV2("0x0000abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
+	transactionHash := api.RequireNewImprintV2("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+	sourceStateHash := api.RequireNewImprintV2("0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
 
 	certData := models.CertificationData{
 		OwnerPredicate:  api.NewPayToPublicKeyPredicate([]byte("test_public_key_1234567890abcdef")),
@@ -75,7 +83,7 @@ func createTestAggregatorRecord(stateID string, blockNumber int64, leafIndex int
 		Witness:         api.HexBytes("test_signature_1234567890abcdef"),
 	}
 
-	commitment := models.NewCertificationRequest(api.RequireNewImprintV2(stateID), certData)
+	commitment := models.NewCertificationRequest(api.RequireNewImprintV2(testStateIDHex(stateID)), certData)
 
 	blockIndex := api.NewBigInt(big.NewInt(blockNumber))
 	leafIdx := api.NewBigInt(big.NewInt(leafIndex))
@@ -94,16 +102,21 @@ func TestAggregatorRecordStorage_StoreBatch_DuplicateHandling(t *testing.T) {
 	require.NoError(t, err, "CreateIndexes should not return an error")
 
 	// Create test records
+	state1 := testStateIDHex("01")
+	state2 := testStateIDHex("02")
+	state3 := testStateIDHex("03")
+	state4 := testStateIDHex("04")
+	state5 := testStateIDHex("05")
 	records1 := []*models.AggregatorRecord{
-		createTestAggregatorRecord("01", 1, 0),
-		createTestAggregatorRecord("02", 1, 1),
-		createTestAggregatorRecord("03", 1, 2),
+		createTestAggregatorRecord(state1, 1, 0),
+		createTestAggregatorRecord(state2, 1, 1),
+		createTestAggregatorRecord(state3, 1, 2),
 	}
 
 	records2 := []*models.AggregatorRecord{
-		createTestAggregatorRecord("01", 1, 0), // Duplicate of first record
-		createTestAggregatorRecord("02", 1, 1), // Duplicate of second record
-		createTestAggregatorRecord("04", 1, 3), // New record
+		createTestAggregatorRecord(state1, 1, 0), // Duplicate of first record
+		createTestAggregatorRecord(state2, 1, 1), // Duplicate of second record
+		createTestAggregatorRecord(state4, 1, 3), // New record
 	}
 
 	// Store first batch
@@ -115,23 +128,23 @@ func TestAggregatorRecordStorage_StoreBatch_DuplicateHandling(t *testing.T) {
 	err = storage.StoreBatch(ctx, records2)
 	require.NoError(t, err, "StoreBatch should ignore duplicate key errors")
 
-	// With SetOrdered(false), request4 was still inserted despite duplicates
+	// With SetOrdered(false), state4 was still inserted despite duplicates
 	count, err := storage.Count(ctx)
 	require.NoError(t, err, "Count should not return an error")
 	assert.Equal(t, int64(4), count, "Should have 4 records (3 original + 1 new, duplicates failed)")
 
-	// Test GetExistingRequestIDs to filter duplicates before inserting
-	requestIDs := []string{"01", "02", "04", "05"}
-	existing, err := storage.GetExistingRequestIDs(ctx, requestIDs)
-	require.NoError(t, err, "GetExistingRequestIDs should not return an error")
-	assert.True(t, existing["01"], "request1 should exist")
-	assert.True(t, existing["02"], "request2 should exist")
-	assert.True(t, existing["04"], "request4 should exist now")
-	assert.False(t, existing["05"], "request5 should not exist")
+	// Test GetExistingStateIDs to filter duplicates before inserting
+	stateIDs := []string{state1, state2, state4, state5}
+	existing, err := storage.GetExistingStateIDs(ctx, stateIDs)
+	require.NoError(t, err, "GetExistingStateIDs should not return an error")
+	assert.True(t, existing[state1], "state1 should exist")
+	assert.True(t, existing[state2], "state2 should exist")
+	assert.True(t, existing[state4], "state4 should exist now")
+	assert.False(t, existing[state5], "state5 should not exist")
 
-	// Insert only new records (after filtering with GetExistingRequestIDs)
+	// Insert only new records (after filtering with GetExistingStateIDs)
 	newRecords := []*models.AggregatorRecord{
-		createTestAggregatorRecord("05", 1, 4),
+		createTestAggregatorRecord(state5, 1, 4),
 	}
 	err = storage.StoreBatch(ctx, newRecords)
 	require.NoError(t, err, "StoreBatch with only new records should succeed")
@@ -159,10 +172,13 @@ func TestAggregatorRecordStorage_GetByBlockNumber(t *testing.T) {
 	})
 
 	// Store some test records
+	state0101 := testStateIDHex("0101")
+	state0102 := testStateIDHex("0102")
+	state0103 := testStateIDHex("0103")
 	records := []*models.AggregatorRecord{
-		createTestAggregatorRecord("0101", 100, 0),
-		createTestAggregatorRecord("0102", 100, 1),
-		createTestAggregatorRecord("0103", 100, 2),
+		createTestAggregatorRecord(state0101, 100, 0),
+		createTestAggregatorRecord(state0102, 100, 1),
+		createTestAggregatorRecord(state0103, 100, 2),
 		createTestAggregatorRecord("0104", 101, 0),
 		createTestAggregatorRecord("0105", 101, 1),
 		createTestAggregatorRecord("0006", 0, 0),
@@ -186,9 +202,9 @@ func TestAggregatorRecordStorage_GetByBlockNumber(t *testing.T) {
 		for _, r := range retrieved {
 			stateIDs[r.StateID.String()] = true
 		}
-		require.True(t, stateIDs["0101"])
-		require.True(t, stateIDs["0102"])
-		require.True(t, stateIDs["0103"])
+		require.True(t, stateIDs[state0101])
+		require.True(t, stateIDs[state0102])
+		require.True(t, stateIDs[state0103])
 	})
 
 	t.Run("should return empty slice for non-existent block number", func(t *testing.T) {
@@ -204,7 +220,7 @@ func TestAggregatorRecordStorage_GetByBlockNumber(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, retrieved)
 		require.Len(t, retrieved, 1)
-		require.Equal(t, api.RequireNewImprintV2("0006"), retrieved[0].StateID)
+		require.Equal(t, api.RequireNewImprintV2(testStateIDHex("0006")), retrieved[0].StateID)
 	})
 }
 

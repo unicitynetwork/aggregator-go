@@ -20,18 +20,12 @@ func createLeaf(path int64, value []byte) *smt.Leaf {
 	}
 }
 
-func normalizeLegacyPath(t *testing.T, raw string) *big.Int {
+func pathFromStateIDHex(t *testing.T, raw string) *big.Int {
 	t.Helper()
 
-	legacyPath, ok := new(big.Int).SetString(raw, 10)
-	require.True(t, ok, "failed to parse path")
-
-	key, err := api.PathToFixedBytes(legacyPath, legacyPath.BitLen()-1)
+	stateID, err := api.NewImprintV2(raw)
 	require.NoError(t, err)
-	key, err = api.ImprintV2(key).GetTreeKey()
-	require.NoError(t, err)
-
-	path, err := api.FixedBytesToPath(key, api.StateTreeKeyLengthBits)
+	path, err := stateID.GetPath()
 	require.NoError(t, err)
 	return path
 }
@@ -108,10 +102,8 @@ func TestMerkleTreePathVerify(t *testing.T) {
 	t.Run("LargePaths", func(t *testing.T) {
 		tree := smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
 
-		// Normalize these captured path fixtures to the current 256-bit path
-		// representation before inserting them into the tree.
-		mintPath := normalizeLegacyPath(t, "7588607046638288532898314259371162887598150843702815116345200719347816808430746270")
-		transferPath := normalizeLegacyPath(t, "7588595804959218369815512972651793411311840553453637142956782535261123804631684864")
+		mintPath := pathFromStateIDHex(t, "7d535ade796772c5088b095e79a18e282437ee8d8238f5aa9d9c61694948ba9e")
+		transferPath := pathFromStateIDHex(t, "6478ca42f6949cfbd4b9e4a41b9a384ea78261c1776808da70cf21e98c345700")
 
 		leaves := []*smt.Leaf{
 			{Path: mintPath, Value: []byte("mint")},
@@ -233,8 +225,8 @@ func TestMerkleTreePathVerify(t *testing.T) {
 		tree := smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
 
 		// Create stateIds
-		stateID1 := "00007d535ade796772c5088b095e79a18e282437ee8d8238f5aa9d9c61694948ba9e"
-		stateID2 := "00006478ca42f6949cfbd4b9e4a41b9a384ea78261c1776808da70cf21e98c345700"
+		stateID1 := "7d535ade796772c5088b095e79a18e282437ee8d8238f5aa9d9c61694948ba9e"
+		stateID2 := "6478ca42f6949cfbd4b9e4a41b9a384ea78261c1776808da70cf21e98c345700"
 
 		req1, err := api.NewImprintV2(stateID1)
 		require.NoError(t, err)

@@ -19,7 +19,7 @@ type BlockRecords struct {
 // BlockRecordsBSON is the MongoDB representation of BlockRecords
 type BlockRecordsBSON struct {
 	BlockNumber primitive.Decimal128 `bson:"blockNumber"`
-	StateIDs    []string             `bson:"requestIds"` // keep requestId in BSON for backwards compatibility
+	StateIDs    []string             `bson:"stateIds"`
 	CreatedAt   time.Time            `bson:"createdAt"`
 }
 

@@ -10,7 +10,6 @@ import (
 
 func TestCertificationRequestLeafValue_V2UsesTransactionHashBytes(t *testing.T) {
 	txRaw := "11223344556677889900aabbccddeeff00112233445566778899aabbccddeeff"
-	txLegacy := "0000" + txRaw
 
 	reqRaw := &CertificationRequest{
 		Version: 2,
@@ -21,14 +20,4 @@ func TestCertificationRequestLeafValue_V2UsesTransactionHashBytes(t *testing.T) 
 	leafRaw, err := reqRaw.LeafValue()
 	require.NoError(t, err)
 	require.Equal(t, api.RequireNewImprintV2(txRaw), api.ImprintV2(leafRaw))
-
-	reqLegacy := &CertificationRequest{
-		Version: 2,
-		CertificationData: CertificationData{
-			TransactionHash: api.RequireNewImprintV2(txLegacy),
-		},
-	}
-	leafLegacy, err := reqLegacy.LeafValue()
-	require.NoError(t, err)
-	require.Equal(t, api.RequireNewImprintV2(txRaw), api.ImprintV2(leafLegacy))
 }

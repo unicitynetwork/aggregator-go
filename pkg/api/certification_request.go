@@ -88,7 +88,7 @@ type CertificationData struct {
 	TransactionHash TransactionHash `json:"transactionHash"`
 
 	// Witness is the "unlocking part" of owner predicate. In case of PayToPublicKey owner predicate the witness must be
-	// a signature created on the hash of CBOR array[SourceStateHashImprint, TransactionHash],
+	// a signature created on the hash of CBOR array[SourceStateHash, TransactionHash],
 	// in Unicity's [R || S || V] format (65 bytes).
 	Witness HexBytes `json:"witness"`
 }

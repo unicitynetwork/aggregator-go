@@ -6,7 +6,6 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
-	v1 "github.com/unicitynetwork/aggregator-go/internal/models/v1"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -26,7 +25,7 @@ type CertificationRequest struct {
 type CertificationRequestBSON struct {
 	ID                    primitive.ObjectID    `bson:"_id,omitempty"`
 	Version               uint32                `json:"version"`
-	StateID               string                `bson:"requestId"` // keep stateID stored as "requestId"
+	StateID               string                `bson:"stateId"`
 	TransactionHash       string                `bson:"transactionHash"`
 	CertificationData     CertificationDataBSON `bson:"certificationData"`
 	AggregateRequestCount uint64                `bson:"aggregateRequestCount"`
@@ -108,29 +107,8 @@ func (c *CertificationRequest) ToAPI() *api.CertificationRequest {
 }
 
 func (c *CertificationRequest) LeafValue() ([]byte, error) {
-	switch c.Version {
-	case 0, 1:
-		return c.ToV1().ToAPI().CreateLeafValue()
-	case 2:
-		// v2 semantics: leaf value is the transaction hash bytes.
-		return c.CertificationData.TransactionHash.DataBytes(), nil
-	default:
+	if c.Version != 2 {
 		return nil, fmt.Errorf("invalid version: %d", c.Version)
 	}
-}
-
-func (c *CertificationRequest) ToV1() *v1.Commitment {
-	return &v1.Commitment{
-		RequestID:       c.StateID,
-		TransactionHash: c.CertificationData.TransactionHash,
-		Authenticator: v1.Authenticator{
-			Algorithm: "secp256k1",
-			PublicKey: c.CertificationData.OwnerPredicate.Params,
-			Signature: c.CertificationData.Witness,
-			StateHash: c.CertificationData.SourceStateHash,
-		},
-		AggregateRequestCount: c.AggregateRequestCount,
-		CreatedAt:             c.CreatedAt,
-		ProcessedAt:           c.ProcessedAt,
-	}
+	return append([]byte(nil), c.CertificationData.TransactionHash...), nil
 }

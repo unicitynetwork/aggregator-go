@@ -14,12 +14,12 @@ import (
 type RecoveryResult struct {
 	Recovered   bool
 	BlockNumber *api.BigInt
-	RequestIDs  []api.StateID
+	StateIDs    []api.StateID
 }
 
-// indexedRequestID tracks a request ID with its original position in the block
-type indexedRequestID struct {
-	reqID     api.StateID
+// indexedStateID tracks a state ID with its original position in the block.
+type indexedStateID struct {
+	stateID   api.StateID
 	leafIndex int
 }
 
@@ -59,7 +59,7 @@ func RecoverUnfinalizedBlock(
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String())
 
-	requestIDs, err := recoverBlock(ctx, log, storage, commitmentQueue, block)
+	stateIDs, err := recoverBlock(ctx, log, storage, commitmentQueue, block)
 	if err != nil {
 		return nil, fmt.Errorf("failed to recover block %s: %w", block.Index.String(), err)
 	}
@@ -68,7 +68,7 @@ func RecoverUnfinalizedBlock(
 	return &RecoveryResult{
 		Recovered:   true,
 		BlockNumber: block.Index,
-		RequestIDs:  requestIDs,
+		StateIDs:    stateIDs,
 	}, nil
 }
 
@@ -87,19 +87,19 @@ func recoverBlock(
 		return nil, fmt.Errorf("FATAL: block records not found for block %s", block.Index.String())
 	}
 
-	requestIDs := blockRecords.StateIDs
-	log.WithContext(ctx).Info("Block records found", "requestCount", len(requestIDs))
+	stateIDs := blockRecords.StateIDs
+	log.WithContext(ctx).Info("Block records found", "stateCount", len(stateIDs))
 
-	existingRecordIDs, err := storage.AggregatorRecordStorage().GetExistingRequestIDs(ctx, requestIDsToStrings(requestIDs))
+	existingRecordIDs, err := storage.AggregatorRecordStorage().GetExistingStateIDs(ctx, stateIDsToStrings(stateIDs))
 	if err != nil {
 		return nil, fmt.Errorf("failed to check existing records: %w", err)
 	}
 
-	smtKeyStrings := make([]string, len(requestIDs))
-	for i, reqID := range requestIDs {
-		keyBytes, err := reqID.GetTreeKey()
+	smtKeyStrings := make([]string, len(stateIDs))
+	for i, stateID := range stateIDs {
+		keyBytes, err := stateID.GetTreeKey()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get SMT key for requestID: %w", err)
+			return nil, fmt.Errorf("failed to get SMT key for stateID: %w", err)
 		}
 		smtKeyStrings[i] = api.HexBytes(keyBytes).String()
 	}
@@ -108,19 +108,19 @@ func recoverBlock(
 		return nil, fmt.Errorf("failed to check existing SMT nodes: %w", err)
 	}
 
-	var missingRecords []indexedRequestID
+	var missingRecords []indexedStateID
 	var missingSmtKeys []api.StateID
-	for i, reqID := range requestIDs {
-		if !existingRecordIDs[reqID.String()] {
-			missingRecords = append(missingRecords, indexedRequestID{reqID: reqID, leafIndex: i})
+	for i, stateID := range stateIDs {
+		if !existingRecordIDs[stateID.String()] {
+			missingRecords = append(missingRecords, indexedStateID{stateID: stateID, leafIndex: i})
 		}
 		if !existingSmtKeys[smtKeyStrings[i]] {
-			missingSmtKeys = append(missingSmtKeys, reqID)
+			missingSmtKeys = append(missingSmtKeys, stateID)
 		}
 	}
 
 	log.WithContext(ctx).Info("Recovery status",
-		"totalRequestIDs", len(requestIDs),
+		"totalStateIDs", len(stateIDs),
 		"existingRecords", len(existingRecordIDs),
 		"existingSmtNodes", len(existingSmtKeys),
 		"missingRecords", len(missingRecords),
@@ -136,8 +136,8 @@ func recoverBlock(
 		return nil, fmt.Errorf("failed to set block as finalized: %w", err)
 	}
 
-	// Ack commitments in Redis - fetch only the ones we need by request ID
-	commitmentMap, err := commitmentQueue.GetByRequestIDs(ctx, requestIDs)
+	// Ack certification requests in Redis - fetch only the ones we need by state ID.
+	commitmentMap, err := commitmentQueue.GetByStateIDs(ctx, stateIDs)
 	if err != nil {
 		log.WithContext(ctx).Warn("Failed to get commitments for acking, they may be re-processed", "error", err)
 	} else if len(commitmentMap) > 0 {
@@ -155,7 +155,7 @@ func recoverBlock(
 		}
 	}
 
-	return requestIDs, nil
+	return stateIDs, nil
 }
 
 func recoverMissingData(
@@ -164,24 +164,24 @@ func recoverMissingData(
 	storage interfaces.Storage,
 	commitmentQueue interfaces.CommitmentQueue,
 	blockNumber *api.BigInt,
-	missingRecords []indexedRequestID,
+	missingRecords []indexedStateID,
 	missingSmtKeys []api.StateID,
 ) error {
-	// Collect all needed request IDs
+	// Collect all needed state IDs.
 	neededIDsMap := make(map[string]api.StateID, len(missingRecords)+len(missingSmtKeys))
 	for _, missing := range missingRecords {
-		neededIDsMap[missing.reqID.String()] = missing.reqID
+		neededIDsMap[missing.stateID.String()] = missing.stateID
 	}
-	for _, reqID := range missingSmtKeys {
-		neededIDsMap[reqID.String()] = reqID
+	for _, stateID := range missingSmtKeys {
+		neededIDsMap[stateID.String()] = stateID
 	}
 	neededIDs := make([]api.StateID, 0, len(neededIDsMap))
-	for _, reqID := range neededIDsMap {
-		neededIDs = append(neededIDs, reqID)
+	for _, stateID := range neededIDsMap {
+		neededIDs = append(neededIDs, stateID)
 	}
 
-	// Fetch only the commitments we need (streams in batches internally)
-	commitmentMap, err := commitmentQueue.GetByRequestIDs(ctx, neededIDs)
+	// Fetch only the certification requests we need (streams in batches internally).
+	commitmentMap, err := commitmentQueue.GetByStateIDs(ctx, neededIDs)
 	if err != nil {
 		return fmt.Errorf("failed to get commitments: %w", err)
 	}
@@ -189,16 +189,16 @@ func recoverMissingData(
 	if len(missingRecords) > 0 {
 		var records []*models.AggregatorRecord
 		for _, missing := range missingRecords {
-			commitment, ok := commitmentMap[missing.reqID.String()]
+			commitment, ok := commitmentMap[missing.stateID.String()]
 			if !ok {
-				existingRecord, err := storage.AggregatorRecordStorage().GetByStateID(ctx, missing.reqID)
+				existingRecord, err := storage.AggregatorRecordStorage().GetByStateID(ctx, missing.stateID)
 				if err != nil {
 					return fmt.Errorf("failed to check existing record: %w", err)
 				}
 				if existingRecord != nil {
 					continue
 				}
-				return fmt.Errorf("FATAL: commitment not found for requestID %s", missing.reqID)
+				return fmt.Errorf("FATAL: certification request not found for stateID %s", missing.stateID)
 			}
 			leafIndex := api.NewBigInt(nil)
 			leafIndex.SetInt64(int64(missing.leafIndex))
@@ -215,12 +215,12 @@ func recoverMissingData(
 
 	if len(missingSmtKeys) > 0 {
 		var nodes []*models.SmtNode
-		for _, reqID := range missingSmtKeys {
-			commitment, ok := commitmentMap[reqID.String()]
+		for _, stateID := range missingSmtKeys {
+			commitment, ok := commitmentMap[stateID.String()]
 			if !ok {
-				keyBytes, err := reqID.GetTreeKey()
+				keyBytes, err := stateID.GetTreeKey()
 				if err != nil {
-					return fmt.Errorf("failed to get SMT key for reqID: %w", err)
+					return fmt.Errorf("failed to get SMT key for stateID: %w", err)
 				}
 				existingNode, err := storage.SmtStorage().GetByKey(ctx, keyBytes)
 				if err != nil {
@@ -229,7 +229,7 @@ func recoverMissingData(
 				if existingNode != nil {
 					continue
 				}
-				return fmt.Errorf("FATAL: commitment not found for SMT key %s", reqID)
+				return fmt.Errorf("FATAL: certification request not found for SMT key %s", stateID)
 			}
 
 			keyBytes, err := commitment.StateID.GetTreeKey()
@@ -261,27 +261,27 @@ func LoadRecoveredNodesIntoSMT(
 	log *logger.Logger,
 	storage interfaces.Storage,
 	smtTree *smt.ThreadSafeSMT,
-	requestIDs []api.StateID,
+	stateIDs []api.StateID,
 ) error {
-	if len(requestIDs) == 0 {
+	if len(stateIDs) == 0 {
 		return nil
 	}
 
-	log.WithContext(ctx).Info("Loading recovered SMT nodes", "count", len(requestIDs))
+	log.WithContext(ctx).Info("Loading recovered SMT nodes", "count", len(stateIDs))
 
-	// Deduplicate request IDs (duplicates can occur when the same commitment
-	// is submitted twice in the same round)
-	seen := make(map[string]struct{}, len(requestIDs))
-	keys := make([]api.HexBytes, 0, len(requestIDs))
-	for _, reqID := range requestIDs {
-		key := string(reqID)
+	// Deduplicate state IDs (duplicates can occur when the same certification
+	// request is submitted twice in the same round).
+	seen := make(map[string]struct{}, len(stateIDs))
+	keys := make([]api.HexBytes, 0, len(stateIDs))
+	for _, stateID := range stateIDs {
+		key := string(stateID)
 		if _, exists := seen[key]; exists {
 			continue
 		}
 		seen[key] = struct{}{}
-		keyBytes, err := reqID.GetTreeKey()
+		keyBytes, err := stateID.GetTreeKey()
 		if err != nil {
-			return fmt.Errorf("failed to get SMT key for requestID %s: %w", reqID, err)
+			return fmt.Errorf("failed to get SMT key for stateID %s: %w", stateID, err)
 		}
 		keys = append(keys, api.HexBytes(keyBytes))
 	}
@@ -311,10 +311,10 @@ func LoadRecoveredNodesIntoSMT(
 	log.WithContext(ctx).Info("Loaded recovered SMT nodes", "count", len(nodes))
 	return nil
 }
-func requestIDsToStrings(requestIDs []api.RequestID) []string {
-	result := make([]string, len(requestIDs))
-	for i, reqID := range requestIDs {
-		result[i] = reqID.String()
+func stateIDsToStrings(stateIDs []api.StateID) []string {
+	result := make([]string, len(stateIDs))
+	for i, stateID := range stateIDs {
+		result[i] = stateID.String()
 	}
 	return result
 }
@@ -335,12 +335,12 @@ func CleanupProcessedPendingCommitments(
 		return nil
 	}
 
-	requestIDs := make([]string, len(pendingCommitments))
+	stateIDs := make([]string, len(pendingCommitments))
 	for i, c := range pendingCommitments {
-		requestIDs[i] = c.StateID.String()
+		stateIDs[i] = c.StateID.String()
 	}
 
-	existingIDs, err := storage.AggregatorRecordStorage().GetExistingRequestIDs(ctx, requestIDs)
+	existingIDs, err := storage.AggregatorRecordStorage().GetExistingStateIDs(ctx, stateIDs)
 	if err != nil {
 		return fmt.Errorf("failed to check existing records: %w", err)
 	}

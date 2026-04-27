@@ -655,8 +655,8 @@ CollectLoop2:
 	storage2.Close(ctx)
 }
 
-// TestGetByRequestIDs verifies that GetByRequestIDs returns only matching commitments.
-func (suite *RedisTestSuite) TestGetByRequestIDs() {
+// TestGetByStateIDs verifies that GetByStateIDs returns only matching certification requests.
+func (suite *RedisTestSuite) TestGetByStateIDs() {
 	ctx := suite.ctx
 	t := suite.T()
 
@@ -669,13 +669,13 @@ func (suite *RedisTestSuite) TestGetByRequestIDs() {
 	time.Sleep(100 * time.Millisecond)
 
 	// Request only 3 of them
-	requestIDs := []api.StateID{
+	stateIDs := []api.StateID{
 		commitments[0].StateID,
 		commitments[2].StateID,
 		commitments[4].StateID,
 	}
 
-	result, err := suite.storage.GetByRequestIDs(ctx, requestIDs)
+	result, err := suite.storage.GetByStateIDs(ctx, stateIDs)
 	require.NoError(t, err)
 	require.Len(t, result, 3, "Should return exactly 3 commitments")
 
@@ -687,8 +687,8 @@ func (suite *RedisTestSuite) TestGetByRequestIDs() {
 	require.Nil(t, result[commitments[3].StateID.String()])
 }
 
-// TestGetByRequestIDs_WithMissingIDs verifies graceful handling of missing IDs.
-func (suite *RedisTestSuite) TestGetByRequestIDs_WithMissingIDs() {
+// TestGetByStateIDs_WithMissingIDs verifies graceful handling of missing IDs.
+func (suite *RedisTestSuite) TestGetByStateIDs_WithMissingIDs() {
 	ctx := suite.ctx
 	t := suite.T()
 
@@ -702,13 +702,13 @@ func (suite *RedisTestSuite) TestGetByRequestIDs_WithMissingIDs() {
 
 	// Request 3 IDs (one doesn't exist)
 	nonExistent := createTestCommitment()
-	requestIDs := []api.RequestID{
+	stateIDs := []api.StateID{
 		commitments[0].StateID,
 		commitments[1].StateID,
 		nonExistent.StateID, // This one doesn't exist in Redis
 	}
 
-	result, err := suite.storage.GetByRequestIDs(ctx, requestIDs)
+	result, err := suite.storage.GetByStateIDs(ctx, stateIDs)
 	require.NoError(t, err)
 	require.Len(t, result, 2, "Should return only 2 existing commitments")
 }
@@ -802,8 +802,8 @@ func (suite *RedisTestSuite) TestCountUnprocessed_IncludesPendingAndLag() {
 	require.Equal(t, int64(5), count, "CountUnprocessed should include both pending and lag")
 }
 
-// TestGetByRequestIDs_BatchesCorrectly verifies XRangeN reads in batches, not entire stream.
-func (suite *RedisTestSuite) TestGetByRequestIDs_BatchesCorrectly() {
+// TestGetByStateIDs_BatchesCorrectly verifies XRangeN reads in batches, not entire stream.
+func (suite *RedisTestSuite) TestGetByStateIDs_BatchesCorrectly() {
 	ctx := suite.ctx
 	t := suite.T()
 
@@ -817,7 +817,7 @@ func (suite *RedisTestSuite) TestGetByRequestIDs_BatchesCorrectly() {
 	require.NoError(t, suite.storage.StoreBatch(ctx, commitments))
 	time.Sleep(200 * time.Millisecond)
 
-	// Call XRangeN as GetByRequestIDs should do (with Count limit)
+	// Call XRangeN as GetByStateIDs should do (with Count limit)
 	messages, err := suite.client.XRangeN(ctx, suite.storage.streamName, "0", "+", batchSize).Result()
 	require.NoError(t, err)
 
@@ -826,9 +826,9 @@ func (suite *RedisTestSuite) TestGetByRequestIDs_BatchesCorrectly() {
 		"XRangeN should return at most %d messages, got %d", batchSize, len(messages))
 }
 
-// TestGetByRequestIDs_FindsAcrossMultipleBatches verifies pagination works
+// TestGetByStateIDs_FindsAcrossMultipleBatches verifies pagination works
 // when the requested ID is beyond the first batch.
-func (suite *RedisTestSuite) TestGetByRequestIDs_FindsAcrossMultipleBatches() {
+func (suite *RedisTestSuite) TestGetByStateIDs_FindsAcrossMultipleBatches() {
 	ctx := suite.ctx
 	t := suite.T()
 
@@ -850,9 +850,9 @@ func (suite *RedisTestSuite) TestGetByRequestIDs_FindsAcrossMultipleBatches() {
 	time.Sleep(300 * time.Millisecond)
 
 	// Request the LAST commitment - requires scanning all batches
-	requestIDs := []api.RequestID{commitments[totalMessages-1].StateID}
+	stateIDs := []api.StateID{commitments[totalMessages-1].StateID}
 
-	result, err := suite.storage.GetByRequestIDs(ctx, requestIDs)
+	result, err := suite.storage.GetByStateIDs(ctx, stateIDs)
 	require.NoError(t, err)
 	require.Len(t, result, 1, "Should find the commitment in the last batch")
 	require.NotNil(t, result[commitments[totalMessages-1].StateID.String()])

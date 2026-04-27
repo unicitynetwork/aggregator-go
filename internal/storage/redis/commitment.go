@@ -411,20 +411,20 @@ func (cs *CommitmentStorage) GetAllPending(ctx context.Context) ([]*models.Certi
 	return commitments, nil
 }
 
-// GetByRequestIDs retrieves commitments matching the given request IDs.
+// GetByStateIDs retrieves certification requests matching the given state IDs.
 // Streams through data in batches to avoid loading everything into memory.
-func (cs *CommitmentStorage) GetByRequestIDs(ctx context.Context, requestIDs []api.StateID) (map[string]*models.CertificationRequest, error) {
-	if len(requestIDs) == 0 {
+func (cs *CommitmentStorage) GetByStateIDs(ctx context.Context, stateIDs []api.StateID) (map[string]*models.CertificationRequest, error) {
+	if len(stateIDs) == 0 {
 		return make(map[string]*models.CertificationRequest), nil
 	}
 
 	// Build lookup set
-	needed := make(map[string]bool, len(requestIDs))
-	for _, reqID := range requestIDs {
-		needed[reqID.String()] = true
+	needed := make(map[string]bool, len(stateIDs))
+	for _, stateID := range stateIDs {
+		needed[stateID.String()] = true
 	}
 
-	result := make(map[string]*models.CertificationRequest, len(requestIDs))
+	result := make(map[string]*models.CertificationRequest, len(stateIDs))
 	lastID := "0"
 	const batchSize = 10000
 
@@ -446,10 +446,10 @@ func (cs *CommitmentStorage) GetByRequestIDs(ctx context.Context, requestIDs []a
 				continue // Skip malformed messages
 			}
 
-			reqIDStr := commitment.StateID.String()
-			if needed[reqIDStr] {
+			stateIDStr := commitment.StateID.String()
+			if needed[stateIDStr] {
 				commitment.StreamID = msg.ID
-				result[reqIDStr] = commitment
+				result[stateIDStr] = commitment
 
 				// Early exit if we found all
 				if len(result) == len(needed) {

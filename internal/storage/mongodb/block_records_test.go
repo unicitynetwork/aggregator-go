@@ -121,8 +121,8 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 		// Create test data
 		blockNumber := api.NewBigInt(big.NewInt(12345))
 		stateIDs := []api.StateID{
-			api.RequireNewImprintV2("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
-			api.RequireNewImprintV2("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
+			api.RequireNewImprintV2("ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
+			api.RequireNewImprintV2("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
 		}
 
 		records := createTestBlockRecords(blockNumber, stateIDs)
@@ -172,7 +172,7 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 
 		blockNumber := api.NewBigInt(largeNumber)
 		stateIDs := []api.StateID{
-			api.RequireNewImprintV2("ffff123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde00"),
+			api.RequireNewImprintV2("ffff123456789abcffff123456789abcffff123456789abcffff123456789abc"),
 		}
 
 		records := createTestBlockRecords(blockNumber, stateIDs)
@@ -345,8 +345,8 @@ func TestBlockRecordsStorage_Store(t *testing.T) {
 		for _, num := range testCases {
 			blockNumber := api.NewBigInt(big.NewInt(num))
 			stateIDs := []api.StateID{
-				api.RequireNewImprintV2("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
-				api.RequireNewImprintV2("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
+				api.RequireNewImprintV2("ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
+				api.RequireNewImprintV2("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
 			}
 			blockRecords := createTestBlockRecords(blockNumber, stateIDs)
 
@@ -632,8 +632,8 @@ func TestBlockRecordsStorage_Store_Unit(t *testing.T) {
 		// Test that BlockRecords can be created properly
 		blockNumber := api.NewBigInt(big.NewInt(42))
 		stateIDs := []api.StateID{
-			api.RequireNewImprintV2("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
-			api.RequireNewImprintV2("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
+			api.RequireNewImprintV2("ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
+			api.RequireNewImprintV2("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
 		}
 
 		records := createTestBlockRecords(blockNumber, stateIDs)
@@ -670,7 +670,7 @@ func TestBlockRecordsStorage_Store_Unit(t *testing.T) {
 
 		blockNumber := api.NewBigInt(largeNumber)
 		stateIDs := []api.StateID{
-			api.RequireNewImprintV2("ffff123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde00"),
+			api.RequireNewImprintV2("ffff123456789abcffff123456789abcffff123456789abcffff123456789abc"),
 		}
 
 		records := createTestBlockRecords(blockNumber, stateIDs)
@@ -741,8 +741,8 @@ func TestBlockRecordsStorage_Store_BSON(t *testing.T) {
 		// Create test data
 		blockNumber := api.NewBigInt(big.NewInt(12345))
 		stateIDs := []api.StateID{
-			api.RequireNewImprintV2("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
-			api.RequireNewImprintV2("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
+			api.RequireNewImprintV2("ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
+			api.RequireNewImprintV2("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
 		}
 
 		originalRecords := createTestBlockRecords(blockNumber, stateIDs)
@@ -806,7 +806,7 @@ func TestBlockRecordsStorage_Store_BSON(t *testing.T) {
 
 		blockNumber := api.NewBigInt(largeNumber)
 		stateIDs := []api.StateID{
-			api.RequireNewImprintV2("ffff123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde00"),
+			api.RequireNewImprintV2("ffff123456789abcffff123456789abcffff123456789abcffff123456789abc"),
 		}
 
 		originalRecords := createTestBlockRecords(blockNumber, stateIDs)
@@ -844,9 +844,9 @@ func TestBlockRecordsStorage_Store_Comprehensive(t *testing.T) {
 		// Create test data with various data types
 		blockNumber := api.NewBigInt(big.NewInt(123456789))
 		stateIDs := []api.StateID{
-			api.RequireNewImprintV2("0000ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
-			api.RequireNewImprintV2("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
-			api.RequireNewImprintV2("ffff123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde00"),
+			api.RequireNewImprintV2("ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40"),
+			api.RequireNewImprintV2("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
+			api.RequireNewImprintV2("ffff123456789abcffff123456789abcffff123456789abcffff123456789abc"),
 		}
 
 		// Create BlockRecords
@@ -886,11 +886,11 @@ func TestBlockRecordsStorage_Store_Comprehensive(t *testing.T) {
 
 		// Test StateID functionality
 		for _, stateID := range unmarshaledRecords.StateIDs {
-			imprintBytes := stateID.Imprint()
-			assert.NoError(t, err, "StateID should be able to convert to imprint")
-			assert.True(t, len(imprintBytes) > 0, "StateID should have imprint bytes")
+			stateIDBytes := stateID.Bytes()
+			assert.NoError(t, err, "StateID should be able to expose bytes")
+			assert.True(t, len(stateIDBytes) > 0, "StateID should have bytes")
 
-			assert.Len(t, stateID.Algorithm(), 2, "Algorithm should be 2 bytes")
+			assert.Len(t, stateID, api.StateTreeKeyLengthBytes, "StateID should be raw v2 bytes")
 		}
 
 		// Test Timestamp functionality

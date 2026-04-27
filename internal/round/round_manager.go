@@ -232,7 +232,7 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 	if recoveryResult.Recovered {
 		rm.logger.Info("Recovered unfinalized block during startup",
 			"blockNumber", recoveryResult.BlockNumber.String(),
-			"requestCount", len(recoveryResult.RequestIDs))
+			"stateCount", len(recoveryResult.StateIDs))
 	}
 
 	_, err = rm.restoreSmtFromStorage(ctx)
@@ -751,9 +751,9 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 		if recoveryResult.Recovered {
 			rm.logger.Info("Recovered unfinalized block on HA activation",
 				"blockNumber", recoveryResult.BlockNumber.String(),
-				"requestCount", len(recoveryResult.RequestIDs))
+				"stateCount", len(recoveryResult.StateIDs))
 
-			if err := LoadRecoveredNodesIntoSMT(ctx, rm.logger, rm.storage, rm.smt, recoveryResult.RequestIDs); err != nil {
+			if err := LoadRecoveredNodesIntoSMT(ctx, rm.logger, rm.storage, rm.smt, recoveryResult.StateIDs); err != nil {
 				return fmt.Errorf("failed to load recovered nodes into SMT: %w", err)
 			}
 		}

@@ -147,7 +147,7 @@ func setupMongoDBAndAggregator(t *testing.T, ctx context.Context) (string, func(
 	require.NoError(t, err)
 
 	// Initialize aggregator service
-	aggregatorService := NewAggregatorService(cfg, log, roundManager, commitmentQueue, mongoStorage, nil, nil)
+	aggregatorService := NewAggregatorService(cfg, log, roundManager, commitmentQueue, mongoStorage, nil)
 
 	// Initialize gateway server
 	server := gateway.NewServer(cfg, log, aggregatorService)
@@ -690,7 +690,7 @@ func (s *testAggregatorRecordStorage) GetByBlockNumber(context.Context, *api.Big
 	return nil, nil
 }
 func (s *testAggregatorRecordStorage) Count(context.Context) (int64, error) { return 0, nil }
-func (s *testAggregatorRecordStorage) GetExistingRequestIDs(context.Context, []string) (map[string]bool, error) {
+func (s *testAggregatorRecordStorage) GetExistingStateIDs(context.Context, []string) (map[string]bool, error) {
 	return nil, nil
 }
 func (s *testAggregatorRecordStorage) GetByStateID(ctx context.Context, stateID api.StateID) (*models.AggregatorRecord, error) {

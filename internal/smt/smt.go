@@ -36,7 +36,7 @@ func hashLen(algo api.HashAlgorithm) int {
 	}
 }
 
-// buildImprint constructs the algorithm-prefixed hash imprint from raw bytes.
+// buildImprint constructs the hash imprint used for SMT root hashes.
 // Used at API boundaries (GetRootHash, GetPath) where a full DataHash object
 // is not needed.
 func buildImprint(algo api.HashAlgorithm, raw []byte) []byte {

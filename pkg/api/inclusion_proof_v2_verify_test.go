@@ -30,8 +30,8 @@ func (stubTrustBase) VerifyQuorumSignatures(data []byte, signatures map[string]h
 func (stubTrustBase) VerifySignature(data []byte, sig []byte, nodeID string) (uint64, error) {
 	return 0, errors.New("stub trust base: sig verification not implemented")
 }
-func (stubTrustBase) GetQuorumThreshold() uint64     { return 0 }
-func (stubTrustBase) GetMaxFaultyNodes() uint64      { return 0 }
+func (stubTrustBase) GetQuorumThreshold() uint64      { return 0 }
+func (stubTrustBase) GetMaxFaultyNodes() uint64       { return 0 }
 func (stubTrustBase) GetRootNodes() []*types.NodeInfo { return nil }
 
 func newStubVctx() *VerifierContext {
@@ -175,14 +175,14 @@ func TestInclusionProofV2Verify_RejectsInvalidUCInputRecordHash(t *testing.T) {
 		},
 	}
 
-	legacyRoot := make([]byte, SiblingSize+2)
+	oversizedRoot := make([]byte, SiblingSize+2)
 
 	cert := &InclusionCert{}
 	certBytes, err := cert.MarshalBinary()
 	require.NoError(t, err)
 
 	ucBytes, err := types.Cbor.Marshal(types.UnicityCertificate{
-		InputRecord: &types.InputRecord{Hash: legacyRoot},
+		InputRecord: &types.InputRecord{Hash: oversizedRoot},
 	})
 	require.NoError(t, err)
 
