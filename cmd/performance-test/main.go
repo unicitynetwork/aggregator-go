@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,7 +21,9 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	bfttypes "github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/aggregator-go/internal/proofverify"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -41,14 +42,36 @@ const (
 	defaultProofInitialDelay = 2500 * time.Millisecond
 )
 
+// Sharding modes for routing generated state IDs to shard endpoints.
+// In app mode the SHARD_TARGETS field is an LSB-first sentinel-int mask;
+// in bft-shard mode it is an MSB-first binary bit string (e.g. "0", "10", "101").
+const (
+	shardingModeApp = "app"
+	shardingModeBFT = "bft-shard"
+)
+
 // Configurable via environment variables
 var (
 	testDuration      = getEnvDuration("TEST_DURATION", defaultTestDuration)
 	requestsPerSec    = getEnvInt("REQUESTS_PER_SEC", defaultRequestsPerSec)
 	proofInitialDelay = getEnvDuration("PROOF_INITIAL_DELAY", defaultProofInitialDelay)
+	shardingMode      = getShardingMode()
 	shardTargets      = getEnvShardTargets()
 	enableH2C         = os.Getenv("ENABLE_H2C") != "false"
 )
+
+func getShardingMode() string {
+	val := strings.ToLower(strings.TrimSpace(os.Getenv("SHARDING_MODE")))
+	switch val {
+	case "", shardingModeApp:
+		return shardingModeApp
+	case shardingModeBFT:
+		return shardingModeBFT
+	default:
+		log.Fatalf("invalid SHARDING_MODE=%q (expected 'app' or 'bft-shard')", val)
+		return shardingModeApp
+	}
+}
 
 func getEnvInt(key string, defaultVal int) int {
 	if val := os.Getenv(key); val != "" {
@@ -72,12 +95,19 @@ func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
 	return defaultVal
 }
 
-// getEnvShardTargets parses SHARD_TARGETS env var
-// Format: "url1:mask1,url2:mask2,..." e.g. "https://localhost:3001:7,https://localhost:3002:6"
+// getEnvShardTargets parses SHARD_TARGETS. Each comma-separated entry is
+// URL:mask where mask is interpreted by the active sharding mode (decimal
+// sentinel-int in app mode, MSB-first binary in bft-shard mode). The last colon
+// in each entry is the delimiter, so URLs with ports still parse correctly.
 func getEnvShardTargets() []shardTarget {
 	val := os.Getenv("SHARD_TARGETS")
 	if val == "" {
-		// Default: single shard on localhost
+		// Default targets are for app-mode local runs. In bft-shard mode the
+		// user must set SHARD_TARGETS explicitly; there is no useful default
+		// bit pattern without knowing the partition's shard scheme.
+		if shardingMode == shardingModeBFT {
+			log.Fatal("SHARDING_MODE=bft-shard requires SHARD_TARGETS (e.g. 'https://localhost:3001:0,https://localhost:3002:1')")
+		}
 		return []shardTarget{
 			{name: "shard-7", url: "https://localhost:3001", shardMask: 7},
 		}
@@ -90,21 +120,49 @@ func getEnvShardTargets() []shardTarget {
 		if part == "" {
 			continue
 		}
-		// Find the last colon to split URL and mask (URL may contain colons for port)
 		lastColon := strings.LastIndex(part, ":")
 		if lastColon == -1 {
-			log.Printf("Warning: invalid shard target format (missing mask): %s", part)
+			log.Printf("Warning: invalid shard target format (missing mask/bits): %s", part)
 			continue
 		}
 		url := part[:lastColon]
-		maskStr := part[lastColon+1:]
-		mask, err := strconv.Atoi(maskStr)
-		if err != nil {
-			log.Printf("Warning: invalid shard mask '%s': %v", maskStr, err)
-			continue
+		field := part[lastColon+1:]
+
+		switch shardingMode {
+		case shardingModeApp:
+			mask, err := strconv.Atoi(field)
+			if err != nil {
+				log.Printf("Warning: invalid shard mask '%s': %v", field, err)
+				continue
+			}
+			targets = append(targets, shardTarget{
+				name:      fmt.Sprintf("shard-%d", mask),
+				url:       url,
+				shardMask: mask,
+			})
+		case shardingModeBFT:
+			// Validate the bit string is only 0s and 1s. Empty string means
+			// "single-shard partition" (accepts every stateID).
+			for _, r := range field {
+				if r != '0' && r != '1' {
+					log.Printf("Warning: invalid shard bits '%s' (bft-shard mode expects binary 0/1 string)", field)
+					field = "__invalid__"
+					break
+				}
+			}
+			if field == "__invalid__" {
+				continue
+			}
+			name := field
+			if name == "" {
+				name = "single"
+			}
+			targets = append(targets, shardTarget{
+				name:      fmt.Sprintf("shard-%s", name),
+				url:       url,
+				shardBits: field,
+			})
 		}
-		name := fmt.Sprintf("shard-%d", mask)
-		targets = append(targets, shardTarget{name: name, url: url, shardMask: mask})
 	}
 
 	if len(targets) == 0 {
@@ -118,7 +176,7 @@ func getEnvShardTargets() []shardTarget {
 // 4 shards (2-bit): "https://localhost:3001:7,https://localhost:3002:6,https://localhost:3003:5,https://localhost:3004:4"
 // 2 shards (1-bit): "https://localhost:3001:3,https://localhost:3002:2"
 //
-// Legacy hardcoded config (for reference)
+// Example hardcoded config (for reference)
 //var shardTargets = []shardTarget{
 //	{name: "shard-7", url: "https://localhost:3001", shardMask: 7}, // 0b111
 //	{name: "shard-6", url: "https://localhost:3002", shardMask: 6}, // 0b110
@@ -128,7 +186,7 @@ func getEnvShardTargets() []shardTarget {
 //	{name: "shard-2", url: "https://localhost:3002", shardMask: 2},
 //}
 
-func normalizeRequestID(id string) string {
+func normalizeStateID(id string) string {
 	return strings.ToLower(id)
 }
 
@@ -158,6 +216,7 @@ func buildShardClients(aggregatorURL, authHeader string, metrics *Metrics) []*Sh
 			name:        name,
 			url:         trimmed,
 			shardMask:   target.shardMask,
+			shardBits:   target.shardBits,
 			client:      NewJSONRPCClient(trimmed, authHeader, metrics),
 			proofClient: NewJSONRPCClient(trimmed, authHeader, metrics), // Separate pool for proofs
 		})
@@ -177,65 +236,108 @@ func buildShardClients(aggregatorURL, authHeader string, metrics *Metrics) []*Sh
 	return clients
 }
 
-func selectShardIndex(requestID api.StateID, shardClients []*ShardClient) int {
+func selectShardIndex(stateID api.StateID, shardClients []*ShardClient) int {
 	shardCount := len(shardClients)
 	if shardCount <= 1 {
 		return 0
 	}
 
-	reqHex := requestID.String()
+	stateIDHex := stateID.String()
 	for idx, sc := range shardClients {
-		if sc == nil || sc.shardMask <= 0 {
+		if sc == nil {
 			continue
 		}
-		match, err := matchesShardMask(reqHex, sc.shardMask)
+		match, err := matchesShardTarget(stateIDHex, sc.shardMask, sc.shardBits)
 		if err == nil && match {
 			return idx
 		}
 	}
 
-	imprint := requestID.Imprint()
+	imprint := stateID.Imprint()
 	if len(imprint) == 0 {
 		return 0
 	}
-	return int(imprint[len(imprint)-1]) % shardCount
+	keyBytes := stateID.DataBytes()
+	if len(keyBytes) == 0 {
+		return 0
+	}
+	// Fallback: distribute over shards when no explicit predicate matched.
+	// Bucket selection stays stable across modes; the top byte happens to be
+	// where both matchers look, so hashing on it is fine for load-balancing.
+	return int(keyBytes[0]) % shardCount
 }
 
-func matchesShardMask(requestIDHex string, shardMask int) (bool, error) {
+// matchesShardTarget dispatches to the active sharding mode's prefix matcher.
+func matchesShardTarget(stateIDHex string, shardMask int, shardBits string) (bool, error) {
+	switch shardingMode {
+	case shardingModeBFT:
+		return matchesShardBits(stateIDHex, shardBits)
+	default:
+		return matchesShardMask(stateIDHex, shardMask)
+	}
+}
+
+func matchesShardMask(stateIDHex string, shardMask int) (bool, error) {
 	if shardMask <= 0 {
 		return false, nil
 	}
-
-	bytes, err := hex.DecodeString(requestIDHex)
-	if err != nil {
-		return false, fmt.Errorf("failed to decode request ID: %w", err)
-	}
-
-	requestBig := new(big.Int).SetBytes(bytes)
-	maskBig := new(big.Int).SetInt64(int64(shardMask))
-
-	msbPos := maskBig.BitLen() - 1
-	if msbPos < 0 {
-		return false, fmt.Errorf("invalid shard mask: %d", shardMask)
-	}
-
-	compareMask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), uint(msbPos)), big.NewInt(1))
-	expected := new(big.Int).And(maskBig, compareMask)
-	requestLowBits := new(big.Int).And(requestBig, compareMask)
-
-	return requestLowBits.Cmp(expected) == 0, nil
+	return api.MatchesShardPrefixFromHex(stateIDHex, shardMask)
 }
 
-// matchesAnyShardTarget checks if a request ID matches any of the configured shard targets
-func matchesAnyShardTarget(requestIDHex string) bool {
+// matchesShardBits is the BFT-mode prefix check. An empty bits string means
+// "single-shard partition, accepts all".
+func matchesShardBits(stateIDHex, shardBits string) (bool, error) {
+	if shardBits == "" {
+		return true, nil
+	}
+	keyBytes, err := hex.DecodeString(stateIDHex)
+	if err != nil {
+		return false, fmt.Errorf("decode stateId hex: %w", err)
+	}
+	if len(keyBytes) != api.StateTreeKeyLengthBytes {
+		return false, fmt.Errorf("stateId must be %d bytes, got %d", api.StateTreeKeyLengthBytes, len(keyBytes))
+	}
+	sid, err := shardIDFromBitString(shardBits)
+	if err != nil {
+		return false, err
+	}
+	return sid.Comparator()(keyBytes), nil
+}
+
+// shardIDFromBitString constructs a types.ShardID from an MSB-first binary
+// string. Encoding: bits packed MSB-first, followed by a single 1 as end
+// marker, zero-padded to ceil((b+1)/8) bytes.
+func shardIDFromBitString(bits string) (bfttypes.ShardID, error) {
+	if bits == "" {
+		return bfttypes.ShardID{}, nil
+	}
+	byteLen := (len(bits) + 1 + 7) / 8
+	buf := make([]byte, byteLen)
+	for i, r := range bits {
+		if r == '1' {
+			buf[i/8] |= 1 << (7 - uint(i%8))
+		}
+	}
+	// End marker: set the bit immediately after the content.
+	buf[len(bits)/8] |= 1 << (7 - uint(len(bits)%8))
+	hexStr := "0x" + hex.EncodeToString(buf)
+	var sid bfttypes.ShardID
+	if err := sid.UnmarshalText([]byte(hexStr)); err != nil {
+		return bfttypes.ShardID{}, fmt.Errorf("encode shard bits %q: %w", bits, err)
+	}
+	return sid, nil
+}
+
+// matchesAnyShardTarget checks if a state ID matches any of the configured shard targets.
+func matchesAnyShardTarget(stateIDHex string) bool {
 	if len(shardTargets) == 0 {
 		return true // No targets configured, accept all
 	}
 	for _, target := range shardTargets {
-		if target.shardMask <= 0 {
+		if shardingMode == shardingModeApp && target.shardMask <= 0 {
 			continue
 		}
-		ok, err := matchesShardMask(requestIDHex, target.shardMask)
+		ok, err := matchesShardTarget(stateIDHex, target.shardMask, target.shardBits)
 		if err == nil && ok {
 			return true
 		}
@@ -253,52 +355,64 @@ func generateCommitmentRequest() *api.CertificationRequest {
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
-	// Generate random state data and create DataHash imprint
+	// Generate random state data and hash it.
 	stateData := make([]byte, 32)
 	rand.Read(stateData)
-	sourceStateHashImprint := signing.CreateDataHash(stateData)
+	sourceStateHash := signing.CreateDataHash(stateData)
 
 	var stateID api.StateID
 
-	// Check if we have shard targets with masks configured
-	hasShardMasks := false
+	// Only rejection-sample when at least one target actually constrains the
+	// state-ID prefix. In bft-shard mode an empty shardBits string means
+	// "single-shard partition", which accepts everything and therefore
+	// imposes no constraint.
+	hasActiveShardPredicate := false
 	for _, target := range shardTargets {
-		if target.shardMask > 0 {
-			hasShardMasks = true
+		switch shardingMode {
+		case shardingModeApp:
+			if target.shardMask > 0 {
+				hasActiveShardPredicate = true
+			}
+		case shardingModeBFT:
+			if target.shardBits != "" {
+				hasActiveShardPredicate = true
+			}
+		}
+		if hasActiveShardPredicate {
 			break
 		}
 	}
 
 	for {
-		calculated, err := api.CreateStateID(ownerPredicate, sourceStateHashImprint)
+		calculated, err := api.CreateStateID(ownerPredicate, sourceStateHash)
 		if err != nil {
-			panic(fmt.Sprintf("Failed to create request ID: %v", err))
+			panic(fmt.Sprintf("Failed to create state ID: %v", err))
 		}
-		// If no shard masks configured, accept any request ID
-		if !hasShardMasks {
+		// If no shard predicate constrains us, accept any state ID.
+		if !hasActiveShardPredicate {
 			stateID = calculated
 			break
 		}
-		// Check if the request ID matches any of the configured shard targets
+		// Check if the state ID matches any of the configured shard targets.
 		if matchesAnyShardTarget(calculated.String()) {
 			stateID = calculated
 			break
 		}
 		// Regenerate state hash and try again
 		rand.Read(stateData)
-		sourceStateHashImprint = signing.CreateDataHash(stateData)
+		sourceStateHash = signing.CreateDataHash(stateData)
 	}
 
-	// Generate random transaction data and create DataHash imprint
+	// Generate random transaction data and hash it.
 	transactionData := make([]byte, 32)
 	rand.Read(transactionData)
-	transactionHashImprint := signing.CreateDataHash(transactionData)
+	transactionHash := signing.CreateDataHash(transactionData)
 
 	signingService := signing.NewSigningService()
 	certData := &api.CertificationData{
 		OwnerPredicate:  ownerPredicate,
-		SourceStateHash: sourceStateHashImprint,
-		TransactionHash: transactionHashImprint,
+		SourceStateHash: sourceStateHash,
+		TransactionHash: transactionHash,
 	}
 	if err = signingService.SignCertData(certData, privateKey.Serialize()); err != nil {
 		panic(fmt.Sprintf("Failed to sign transaction: %v", err))
@@ -373,12 +487,12 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 						sm.failedRequests.Add(1)
 					}
 					if resp.Error.Message == "STATE_ID_EXISTS" {
-						atomic.AddInt64(&metrics.requestIdExistsErr, 1)
+						atomic.AddInt64(&metrics.stateIdExistsErr, 1)
 						if sm := metrics.shard(shardIdx); sm != nil {
-							sm.requestIdExistsErr.Add(1)
+							sm.stateIdExistsErr.Add(1)
 						}
-						requestIDStr := normalizeRequestID(req.StateID.String())
-						metrics.submittedRequestIDs.Store(requestIDStr, true)
+						stateIDStr := normalizeStateID(req.StateID.String())
+						metrics.submittedStateIDs.Store(stateIDStr, true)
 					}
 					return
 				}
@@ -392,24 +506,24 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 				}
 
 				switch submitResp.Status {
-				case "SUCCESS", "REQUEST_ID_EXISTS":
-					if submitResp.Status == "REQUEST_ID_EXISTS" {
-						atomic.AddInt64(&metrics.requestIdExistsErr, 1)
+				case "SUCCESS", "STATE_ID_EXISTS":
+					if submitResp.Status == "STATE_ID_EXISTS" {
+						atomic.AddInt64(&metrics.stateIdExistsErr, 1)
 						if sm := metrics.shard(shardIdx); sm != nil {
-							sm.requestIdExistsErr.Add(1)
+							sm.stateIdExistsErr.Add(1)
 						}
 					}
 					atomic.AddInt64(&metrics.successfulRequests, 1)
 					if sm := metrics.shard(shardIdx); sm != nil {
 						sm.successfulRequests.Add(1)
 					}
-					requestIDStr := normalizeRequestID(req.StateID.String())
-					metrics.submittedRequestIDs.Store(requestIDStr, true)
+					stateIDStr := normalizeStateID(req.StateID.String())
+					metrics.submittedStateIDs.Store(stateIDStr, true)
 
 					if proofQueue != nil {
-						metrics.recordSubmissionTimestamp(requestIDStr)
+						metrics.recordSubmissionTimestamp(stateIDStr)
 						select {
-						case proofQueue <- proofJob{shardIdx: shardIdx, requestID: requestIDStr}:
+						case proofQueue <- proofJob{shardIdx: shardIdx, request: req}:
 						default:
 							// Queue full, skip proof verification for this one
 						}
@@ -429,16 +543,27 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 }
 
 // Worker function that continuously verifies inclusion proofs in a sharded setup.
-func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, metrics *Metrics, proofQueue chan proofJob, cancelTest context.CancelFunc, counters *RequestRateCounters) {
+func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, metrics *Metrics, proofQueue chan proofJob, counters *RequestRateCounters) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case job := <-proofQueue:
-			go func(reqID string, shardIdx int) {
+			go func(job proofJob) {
+				if job.request == nil {
+					metrics.recordError("Missing original request for proof verification")
+					atomic.AddInt64(&metrics.proofVerifyFailed, 1)
+					if sm := metrics.shard(job.shardIdx); sm != nil {
+						sm.proofVerifyFailed.Add(1)
+					}
+					return
+				}
+
+				stateID := normalizeStateID(job.request.StateID.String())
+				shardIdx := job.shardIdx
 				time.Sleep(proofInitialDelay)
 				startTime := time.Now()
-				normalizedID := normalizeRequestID(reqID)
+				normalizedID := stateID
 				client := shardClients[shardIdx].proofClient // Use separate proof client pool
 
 				for attempt := 0; attempt < proofMaxRetries; attempt++ {
@@ -456,7 +581,7 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 						}
 					}
 
-					proofReq := GetInclusionProofRequestV2{StateID: reqID}
+					proofReq := GetInclusionProofRequestV2{StateID: stateID}
 
 					atomic.AddInt64(&metrics.proofActiveRequests, 1)
 					if counters != nil {
@@ -534,48 +659,21 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 					}
 					metrics.addProofLatency(totalLatency)
 
-					apiPath := proofResp.InclusionProof.MerkleTreePath
-
-					requestIDPath, err := api.RequireNewImprintV2(reqID).GetPath()
-					if err != nil {
-						metrics.recordError(fmt.Sprintf("Failed to get path for request ID: %v", err))
-						atomic.AddInt64(&metrics.proofVerifyFailed, 1)
-						if sm := metrics.shard(shardIdx); sm != nil {
-							sm.proofVerifyFailed.Add(1)
-						}
-						return
-					}
-
-					result, err := apiPath.Verify(requestIDPath)
-					if err != nil {
-						metrics.recordError(fmt.Sprintf("Proof verification error: %v", err))
-						atomic.AddInt64(&metrics.proofVerifyFailed, 1)
-						if sm := metrics.shard(shardIdx); sm != nil {
-							sm.proofVerifyFailed.Add(1)
-						}
-						return
-					}
-
-					if result.Result {
-						atomic.AddInt64(&metrics.proofVerified, 1)
-						if sm := metrics.shard(shardIdx); sm != nil {
-							sm.proofVerified.Add(1)
-						}
-					} else {
-						if !result.PathIncluded && attempt < proofMaxRetries-1 {
+					if err := proofverify.VerifyInclusionProofLocal(proofResp.InclusionProof, job.request); err != nil {
+						if attempt < proofMaxRetries-1 {
 							time.Sleep(proofRetryDelay)
 							continue
 						}
-						fmt.Printf("\n\n[FATAL ERROR] Proof verification failed for request %s after %d attempts\n", reqID, attempt+1)
-						fmt.Printf("PathValid: %v\n", result.PathValid)
-						fmt.Printf("PathIncluded: %v\n", result.PathIncluded)
-						fmt.Printf("Stopping test due to proof verification failure.\n\n")
+						metrics.recordError(fmt.Sprintf("Proof verification failed for state ID %s: %v", stateID, err))
 						atomic.AddInt64(&metrics.proofVerifyFailed, 1)
 						if sm := metrics.shard(shardIdx); sm != nil {
 							sm.proofVerifyFailed.Add(1)
 						}
-						cancelTest()
 						return
+					}
+					atomic.AddInt64(&metrics.proofVerified, 1)
+					if sm := metrics.shard(shardIdx); sm != nil {
+						sm.proofVerified.Add(1)
 					}
 
 					return
@@ -586,7 +684,7 @@ func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, m
 				if sm := metrics.shard(shardIdx); sm != nil {
 					sm.proofFailed.Add(1)
 				}
-			}(job.requestID, job.shardIdx)
+			}(job)
 		}
 	}
 }
@@ -695,12 +793,12 @@ func printShardFinalReport(metrics *Metrics, shardClients []*ShardClient) {
 		total := sm.totalRequests.Load()
 		success := sm.successfulRequests.Load()
 		failed := sm.failedRequests.Load()
-		exists := sm.requestIdExistsErr.Load()
+		exists := sm.stateIdExistsErr.Load()
 		successPct := 0.0
 		if total > 0 {
 			successPct = float64(success) / float64(total) * 100
 		}
-		fmt.Printf("  - %s total=%d success=%d failed=%d request_id_exists=%d success_rate=%.2f%%\n",
+		fmt.Printf("  - %s total=%d success=%d failed=%d state_id_exists=%d success_rate=%.2f%%\n",
 			sc.name, total, success, failed, exists, successPct)
 	}
 
@@ -1067,6 +1165,7 @@ func main() {
 	authHeader := os.Getenv("AUTH_HEADER")
 
 	fmt.Printf("Starting aggregator performance test...\n")
+	fmt.Printf("Sharding mode: %s\n", shardingMode)
 	if len(shardTargets) == 0 {
 		fmt.Printf("Target: %s\n", aggregatorURL)
 	} else {
@@ -1076,10 +1175,19 @@ func main() {
 			if target.name != "" {
 				label = fmt.Sprintf("%s (%s)", target.name, target.url)
 			}
-			if target.shardMask > 0 {
-				fmt.Printf("  - %s shardMask=%d\n", label, target.shardMask)
-			} else {
-				fmt.Printf("  - %s\n", label)
+			switch shardingMode {
+			case shardingModeBFT:
+				if target.shardBits != "" {
+					fmt.Printf("  - %s shardBits=%s (MSB-first)\n", label, target.shardBits)
+				} else {
+					fmt.Printf("  - %s (single-shard partition)\n", label)
+				}
+			default:
+				if target.shardMask > 0 {
+					fmt.Printf("  - %s shardMask=%d\n", label, target.shardMask)
+				} else {
+					fmt.Printf("  - %s\n", label)
+				}
 			}
 		}
 	}
@@ -1213,7 +1321,7 @@ func main() {
 	var warmupSubmissionWg sync.WaitGroup
 	var warmupPoolIndex atomic.Int64
 	var warmupMetrics Metrics
-	warmupMetrics.submittedRequestIDs.Store("init", true) // Initialize map
+	warmupMetrics.submittedStateIDs.Store("init", true) // Initialize map
 	warmupMetrics.submissionStartTime = time.Now()
 
 	// Start warmup workers with separate warmup pool
@@ -1287,7 +1395,7 @@ func main() {
 		proofWg.Add(1)
 		go func() {
 			defer proofWg.Done()
-			proofVerificationWorker(proofCtx, shardClients, metrics, proofQueue, proofCancel, rateCounters)
+			proofVerificationWorker(proofCtx, shardClients, metrics, proofQueue, rateCounters)
 		}()
 	}
 
@@ -1380,7 +1488,7 @@ func main() {
 	total := atomic.LoadInt64(&metrics.totalRequests)
 	successful = atomic.LoadInt64(&metrics.successfulRequests)
 	failed := atomic.LoadInt64(&metrics.failedRequests)
-	exists := atomic.LoadInt64(&metrics.requestIdExistsErr)
+	exists := atomic.LoadInt64(&metrics.stateIdExistsErr)
 
 	fmt.Printf("\n\n========================================\n")
 	fmt.Printf("PERFORMANCE TEST RESULTS\n")

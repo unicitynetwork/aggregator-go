@@ -42,20 +42,20 @@ type CommitmentQueue interface {
 	// CountUnprocessed returns the number of unprocessed certification requests
 	CountUnprocessed(ctx context.Context) (int64, error)
 
-	// GetAllPending retrieves all pending (unacknowledged) commitments
-	// Used to cleanup already-processed pending commitments on startup
+	// GetAllPending retrieves all pending (unacknowledged) certification requests.
+	// Used to cleanup already-processed pending certification requests on startup.
 	GetAllPending(ctx context.Context) ([]*models.CertificationRequest, error)
 
-	// GetByRequestIDs retrieves commitments matching the given request IDs.
+	// GetByStateIDs retrieves certification requests matching the given state IDs.
 	// Streams through data in batches to avoid loading everything into memory.
-	GetByRequestIDs(ctx context.Context, requestIDs []api.StateID) (map[string]*models.CertificationRequest, error)
+	GetByStateIDs(ctx context.Context, stateIDs []api.StateID) (map[string]*models.CertificationRequest, error)
 
 	// Lifecycle methods
 	Initialize(ctx context.Context) error
 	Close(ctx context.Context) error
 }
 
-// CertificationRequestAck represents the metadata required to acknowledge a commitment.
+// CertificationRequestAck represents the metadata required to acknowledge a certification request.
 type CertificationRequestAck struct {
 	StateID  api.StateID
 	StreamID string
@@ -78,8 +78,8 @@ type AggregatorRecordStorage interface {
 	// Count returns the total number of records
 	Count(ctx context.Context) (int64, error)
 
-	// GetExistingRequestIDs returns which of the given request IDs already exist
-	GetExistingRequestIDs(ctx context.Context, requestIDs []string) (map[string]bool, error)
+	// GetExistingStateIDs returns which of the given state IDs already exist.
+	GetExistingStateIDs(ctx context.Context, stateIDs []string) (map[string]bool, error)
 }
 
 // BlockStorage handles blockchain block storage

@@ -9,7 +9,7 @@ import (
 )
 
 func TestStateIDMarshalJSON(t *testing.T) {
-	stateID := RequireNewImprintV2("0000cfe84a1828e2edd0a7d9533b23e519f746069a938d549a150e07e14dc0f9cf00")
+	stateID := RequireNewImprintV2("cfe84a1828e2edd0a7d9533b23e519f746069a938d549a150e07e14dc0f9cf00")
 
 	data, err := json.Marshal(stateID)
 	require.NoError(t, err, "Failed to marshal StateID")
@@ -38,17 +38,17 @@ func TestHexBytesMarshalJSON(t *testing.T) {
 	}
 }
 
-func TestImprintHexStringMarshalJSON(t *testing.T) {
-	imprint := RequireNewImprintV2("0000cd60")
+func TestImprintV2MarshalJSON(t *testing.T) {
+	imprint := RequireNewImprintV2("cd60a4ad038d834f4ef0fefc4a9f4b5a8f4e1dd51c79f0f4bbcb5c39f4c8d8a1")
 
 	data, err := json.Marshal(imprint)
-	require.NoError(t, err, "Failed to marshal ImprintHexString")
+	require.NoError(t, err, "Failed to marshal ImprintV2")
 
 	var unmarshaledImprint ImprintV2
 	err = json.Unmarshal(data, &unmarshaledImprint)
-	require.NoError(t, err, "Failed to unmarshal ImprintHexString")
+	require.NoError(t, err, "Failed to unmarshal ImprintV2")
 
-	require.Equal(t, imprint, unmarshaledImprint, "ImprintHexString mismatch")
+	require.Equal(t, imprint, unmarshaledImprint, "ImprintV2 mismatch")
 }
 
 func TestTimeNanoMarshalJSON(t *testing.T) {

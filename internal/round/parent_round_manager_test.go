@@ -1,6 +1,7 @@
 package round
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -433,12 +434,13 @@ func (suite *ParentRoundManagerTestSuite) TestBlockRootMatchesSMTRoot() {
 	err = prm.SubmitShardRoot(ctx, update)
 	suite.Require().NoError(err)
 
-	// Wait for the SMT to include the shard update (root hash will change from empty)
-	var expectedRootHex string
+	// Wait for the SMT to include the shard update (raw 32-byte root matching UC.IR.h)
+	emptyRoot := api.HexBytes(smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength).GetRootHashRaw())
+	var expectedRoot api.HexBytes
 	suite.Require().Eventually(func() bool {
-		expectedRootHex = prm.GetSMT().GetRootHash()
+		expectedRoot = api.HexBytes(prm.GetSMT().GetRootHashRaw())
 		// Empty SMT has a specific hash, wait for it to change after shard update is processed
-		return expectedRootHex != smt.NewParentSparseMerkleTree(api.SHA256, suite.cfg.Sharding.ShardIDLength).GetRootHashHex()
+		return !bytes.Equal(expectedRoot, emptyRoot)
 	}, 5*time.Second, 50*time.Millisecond, "expected SMT to include shard update")
 
 	// Now wait for a block with this root hash to be stored
@@ -450,10 +452,10 @@ func (suite *ParentRoundManagerTestSuite) TestBlockRootMatchesSMTRoot() {
 		}
 		latestBlock = block
 		// Check if this block has the expected root (contains our shard update)
-		return latestBlock.RootHash.String() == expectedRootHex
+		return bytes.Equal(latestBlock.RootHash, expectedRoot)
 	}, 5*time.Second, 50*time.Millisecond, "expected block with shard update to be stored")
 
-	suite.Assert().Equal(expectedRootHex, latestBlock.RootHash.String(), "stored block root should match SMT root")
+	suite.Assert().Equal(expectedRoot, latestBlock.RootHash, "stored block root should match SMT root")
 }
 
 // TestParentRoundManagerSuite runs the test suite

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/types/hex"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -61,6 +62,7 @@ func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.
 		uc := types.UnicityCertificate{
 			InputRecord: &types.InputRecord{
 				RoundNumber: roundNumber,
+				Hash:        hex.Bytes(block.RootHash),
 			},
 			UnicitySeal: &types.UnicitySeal{
 				RootChainRoundNumber: roundNumber,

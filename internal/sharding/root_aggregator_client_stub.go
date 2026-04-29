@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/types/hex"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -46,16 +47,18 @@ func (m *RootAggregatorClientStub) GetShardProof(ctx context.Context, request *a
 
 	if m.submissions[request.ShardID] != nil {
 		m.returnedProofCount++
-		submittedRootHash := m.submittedRootHash.String()
-		ucBytes, err := stubProofUC(uint64(m.returnedProofCount), uint64(m.returnedProofCount))
+		ucBytes, err := stubProofUC(uint64(m.returnedProofCount), uint64(m.returnedProofCount), m.submittedRootHash)
 		if err != nil {
 			return nil, err
 		}
+		fragment := &api.ParentInclusionFragment{
+			CertificateBytes: api.NewHexBytes(make([]byte, api.BitmapSize)),
+			ShardLeafValue:   api.NewHexBytes(m.submittedRootHash),
+		}
 		return &api.RootShardInclusionProof{
+			ParentFragment:     fragment,
+			BlockNumber:        uint64(m.returnedProofCount),
 			UnicityCertificate: ucBytes,
-			MerkleTreePath: &api.MerkleTreePath{
-				Steps: []api.MerkleTreeStep{{Data: &submittedRootHash}},
-			},
 		}, nil
 	}
 	return nil, nil
@@ -91,10 +94,11 @@ func (m *RootAggregatorClientStub) SetSubmissionError(err error) {
 	m.submissionError = err
 }
 
-func stubProofUC(parentRound, rootRound uint64) (api.HexBytes, error) {
+func stubProofUC(parentRound, rootRound uint64, rootHash api.HexBytes) (api.HexBytes, error) {
 	uc := types.UnicityCertificate{
 		InputRecord: &types.InputRecord{
 			RoundNumber: parentRound,
+			Hash:        hex.Bytes(rootHash),
 		},
 		UnicitySeal: &types.UnicitySeal{
 			RootChainRoundNumber: rootRound,

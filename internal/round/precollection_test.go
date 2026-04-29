@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/types/hex"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/events"
@@ -175,7 +176,6 @@ func (c *staleThenFreshRootAggregatorClient) GetShardProof(ctx context.Context, 
 	}
 
 	c.proofPolls++
-	root := c.submittedRoot.String()
 	parentRound := c.staleParentRound
 	rootRound := c.staleRootRound
 
@@ -186,16 +186,18 @@ func (c *staleThenFreshRootAggregatorClient) GetShardProof(ctx context.Context, 
 	default:
 	}
 
-	uc, err := testProofUC(parentRound, rootRound)
+	uc, err := testProofUC(parentRound, rootRound, c.submittedRoot)
 	if err != nil {
 		return nil, err
 	}
 
 	return &api.RootShardInclusionProof{
-		UnicityCertificate: uc,
-		MerkleTreePath: &api.MerkleTreePath{
-			Steps: []api.MerkleTreeStep{{Data: &root}},
+		ParentFragment: &api.ParentInclusionFragment{
+			CertificateBytes: api.NewHexBytes(make([]byte, api.BitmapSize)),
+			ShardLeafValue:   api.NewHexBytes(c.submittedRoot),
 		},
+		BlockNumber:        parentRound,
+		UnicityCertificate: uc,
 	}, nil
 }
 
@@ -209,10 +211,11 @@ func (c *staleThenFreshRootAggregatorClient) ProofPolls() int {
 	return c.proofPolls
 }
 
-func testProofUC(parentRound, rootRound uint64) (api.HexBytes, error) {
+func testProofUC(parentRound, rootRound uint64, rootHash api.HexBytes) (api.HexBytes, error) {
 	uc := types.UnicityCertificate{
 		InputRecord: &types.InputRecord{
 			RoundNumber: parentRound,
+			Hash:        hex.Bytes(rootHash),
 		},
 		UnicitySeal: &types.UnicitySeal{
 			RootChainRoundNumber: rootRound,
@@ -265,7 +268,7 @@ func newTestLogger(t *testing.T) *logger.Logger {
 func newTestPrecollector(t *testing.T, stream chan *models.CertificationRequest, maxPerRound int) (*childPrecollector, *smt.ThreadSafeSMT) {
 	t.Helper()
 	log := newTestLogger(t)
-	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
 	if maxPerRound <= 0 {
 		maxPerRound = 10000
 	}
@@ -550,7 +553,7 @@ func TestPreCollectionReparenting(t *testing.T) {
 		defer cancel()
 
 		testLogger := newTestLogger(t)
-		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
 		initialMainRootHash := smtInstance.GetRootHash()
 
 		// Round N: Create snapshot and add a leaf
@@ -624,7 +627,8 @@ func TestChildPrecollector_DeactivateDuringInFlightRound(t *testing.T) {
 			MaxCommitmentsPerRound: 1000,
 		},
 		Sharding: config.ShardingConfig{
-			Mode: config.ShardingModeChild,
+			Mode:          config.ShardingModeChild,
+			ShardIDLength: 1,
 			Child: config.ChildConfig{
 				ShardID:            0b11,
 				ParentPollTimeout:  5 * time.Second,
@@ -636,7 +640,7 @@ func TestChildPrecollector_DeactivateDuringInFlightRound(t *testing.T) {
 
 	testLogger := newTestLogger(t)
 	rootClient := newBlockingProofRootAggregatorClient()
-	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
 
 	rm, err := NewRoundManager(
 		ctx,
@@ -697,7 +701,8 @@ func TestChildRound_ParentProofTimeoutIsRetriable(t *testing.T) {
 			MaxCommitmentsPerRound: 1000,
 		},
 		Sharding: config.ShardingConfig{
-			Mode: config.ShardingModeChild,
+			Mode:          config.ShardingModeChild,
+			ShardIDLength: 1,
 			Child: config.ChildConfig{
 				ShardID:            0b11,
 				ParentPollTimeout:  100 * time.Millisecond,
@@ -709,7 +714,7 @@ func TestChildRound_ParentProofTimeoutIsRetriable(t *testing.T) {
 
 	testLogger := newTestLogger(t)
 	rootClient := newBlockingProofRootAggregatorClient()
-	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
 
 	rm, err := NewRoundManager(
 		ctx,
@@ -776,7 +781,7 @@ func TestStartNewRoundWithSnapshot(t *testing.T) {
 		storage := testutil.SetupTestStorage(t, cfg)
 
 		testLogger := newTestLogger(t)
-		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
 
 		rm, err := NewRoundManager(
 			ctx,
@@ -833,7 +838,8 @@ func TestPipelinedChildModeFlow(t *testing.T) {
 				MaxCommitmentsPerRound: 1000,
 			},
 			Sharding: config.ShardingConfig{
-				Mode: config.ShardingModeChild,
+				Mode:          config.ShardingModeChild,
+				ShardIDLength: 1,
 				Child: config.ChildConfig{
 					ShardID:            0b11,
 					ParentPollTimeout:  5 * time.Second,
@@ -845,7 +851,7 @@ func TestPipelinedChildModeFlow(t *testing.T) {
 
 		testLogger := newTestLogger(t)
 		rootAggregatorClient := testsharding.NewRootAggregatorClientStub()
-		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
 
 		rm, err := NewRoundManager(
 			ctx,
@@ -903,7 +909,8 @@ func TestChildPreCollection_CommitmentAfterProofBeforeRoundEnd_ShouldBeInNextRou
 			MaxCommitmentsPerRound: 1000,
 		},
 		Sharding: config.ShardingConfig{
-			Mode: config.ShardingModeChild,
+			Mode:          config.ShardingModeChild,
+			ShardIDLength: 1,
 			Child: config.ChildConfig{
 				ShardID:            0b11,
 				ParentPollTimeout:  5 * time.Second,
@@ -915,7 +922,7 @@ func TestChildPreCollection_CommitmentAfterProofBeforeRoundEnd_ShouldBeInNextRou
 
 	testLogger := newTestLogger(t)
 	rootAggregatorClient := testsharding.NewRootAggregatorClientStub()
-	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
 
 	rm, err := NewRoundManager(
 		ctx,
@@ -972,7 +979,8 @@ func TestChildMode_RequiresFreshParentProof(t *testing.T) {
 			MaxCommitmentsPerRound: 1000,
 		},
 		Sharding: config.ShardingConfig{
-			Mode: config.ShardingModeChild,
+			Mode:          config.ShardingModeChild,
+			ShardIDLength: 1,
 			Child: config.ChildConfig{
 				ShardID:            0b11,
 				ParentPollTimeout:  5 * time.Second,
@@ -984,11 +992,11 @@ func TestChildMode_RequiresFreshParentProof(t *testing.T) {
 
 	testLogger := newTestLogger(t)
 	rootAggregatorClient := newStaleThenFreshRootAggregatorClient(1, 10, 2, 13)
-	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
 
 	rootHash, err := api.NewHexBytesFromString(smtInstance.GetRootHash())
 	require.NoError(t, err)
-	initialUC, err := testProofUC(1, 10)
+	initialUC, err := testProofUC(1, 10, rootHash)
 	require.NoError(t, err)
 	initialBlock := models.NewBlock(
 		api.NewBigInt(big.NewInt(1)),
@@ -999,7 +1007,6 @@ func TestChildMode_RequiresFreshParentProof(t *testing.T) {
 		rootHash,
 		api.HexBytes{},
 		initialUC,
-		nil,
 	)
 	initialBlock.Finalized = true
 	require.NoError(t, storage.BlockStorage().Store(ctx, initialBlock))

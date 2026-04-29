@@ -19,7 +19,7 @@ The Unicity Aggregator implements a decentralized Agent-Aggregator communication
 - ✅ **Signature Validation** - Full secp256k1 cryptographic validation for commitments
 - ✅ **SMT Integration** - Sparse Merkle Tree for inclusion proofs
 - ✅ **Round Management** - Automated block creation with batch processing
-- ✅ **DataHash Support** - Proper algorithm imprint format for SHA256 hashes
+- ✅ **Raw v2 Hash Support** - 32-byte SHA256 state and transaction hashes
 - ✅ **Configurable Concurrency** - Request rate limiting and parallel processing
 - ✅ **Graceful Shutdown** - Proper resource cleanup on termination
 - ✅ **Health Monitoring** - Comprehensive health and status endpoints
@@ -203,46 +203,12 @@ Submit a state transition request to the aggregation layer with cryptographic va
 {
   "jsonrpc": "2.0",
   "method": "certification_request",
-  "params": "8458220000b1333daf3261d9bfa9d6dd98f170c0e756c26dbe284b5f90b27df900f6a77c04848301410158210299de0a2414a39fc981694b40bcb7006c6a3c70da7097a9a02877469fe1d2a62b582200002dc34763859638857585ce6aa30a43d3d7a342b51e6caee408888f3ab1c9e84b582200004c3b2c6fce3a19589cb219a0c18281696fedcbab1f28afd8aecc830cff55dacb584103ce4ef0fe3b4f53f5264daee6930c5e7a3b60f4dfd102b4d8f2420d8bbba17e446b0f855ad402437f14d00c1f27752e9aa802301ca42a57a80cb1f6f57e03eb00f500",
+  "params": "<hex-encoded CertificationRequest CBOR>",
   "id": 1
 }
 ```
 
-Params is hex encoded string of CertificationRequest CBOR bytes.
-
-**Decoded params:**
-```
-84                                           # array(4)
-   58 22                                     #   bytes(34)
-      0000b1333daf3261d9bfa9d6dd98f170       #     "\x00\x00\xb13=\xaf2a\xd9\xbf\xa9\xd6\xdd\x98\xf1p"
-      c0e756c26dbe284b5f90b27df900f6a7       #     "\xc0\xe7V\xc2m\xbe(K_\x90\xb2}\xf9\x00\xf6\xa7"
-      7c04                                   #     "|\x04"
-   84                                        #   array(4)
-      83                                     #     array(3)
-         01                                  #       unsigned(1)
-         41                                  #       bytes(1)
-            01                               #         "\x01"
-         58 21                               #       bytes(33)
-            0299de0a2414a39fc981694b40bcb700 #         "\x02\x99\xde\n$\x14\xa3\x9f\xc9\x81iK@\xbc\xb7\x00"
-            6c6a3c70da7097a9a02877469fe1d2a6 #         "lj<p\xdap\x97\xa9\xa0(wF\x9f\xe1\xd2\xa6"
-            2b                               #         "+"
-      58 22                                  #     bytes(34)
-         00002dc34763859638857585ce6aa30a    #       "\x00\x00-\xc3Gc\x85\x968\x85u\x85\xcej\xa3\n"
-         43d3d7a342b51e6caee408888f3ab1c9    #       "C\xd3\xd7\xa3B\xb5\x1el\xae\xe4\x08\x88\x8f:\xb1\xc9"
-         e84b                                #       "\xe8K"
-      58 22                                  #     bytes(34)
-         00004c3b2c6fce3a19589cb219a0c182    #       "\x00\x00L;,o\xce:\x19X\x9c\xb2\x19\xa0\xc1\x82"
-         81696fedcbab1f28afd8aecc830cff55    #       "\x81io\xed\xcb\xab\x1f(\xaf\xd8\xae\xcc\x83\x0c\xffU"
-         dacb                                #       "\xda\xcb"
-      58 41                                  #     bytes(65)
-         03ce4ef0fe3b4f53f5264daee6930c5e    #       "\x03\xceN\xf0\xfe;OS\xf5&M\xae\xe6\x93\x0c^"
-         7a3b60f4dfd102b4d8f2420d8bbba17e    #       "z;`\xf4\xdf\xd1\x02\xb4\xd8\xf2B\r\x8b\xbb\xa1~"
-         446b0f855ad402437f14d00c1f27752e    #       "Dk\x0f\x85Z\xd4\x02C\x7f\x14\xd0\x0c\x1f\'u."
-         9aa802301ca42a57a80cb1f6f57e03eb    #       "\x9a\xa8\x020\x1c\xa4*W\xa8\x0c\xb1\xf6\xf5~\x03\xeb"
-         00                                  #       "\x00"
-   f5                                        #   true, simple(21)
-   00                                        #   unsigned(0)
-```
+Params is a hex-encoded `api.CertificationRequest` CBOR payload. The payload contains raw 32-byte values for `stateId`, `sourceStateHash`, and `transactionHash`; these fields do not include algorithm prefixes.
 
 Which corresponds to Go data structures:
 ```
@@ -250,10 +216,11 @@ Which corresponds to Go data structures:
 // sometimes also referred to as StateTransitionCertificationRequest, Commitment or UnicityServiceRequest.
 type CertificationRequest struct {
 	_ struct{} `cbor:",toarray"`
+	Version types.Version
 
 	// StateID is the unique identifier of the certification request, used as a key in the state tree.
-	// Calculated as hash of CBOR array [CertificationData.OwnerPredicate, CertificationData.SourceStateHashImprint],
-	// prefixed by two bytes that define the hashing algorithm (two zero bytes in case of SHA2_256).
+	// In v2 it is the raw 32-byte hash of the CBOR array
+	// [CertificationData.OwnerPredicate, CertificationData.SourceStateHash].
 	StateID StateID
 
 	// CertificationData contains the necessary cryptographic data needed for the CertificationRequest.
@@ -265,6 +232,7 @@ type CertificationRequest struct {
 // CertificationData represents the necessary cryptographic data needed for a state transition CertificationRequest.
 type CertificationData struct {
 	_ struct{} `cbor:",toarray"`
+	Version types.Version
 
 	// OwnerPredicate is the owner predicate in format: CBOR[engine: uint, code: byte[], params: byte[]].
 	//
@@ -274,16 +242,14 @@ type CertificationData struct {
 	//  - params = 5821 000102..20 (byte array of length 33 containing the raw bytes of the public key value)
 	OwnerPredicate Predicate `json:"ownerPredicate"`
 
-	// SourceStateHash is the source data (token) hash,
-	// prefixed by two bytes that define the hashing algorithm (two zero bytes in case of SHA2_256).
+	// SourceStateHash is the raw 32-byte hash of the source data.
 	SourceStateHash SourceStateHash `json:"sourceStateHash"`
 
-	// TransactionHash is the entire transaction data hash (including the source data),
-	// prefixed by two bytes that define the hashing algorithm (two zero bytes in case of SHA2_256).
+	// TransactionHash is the raw 32-byte hash of the transaction data.
 	TransactionHash TransactionHash `json:"transactionHash"`
 
 	// Witness is the "unlocking part" of owner predicate. In case of PayToPublicKey owner predicate the witness must be
-	// a signature created on the hash of CBOR array[SourceStateHashImprint, TransactionHash],
+	// a signature created on the hash of CBOR array[SourceStateHash, TransactionHash],
 	// in Unicity's [R || S || V] format (65 bytes).
 	Witness HexBytes `json:"witness"`
 }
@@ -301,54 +267,70 @@ type CertificationData struct {
 ```
 
 **Validation Statuses:**
-- `SUCCESS` - Commitment accepted and will be included in next block
+- `SUCCESS` - Certification request accepted and will be included in next block
 - `INVALID_PUBLIC_KEY_FORMAT` - Invalid secp256k1 public key
 - `INVALID_SIGNATURE_FORMAT` - Invalid signature format or length
 - `SIGNATURE_VERIFICATION_FAILED` - Signature doesn't match transaction hash and public key
 - `STATE_ID_MISMATCH` - StateID doesn't match SHA256(CBOR[publicKey, sourceStateHash])
-- `INVALID_SOURCE_STATE_HASH_FORMAT` - SourceStateHash not in proper DataHash imprint format
-- `INVALID_TRANSACTION_HASH_FORMAT` - TransactionHash not in proper DataHash imprint format
+- `INVALID_SOURCE_STATE_HASH_FORMAT` - SourceStateHash is not exactly 32 bytes
+- `INVALID_TRANSACTION_HASH_FORMAT` - TransactionHash is not exactly 32 bytes
 - `INVALID_SHARD` - The certification request was sent to the wrong shard
 
-#### `get_inclusion_proof`
-Retrieve the Sparse Merkle Tree inclusion proof for a specific state transition request.
+#### `get_inclusion_proof.v2`
+Retrieve the v2 inclusion proof for a submitted certification request.
+
+The `stateId` must be exactly 64 hex characters (32 raw bytes).
 
 **Request:**
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "get_inclusion_proof",
+  "method": "get_inclusion_proof.v2",
   "params": {
-    "stateId": "0000c7aa6962316c0eeb1469dc3d7793e39e140c005e6eea0e188dcc73035d765937"
+    "stateId": "c7aa6962316c0eeb1469dc3d7793e39e140c005e6eea0e188dcc73035d765937"
   },
   "id": 2
 }
 ```
 
 **Response:**
+
 ```json
 {
-  "jsonrpc":"2.0",
-  "result":{
-    "certificationData":{
-      "publicKey":"027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
-      "signature":"65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
-      "sourceStateHash":"0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647",
-      "transactionHash":"0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297"
-    },
-    "merkleTreePath":{
-      "root":"0000342d44bb4f43b2de5661cf3690254b95b49e46820b90f13fbe2798f428459ba4",
-      "steps":[
-        {
-          "branch":["0000f00a106493f8bee8846b84325fe71411ea01b8a7c5d7cc0853888b1ef9cbf83b"],
-          "path":"7588619140208316325429861720569170962648734570557434545963804239233978322458521890",
-          "sibling":null
-        }
-      ]
-    }
-  },
-  "id":2
+  "jsonrpc": "2.0",
+  "result": "<hex-encoded CBOR>",
+  "id": 2
 }
+```
+
+The `result` field is a hex-encoded CBOR array:
+```
+[blockNumber, [certificationData, certificateBytes, unicityCertificate]]
+```
+
+- `certificationData` is the certification data for inclusion proofs, or `null` for non-inclusion proofs.
+- For inclusion proofs, `certificateBytes` is the binary inclusion certificate: `bitmap[32] || sibling_1[32] || ... || sibling_n[32]`, where `n = popcount(bitmap)`. Siblings are in root-to-leaf order. For non-inclusion proofs, `certificateBytes` is an exclusion certificate: `k_l[32] || h_l[32] || bitmap[32] || siblings...` (exclusion proof generation is not yet implemented).
+- The expected SMT root is always taken from `UC.IR.h` (input record hash of the Unicity Certificate). No root field appears in the certificate itself.
+
+**Hash rules (Yellowpaper-aligned):**
+- Leaf: `H(0x00 || key || value)` where value is the raw transaction hash bytes
+- Inner node (two children): `H(0x01 || depth_byte || left || right)`
+- Inner node (one child): passthrough (child hash unchanged)
+
+**Key encoding:** 32 bytes, LSB-first bit addressing. `bit(key, d) = (key[d/8] >> (d%8)) & 1`.
+
+**Verification pseudocode:**
+```
+h = H(0x00 || key || value)
+j = len(siblings)
+for d in 255..=0:
+    if bitmap bit d is not set: continue
+    j -= 1
+    if bit(key, d) == 1:
+        h = H(0x01 || d || siblings[j] || h)
+    else:
+        h = H(0x01 || d || h || siblings[j])
+assert j == 0 and h == UC.IR.h
 ```
 
 #### `get_block_height`
@@ -433,12 +415,12 @@ Retrieve all certification requests included in a specific block.
   "result": {
     "aggregatorRecords": [
       {
-        "stateId": "0000c7aa6962316c0eeb1469dc3d7793e39e140c005e6eea0e188dcc73035d765937",
+        "stateId": "c7aa6962316c0eeb1469dc3d7793e39e140c005e6eea0e188dcc73035d765937",
         "certificationData": {
           "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
           "signature": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
-          "sourceStateHash": "0000539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647",
-          "transactionHash": "0000c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297"
+          "sourceStateHash": "539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647",
+          "transactionHash": "c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297"
         },
         "blockNumber": "123",
         "leafIndex": "0",
@@ -616,7 +598,7 @@ SHARD_TARGETS="http://localhost:3001:3,http://localhost:3002:2" TEST_DURATION=10
 
 **Performance Test Features:**
 - ✅ **Cryptographically Valid Data** - Real secp256k1 key pairs and signatures
-- ✅ **Proper DataHash Format** - Correct algorithm imprints with "0000" SHA256 prefix
+- ✅ **Raw v2 Hash Format** - 32-byte SHA256 state and transaction hashes
 - ✅ **Deterministic StateIDs** - Calculated as SHA256(publicKey || sourceStateHash)
 - ✅ **High Concurrency** - Configurable worker count and request rate
 - ✅ **Block Monitoring** - Tracks certification requests per block and throughput
@@ -655,6 +637,15 @@ The service implements a MongoDB-based leader election system:
 - **`standalone`** - Single server mode (HA disabled)
 
 ## Sharding
+
+The aggregator supports two orthogonal sharding strategies, selected by `SHARDING_MODE`:
+
+- **Application-level sharding** (`parent` / `child`) — aggregator-layer split: one parent aggregator aggregates the SMTs of multiple children. Described in the rest of this section.
+- **BFT-side sharding** (`bft-shard`) — BFT-layer split: multiple aggregators act as shard validators of a single multi-shard BFT partition, and shard-inclusion is proved directly by the `ShardTreeCertificate` embedded in the `UnicityCertificate`. Described in [BFT-side sharding](#bft-side-sharding-sharding_modebft-shard).
+
+The two modes use different routing inputs and different shard-ID semantics; they are not interchangeable.
+
+### Application-level sharding (`SHARDING_MODE=parent` / `child`)
 
 To support horizontal scaling, the aggregators can be run in a sharded configuration consisting of one parent aggregator 
 and multiple child aggregators. In this mode, the global Sparse Merkle Tree (SMT) is split across the child nodes, and 
@@ -740,6 +731,89 @@ environment:
   SHARDING_CHILD_PARENT_RPC_ADDR: http://aggregator-root:3000
 ```
 
+### BFT-side sharding (`SHARDING_MODE=bft-shard`)
+
+In `bft-shard` mode, multiple aggregators are deployed as shard validators of a single multi-shard BFT partition. Each aggregator owns one shard, talks directly to the BFT rootchain, and the `UnicityCertificate` it receives embeds a `ShardTreeCertificate` that binds its local SMT root into the partition root. There is no parent aggregator — shard-inclusion is proved by the embedded certificate rather than by a per-round polling loop.
+
+This mode is orthogonal to `parent`/`child`: it uses a different routing key (raw 32-byte `stateId`), a different shard-ID encoding (bit-strings, MSB-first), and a different admission rule.
+
+#### Routing semantics
+
+- Routing key: the raw 32-byte `stateId`.
+- Shard identifiers are **bit-strings**, e.g. `"0"`, `"1"`, `"101"`. The first N bits of `stateId` (bit 7 of byte 0 first, descending to bit 0 of byte 31) must equal the shard's bit-string. This matches `types.ShardID.Comparator()` in `bft-go-base`.
+- A request whose `stateId` does not match the local shard's prefix is rejected with `INVALID_SHARD`.
+- Shard prefixes must form a prefix-free covering set: every possible `stateId` maps to exactly one shard.
+
+#### Example: 1-bit split
+
+```text
+                        +---------------------+
+                        |  BFT rootchain      |
+                        |  (partition id 7)   |
+                        +---------------------+
+                         /                   \
+                        /                     \
++---------------------------+    +---------------------------+
+| aggregator-bft-shard0     |    | aggregator-bft-shard1     |
+| SHARDING_MODE=bft-shard   |    | SHARDING_MODE=bft-shard   |
+| shard-id = 0x40 ("0")     |    | shard-id = 0xC0 ("1")     |
+| accepts stateId with MSB=0|    | accepts stateId with MSB=1|
+| listens on :3001          |    | listens on :3002          |
++---------------------------+    +---------------------------+
+```
+
+Note on shard-conf hex values: `0x40` encodes the bit-string `"0"` under the trailing-`1` end-marker convention in `bft-go-base/types/bitstring.go`; `0x80` is the length-0 empty shard. The two children of the empty-shard root split are `0x40` and `0xC0`.
+
+#### Configuration
+
+A bft-shard aggregator is configured with:
+
+```yaml
+environment:
+  SHARDING_MODE: "bft-shard"
+  BFT_ENABLED: "true"
+  BFT_SHARD_CONF_FILE: "/app/bft-config/shard_0/shard-conf-7_0.json"
+  BFT_TRUST_BASE_FILES: "/app/bft-config/trust-base.json"
+  BFT_RPC_ADDRESS: "http://bft-root:8002"
+  # plus the standard BFT_ADDRESS / BFT_BOOTSTRAP_ADDRESSES / BFT_ANNOUNCE_ADDRESSES
+```
+
+Shard identity (partition ID, shard ID, genesis epoch) is loaded from `BFT_SHARD_CONF_FILE`, produced by `ubft shard-conf generate ... --shard-id 0x40 ...`. All shard confs in the partition must be pre-provisioned to the rootchain; the aggregator does not register dynamically.
+
+A `bft-shard` config must have a non-empty shard ID (length ≥ 1 bit). For a single-shard deployment, use `SHARDING_MODE=standalone`.
+
+#### Quickstart (local Docker)
+
+```bash
+# Spin up 1 BFT rootchain + 2 shard aggregators + MongoDB + Redis.
+make docker-run-bft-sh-clean
+
+# Tail shard logs:
+docker logs -f aggregator-bft-shard0   # serves on :3001 (shard "0")
+docker logs -f aggregator-bft-shard1   # serves on :3002 (shard "1")
+
+# Teardown:
+docker compose -f bft-sharding-compose.yml down
+```
+
+Other make targets:
+
+- `make docker-run-bft-sh-clean-keep-tb` — preserves BFT genesis/trust-base across restarts; reinitializes MongoDB/Redis only.
+- `make docker-restart-bft-sh` — rebuilds and restarts only the aggregators, leaving BFT nodes running.
+
+#### Driving test traffic
+
+`cmd/commitment` submits individual v2 certification requests to a chosen endpoint. `cmd/performance-test` with `SHARDING_MODE=bft-shard` and `SHARD_TARGETS` of the form `http://localhost:3001:0,http://localhost:3002:1` drives both shards in parallel and generates stateIds whose leading bits match each shard's prefix. Cross-shard traffic is rejected with `INVALID_SHARD`.
+
+#### Client-side proof verification
+
+Returned inclusion proofs should be verified on the client side. The Go API exposes the strict verifier as `pkg/api.InclusionProofV2.Verify(req, vctx)`, which checks the proof against the trust base and expected shard/partition context.
+
+#### Observability
+
+- `/health` reports the bft-shard identity via `bftShardId` (MSB-first bit-string; empty in non-bft-shard modes). The integer `shardIdLen` / `shardId` fields are zero in bft-shard mode.
+- Wrong-shard submissions return `INVALID_SHARD` at admission; the rejecting aggregator's log records the mismatch.
+
 ## Error Handling
 
 The service implements comprehensive JSON-RPC 2.0 error codes:
@@ -778,22 +852,22 @@ The service implements complete secp256k1 signature validation:
 
 - **✅ Public Key Validation** - Compressed 33-byte secp256k1 public keys
 - **✅ Signature Verification** - 65-byte signatures (64 bytes + recovery byte)
-- **✅ StateID Validation** - Deterministic calculation: SHA256(publicKey || sourceStateHash)
-- **✅ DataHash Support** - Algorithm imprint format with "0000" SHA256 prefix
+- **✅ StateID Validation** - Deterministic calculation over owner predicate and source state hash
+- **✅ Raw Hash Support** - 32-byte source state and transaction hashes
 - **✅ Transaction Signing** - Signatures verified against transaction hash data
 
 ### Supported Algorithms
 - **secp256k1** - Full implementation with btcec library
 - **SHA256** - Hash algorithm for all cryptographic operations
-- **DataHash Imprints** - Unicity-compatible format with algorithm prefix
+- **Raw v2 Hashes** - 32-byte SHA256 hashes without per-field algorithm prefixes
 
 ### Validation Process
 1. **Algorithm Check** - Verify "secp256k1" algorithm support
 2. **Public Key Format** - Validate compressed secp256k1 public key (33 bytes)
-3. **State Hash Format** - Validate DataHash imprint with "0000" SHA256 prefix
-4. **StateID Verification** - Ensure StateID = SHA256(publicKey || sourceStateHash)
+3. **State Hash Format** - Validate raw 32-byte source state hash
+4. **StateID Verification** - Ensure StateID matches the owner predicate and source state hash
 5. **Signature Format** - Validate 65-byte signature length
-6. **Transaction Hash Format** - Validate DataHash imprint format
+6. **Transaction Hash Format** - Validate raw 32-byte transaction hash
 7. **Signature Verification** - Cryptographically verify signature against transaction hash
 
 ## Architecture Notes

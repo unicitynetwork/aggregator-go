@@ -62,7 +62,7 @@ func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	smtInstance := smt.NewSparseMerkleTree(api.SHA256, 16+256)
+	smtInstance := smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
 	threadSafeSMT := smt.NewThreadSafeSMT(smtInstance)
 	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil,
 		state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
@@ -91,7 +91,8 @@ func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 
 	// Pre-populate storage with 2 out of 5 records (simulating partial write before crash)
 	partialLeaves := rm.currentRound.PendingLeaves[:2]
-	preExistingNodes := rm.convertLeavesToNodes(partialLeaves)
+	preExistingNodes, err := rm.convertLeavesToNodes(partialLeaves)
+	require.NoError(t, err)
 	err = s.storage.SmtStorage().StoreBatch(ctx, preExistingNodes)
 	require.NoError(t, err, "Pre-populating SMT nodes should succeed")
 
@@ -121,7 +122,6 @@ func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 		rootHashBytes,
 		api.HexBytes{},
 		api.HexBytes{},
-		nil,
 	)
 
 	// FinalizeBlock should succeed despite duplicates
@@ -147,7 +147,7 @@ func (s *FinalizeDuplicateTestSuite) Test2_NoDuplicates() {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	smtInstance := smt.NewSparseMerkleTree(api.SHA256, 16+256)
+	smtInstance := smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
 	threadSafeSMT := smt.NewThreadSafeSMT(smtInstance)
 	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil,
 		state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
@@ -180,7 +180,6 @@ func (s *FinalizeDuplicateTestSuite) Test2_NoDuplicates() {
 		rootHashBytes,
 		api.HexBytes{},
 		api.HexBytes{},
-		nil,
 	)
 
 	// Should succeed on first try (no duplicates)
@@ -199,7 +198,7 @@ func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	smtInstance := smt.NewSparseMerkleTree(api.SHA256, 16+256)
+	smtInstance := smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
 	threadSafeSMT := smt.NewThreadSafeSMT(smtInstance)
 	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil,
 		state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
@@ -224,7 +223,8 @@ func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 	recordCountBefore, _ := s.storage.AggregatorRecordStorage().Count(ctx)
 
 	// Pre-populate ALL SMT nodes and aggregator records
-	allNodes := rm.convertLeavesToNodes(rm.currentRound.PendingLeaves)
+	allNodes, err := rm.convertLeavesToNodes(rm.currentRound.PendingLeaves)
+	require.NoError(t, err)
 	err = s.storage.SmtStorage().StoreBatch(ctx, allNodes)
 	require.NoError(t, err)
 
@@ -245,7 +245,6 @@ func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 		rootHashBytes,
 		api.HexBytes{},
 		api.HexBytes{},
-		nil,
 	)
 
 	// Should succeed even when all records are duplicates
@@ -272,7 +271,7 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
 	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
 	require.NoError(t, err)
 
@@ -303,7 +302,6 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 		rootHashBytes,
 		api.HexBytes{},
 		api.HexBytes{},
-		nil,
 	)
 
 	// Pre-store the block (simulating previous attempt that stored block but failed on MarkProcessed)
@@ -312,11 +310,11 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 	require.NoError(t, err, "Pre-storing block should succeed")
 
 	// Also pre-store block records
-	requestIds := make([]api.StateID, len(commitments))
+	stateIDs := make([]api.StateID, len(commitments))
 	for i, c := range commitments {
-		requestIds[i] = c.StateID
+		stateIDs[i] = c.StateID
 	}
-	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds))
+	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, stateIDs))
 	require.NoError(t, err, "Pre-storing block records should succeed")
 
 	// Get counts before FinalizeBlock
@@ -354,7 +352,7 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
 	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
 	require.NoError(t, err)
 
@@ -385,7 +383,6 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 		rootHashBytes,
 		api.HexBytes{},
 		api.HexBytes{},
-		nil,
 	)
 
 	// Pre-store the block as FINALIZED (simulating previous successful attempt except MarkProcessed)
@@ -394,15 +391,16 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	require.NoError(t, err, "Pre-storing finalized block should succeed")
 
 	// Pre-store block records
-	requestIds := make([]api.StateID, len(commitments))
+	stateIDs := make([]api.StateID, len(commitments))
 	for i, c := range commitments {
-		requestIds[i] = c.StateID
+		stateIDs[i] = c.StateID
 	}
-	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, requestIds))
+	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, stateIDs))
 	require.NoError(t, err, "Pre-storing block records should succeed")
 
 	// Pre-store all SMT nodes and records (simulating full previous attempt)
-	allNodes := rm.convertLeavesToNodes(rm.currentRound.PendingLeaves)
+	allNodes, err := rm.convertLeavesToNodes(rm.currentRound.PendingLeaves)
+	require.NoError(t, err)
 	err = s.storage.SmtStorage().StoreBatch(ctx, allNodes)
 	require.NoError(t, err)
 
@@ -431,7 +429,7 @@ func (s *FinalizeDuplicateTestSuite) Test6_BlockRecordsMatchPendingCommitmentsOn
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
 	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
 	require.NoError(t, err)
 
@@ -484,7 +482,6 @@ func (s *FinalizeDuplicateTestSuite) Test6_BlockRecordsMatchPendingCommitmentsOn
 		rootHashBytes,
 		api.HexBytes{},
 		api.HexBytes{},
-		nil,
 	)
 
 	err = rm.FinalizeBlock(ctx, block)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/big"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -163,6 +162,9 @@ func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.
 			pas.logger.WithContext(ctx).Debug("Serving shard proof while node is follower")
 		}
 	}
+	if !pas.parentRoundManager.IsReady() {
+		return nil, errors.New("parent round manager is not ready to serve shard proofs")
+	}
 
 	if err := pas.validateShardID(req.ShardID); err != nil {
 		pas.logger.WithContext(ctx).Warn("Invalid shard ID", "shardId", req.ShardID, "error", err.Error())
@@ -171,31 +173,24 @@ func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.
 
 	pas.logger.WithContext(ctx).Debug("Shard proof requested", "shardId", req.ShardID)
 
-	shardPath := new(big.Int).SetInt64(int64(req.ShardID))
-	merkleTreePath, err := pas.parentRoundManager.GetSMT().GetPath(shardPath)
+	parentFragment, rootHashRaw, err := pas.parentRoundManager.GetSMT().GetShardInclusionFragmentWithRoot(req.ShardID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get merkle tree path: %w", err)
+		return nil, fmt.Errorf("failed to get shard inclusion fragment: %w", err)
 	}
-
-	var proofPath *api.MerkleTreePath
-	if len(merkleTreePath.Steps) > 0 && merkleTreePath.Steps[0].Data != nil {
-		proofPath = merkleTreePath
-		pas.logger.WithContext(ctx).Info("Generated shard proof from current state",
-			"shardId", req.ShardID,
-			"rootHash", merkleTreePath.Root)
-	} else {
-		proofPath = nil
+	if parentFragment == nil {
 		pas.logger.WithContext(ctx).Info("Shard has not submitted root yet, returning nil proof",
 			"shardId", req.ShardID)
 	}
 
 	var unicityCertificate api.HexBytes
-	if proofPath != nil {
-		rootHash, err := api.NewHexBytesFromString(merkleTreePath.Root)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse root hash: %w", err)
-		}
-
+	var blockNumber uint64
+	if parentFragment != nil {
+		// GetShardInclusionFragmentWithRoot snapshots fragment+root under one RLock.
+		// Finalization persists block data before committing the SMT snapshot,
+		// so a visible root is expected to have a corresponding finalized block.
+		// Blocks are stored under the raw 32-byte SMT root matching
+		// UC.IR.h, so look up the block by the raw root hash.
+		rootHash := api.HexBytes(rootHashRaw)
 		block, err := pas.storage.BlockStorage().GetLatestByRootHash(ctx, rootHash)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get latest block by root hash: %w", err)
@@ -204,11 +199,13 @@ func (pas *ParentAggregatorService) GetShardProof(ctx context.Context, req *api.
 			return nil, fmt.Errorf("no block found with root hash %s", rootHash.String())
 		}
 		unicityCertificate = block.UnicityCertificate
+		blockNumber = block.Index.Uint64()
 	}
 
 	return &api.GetShardProofResponse{
-		MerkleTreePath:     proofPath,
+		ParentFragment:     parentFragment,
 		UnicityCertificate: unicityCertificate,
+		BlockNumber:        blockNumber,
 	}, nil
 }
 
@@ -240,19 +237,9 @@ func (pas *ParentAggregatorService) validateShardID(shardID api.ShardID) error {
 	return nil
 }
 
-// SubmitCommitment - not used in parent mode
-func (pas *ParentAggregatorService) SubmitCommitment(ctx context.Context, req *api.SubmitCommitmentRequest) (*api.SubmitCommitmentResponse, error) {
-	return nil, fmt.Errorf("submit_commitment is not supported in parent mode - use submit_shard_root instead")
-}
-
 // CertificationRequest - not used in parent mode
 func (pas *ParentAggregatorService) CertificationRequest(ctx context.Context, req *api.CertificationRequest) (*api.CertificationResponse, error) {
 	return nil, fmt.Errorf("certification_request is not supported in parent mode - use submit_shard_root instead")
-}
-
-// GetInclusionProofV1 - not used in parent mode
-func (pas *ParentAggregatorService) GetInclusionProofV1(ctx context.Context, req *api.GetInclusionProofRequestV1) (*api.GetInclusionProofResponseV1, error) {
-	return nil, fmt.Errorf("get_inclusion_proof is not supported in parent mode - use get_shard_proof instead")
 }
 
 // GetInclusionProofV2 - not used in parent mode
@@ -280,11 +267,6 @@ func (pas *ParentAggregatorService) GetBlockHeight(ctx context.Context) (*api.Ge
 // GetBlock - TODO: implement
 func (pas *ParentAggregatorService) GetBlock(ctx context.Context, req *api.GetBlockRequest) (*api.GetBlockResponse, error) {
 	return nil, fmt.Errorf("get_block not implemented yet in parent mode")
-}
-
-// GetBlockCommitments - TODO: implement
-func (pas *ParentAggregatorService) GetBlockCommitments(ctx context.Context, req *api.GetBlockCommitmentsRequest) (*api.GetBlockCommitmentsResponse, error) {
-	return nil, fmt.Errorf("get_block_commitments not implemented yet in parent mode")
 }
 
 // GetBlockRecords - TODO: implement

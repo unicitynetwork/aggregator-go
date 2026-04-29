@@ -18,6 +18,9 @@ type ThreadSafeSmtSnapshot struct {
 
 // NewThreadSafeSmtSnapshot creates a new thread-safe SMT snapshot wrapper
 func NewThreadSafeSmtSnapshot(snapshot *SmtSnapshot) *ThreadSafeSmtSnapshot {
+	// Prime hash caches before publishing the snapshot wrapper so concurrent
+	// readers never need to populate cache state under RLock.
+	snapshot.ensureHashes()
 	return &ThreadSafeSmtSnapshot{
 		snapshot: snapshot,
 	}
@@ -53,7 +56,11 @@ func (tss *ThreadSafeSmtSnapshot) AddLeaf(path *big.Int, value []byte) error {
 
 // addLeafUnsafe adds a single leaf without acquiring locks (internal use)
 func (tss *ThreadSafeSmtSnapshot) addLeafUnsafe(path *big.Int, value []byte) error {
-	return tss.snapshot.AddLeaf(path, value)
+	if err := tss.snapshot.AddLeaf(path, value); err != nil {
+		return err
+	}
+	tss.snapshot.ensureHashes()
+	return nil
 }
 
 // GetRootHash returns the current root hash of the snapshot
@@ -70,6 +77,25 @@ func (tss *ThreadSafeSmtSnapshot) GetPath(path *big.Int) (*api.MerkleTreePath, e
 	defer tss.rwMux.RUnlock()
 
 	return tss.snapshot.GetPath(path)
+}
+
+// GetRootHashRaw returns the raw 32-byte root hash of the snapshot.
+// This is a read operation that can be performed concurrently.
+func (tss *ThreadSafeSmtSnapshot) GetRootHashRaw() []byte {
+	tss.rwMux.RLock()
+	defer tss.rwMux.RUnlock()
+
+	return tss.snapshot.GetRootHashRaw()
+}
+
+// GetInclusionCert builds a v2 inclusion certificate for the leaf
+// at the given raw 32-byte key in this snapshot. This is a read operation
+// that can be performed concurrently.
+func (tss *ThreadSafeSmtSnapshot) GetInclusionCert(key []byte) (*api.InclusionCert, error) {
+	tss.rwMux.RLock()
+	defer tss.rwMux.RUnlock()
+
+	return tss.snapshot.GetInclusionCert(key)
 }
 
 // GetStats returns statistics about the snapshot
@@ -100,6 +126,7 @@ func (tss *ThreadSafeSmtSnapshot) Commit(originalSMT *ThreadSafeSMT) {
 	defer originalSMT.rwMux.Unlock()
 
 	tss.snapshot.Commit()
+	originalSMT.smt.ensureHashes()
 }
 
 // SetCommitTarget changes the target tree for snapshot chaining.
@@ -127,5 +154,9 @@ func (tss *ThreadSafeSmtSnapshot) CreateSnapshot() *ThreadSafeSmtSnapshot {
 func (tss *ThreadSafeSmtSnapshot) WithWriteLock(fn func(*SmtSnapshot) error) error {
 	tss.rwMux.Lock()
 	defer tss.rwMux.Unlock()
-	return fn(tss.snapshot)
+	if err := fn(tss.snapshot); err != nil {
+		return err
+	}
+	tss.snapshot.ensureHashes()
+	return nil
 }

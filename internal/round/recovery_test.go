@@ -43,7 +43,7 @@ func (s *RecoveryTestSuite) SetupSuite() {
 	s.ctx = context.Background()
 
 	// Start Redis container
-	redisC, err := redisContainer.Run(s.ctx, "redis:7")
+	redisC, err := redisContainer.Run(s.ctx, "redis:7-alpine")
 	s.Require().NoError(err)
 	s.redisCleanup = func() {
 		_ = redisC.Terminate(s.ctx)
@@ -121,26 +121,26 @@ func (s *RecoveryTestSuite) SetupTest() {
 }
 
 // Helper to create and store test data
-func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, prefix string) ([]*models.CertificationRequest, *models.Block, []api.RequestID) {
+func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, prefix string) ([]*models.CertificationRequest, *models.Block, []api.StateID) {
 	t := s.T()
 	blockNumber := api.NewBigInt(big.NewInt(blockNum))
 
 	// Create commitments
 	commitments := testutil.CreateTestCertificationRequests(t, commitmentCount, prefix)
 
-	// Create request IDs
-	requestIDs := make([]api.RequestID, len(commitments))
+	// Create state IDs.
+	stateIDs := make([]api.StateID, len(commitments))
 	for i, c := range commitments {
-		requestIDs[i] = c.StateID
+		stateIDs[i] = c.StateID
 	}
 
 	// Compute SMT root hash
-	smtTree := smt.NewSparseMerkleTree(api.SHA256, 16+256)
+	smtTree := smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
 	leaves := make([]*smt.Leaf, len(commitments))
 	for i, c := range commitments {
 		path, err := c.StateID.GetPath()
 		require.NoError(t, err)
-		leafValue, err := c.CertificationData.ToAPI().Hash()
+		leafValue, err := c.LeafValue()
 		require.NoError(t, err)
 		leaves[i] = smt.NewLeaf(path, leafValue)
 	}
@@ -149,10 +149,10 @@ func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, 
 	rootHashBytes := smtTree.GetRootHash()
 
 	// Create block (unfinalized)
-	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", api.HexBytes(rootHashBytes), nil, nil, nil)
+	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", api.HexBytes(rootHashBytes), nil, nil)
 	block.Finalized = false
 
-	return commitments, block, requestIDs
+	return commitments, block, stateIDs
 }
 
 // Helper to store commitments in Redis pending queue
@@ -169,11 +169,11 @@ func (s *RecoveryTestSuite) storeCommitmentsInRedis(commitments []*models.Certif
 func (s *RecoveryTestSuite) storeSmtNodes(commitments []*models.CertificationRequest) {
 	nodes := make([]*models.SmtNode, len(commitments))
 	for i, c := range commitments {
-		path, err := c.StateID.GetPath()
+		keyBytes, err := c.StateID.GetTreeKey()
 		s.Require().NoError(err)
-		leafValue, err := c.CertificationData.ToAPI().Hash()
+		leafValue, err := c.LeafValue()
 		s.Require().NoError(err)
-		nodes[i] = models.NewSmtNode(api.HexBytes(path.Bytes()), leafValue)
+		nodes[i] = models.NewSmtNode(api.HexBytes(keyBytes), leafValue)
 	}
 	err := s.storage.SmtStorage().StoreBatch(s.ctx, nodes)
 	s.Require().NoError(err)
@@ -196,7 +196,7 @@ func (s *RecoveryTestSuite) Test01_NoUnfinalizedBlocks() {
 	t := s.T()
 
 	// Create a finalized block
-	commitments, block, requestIDs := s.createTestData(1, 3, "t01")
+	commitments, block, stateIDs := s.createTestData(1, 3, "t01")
 	block.Finalized = true
 
 	// Store the finalized block
@@ -204,7 +204,7 @@ func (s *RecoveryTestSuite) Test01_NoUnfinalizedBlocks() {
 	require.NoError(t, err)
 
 	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, requestIDs)
+	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
 	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
 	require.NoError(t, err)
 
@@ -229,14 +229,14 @@ func (s *RecoveryTestSuite) Test02_AllDataPresent() {
 	t := s.T()
 
 	// Create unfinalized block with all data present
-	commitments, block, requestIDs := s.createTestData(2, 5, "t02")
+	commitments, block, stateIDs := s.createTestData(2, 5, "t02")
 
 	// Store block (unfinalized)
 	err := s.storage.BlockStorage().Store(s.ctx, block)
 	require.NoError(t, err)
 
 	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, requestIDs)
+	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
 	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
 	require.NoError(t, err)
 
@@ -269,14 +269,14 @@ func (s *RecoveryTestSuite) Test03_MissingAggregatorRecords() {
 	t := s.T()
 
 	// Create unfinalized block
-	commitments, block, requestIDs := s.createTestData(3, 4, "t03")
+	commitments, block, stateIDs := s.createTestData(3, 4, "t03")
 
 	// Store block (unfinalized)
 	err := s.storage.BlockStorage().Store(s.ctx, block)
 	require.NoError(t, err)
 
 	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, requestIDs)
+	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
 	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
 	require.NoError(t, err)
 
@@ -316,14 +316,14 @@ func (s *RecoveryTestSuite) Test04_MissingSmtNodes() {
 	t := s.T()
 
 	// Create unfinalized block
-	commitments, block, requestIDs := s.createTestData(4, 4, "t04")
+	commitments, block, stateIDs := s.createTestData(4, 4, "t04")
 
 	// Store block (unfinalized)
 	err := s.storage.BlockStorage().Store(s.ctx, block)
 	require.NoError(t, err)
 
 	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, requestIDs)
+	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
 	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
 	require.NoError(t, err)
 
@@ -362,14 +362,14 @@ func (s *RecoveryTestSuite) Test05_MissingBoth() {
 	t := s.T()
 
 	// Create unfinalized block
-	commitments, block, requestIDs := s.createTestData(5, 5, "t05")
+	commitments, block, stateIDs := s.createTestData(5, 5, "t05")
 
 	// Store block (unfinalized)
 	err := s.storage.BlockStorage().Store(s.ctx, block)
 	require.NoError(t, err)
 
 	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, requestIDs)
+	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
 	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
 	require.NoError(t, err)
 
@@ -412,8 +412,8 @@ func (s *RecoveryTestSuite) Test06_MultipleUnfinalizedBlocks() {
 	t := s.T()
 
 	// Create two unfinalized blocks
-	_, block1, requestIDs1 := s.createTestData(6, 2, "t06a")
-	_, block2, requestIDs2 := s.createTestData(7, 2, "t06b")
+	_, block1, stateIDs1 := s.createTestData(6, 2, "t06a")
+	_, block2, stateIDs2 := s.createTestData(7, 2, "t06b")
 
 	// Store both blocks as unfinalized
 	err := s.storage.BlockStorage().Store(s.ctx, block1)
@@ -422,9 +422,9 @@ func (s *RecoveryTestSuite) Test06_MultipleUnfinalizedBlocks() {
 	require.NoError(t, err)
 
 	// Store block records for both
-	err = s.storage.BlockRecordsStorage().Store(s.ctx, models.NewBlockRecords(block1.Index, requestIDs1))
+	err = s.storage.BlockRecordsStorage().Store(s.ctx, models.NewBlockRecords(block1.Index, stateIDs1))
 	require.NoError(t, err)
-	err = s.storage.BlockRecordsStorage().Store(s.ctx, models.NewBlockRecords(block2.Index, requestIDs2))
+	err = s.storage.BlockRecordsStorage().Store(s.ctx, models.NewBlockRecords(block2.Index, stateIDs2))
 	require.NoError(t, err)
 
 	// Run recovery - should fail with FATAL error
@@ -468,20 +468,20 @@ func (s *RecoveryTestSuite) Test07_MissingBlockRecords() {
 }
 
 // ============================================================================
-// Test 8: Commitment Not Found (FATAL Error)
+// Test 8: Certification Request Not Found (FATAL Error)
 // ============================================================================
-func (s *RecoveryTestSuite) Test08_CommitmentNotFound() {
+func (s *RecoveryTestSuite) Test08_CertificationRequestNotFound() {
 	t := s.T()
 
 	// Create unfinalized block
-	commitments, block, requestIDs := s.createTestData(9, 3, "t08")
+	commitments, block, stateIDs := s.createTestData(9, 3, "t08")
 
 	// Store block (unfinalized)
 	err := s.storage.BlockStorage().Store(s.ctx, block)
 	require.NoError(t, err)
 
 	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, requestIDs)
+	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
 	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
 	require.NoError(t, err)
 
@@ -491,17 +491,17 @@ func (s *RecoveryTestSuite) Test08_CommitmentNotFound() {
 	require.NoError(t, err)
 	time.Sleep(200 * time.Millisecond)
 
-	// Run recovery - should fail because commitment data not found
+	// Run recovery - should fail because certification request data not found
 	result, err := RecoverUnfinalizedBlock(s.ctx, s.testLogger, s.storage, s.commitmentQueue)
-	require.Error(t, err, "Should return error when commitment not found")
+	require.Error(t, err, "Should return error when certification request is not found")
 	require.Nil(t, result)
 	require.Contains(t, err.Error(), "FATAL")
-	require.Contains(t, err.Error(), "commitment not found")
+	require.Contains(t, err.Error(), "certification request not found")
 
 	// Clean up
 	_ = s.storage.BlockStorage().SetFinalized(s.ctx, block.Index, true)
 
-	t.Log("✓ Test08_CommitmentNotFound passed")
+	t.Log("✓ Test08_CertificationRequestNotFound passed")
 }
 
 // ============================================================================
@@ -511,14 +511,14 @@ func (s *RecoveryTestSuite) Test09_PartialAggregatorRecords_LeafIndexPreserved()
 	t := s.T()
 
 	// Create unfinalized block with 5 commitments
-	commitments, block, requestIDs := s.createTestData(10, 5, "t09partial")
+	commitments, block, stateIDs := s.createTestData(10, 5, "t09partial")
 
 	// Store block (unfinalized)
 	err := s.storage.BlockStorage().Store(s.ctx, block)
 	require.NoError(t, err)
 
 	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, requestIDs)
+	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
 	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
 	require.NoError(t, err)
 
@@ -546,7 +546,7 @@ func (s *RecoveryTestSuite) Test09_PartialAggregatorRecords_LeafIndexPreserved()
 	// Record at position 2 should have leafIndex=2, record at position 3 should have leafIndex=3
 	missingIndices := []int{2, 3}
 	for _, idx := range missingIndices {
-		record, err := s.storage.AggregatorRecordStorage().GetByStateID(s.ctx, requestIDs[idx])
+		record, err := s.storage.AggregatorRecordStorage().GetByStateID(s.ctx, stateIDs[idx])
 		require.NoError(t, err)
 		require.NotNil(t, record, "Record at position %d should exist after recovery", idx)
 		require.Equal(t, int64(idx), record.LeafIndex.Int.Int64(),
@@ -555,7 +555,7 @@ func (s *RecoveryTestSuite) Test09_PartialAggregatorRecords_LeafIndexPreserved()
 
 	// Also verify existing records still have correct indices
 	for _, idx := range existingIndices {
-		record, err := s.storage.AggregatorRecordStorage().GetByStateID(s.ctx, requestIDs[idx])
+		record, err := s.storage.AggregatorRecordStorage().GetByStateID(s.ctx, stateIDs[idx])
 		require.NoError(t, err)
 		require.NotNil(t, record, "Existing record at position %d should still exist", idx)
 		require.Equal(t, int64(idx), record.LeafIndex.Int.Int64(),
@@ -572,14 +572,14 @@ func (s *RecoveryTestSuite) Test10_PartialSmtNodes_CorrectDetection() {
 	t := s.T()
 
 	// Create unfinalized block with 5 commitments
-	commitments, block, requestIDs := s.createTestData(10, 5, "t10partial")
+	commitments, block, stateIDs := s.createTestData(10, 5, "t10partial")
 
 	// Store block (unfinalized)
 	err := s.storage.BlockStorage().Store(s.ctx, block)
 	require.NoError(t, err)
 
 	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, requestIDs)
+	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
 	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
 	require.NoError(t, err)
 
@@ -590,11 +590,11 @@ func (s *RecoveryTestSuite) Test10_PartialSmtNodes_CorrectDetection() {
 	existingIndices := []int{0, 1, 4}
 	existingNodes := make([]*models.SmtNode, len(existingIndices))
 	for i, idx := range existingIndices {
-		path, err := commitments[idx].StateID.GetPath()
+		keyBytes, err := commitments[idx].StateID.GetTreeKey()
 		require.NoError(t, err)
-		leafValue, err := commitments[idx].CertificationData.ToAPI().Hash()
+		leafValue, err := commitments[idx].LeafValue()
 		require.NoError(t, err)
-		existingNodes[i] = models.NewSmtNode(api.HexBytes(path.Bytes()), leafValue)
+		existingNodes[i] = models.NewSmtNode(api.HexBytes(keyBytes), leafValue)
 	}
 	err = s.storage.SmtStorage().StoreBatch(s.ctx, existingNodes)
 	require.NoError(t, err)
@@ -633,18 +633,18 @@ func (s *RecoveryTestSuite) Test11_LoadRecoveredNodesIntoSMT() {
 
 	// Create test commitments and store their SMT nodes
 	commitments := testutil.CreateTestCertificationRequests(t, 4, "t09")
-	requestIDs := make([]api.RequestID, len(commitments))
+	stateIDs := make([]api.StateID, len(commitments))
 	for i, c := range commitments {
-		requestIDs[i] = c.StateID
+		stateIDs[i] = c.StateID
 	}
 
 	// Compute expected root hash
-	expectedSMT := smt.NewSparseMerkleTree(api.SHA256, 16+256)
+	expectedSMT := smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
 	leaves := make([]*smt.Leaf, len(commitments))
 	for i, c := range commitments {
 		path, err := c.StateID.GetPath()
 		require.NoError(t, err)
-		leafValue, err := c.CertificationData.ToAPI().Hash()
+		leafValue, err := c.LeafValue()
 		require.NoError(t, err)
 		leaves[i] = smt.NewLeaf(path, leafValue)
 	}
@@ -656,11 +656,11 @@ func (s *RecoveryTestSuite) Test11_LoadRecoveredNodesIntoSMT() {
 	s.storeSmtNodes(commitments)
 
 	// Create empty SMT to load into
-	targetSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	targetSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
 	require.NotEqual(t, expectedRootHash, targetSMT.GetRootHash(), "SMT should be empty initially")
 
 	// Load recovered nodes into SMT
-	err = LoadRecoveredNodesIntoSMT(s.ctx, s.testLogger, s.storage, targetSMT, requestIDs)
+	err = LoadRecoveredNodesIntoSMT(s.ctx, s.testLogger, s.storage, targetSMT, stateIDs)
 	require.NoError(t, err)
 
 	// Verify SMT has correct root hash (ThreadSafeSMT.GetRootHash() returns hex string)
@@ -788,11 +788,11 @@ func (s *RecoveryTestSuite) Test16_RecoveryCallsCleanup() {
 	t := s.T()
 
 	// Create a FINALIZED block with records
-	commitments, block, requestIDs := s.createTestData(16, 3, "t16")
+	commitments, block, stateIDs := s.createTestData(16, 3, "t16")
 	block.Finalized = true
 	err := s.storage.BlockStorage().Store(s.ctx, block)
 	require.NoError(t, err)
-	err = s.storage.BlockRecordsStorage().Store(s.ctx, models.NewBlockRecords(block.Index, requestIDs))
+	err = s.storage.BlockRecordsStorage().Store(s.ctx, models.NewBlockRecords(block.Index, stateIDs))
 	require.NoError(t, err)
 	s.storeAggregatorRecords(commitments, block.Index)
 	s.storeSmtNodes(commitments)

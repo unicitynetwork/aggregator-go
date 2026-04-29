@@ -83,28 +83,28 @@ func createValidCertificationRequest() *api.CertificationRequest {
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
 	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
-	// Generate random state data and create DataHash imprint
+	// Generate random state data and create the raw v2 source state hash.
 	stateData := make([]byte, 32)
 	rand.Read(stateData)
 
-	stateHashImprint := signing.CreateDataHash(stateData)
+	stateHash := signing.CreateDataHash(stateData)
 	// Create StateID deterministically
-	stateID, err := api.CreateStateID(ownerPredicate, stateHashImprint)
+	stateID, err := api.CreateStateID(ownerPredicate, stateHash)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create state ID: %v", err))
 	}
 
-	// Generate random transaction data and create DataHash imprint
+	// Generate random transaction data and create the raw v2 transaction hash.
 	transactionData := make([]byte, 32)
 	rand.Read(transactionData)
-	transactionHashImprint := signing.CreateDataHash(transactionData)
+	transactionHash := signing.CreateDataHash(transactionData)
 
 	// Sign the transaction
 	signingService := signing.NewSigningService()
 	certData := &api.CertificationData{
 		OwnerPredicate:  ownerPredicate,
-		SourceStateHash: stateHashImprint,
-		TransactionHash: transactionHashImprint,
+		SourceStateHash: stateHash,
+		TransactionHash: transactionHash,
 	}
 	if err := signingService.SignCertData(certData, privateKey.Serialize()); err != nil {
 		panic(fmt.Sprintf("Failed to sign certification request data: %v", err))

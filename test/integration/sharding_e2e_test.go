@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/big"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -15,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	mongoContainer "github.com/testcontainers/testcontainers-go/modules/mongodb"
 	redisContainer "github.com/testcontainers/testcontainers-go/modules/redis"
+	bfttypes "github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/events"
@@ -23,6 +23,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/service"
+	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
@@ -35,7 +36,7 @@ func TestShardingE2E(t *testing.T) {
 	ctx := t.Context()
 
 	// Start containers (shared MongoDB with different databases per aggregator)
-	redis, err := redisContainer.Run(ctx, "redis:7")
+	redis, err := redisContainer.Run(ctx, "redis:7-alpine")
 	require.NoError(t, err)
 	defer redis.Terminate(ctx)
 	redisURI, _ := redis.ConnectionString(ctx)
@@ -61,17 +62,17 @@ func TestShardingE2E(t *testing.T) {
 	waitForBlock(t, "http://localhost:9002", 1, 15*time.Second)
 
 	// Submit commitments over multiple rounds
-	var shard2ReqIDs, shard3ReqIDs []string
+	var shard2Requests, shard3Requests []*api.CertificationRequest
 
 	// Round 1: submit 2 commitments to each shard
 	for i := 0; i < 2; i++ {
-		c, reqID := createCommitmentForShard(t, 2)
+		c := createCommitmentForShard(t, cfgForShard(2))
 		submitCertificationRequest(t, "http://localhost:9001", c)
-		shard2ReqIDs = append(shard2ReqIDs, reqID)
+		shard2Requests = append(shard2Requests, c)
 
-		c, reqID = createCommitmentForShard(t, 3)
+		c = createCommitmentForShard(t, cfgForShard(3))
 		submitCertificationRequest(t, "http://localhost:9002", c)
-		shard3ReqIDs = append(shard3ReqIDs, reqID)
+		shard3Requests = append(shard3Requests, c)
 	}
 
 	waitForBlock(t, "http://localhost:9001", 2, 15*time.Second)
@@ -79,36 +80,36 @@ func TestShardingE2E(t *testing.T) {
 
 	// Round 2: submit 2 more commitments to each shard
 	for i := 0; i < 2; i++ {
-		c, reqID := createCommitmentForShard(t, 2)
+		c := createCommitmentForShard(t, cfgForShard(2))
 		submitCertificationRequest(t, "http://localhost:9001", c)
-		shard2ReqIDs = append(shard2ReqIDs, reqID)
+		shard2Requests = append(shard2Requests, c)
 
-		c, reqID = createCommitmentForShard(t, 3)
+		c = createCommitmentForShard(t, cfgForShard(3))
 		submitCertificationRequest(t, "http://localhost:9002", c)
-		shard3ReqIDs = append(shard3ReqIDs, reqID)
+		shard3Requests = append(shard3Requests, c)
 	}
 
 	waitForBlock(t, "http://localhost:9001", 3, 15*time.Second)
 	waitForBlock(t, "http://localhost:9002", 3, 15*time.Second)
 
 	// Round 3: submit 1 more commitment to each shard
-	c, reqID := createCommitmentForShard(t, 2)
+	c := createCommitmentForShard(t, cfgForShard(2))
 	submitCertificationRequest(t, "http://localhost:9001", c)
-	shard2ReqIDs = append(shard2ReqIDs, reqID)
+	shard2Requests = append(shard2Requests, c)
 
-	c, reqID = createCommitmentForShard(t, 3)
+	c = createCommitmentForShard(t, cfgForShard(3))
 	submitCertificationRequest(t, "http://localhost:9002", c)
-	shard3ReqIDs = append(shard3ReqIDs, reqID)
+	shard3Requests = append(shard3Requests, c)
 
 	waitForBlock(t, "http://localhost:9001", 4, 15*time.Second)
 	waitForBlock(t, "http://localhost:9002", 4, 15*time.Second)
 
 	// Verify all proofs
-	for _, reqID := range shard2ReqIDs {
-		waitForValidProof(t, "http://localhost:9001", reqID, 15*time.Second)
+	for _, req := range shard2Requests {
+		waitForValidProof(t, "http://localhost:9001", req, 15*time.Second)
 	}
-	for _, reqID := range shard3ReqIDs {
-		waitForValidProof(t, "http://localhost:9002", reqID, 15*time.Second)
+	for _, req := range shard3Requests {
+		waitForValidProof(t, "http://localhost:9002", req, 15*time.Second)
 	}
 }
 
@@ -164,8 +165,10 @@ func startAggregator(t *testing.T, ctx context.Context, name, port, mongoURI, re
 	// Create SMT instance based on sharding mode
 	var smtInstance *smt.SparseMerkleTree
 	switch cfg.Sharding.Mode {
-	case config.ShardingModeStandalone, config.ShardingModeChild:
-		smtInstance = smt.NewSparseMerkleTree(api.SHA256, 16+256)
+	case config.ShardingModeStandalone:
+		smtInstance = smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
+	case config.ShardingModeChild:
+		smtInstance = smt.NewChildSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits, cfg.Sharding.Child.ShardID)
 	case config.ShardingModeParent:
 		smtInstance = smt.NewParentSparseMerkleTree(api.SHA256, cfg.Sharding.ShardIDLength)
 	}
@@ -175,7 +178,7 @@ func startAggregator(t *testing.T, ctx context.Context, name, port, mongoURI, re
 	mgr.Start(aggCtx)
 	mgr.Activate(aggCtx)
 
-	svc, _ := service.NewService(aggCtx, cfg, log, mgr, queue, stor, nil, nil)
+	svc, _ := service.NewService(aggCtx, cfg, log, mgr, queue, stor, nil)
 	srv := gateway.NewServer(cfg, log, svc)
 	go srv.Start()
 	time.Sleep(100 * time.Millisecond)
@@ -236,21 +239,27 @@ func waitForBlock(t *testing.T, url string, minBlock int64, timeout time.Duratio
 	t.Fatalf("Timeout waiting for block %d at %s", minBlock, url)
 }
 
-func waitForValidProof(t *testing.T, url, reqID string, timeout time.Duration) {
+func waitForValidProof(t *testing.T, url string, req *api.CertificationRequest, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
-	reqIDObj := api.RequireNewImprintV2(reqID)
-	path, _ := reqIDObj.GetPath()
 
 	for time.Now().Before(deadline) {
-		result, err := rpcCall(url, "get_inclusion_proof.v2", map[string]string{"stateId": reqID})
+		result, err := rpcCall(url, "get_inclusion_proof.v2", &api.GetInclusionProofRequestV2{StateID: req.StateID})
 		if err == nil {
 			var resp api.GetInclusionProofResponseV2
-			json.Unmarshal(result, &resp)
-			if resp.InclusionProof != nil && resp.InclusionProof.MerkleTreePath != nil {
-				verifyResult, _ := resp.InclusionProof.MerkleTreePath.Verify(path)
-				if verifyResult != nil && verifyResult.Result {
-					return
-				}
+			require.NoError(t, json.Unmarshal(result, &resp))
+			if resp.InclusionProof != nil && len(resp.InclusionProof.CertificateBytes) > 0 {
+				require.Greater(t, resp.BlockNumber, uint64(0))
+				// Local verification only — this parent/child sharding e2e test
+				// does not load a trust base. Full InclusionProofV2.Verify is
+				// exercised by the bft-sharding e2e test.
+				var cert api.InclusionCert
+				require.NoError(t, cert.UnmarshalBinary(resp.InclusionProof.CertificateBytes))
+				rootRaw, err := resp.InclusionProof.UCInputRecordHashRaw()
+				require.NoError(t, err)
+				key, err := req.StateID.GetTreeKey()
+				require.NoError(t, err)
+				require.NoError(t, cert.Verify(key, req.CertificationData.TransactionHash.DataBytes(), rootRaw, api.InclusionProofV2HashAlgorithm))
+				return
 			}
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -258,17 +267,24 @@ func waitForValidProof(t *testing.T, url, reqID string, timeout time.Duration) {
 	t.Fatalf("Timeout waiting for valid proof at %s", url)
 }
 
-func createCommitmentForShard(t *testing.T, shardID api.ShardID) (*api.CertificationRequest, string) {
-	mask := big.NewInt(1)
-	expected := big.NewInt(int64(shardID & 1))
-
+func createCommitmentForShard(t *testing.T, shardingCfg config.ShardingConfig) *api.CertificationRequest {
+	validator := signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{})
 	for i := 0; i < 1000; i++ {
-		c := testutil.CreateTestCertificationRequest(t, fmt.Sprintf("shard%d_%d_%d", shardID, i, time.Now().UnixNano()))
-		if new(big.Int).And(new(big.Int).SetBytes(c.StateID.Bytes()), mask).Cmp(expected) == 0 {
-			certificationRequest := c.ToAPI()
-			return certificationRequest, c.StateID.String()
+		c := testutil.CreateTestCertificationRequest(t, fmt.Sprintf("shard%d_%d_%d", shardingCfg.Child.ShardID, i, time.Now().UnixNano()))
+		if err := validator.ValidateShardID(c.StateID); err == nil {
+			return c.ToAPI()
 		}
 	}
 	t.Fatal("Failed to generate commitment for shard")
-	return nil, ""
+	return nil
+}
+
+func cfgForShard(shardID api.ShardID) config.ShardingConfig {
+	return config.ShardingConfig{
+		Mode:          config.ShardingModeChild,
+		ShardIDLength: 1,
+		Child: config.ChildConfig{
+			ShardID: shardID,
+		},
+	}
 }

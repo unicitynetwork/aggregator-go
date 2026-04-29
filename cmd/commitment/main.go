@@ -9,13 +9,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math/big"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 
+	"github.com/unicitynetwork/aggregator-go/internal/proofverify"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -67,112 +67,80 @@ func main() {
 		},
 	}
 
-	commitReq := generateCommitmentRequest()
+	certReq := generateCertificationRequest()
 	if *flagVerbose {
-		if payload, err := json.MarshalIndent(commitReq, "", "  "); err == nil {
-			logger.Printf("submit_commitment request:\n%s", payload)
+		if payload, err := json.MarshalIndent(certReq, "", "  "); err == nil {
+			logger.Printf("certification_request request:\n%s", payload)
 		}
 	}
 
-	logger.Printf("Submitting commitment to URL: %s", *flagURL)
+	logger.Printf("Submitting certification request to URL: %s", *flagURL)
 
-	submitResp, err := callJSONRPC(ctx, client, *flagURL, *flagAuth, "submit_commitment", commitReq)
+	submitResp, err := callJSONRPC(ctx, client, *flagURL, *flagAuth, "certification_request", certReq)
 	if err != nil {
-		logger.Fatalf("submit_commitment call failed: %v", err)
+		logger.Fatalf("certification_request call failed: %v", err)
 	}
 
 	if *flagVerbose {
 		if payload, err := json.MarshalIndent(submitResp, "", "  "); err == nil {
-			logger.Printf("submit_commitment response:\n%s", payload)
+			logger.Printf("certification_request response:\n%s", payload)
 		}
 	}
 
-	var submitResult api.SubmitCommitmentResponse
+	var submitResult api.CertificationResponse
 	if submitResp.Error != nil {
-		logger.Fatalf("submit_commitment returned error: %s (code %d)", submitResp.Error.Message, submitResp.Error.Code)
+		logger.Fatalf("certification_request returned error: %s (code %d)", submitResp.Error.Message, submitResp.Error.Code)
 	}
 	if err := json.Unmarshal(submitResp.Result, &submitResult); err != nil {
-		logger.Fatalf("failed to decode submit_commitment result: %v", err)
+		logger.Fatalf("failed to decode certification_request result: %v", err)
 	}
-	if submitResult.Status != "SUCCESS" {
-		logger.Fatalf("submit_commitment status was %q", submitResult.Status)
+	if submitResult.Status != "SUCCESS" && submitResult.Status != "STATE_ID_EXISTS" {
+		logger.Fatalf("certification_request status was %q", submitResult.Status)
 	}
-
-	// Verify and display the receipt if present
-	if submitResult.Receipt != nil {
-		logger.Printf("Receipt received:")
-		logger.Printf("  Algorithm: %s", submitResult.Receipt.Algorithm)
-		logger.Printf("  PublicKey: %s", submitResult.Receipt.PublicKey)
-		logger.Printf("  Signature: %s", submitResult.Receipt.Signature)
-		logger.Printf("  Request.Service: %s", submitResult.Receipt.Request.Service)
-		logger.Printf("  Request.Method: %s", submitResult.Receipt.Request.Method)
-		logger.Printf("  Request.RequestID: %s", submitResult.Receipt.Request.RequestID)
-
-		// Verify the receipt signature
-		requestBytes, err := json.Marshal(submitResult.Receipt.Request)
-		if err != nil {
-			logger.Printf("Warning: failed to marshal receipt request for verification: %v", err)
-		} else {
-			signingService := signing.NewSigningService()
-			valid, err := signingService.VerifyWithPublicKey(requestBytes, submitResult.Receipt.Signature, submitResult.Receipt.PublicKey)
-			if err != nil {
-				logger.Printf("Warning: receipt signature verification error: %v", err)
-			} else if valid {
-				logger.Printf("Receipt signature VERIFIED successfully!")
-			} else {
-				logger.Printf("Warning: receipt signature verification FAILED!")
-			}
-		}
-	} else {
-		logger.Printf("No receipt received (receipt was requested: %v)", *commitReq.Receipt)
-	}
-
-	logger.Printf("Commitment %s accepted. Polling for inclusion proof...", commitReq.RequestID)
-
-	path, err := commitReq.RequestID.GetPath()
-	if err != nil {
-		logger.Fatalf("failed to derive SMT path: %v", err)
-	}
+	logger.Printf("Certification request %s accepted. Polling for inclusion proof...", certReq.StateID)
 
 	submittedAt := time.Now()
-	inclusionProof, verification, attempts, err := waitForInclusionProof(ctx, client, commitReq.RequestID, path, logger)
+	inclusionProof, attempts, err := waitForInclusionProof(ctx, client, certReq, logger)
 	if err != nil {
 		logger.Fatalf("failed to retrieve inclusion proof after %d attempt(s): %v", attempts, err)
 	}
 
 	if *flagVerbose {
 		if payload, err := json.MarshalIndent(inclusionProof, "", "  "); err == nil {
-			logger.Printf("get_inclusion_proof response:\n%s", payload)
+			logger.Printf("get_inclusion_proof.v2 response:\n%s", payload)
 		}
 	}
 
-	logger.Printf("Proof verification result: pathValid=%t pathIncluded=%t overall=%t",
-		verification.PathValid, verification.PathIncluded, verification.Result)
+	if err := proofverify.VerifyInclusionProofLocal(inclusionProof.InclusionProof, certReq); err != nil {
+		logger.Fatalf("proof verification failed: %v", err)
+	}
+	logger.Printf("Proof verified successfully against block %d.", inclusionProof.BlockNumber)
 
 	elapsed := time.Since(submittedAt)
 	logger.Printf("Valid inclusion proof received in %s after %d attempt(s).", elapsed.Round(time.Millisecond), attempts)
 
-	logger.Printf("Commitment %s successfully submitted and verified.", commitReq.RequestID)
+	logger.Printf("Certification request %s successfully submitted and verified.", certReq.StateID)
 }
 
-func generateCommitmentRequest() *api.SubmitCommitmentRequest {
+func generateCertificationRequest() *api.CertificationRequest {
 	privateKey, err := btcec.NewPrivateKey()
 	if err != nil {
 		panic(fmt.Sprintf("failed to generate private key: %v", err))
 	}
 
 	publicKeyBytes := privateKey.PubKey().SerializeCompressed()
+	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKeyBytes)
 
 	stateData := make([]byte, 32)
 	if _, err := rand.Read(stateData); err != nil {
 		panic(fmt.Sprintf("failed to read random state bytes: %v", err))
 	}
 
-	stateHashImprint := signing.CreateDataHash(stateData)
+	sourceStateHash := signing.CreateDataHash(stateData)
 
-	requestID, err := api.CreateRequestID(publicKeyBytes, stateHashImprint)
+	stateID, err := api.CreateStateID(ownerPredicate, sourceStateHash)
 	if err != nil {
-		panic(fmt.Sprintf("failed to create request ID: %v", err))
+		panic(fmt.Sprintf("failed to create state ID: %v", err))
 	}
 
 	transactionData := make([]byte, 32)
@@ -180,25 +148,20 @@ func generateCommitmentRequest() *api.SubmitCommitmentRequest {
 		panic(fmt.Sprintf("failed to read random transaction bytes: %v", err))
 	}
 
-	transactionHashImprint := signing.CreateDataHash(transactionData)
-	transactionHashBytes := transactionHashImprint.DataBytes()
-
-	signature, err := signing.NewSigningService().SignHash(transactionHashBytes, privateKey.Serialize())
-	if err != nil {
-		panic(fmt.Sprintf("failed to sign transaction hash: %v", err))
+	transactionHash := signing.CreateDataHash(transactionData)
+	certData := api.CertificationData{
+		OwnerPredicate:  ownerPredicate,
+		SourceStateHash: sourceStateHash,
+		TransactionHash: transactionHash,
+	}
+	if err := signing.NewSigningService().SignCertData(&certData, privateKey.Serialize()); err != nil {
+		panic(fmt.Sprintf("failed to sign certification data: %v", err))
 	}
 
-	receipt := true
-	return &api.SubmitCommitmentRequest{
-		RequestID:       requestID,
-		TransactionHash: transactionHashImprint,
-		Authenticator: api.Authenticator{
-			Algorithm: "secp256k1",
-			PublicKey: publicKeyBytes,
-			Signature: signature,
-			StateHash: stateHashImprint,
-		},
-		Receipt: &receipt,
+	return &api.CertificationRequest{
+		StateID:               stateID,
+		CertificationData:     certData,
+		AggregateRequestCount: 1,
 	}
 }
 
@@ -219,10 +182,9 @@ func callJSONRPC(ctx context.Context, client *http.Client, url, authHeader, meth
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	/*if authHeader != "" {
-		req.Header.Set("Authorization", "supersecret")
-	}*/
-	req.Header.Set("Authorization", "Bearer supersecret")
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -238,7 +200,7 @@ func callJSONRPC(ctx context.Context, client *http.Client, url, authHeader, meth
 	return &rpcResp, nil
 }
 
-func waitForInclusionProof(ctx context.Context, client *http.Client, requestID api.RequestID, requestPath *big.Int, logger *log.Logger) (*api.GetInclusionProofResponseV2, *api.PathVerificationResult, int, error) {
+func waitForInclusionProof(ctx context.Context, client *http.Client, req *api.CertificationRequest, logger *log.Logger) (*api.GetInclusionProofResponseV2, int, error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(45 * time.Second)
@@ -249,65 +211,46 @@ func waitForInclusionProof(ctx context.Context, client *http.Client, requestID a
 		attempts++
 		select {
 		case <-ctx.Done():
-			return nil, nil, attempts, ctx.Err()
+			return nil, attempts, ctx.Err()
 		default:
 		}
 
-		proofResp, err := callJSONRPC(ctx, client, *flagURL, *flagAuth, "get_inclusion_proof", api.GetInclusionProofRequestV2{
-			StateID: requestID,
+		proofResp, err := callJSONRPC(ctx, client, *flagURL, *flagAuth, "get_inclusion_proof.v2", api.GetInclusionProofRequestV2{
+			StateID: req.StateID,
 		})
 		if err != nil {
-			logger.Printf("get_inclusion_proof attempt %d failed: %v", attempts, err)
+			logger.Printf("get_inclusion_proof.v2 attempt %d failed: %v", attempts, err)
 			time.Sleep(*flagPollInterval)
 			continue
 		}
 
 		if proofResp.Error != nil {
-			logger.Printf("get_inclusion_proof attempt %d returned error: %s (code %d)", attempts, proofResp.Error.Message, proofResp.Error.Code)
+			logger.Printf("get_inclusion_proof.v2 attempt %d returned error: %s (code %d)", attempts, proofResp.Error.Message, proofResp.Error.Code)
 			time.Sleep(*flagPollInterval)
 			continue
 		}
 
 		var payload api.GetInclusionProofResponseV2
 		if err := json.Unmarshal(proofResp.Result, &payload); err != nil {
-			logger.Printf("get_inclusion_proof attempt %d decode error: %v", attempts, err)
+			logger.Printf("get_inclusion_proof.v2 attempt %d decode error: %v", attempts, err)
 			time.Sleep(*flagPollInterval)
 			continue
 		}
 
-		if payload.InclusionProof == nil || payload.InclusionProof.MerkleTreePath == nil {
-			logger.Printf("get_inclusion_proof attempt %d: proof payload incomplete, retrying...", attempts)
+		if payload.InclusionProof == nil || len(payload.InclusionProof.UnicityCertificate) == 0 {
+			logger.Printf("get_inclusion_proof.v2 attempt %d: proof payload incomplete, retrying...", attempts)
 			time.Sleep(*flagPollInterval)
 			continue
 		}
 
-		result, err := verifyProof(&payload, requestPath)
-		if err != nil {
-			logger.Printf("get_inclusion_proof attempt %d verification error: %v", attempts, err)
+		if err := proofverify.VerifyInclusionProofLocal(payload.InclusionProof, req); err != nil {
+			logger.Printf("get_inclusion_proof.v2 attempt %d verification error: %v", attempts, err)
 			time.Sleep(*flagPollInterval)
 			continue
 		}
 
-		if result.PathIncluded {
-			return &payload, result, attempts, nil
-		}
-
-		logger.Printf("get_inclusion_proof attempt %d: proof returned but path not included yet (pathValid=%t). Waiting...",
-			attempts, result.PathValid)
-		time.Sleep(*flagPollInterval)
+		return &payload, attempts, nil
 	}
 
-	return nil, nil, attempts, fmt.Errorf("timed out waiting for inclusion proof for request %s", requestID)
-}
-
-func verifyProof(resp *api.GetInclusionProofResponseV2, path *big.Int) (*api.PathVerificationResult, error) {
-	if resp == nil || resp.InclusionProof == nil {
-		return nil, fmt.Errorf("inclusion proof payload was empty")
-	}
-
-	if resp.InclusionProof.MerkleTreePath == nil {
-		return nil, fmt.Errorf("merkle tree path missing from inclusion proof")
-	}
-
-	return resp.InclusionProof.MerkleTreePath.Verify(path)
+	return nil, attempts, fmt.Errorf("timed out waiting for inclusion proof for state ID %s", req.StateID)
 }

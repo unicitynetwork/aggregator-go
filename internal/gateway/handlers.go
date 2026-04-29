@@ -50,7 +50,9 @@ func (s *Server) parseCertificationRequest(params json.RawMessage) (*api.Certifi
 	return req, nil
 }
 
-// handleGetInclusionProofV2 handles the get_inclusion_proof.v2 method
+// handleGetInclusionProofV2 handles the get_inclusion_proof.v2 method.
+//
+// v2 requires stateId to be exactly 32 raw bytes with no algorithm prefix.
 func (s *Server) handleGetInclusionProofV2(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
 	var req api.GetInclusionProofRequestV2
 	if err := json.Unmarshal(params, &req); err != nil {
@@ -60,6 +62,11 @@ func (s *Server) handleGetInclusionProofV2(ctx context.Context, params json.RawM
 	// Validate required fields
 	if req.StateID == nil {
 		return nil, jsonrpc.NewValidationError("stateId is required")
+	}
+	if len(req.StateID) != api.StateTreeKeyLengthBytes {
+		return nil, jsonrpc.NewValidationError(fmt.Sprintf(
+			"stateId must be exactly %d bytes (v2 wire format), got %d",
+			api.StateTreeKeyLengthBytes, len(req.StateID)))
 	}
 
 	// Call service

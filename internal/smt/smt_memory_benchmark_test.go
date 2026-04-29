@@ -76,7 +76,7 @@ func BenchmarkSMTMemoryUsageRealistic(b *testing.B) {
 			runtime.ReadMemStats(&memBefore)
 
 			// Create SMT with realistic key length (16 bits shard prefix + 256 bits hash)
-			smtTree := NewSparseMerkleTree(api.SHA256, 16+256)
+			smtTree := NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
 
 			// Generate realistic commitments and add as leaves
 			leaves := make([]*Leaf, size)
@@ -141,7 +141,7 @@ func BenchmarkSMTOperationsWithLoad(b *testing.B) {
 	// Pre-populate with 100k leaves
 	const preloadSize = 100_000
 
-	smtTree := NewSparseMerkleTree(api.SHA256, 16+256)
+	smtTree := NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
 	leaves := make([]*Leaf, preloadSize)
 	paths := make([]*big.Int, preloadSize)
 

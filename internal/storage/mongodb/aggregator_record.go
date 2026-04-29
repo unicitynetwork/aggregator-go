@@ -10,7 +10,6 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
-	modelsV1 "github.com/unicitynetwork/aggregator-go/internal/models/v1"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -67,17 +66,17 @@ func (ars *AggregatorRecordStorage) StoreBatch(ctx context.Context, records []*m
 	return nil
 }
 
-// GetExistingRequestIDs returns which of the given request IDs already exist in the database.
+// GetExistingStateIDs returns which of the given state IDs already exist in the database.
 // Used to filter duplicates before inserting.
-func (ars *AggregatorRecordStorage) GetExistingRequestIDs(ctx context.Context, requestIDs []string) (map[string]bool, error) {
-	if len(requestIDs) == 0 {
+func (ars *AggregatorRecordStorage) GetExistingStateIDs(ctx context.Context, stateIDs []string) (map[string]bool, error) {
+	if len(stateIDs) == 0 {
 		return make(map[string]bool), nil
 	}
 
-	cursor, err := ars.collection.Find(ctx, bson.M{"requestId": bson.M{"$in": requestIDs}},
-		options.Find().SetProjection(bson.M{"requestId": 1}))
+	cursor, err := ars.collection.Find(ctx, bson.M{"stateId": bson.M{"$in": stateIDs}},
+		options.Find().SetProjection(bson.M{"stateId": 1}))
 	if err != nil {
-		return nil, fmt.Errorf("failed to query existing request IDs: %w", err)
+		return nil, fmt.Errorf("failed to query existing state IDs: %w", err)
 	}
 	defer cursor.Close(ctx)
 
@@ -85,8 +84,8 @@ func (ars *AggregatorRecordStorage) GetExistingRequestIDs(ctx context.Context, r
 	for cursor.Next(ctx) {
 		var doc bson.M
 		if err := cursor.Decode(&doc); err == nil {
-			if reqID, ok := doc["requestId"].(string); ok {
-				existing[reqID] = true
+			if stateID, ok := doc["stateId"].(string); ok {
+				existing[stateID] = true
 			}
 		}
 	}
@@ -96,7 +95,7 @@ func (ars *AggregatorRecordStorage) GetExistingRequestIDs(ctx context.Context, r
 // GetByStateID retrieves an aggregator record by state ID
 func (ars *AggregatorRecordStorage) GetByStateID(ctx context.Context, stateID api.StateID) (*models.AggregatorRecord, error) {
 	var raw bson.Raw
-	filter := bson.M{"requestId": stateID.String()}
+	filter := bson.M{"stateId": stateID.String()}
 	if err := ars.collection.FindOne(ctx, filter).Decode(&raw); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
@@ -147,45 +146,15 @@ func (ars *AggregatorRecordStorage) decodeRecord(raw bson.Raw) (*models.Aggregat
 	}
 
 	switch probe.Version {
-	case 0: // data stored before commitment-v2
-		var bsonV1 modelsV1.AggregatorRecordV1BSON
-		if err := bson.Unmarshal(raw, &bsonV1); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal v1 aggregator record: %w", err)
-		}
-		aggregatorRecordV1, err := bsonV1.FromBSON()
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert aggregator record v1 bson to domain: %w", err)
-		}
-		return aggregatorRecordFromV1(aggregatorRecordV1)
-	case 1, 2:
-		// version 1 - data stored after commitment-v2 through v1 api
-		// version 2 - data stored after commitment-v2 through v2 api
+	case 2:
 		var v2 models.AggregatorRecordBSON
 		if err := bson.Unmarshal(raw, &v2); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal v2 aggregator record: %w", err)
+			return nil, fmt.Errorf("failed to unmarshal aggregator record: %w", err)
 		}
 		return v2.FromBSON()
 	default:
 		return nil, fmt.Errorf("unsupported aggregator record version: %d", probe.Version)
 	}
-}
-
-func aggregatorRecordFromV1(v1 *modelsV1.AggregatorRecordV1) (*models.AggregatorRecord, error) {
-	return &models.AggregatorRecord{
-		Version: 1,
-		StateID: v1.RequestID,
-		CertificationData: models.CertificationData{
-			OwnerPredicate:  api.NewPayToPublicKeyPredicate(v1.Authenticator.PublicKey),
-			SourceStateHash: v1.Authenticator.StateHash,
-			TransactionHash: v1.TransactionHash,
-			Witness:         v1.Authenticator.Signature,
-		},
-		AggregateRequestCount: v1.AggregateRequestCount,
-		BlockNumber:           v1.BlockNumber,
-		LeafIndex:             v1.LeafIndex,
-		CreatedAt:             v1.CreatedAt,
-		FinalizedAt:           v1.FinalizedAt,
-	}, nil
 }
 
 // Count returns the total number of records
@@ -201,7 +170,7 @@ func (ars *AggregatorRecordStorage) Count(ctx context.Context) (int64, error) {
 func (ars *AggregatorRecordStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
 		{
-			Keys:    bson.D{{Key: "requestId", Value: 1}},
+			Keys:    bson.D{{Key: "stateId", Value: 1}},
 			Options: options.Index().SetUnique(true),
 		},
 		{

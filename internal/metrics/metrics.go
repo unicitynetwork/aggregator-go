@@ -15,14 +15,11 @@ import (
 // Any method name not in this set is normalized to "unknown" to prevent
 // unbounded label cardinality from arbitrary client input.
 var knownMethods = map[string]struct{}{
-	"submit_commitment":      {},
 	"certification_request":  {},
-	"get_inclusion_proof":    {},
 	"get_inclusion_proof.v2": {},
 	"get_no_deletion_proof":  {},
 	"get_block_height":       {},
 	"get_block":              {},
-	"get_block_commitments":  {},
 	"get_block_records":      {},
 	"submit_shard_root":      {},
 	"get_shard_proof":        {},

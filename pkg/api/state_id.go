@@ -8,13 +8,19 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-// ImprintV2 is the unified type for both V1 (imprints with algorithm prefix) and V2 (raw bytes)
+// ImprintV2 stores hash-like identifiers used by the public API.
 type ImprintV2 HexBytes
 
 type StateID = ImprintV2
 type SourceStateHash = ImprintV2
 type TransactionHash = ImprintV2
-type RequestID = ImprintV2
+
+const (
+	// StateTreeKeyLengthBits is the v2 SMT key size.
+	// The key is the raw 32-byte hash value (no per-key algorithm prefix).
+	StateTreeKeyLengthBits  = 256
+	StateTreeKeyLengthBytes = StateTreeKeyLengthBits / 8
+)
 
 func NewImprintV2(s string) (ImprintV2, error) {
 	b, err := NewHexBytesFromString(s)
@@ -37,34 +43,86 @@ func (r ImprintV2) String() string {
 	return (HexBytes)(r).String()
 }
 
-func (r ImprintV2) IsV1() bool {
-	// V1 imprints are 34 bytes (2 prefix + 32 hash)
-	// V2 are 32 bytes.
-	return len(r) == 34
-}
-
 func (r ImprintV2) GetPath() (*big.Int, error) {
-	// pad v2 imprints with two zero bytes to maintain consistency in smt
-	var path []byte
-	if len(r) == 32 {
-		path = make([]byte, 34)
-		copy(path[2:], r)
-	} else {
-		path = r[:]
+	key, err := r.GetTreeKey()
+	if err != nil {
+		return nil, err
 	}
-
-	// Converts StateID hex string to a big.Int for use as an SMT path.
-	// Prefixes with "0x01" to preserve leading zero bits in the original hex string,
-	// ensuring consistent path representation in the Sparse Merkle Tree.
-	b := append([]byte{0x01}, path...)
-	return new(big.Int).SetBytes(b), nil
+	return FixedBytesToPath(key, StateTreeKeyLengthBits)
 }
 
-func (r ImprintV2) Algorithm() []byte {
-	if r.IsV1() {
-		return r[0:2]
+// GetTreeKey returns the canonical SMT key bytes (32 bytes, no algorithm prefix).
+func (r ImprintV2) GetTreeKey() ([]byte, error) {
+	key := r.DataBytes()
+	if len(key) != StateTreeKeyLengthBytes {
+		return nil, fmt.Errorf("invalid imprint length for SMT key: expected %d bytes key data, got %d", StateTreeKeyLengthBytes, len(key))
 	}
-	return []byte{0, 0}
+	return append([]byte(nil), key...), nil
+}
+
+// PathToFixedBytes converts a sentinel-prefixed SMT path into fixed-width key bytes.
+// Byte order follows the v2 SMT bit layout:
+// key bit d is bit (d%8) of key[d/8] (LSB-first across bytes).
+func PathToFixedBytes(path *big.Int, keyLengthBits int) ([]byte, error) {
+	if keyLengthBits <= 0 {
+		return nil, fmt.Errorf("invalid key length: %d", keyLengthBits)
+	}
+	if path == nil || path.Sign() <= 0 {
+		return nil, fmt.Errorf("invalid path: must be positive")
+	}
+	if path.BitLen()-1 != keyLengthBits {
+		return nil, fmt.Errorf("invalid path length: expected %d bits, got %d", keyLengthBits, path.BitLen()-1)
+	}
+
+	keyLengthBytes := (keyLengthBits + 7) / 8
+	keyInt := new(big.Int).Set(path)
+	// Clear sentinel bit (the highest bit at index keyLengthBits).
+	keyInt.SetBit(keyInt, keyLengthBits, 0)
+
+	beKey := keyInt.Bytes()
+	if len(beKey) > keyLengthBytes {
+		return nil, fmt.Errorf("path bytes too long: expected at most %d bytes, got %d", keyLengthBytes, len(beKey))
+	}
+
+	bePadded := make([]byte, keyLengthBytes)
+	copy(bePadded[keyLengthBytes-len(beKey):], beKey)
+
+	out := make([]byte, keyLengthBytes)
+	for i := range out {
+		// Convert from big-endian integer bytes to LSB-first SMT key byte order.
+		out[i] = bePadded[keyLengthBytes-1-i]
+	}
+	return out, nil
+}
+
+// FixedBytesToPath converts fixed-width SMT key bytes into sentinel-prefixed path form.
+func FixedBytesToPath(key []byte, keyLengthBits int) (*big.Int, error) {
+	if keyLengthBits <= 0 {
+		return nil, fmt.Errorf("invalid key length: %d", keyLengthBits)
+	}
+	keyLengthBytes := (keyLengthBits + 7) / 8
+	if len(key) != keyLengthBytes {
+		return nil, fmt.Errorf("invalid key length in bytes: expected %d, got %d", keyLengthBytes, len(key))
+	}
+
+	// For non-byte-aligned keys, ensure unused high bits are zero in the last
+	// (highest-index) byte under LSB-first key-byte ordering.
+	if rem := keyLengthBits % 8; rem != 0 {
+		mask := byte(0xFF << rem)
+		if key[keyLengthBytes-1]&mask != 0 {
+			return nil, fmt.Errorf("invalid key: unused high bits must be zero")
+		}
+	}
+
+	// Convert from LSB-first SMT key byte order to big-endian integer bytes.
+	be := make([]byte, keyLengthBytes)
+	for i := range be {
+		be[i] = key[keyLengthBytes-1-i]
+	}
+
+	path := new(big.Int).SetBytes(be)
+	path.SetBit(path, keyLengthBits, 1)
+	return path, nil
 }
 
 func (r ImprintV2) Imprint() []byte {
@@ -76,10 +134,7 @@ func (r ImprintV2) Bytes() []byte {
 }
 
 func (r ImprintV2) DataBytes() []byte {
-	if r.IsV1() {
-		return r[2:]
-	}
-	return r
+	return append([]byte(nil), r...)
 }
 
 func (r ImprintV2) MarshalJSON() ([]byte, error) {

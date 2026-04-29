@@ -77,11 +77,13 @@ type leafAddResult struct {
 	rejected           []interfaces.CertificationRequestAck
 }
 
-// ProposeBlock creates and proposes a new block with the given data
-func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigInt, rootHash string) error {
+// ProposeBlock creates and proposes a new block with the given data.
+// rootHash is the raw 32-byte SMT root (no algorithm-id prefix) — the
+// block, UC.IR.h and V2 proof wire all bind against this raw form.
+func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigInt, rootHash api.HexBytes) error {
 	rm.logger.WithContext(ctx).Info("proposeBlock called",
 		"blockNumber", blockNumber.String(),
-		"rootHash", rootHash)
+		"rootHash", rootHash.String())
 
 	rm.roundMutex.Lock()
 	if rm.currentRound != nil {
@@ -94,7 +96,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 
 	rm.logger.WithContext(ctx).Info("Creating block proposal",
 		"blockNumber", blockNumber.String(),
-		"rootHash", rootHash)
+		"rootHash", rootHash.String())
 
 	// Get parent block hash
 	var parentHash api.HexBytes
@@ -114,23 +116,16 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		}
 	}
 
-	// Create block (simplified for now)
-	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
-	if err != nil {
-		return fmt.Errorf("failed to parse root hash %s: %w", rootHash, err)
-	}
-
 	switch rm.config.Sharding.Mode {
-	case config.ShardingModeStandalone:
+	case config.ShardingModeStandalone, config.ShardingModeBFTShard:
 		block := models.NewBlock(
 			blockNumber,
 			rm.config.Chain.ID,
 			0,
 			rm.config.Chain.Version,
 			rm.config.Chain.ForkID,
-			rootHashBytes,
+			rootHash,
 			parentHash,
-			nil,
 			nil,
 		)
 		rm.roundMutex.RLock()
@@ -151,22 +146,16 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			"blockNumber", blockNumber.String())
 		return nil
 	case config.ShardingModeChild:
-		rm.logger.WithContext(ctx).Info("Submitting root hash to parent shard", "rootHash", rootHash)
+		rm.logger.WithContext(ctx).Info("Submitting root hash to parent shard", "rootHash", rootHash.String())
 
-		// Strip algorithm prefix (first 2 bytes) before sending to parent
-		// Parent SMT stores raw 32-byte hashes, not the full 34-byte format with algorithm ID
-		// This is required for JoinPaths to work correctly when combining child and parent proofs
-		if len(rootHashBytes) < 2 {
-			return fmt.Errorf("root hash too short: expected at least 2 bytes for algorithm prefix, got %d", len(rootHashBytes))
-		}
-		rootHashRaw := rootHashBytes[2:] // Remove algorithm identifier
-		if len(rootHashRaw) != 32 {
-			return fmt.Errorf("child root hash has invalid length after stripping prefix: expected 32 bytes, got %d", len(rootHashRaw))
+		if len(rootHash) != api.StateTreeKeyLengthBytes {
+			return fmt.Errorf("child root hash has invalid length: expected %d bytes, got %d",
+				api.StateTreeKeyLengthBytes, len(rootHash))
 		}
 
 		request := &api.SubmitShardRootRequest{
 			ShardID:  rm.config.Sharding.Child.ShardID,
-			RootHash: rootHashRaw,
+			RootHash: rootHash,
 		}
 		submitStart := time.Now()
 		if err := rm.submitShardRootWithRetry(ctx, request); err != nil {
@@ -175,22 +164,23 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		submissionDuration := time.Since(submitStart)
 		metrics.ParentRootSubmissionDuration.Observe(submissionDuration.Seconds())
 		rm.logger.WithContext(ctx).Info("Root hash submitted to parent, polling for inclusion proof...",
-			"rootHash", rootHashRaw.String(),
+			"rootHash", rootHash.String(),
 			"submissionDuration", submissionDuration)
 
 		proofWaitStart := time.Now()
 		var (
 			proof    *api.RootShardInclusionProof
 			parentUC *types.UnicityCertificate
+			err      error
 		)
 		for {
-			proof, parentUC, err = rm.pollForParentProof(ctx, rootHashRaw.String())
+			proof, parentUC, err = rm.pollForParentProof(ctx, rootHash)
 			if err == nil {
 				break
 			}
 			if errors.Is(err, ErrParentProofPollTimeout) {
 				rm.logger.WithContext(ctx).Warn("Parent shard proof poll timed out, continuing to poll",
-					"rootHash", rootHashRaw.String(),
+					"rootHash", rootHash.String(),
 					"timeout", rm.config.Sharding.Child.ParentPollTimeout)
 				continue
 			}
@@ -198,7 +188,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		}
 		proofWait := time.Since(proofWaitStart)
 		rm.logger.WithContext(ctx).Info("Parent shard proof received",
-			"rootHash", rootHashRaw.String(),
+			"rootHash", rootHash.String(),
 			"proofWait", proofWait,
 			"submissionToProof", submissionDuration+proofWait)
 		rm.roundMutex.Lock()
@@ -208,16 +198,21 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		}
 		rm.roundMutex.Unlock()
 
-		block := models.NewBlock(
+		if proof.ParentFragment == nil {
+			return fmt.Errorf("parent shard proof missing native parent fragment")
+		}
+
+		block := models.NewChildBlock(
 			blockNumber,
 			rm.config.Chain.ID,
 			request.ShardID,
 			rm.config.Chain.Version,
 			rm.config.Chain.ForkID,
-			rootHashBytes,
+			rootHash,
 			parentHash,
 			proof.UnicityCertificate,
-			proof.MerkleTreePath,
+			proof.ParentFragment,
+			proof.BlockNumber,
 		)
 		if err := rm.FinalizeBlockWithRetry(ctx, block); err != nil {
 			return fmt.Errorf("failed to finalize block after retries: %w", err)
@@ -259,7 +254,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 	}
 }
 
-func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string) (*api.RootShardInclusionProof, *types.UnicityCertificate, error) {
+func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash api.HexBytes) (*api.RootShardInclusionProof, *types.UnicityCertificate, error) {
 	pollingCtx, cancel := context.WithTimeout(ctx, rm.config.Sharding.Child.ParentPollTimeout)
 	defer cancel()
 
@@ -275,27 +270,27 @@ func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string)
 			}
 			metrics.ParentProofErrorsTotal.Inc()
 			rm.logger.WithContext(ctx).Warn("Timed out waiting for parent shard inclusion proof",
-				"rootHash", rootHash,
+				"rootHash", rootHash.String(),
 				"pollDuration", time.Since(pollStart))
-			return nil, nil, fmt.Errorf("%w: %s", ErrParentProofPollTimeout, rootHash)
+			return nil, nil, fmt.Errorf("%w: %s", ErrParentProofPollTimeout, rootHash.String())
 		case <-ticker.C:
 			request := &api.GetShardProofRequest{ShardID: rm.config.Sharding.Child.ShardID}
 			proof, err := rm.rootClient.GetShardProof(pollingCtx, request)
 			if err != nil {
 				metrics.ParentProofErrorsTotal.Inc()
 				rm.logger.WithContext(ctx).Warn("Failed to fetch parent shard inclusion proof, retrying",
-					"rootHash", rootHash,
+					"rootHash", rootHash.String(),
 					"error", err.Error())
 				continue
 			}
-			if proof == nil || !proof.IsValid(rootHash) {
+			if proof == nil || !proof.IsValid(rm.config.Sharding.Child.ShardID, rm.config.Sharding.ShardIDLength, rootHash) {
 				continue
 			}
 
 			parentUC, err := decodeUnicityCertificate(proof.UnicityCertificate)
 			if err != nil {
 				rm.logger.WithContext(ctx).Warn("Failed to decode parent shard proof UC, retrying",
-					"rootHash", rootHash,
+					"rootHash", rootHash.String(),
 					"error", err.Error())
 				continue
 			}
@@ -303,7 +298,7 @@ func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string)
 			lastParentRound := rm.lastAcceptedParentUC()
 			if parentUC.GetRoundNumber() <= lastParentRound {
 				rm.logger.WithContext(ctx).Debug("Ignoring stale parent shard proof",
-					"rootHash", rootHash,
+					"rootHash", rootHash.String(),
 					"proofParentRound", parentUC.GetRoundNumber(),
 					"lastAcceptedParentRound", lastParentRound)
 				continue
@@ -393,6 +388,10 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 
 // FinalizeBlock creates and persists a new block with the given data
 func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) error {
+	if err := rm.validateBlockForMode(block); err != nil {
+		return err
+	}
+
 	rm.logger.WithContext(ctx).Info("FinalizeBlock called",
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String(),
@@ -424,13 +423,13 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	rm.roundMutex.Unlock()
 
 	commitmentCount = len(pendingCommitments)
-	requestIds := make([]api.StateID, commitmentCount)
+	stateIDs := make([]api.StateID, commitmentCount)
 	ackEntries := make([]interfaces.CertificationRequestAck, commitmentCount)
 	var proofTimes []time.Duration
 
 	now := time.Now()
 	for i, commitment := range pendingCommitments {
-		requestIds[i] = commitment.StateID
+		stateIDs[i] = commitment.StateID
 		ackEntries[i] = interfaces.CertificationRequestAck{StateID: commitment.StateID, StreamID: commitment.StreamID}
 
 		if commitment.CreatedAt != nil {
@@ -443,11 +442,14 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	}
 
 	persistDataStart = time.Now()
-	smtNodes := rm.convertLeavesToNodes(pendingLeaves)
+	smtNodes, err := rm.convertLeavesToNodes(pendingLeaves)
+	if err != nil {
+		return fmt.Errorf("failed to convert leaves to storage nodes: %w", err)
+	}
 	records := rm.convertCommitmentsToRecords(pendingCommitments, block.Index)
 
 	block.Finalized = false
-	if err := rm.storeBlockAndRecords(ctx, block, requestIds); err != nil {
+	if err := rm.storeBlockAndRecords(ctx, block, stateIDs); err != nil {
 		if !errors.Is(err, interfaces.ErrDuplicateKey) {
 			return fmt.Errorf("failed to store block and records: %w", err)
 		}
@@ -486,7 +488,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	rm.roundMutex.Lock()
 	if rm.currentRound != nil {
 		rm.currentRound.Block = block
-		rm.currentRound.PendingRootHash = ""
+		rm.currentRound.PendingRootHash = nil
 		rm.currentRound.PendingLeaves = nil
 		rm.currentRound.PendingCommitments = nil
 		rm.currentRound.Snapshot = nil
@@ -590,20 +592,39 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	return nil
 }
 
+func (rm *RoundManager) validateBlockForMode(block *models.Block) error {
+	if block == nil {
+		return errors.New("block is nil")
+	}
+	if rm.config.Sharding.Mode.IsChild() {
+		if block.ParentFragment == nil {
+			return errors.New("child-mode block missing parent fragment")
+		}
+		if block.ParentBlockNumber == 0 {
+			return errors.New("child-mode block missing parent block number")
+		}
+	}
+	return nil
+}
+
 // convertLeavesToNodes converts SMT leaves to storage models
-func (rm *RoundManager) convertLeavesToNodes(leaves []*smt.Leaf) []*models.SmtNode {
+func (rm *RoundManager) convertLeavesToNodes(leaves []*smt.Leaf) ([]*models.SmtNode, error) {
 	if len(leaves) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	smtNodes := make([]*models.SmtNode, len(leaves))
-	for i, leaf := range leaves {
-		keyBytes := leaf.Path.Bytes()
+	keyLength := rm.smt.GetKeyLength()
+	smtNodes := make([]*models.SmtNode, 0, len(leaves))
+	for _, leaf := range leaves {
+		keyBytes, err := api.PathToFixedBytes(leaf.Path, keyLength)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert leaf path %s to SMT storage key: %w", leaf.Path.String(), err)
+		}
 		key := api.NewHexBytes(keyBytes)
 		value := api.NewHexBytes(leaf.Value)
-		smtNodes[i] = models.NewSmtNode(key, value)
+		smtNodes = append(smtNodes, models.NewSmtNode(key, value))
 	}
-	return smtNodes
+	return smtNodes, nil
 }
 
 // convertCommitmentsToRecords converts commitments to aggregator records
@@ -623,12 +644,12 @@ func (rm *RoundManager) convertCommitmentsToRecords(commitments []*models.Certif
 // executeBlockTransaction executes the block finalization transaction.
 // storeBlockAndRecords stores the block and block records in a mini-transaction.
 // The block is stored with finalized=false.
-func (rm *RoundManager) storeBlockAndRecords(ctx context.Context, block *models.Block, requestIds []api.StateID) error {
+func (rm *RoundManager) storeBlockAndRecords(ctx context.Context, block *models.Block, stateIDs []api.StateID) error {
 	return rm.storage.WithTransaction(ctx, func(txCtx context.Context) error {
 		if err := rm.storage.BlockStorage().Store(txCtx, block); err != nil {
 			return fmt.Errorf("failed to store block: %w", err)
 		}
-		if err := rm.storage.BlockRecordsStorage().Store(txCtx, models.NewBlockRecords(block.Index, requestIds)); err != nil {
+		if err := rm.storage.BlockRecordsStorage().Store(txCtx, models.NewBlockRecords(block.Index, stateIDs)); err != nil {
 			return fmt.Errorf("failed to store block records: %w", err)
 		}
 		return nil

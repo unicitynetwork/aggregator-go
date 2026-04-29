@@ -1,6 +1,7 @@
 package round
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -295,12 +296,7 @@ func (prm *ParentRoundManager) processRound(ctx context.Context, round *ParentRo
 
 	var parentRootHash api.HexBytes
 	if len(round.ProcessedShardUpdates) == 0 {
-		rootHashHex := round.Snapshot.GetRootHash()
-		parsedRoot, err := api.NewHexBytesFromString(rootHashHex)
-		if err != nil {
-			return fmt.Errorf("failed to parse parent SMT root hash %q: %w", rootHashHex, err)
-		}
-		parentRootHash = parsedRoot
+		parentRootHash = round.Snapshot.GetRootHashRaw()
 		prm.logger.WithContext(ctx).Info("Empty parent round, using current SMT root hash",
 			"rootHash", parentRootHash.String())
 	} else {
@@ -313,18 +309,13 @@ func (prm *ParentRoundManager) processRound(ctx context.Context, round *ParentRo
 		}
 
 		smtStart := time.Now()
-		rootHashStr, err := round.Snapshot.AddLeaves(leaves)
-		metrics.SMTAddLeavesDuration.Observe(time.Since(smtStart).Seconds())
-		if err != nil {
+		if _, err := round.Snapshot.AddLeaves(leaves); err != nil {
+			metrics.SMTAddLeavesDuration.Observe(time.Since(smtStart).Seconds())
 			return fmt.Errorf("failed to add shard leaves to parent SMT snapshot: %w", err)
 		}
+		metrics.SMTAddLeavesDuration.Observe(time.Since(smtStart).Seconds())
 
-		parsedRoot, err := api.NewHexBytesFromString(rootHashStr)
-		if err != nil {
-			return fmt.Errorf("failed to parse updated parent SMT root hash %q: %w", rootHashStr, err)
-		}
-
-		parentRootHash = parsedRoot
+		parentRootHash = round.Snapshot.GetRootHashRaw()
 		prm.logger.WithContext(ctx).Info("Added shard updates to parent SMT snapshot",
 			"shardCount", len(round.ProcessedShardUpdates),
 			"newRootHash", parentRootHash.String())
@@ -353,7 +344,6 @@ func (prm *ParentRoundManager) processRound(ctx context.Context, round *ParentRo
 		prm.config.Chain.ForkID,
 		parentRootHash,
 		previousBlockHash,
-		nil,
 		nil,
 	)
 
@@ -639,22 +629,23 @@ func (prm *ParentRoundManager) reconstructParentSMT(ctx context.Context) error {
 
 		prm.logger.WithContext(ctx).Info("Successfully reconstructed parent SMT",
 			"leafCount", len(leaves),
-			"rootHash", prm.parentSMT.GetRootHash())
+			"rootHash", api.HexBytes(prm.parentSMT.GetRootHashRaw()).String())
 	}
 
-	// Verify reconstructed root hash matches latest block (safety check)
+	// Verify reconstructed root hash matches latest block (safety check).
+	// Both sides are raw 32-byte roots (matching UC.IR.h / V2 wire format).
 	latestBlock, err := prm.storage.BlockStorage().GetLatest(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get latest block for verification: %w", err)
 	}
 	if latestBlock != nil {
-		reconstructedHash := prm.parentSMT.GetRootHash()
-		expectedHash := latestBlock.RootHash.String()
-		if reconstructedHash != expectedHash {
-			return fmt.Errorf("parent SMT reconstruction failed: root hash mismatch (got %s, expected %s)", reconstructedHash, expectedHash)
+		reconstructedHash := api.HexBytes(prm.parentSMT.GetRootHashRaw())
+		if !bytes.Equal(reconstructedHash, latestBlock.RootHash) {
+			return fmt.Errorf("parent SMT reconstruction failed: root hash mismatch (got %s, expected %s)",
+				reconstructedHash.String(), latestBlock.RootHash.String())
 		}
 		prm.logger.WithContext(ctx).Info("Parent SMT root hash verification passed",
-			"rootHash", reconstructedHash,
+			"rootHash", reconstructedHash.String(),
 			"blockNumber", latestBlock.Index.String())
 	}
 

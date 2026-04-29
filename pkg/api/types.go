@@ -4,7 +4,7 @@ package api
 
 import (
 	"bytes"
-	"encoding/hex"
+	"crypto"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,17 +68,18 @@ type AggregatorRecord struct {
 
 // Block represents a blockchain block
 type Block struct {
-	Index                *BigInt         `json:"index"`
-	ChainID              string          `json:"chainId"`
-	ShardID              ShardID         `json:"shardId"`
-	Version              string          `json:"version"`
-	ForkID               string          `json:"forkId"`
-	RootHash             HexBytes        `json:"rootHash"`
-	PreviousBlockHash    HexBytes        `json:"previousBlockHash"`
-	NoDeletionProofHash  HexBytes        `json:"noDeletionProofHash"`
-	CreatedAt            *Timestamp      `json:"createdAt"`
-	UnicityCertificate   HexBytes        `json:"unicityCertificate"`
-	ParentMerkleTreePath *MerkleTreePath `json:"parentMerkleTreePath,omitempty"` // child mode only
+	Index               *BigInt                  `json:"index"`
+	ChainID             string                   `json:"chainId"`
+	ShardID             ShardID                  `json:"shardId"`
+	Version             string                   `json:"version"`
+	ForkID              string                   `json:"forkId"`
+	RootHash            HexBytes                 `json:"rootHash"`
+	PreviousBlockHash   HexBytes                 `json:"previousBlockHash"`
+	NoDeletionProofHash HexBytes                 `json:"noDeletionProofHash"`
+	CreatedAt           *Timestamp               `json:"createdAt"`
+	UnicityCertificate  HexBytes                 `json:"unicityCertificate"`
+	ParentFragment      *ParentInclusionFragment `json:"parentFragment,omitempty"`    // child mode only
+	ParentBlockNumber   uint64                   `json:"parentBlockNumber,omitempty"` // child mode only
 }
 
 // NoDeletionProof represents a no-deletion proof
@@ -109,16 +110,97 @@ type GetInclusionProofResponseV2 struct {
 	InclusionProof *InclusionProofV2 `json:"inclusionProof"`
 }
 
+// InclusionProofV2 is the canonical v2 inclusion proof payload.
+//
+// Wire form: CBOR tag InclusionProofTag wrapping a 4-element toarray:
+//
+//	#InclusionProofTag ([
+//	  version: uint,
+//	  certificationDataOrNull,
+//	  certificateBytes: bstr,   // InclusionCert or ExclusionCert raw wire form
+//	  unicityCertificate: raw CBOR
+//	])
+//
+// Discriminator:
+//   - CertificationData != nil → inclusion. CertificateBytes is an
+//     InclusionCert wire payload. The SMT key comes from the outer RPC
+//     request (stateId); the leaf value is CertificationData.TransactionHash.
+//   - CertificationData == nil → non-inclusion. CertificateBytes is an
+//     ExclusionCert wire payload. Non-inclusion verification is not yet
+//     implemented in Go.
+//
+// The expected SMT root is ALWAYS taken from UC.IR.h (input record hash
+// of the embedded Unicity Certificate). No root field appears here.
+//
+// See docs/inclusion-proof-wire.md for the frozen specification.
 type InclusionProofV2 struct {
 	_                  struct{}           `cbor:",toarray"`
+	Version            types.Version      `json:"version"`
 	CertificationData  *CertificationData `json:"certificationData"`
-	MerkleTreePath     *MerkleTreePath    `json:"merkleTreePath"`
+	CertificateBytes   HexBytes           `json:"certificateBytes"`
 	UnicityCertificate types.RawCBOR      `json:"unicityCertificate"`
 }
 
+func (p *InclusionProofV2) GetVersion() types.Version {
+	if p != nil && p.Version > 0 {
+		return p.Version
+	}
+	return 1
+}
+
+func (p *InclusionProofV2) MarshalCBOR() ([]byte, error) {
+	type alias InclusionProofV2
+	cp := *p
+	if cp.Version == 0 {
+		cp.Version = 1
+	}
+	return types.Cbor.MarshalTaggedValue(InclusionProofTag, (*alias)(&cp))
+}
+
+func (p *InclusionProofV2) UnmarshalCBOR(data []byte) error {
+	type alias InclusionProofV2
+	return types.UnmarshalTaggedVersioned(InclusionProofTag, 1, data, (*alias)(p), p)
+}
+
+// ParentInclusionFragment is the internal parent-tree proof fragment stored on
+// finalized child blocks and returned by get_shard_proof. CertificateBytes
+// uses the same bitmap+sibling wire shape as InclusionCert; ShardLeafValue is
+// the parent leaf value proven by that fragment and must equal the child SMT
+// root before later composition.
+type ParentInclusionFragment struct {
+	CertificateBytes HexBytes `json:"certificateBytes"`
+	ShardLeafValue   HexBytes `json:"shardLeafValue"`
+}
+
+func (f *ParentInclusionFragment) Verify(shardID ShardID, keyLength int, expectedLeafValue, expectedRoot []byte, algo HashAlgorithm) error {
+	if f == nil {
+		return errors.New("missing parent fragment")
+	}
+	if len(f.ShardLeafValue) != SiblingSize {
+		return fmt.Errorf("invalid parent fragment shard leaf value length: got %d, want %d", len(f.ShardLeafValue), SiblingSize)
+	}
+	if !bytes.Equal(f.ShardLeafValue, expectedLeafValue) {
+		return errors.New("parent fragment shard leaf value does not match expected child root")
+	}
+
+	var cert InclusionCert
+	if err := cert.UnmarshalBinary(f.CertificateBytes); err != nil {
+		return fmt.Errorf("failed to decode parent fragment cert: %w", err)
+	}
+
+	path := big.NewInt(int64(shardID))
+	key, err := PathToFixedBytes(path, keyLength)
+	if err != nil {
+		return fmt.Errorf("failed to derive parent fragment key: %w", err)
+	}
+
+	return verifyBitmapPath(&cert.Bitmap, cert.Siblings, key, f.ShardLeafValue, expectedRoot, algo)
+}
+
 type RootShardInclusionProof struct {
-	MerkleTreePath     *MerkleTreePath `json:"merkleTreePath"`
-	UnicityCertificate HexBytes        `json:"unicityCertificate"`
+	ParentFragment     *ParentInclusionFragment `json:"parentFragment,omitempty"`
+	UnicityCertificate HexBytes                 `json:"unicityCertificate"`
+	BlockNumber        uint64                   `json:"blockNumber,omitempty"`
 }
 
 // GetNoDeletionProofResponse represents the get_no_deletion_proof JSON-RPC response
@@ -187,8 +269,9 @@ type GetShardProofRequest struct {
 
 // GetShardProofResponse represents the get_shard_proof JSON-RPC response
 type GetShardProofResponse struct {
-	MerkleTreePath     *MerkleTreePath `json:"merkleTreePath"`     // Proof path for the shard
-	UnicityCertificate HexBytes        `json:"unicityCertificate"` // Unicity Certificate from the finalized block
+	ParentFragment     *ParentInclusionFragment `json:"parentFragment,omitempty"` // native parent fragment for child v2 composition
+	UnicityCertificate HexBytes                 `json:"unicityCertificate"`       // Unicity Certificate from the finalized block
+	BlockNumber        uint64                   `json:"blockNumber,omitempty"`
 }
 
 // HealthStatus represents the health status of the service
@@ -218,15 +301,25 @@ func (h *HealthStatus) AddDetail(key, value string) {
 	h.Details[key] = value
 }
 
-func (r *RootShardInclusionProof) IsValid(shardRootHash string) bool {
-	return r.MerkleTreePath != nil && len(r.UnicityCertificate) > 0 &&
-		len(r.MerkleTreePath.Steps) > 0 && r.MerkleTreePath.Steps[0].Data != nil && *r.MerkleTreePath.Steps[0].Data == shardRootHash
+func (r *RootShardInclusionProof) IsValid(shardID ShardID, keyLength int, shardRootHash HexBytes) bool {
+	if r == nil || len(r.UnicityCertificate) == 0 || r.ParentFragment == nil {
+		return false
+	}
+	rootRaw, err := ucInputRecordHashRaw(r.UnicityCertificate)
+	if err != nil {
+		return false
+	}
+	return r.ParentFragment.Verify(shardID, keyLength, shardRootHash, rootRaw, InclusionProofV2HashAlgorithm) == nil
 }
 
 type Sharding struct {
 	Mode       string `json:"mode"`
 	ShardIDLen int    `json:"shardIdLen"`
 	ShardID    int    `json:"shardId"`
+	// BFTShardID is the MSB-first bit-string (e.g. "0" or "101") of the BFT
+	// shard in bft-shard mode; empty in other modes. Populated separately
+	// from ShardIDLen/ShardID because a bit-string does not fit in an int.
+	BFTShardID string `json:"bftShardId,omitempty"`
 }
 
 // MarshalJSON marshals the request to CBOR and then hex encodes it, returning the result as a JSON string.
@@ -247,44 +340,105 @@ func (c *GetInclusionProofResponseV2) UnmarshalJSON(data []byte) error {
 	return types.Cbor.Unmarshal(hb, c)
 }
 
-func (p *InclusionProofV2) Verify(v2 *CertificationRequest) error {
-	path, err := v2.StateID.GetPath()
-	if err != nil {
-		return fmt.Errorf("failed to get path: %w", err)
-	}
-	expectedLeafValue, err := v2.CertificationData.Hash()
-	if err != nil {
-		return fmt.Errorf("failed to get leaf value: %w", err)
-	}
-	return verify(p.MerkleTreePath, path, expectedLeafValue)
+// InclusionProofV2HashAlgorithm is the SMT hash algorithm locked in by the
+// v2 inclusion proof wire contract. It is fixed to SHA-256; changing it
+// requires a format version bump.
+const InclusionProofV2HashAlgorithm = SHA256
+
+// VerifierContext carries the trust base and expected partition/shard
+// identity a verifier needs to certify a v2 inclusion proof. TrustBase,
+// PartitionID, and ExpectedShardID are required; ShardConfHash is optional
+// (nil skips the cross-check against UC.ShardConfHash).
+type VerifierContext struct {
+	TrustBase       types.RootTrustBase
+	PartitionID     types.PartitionID
+	ExpectedShardID types.ShardID
+	ShardConfHash   []byte
 }
 
-func verify(p *MerkleTreePath, path *big.Int, expectedLeafValue []byte) error {
-	// Verify leaf matches the first merkle tree step
+// Verify checks a v2 inclusion proof end-to-end against the outer
+// CertificationRequest and VerifierContext: local SMT path, UnicityCertificate
+// (shard tree → unicity tree → seal), and ShardTreeCertificate.Shard equality.
+//
+// The nil-guard error strings below are part of the public contract so
+// reference verifiers in other languages can pin them.
+func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContext) error {
 	if p == nil {
-		return errors.New("missing merkle tree path")
+		return errors.New("nil inclusion proof")
 	}
-	if len(p.Steps) == 0 {
-		return errors.New("empty merkle path")
+	if v2 == nil {
+		return errors.New("nil certification request")
 	}
-	if p.Steps[0].Data == nil {
-		return errors.New("missing leaf data in proof")
+	if vctx == nil {
+		return errors.New("nil verifier context")
 	}
-	leafValue, err := hex.DecodeString(*p.Steps[0].Data)
-	if err != nil {
-		return fmt.Errorf("invalid leaf data encoding: %w", err)
+	if vctx.TrustBase == nil {
+		return errors.New("nil trust base")
 	}
-	if !bytes.Equal(expectedLeafValue, leafValue) {
-		return errors.New("leaf hash mismatch: proof does not include expected value")
+	if p.CertificationData == nil {
+		return ErrExclusionNotImpl
+	}
+	if len(v2.CertificationData.TransactionHash) == 0 {
+		return errors.New("missing certification request transaction hash")
+	}
+	if !bytes.Equal(
+		p.CertificationData.TransactionHash.DataBytes(),
+		v2.CertificationData.TransactionHash.DataBytes(),
+	) {
+		return errors.New("proof certification data transaction hash does not match certification request transaction hash")
 	}
 
-	// Verify merkle tree path hashes to root
-	res, err := p.Verify(path)
+	rootRaw, err := p.UCInputRecordHashRaw()
 	if err != nil {
-		return fmt.Errorf("merkle path verification failed: %w", err)
+		return err
 	}
-	if !res.Result {
-		return errors.New("merkle path verification failed")
+
+	var cert InclusionCert
+	if err := cert.UnmarshalBinary(p.CertificateBytes); err != nil {
+		return fmt.Errorf("failed to decode inclusion cert: %w", err)
 	}
+	key, err := v2.StateID.GetTreeKey()
+	if err != nil {
+		return fmt.Errorf("failed to derive SMT key from stateId: %w", err)
+	}
+	// v2 leaf value is the raw transaction hash.
+	value := v2.CertificationData.TransactionHash.DataBytes()
+	if err := cert.Verify(key, value, rootRaw, InclusionProofV2HashAlgorithm); err != nil {
+		return err
+	}
+
+	var uc types.UnicityCertificate
+	if err := types.Cbor.Unmarshal(p.UnicityCertificate, &uc); err != nil {
+		return fmt.Errorf("failed to decode unicity certificate: %w", err)
+	}
+	if err := uc.Verify(vctx.TrustBase, crypto.SHA256, vctx.PartitionID, vctx.ExpectedShardID, vctx.ShardConfHash); err != nil {
+		return fmt.Errorf("unicity certificate verification failed: %w", err)
+	}
+
 	return nil
+}
+
+// UCInputRecordHashRaw decodes the embedded Unicity Certificate and
+// returns UC.IR.h as a raw 32-byte hash. Any other length is rejected.
+func (p *InclusionProofV2) UCInputRecordHashRaw() ([]byte, error) {
+	return ucInputRecordHashRaw(p.UnicityCertificate)
+}
+
+func ucInputRecordHashRaw(raw []byte) ([]byte, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("missing unicity certificate")
+	}
+	var uc types.UnicityCertificate
+	if err := types.Cbor.Unmarshal(raw, &uc); err != nil {
+		return nil, fmt.Errorf("failed to decode unicity certificate: %w", err)
+	}
+	if uc.InputRecord == nil {
+		return nil, errors.New("unicity certificate missing input record")
+	}
+	ir := uc.InputRecord.Hash
+	if len(ir) != StateTreeKeyLengthBytes {
+		return nil, fmt.Errorf("invalid UC.IR.h length: got %d, want %d",
+			len(ir), StateTreeKeyLengthBytes)
+	}
+	return append([]byte(nil), ir...), nil
 }

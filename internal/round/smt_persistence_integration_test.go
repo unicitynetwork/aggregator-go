@@ -60,7 +60,7 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 		{Path: big.NewInt(15), Value: []byte("test_value_15")},
 		{Path: big.NewInt(16), Value: []byte("test_value_16")},
 	}
-	keyLen := 16 + 256
+	keyLen := api.StateTreeKeyLengthBits
 	for _, t := range testLeaves {
 		t.Path = new(big.Int).SetBit(t.Path, keyLen, 1)
 	}
@@ -73,11 +73,12 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)), nil)
 	require.NoError(t, err, "Should create RoundManager")
 
 	// Test persistence
-	smtNodes := rm.convertLeavesToNodes(testLeaves)
+	smtNodes, err := rm.convertLeavesToNodes(testLeaves)
+	require.NoError(t, err)
 	err = storage.SmtStorage().StoreBatch(ctx, smtNodes)
 	require.NoError(t, err, "Should persist SMT nodes")
 
@@ -86,20 +87,20 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(len(testLeaves)), count, "Should have stored all SMT nodes")
 
-	// Test restoration produces same root hash as fresh SMT
+	// Test restoration produces same root hash as fresh SMT (raw 32-byte form)
 	freshSmt := smt.NewSparseMerkleTree(api.SHA256, keyLen)
 	err = freshSmt.AddLeaves(testLeaves)
 	require.NoError(t, err, "Fresh SMT should accept leaves")
-	freshHash := freshSmt.GetRootHashHex()
+	freshHash := freshSmt.GetRootHashRaw()
 
 	// Create RoundManager and call Start() to trigger restoration
-	restoredRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
+	restoredRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)), nil)
 	require.NoError(t, err, "Should create RoundManager")
 
 	err = restoredRm.Start(ctx)
 	require.NoError(t, err, "SMT restoration should succeed")
 	defer restoredRm.Stop(ctx)
-	restoredHash := restoredRm.smt.GetRootHash()
+	restoredHash := restoredRm.smt.GetRootHashRaw()
 
 	assert.Equal(t, freshHash, restoredHash, "Restored SMT should have same root hash as fresh SMT")
 
@@ -127,28 +128,29 @@ func TestLargeSmtRestoration(t *testing.T) {
 			RoundDuration: time.Second,
 		},
 	}
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)), nil)
 	require.NoError(t, err, "Should create RoundManager")
 
 	const testNodeCount = 12000 // Ensure multiple chunks (chunkSize = 10000 in round_manager.go)
 
 	// Create large dataset with non-sequential paths to test ordering
 	testLeaves := make([]*smt.Leaf, testNodeCount)
-	keyLen := 16 + 256
+	keyLen := api.StateTreeKeyLengthBits
 	for i := 0; i < testNodeCount; i++ {
 		path := new(big.Int).SetBit(big.NewInt(int64((i+1)*700000)), keyLen, 1)
 		value := []byte(fmt.Sprintf("large_test_value_%d", i))
 		testLeaves[i] = smt.NewLeaf(path, value)
 	}
 
-	// Create fresh SMT for comparison
+	// Create fresh SMT for comparison (raw 32-byte form)
 	freshSmt := smt.NewSparseMerkleTree(api.SHA256, keyLen)
 	err = freshSmt.AddLeaves(testLeaves)
 	require.NoError(t, err, "Fresh SMT AddLeaves should succeed")
-	freshHash := freshSmt.GetRootHashHex()
+	freshHash := freshSmt.GetRootHashRaw()
 
 	// Persist leaves to storage
-	smtNodes := rm.convertLeavesToNodes(testLeaves)
+	smtNodes, err := rm.convertLeavesToNodes(testLeaves)
+	require.NoError(t, err)
 	err = storage.SmtStorage().StoreBatch(ctx, smtNodes)
 	require.NoError(t, err, "Should persist large number of SMT nodes")
 
@@ -158,14 +160,14 @@ func TestLargeSmtRestoration(t *testing.T) {
 	require.Equal(t, int64(testNodeCount), count, "Should have stored all nodes")
 
 	// Create new RoundManager and call Start() to restore from storage (uses multiple chunks)
-	newRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
+	newRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)), nil)
 	require.NoError(t, err, "Should create new RoundManager")
 
 	err = newRm.Start(ctx)
 	require.NoError(t, err, "Large SMT restoration should succeed")
 	defer newRm.Stop(ctx)
 
-	restoredHash := newRm.smt.GetRootHash()
+	restoredHash := newRm.smt.GetRootHashRaw()
 
 	// Critical test: multi-chunk restoration should match single-batch creation
 	assert.Equal(t, freshHash, restoredHash, "Multi-chunk restoration should produce same hash as fresh SMT")
@@ -191,7 +193,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)), nil)
 	require.NoError(t, err, "Should create RoundManager")
 
 	rm.currentRound = &Round{
@@ -212,15 +214,12 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	rm.roundMutex.Unlock()
 	require.NoError(t, err, "processMiniBatch should succeed")
 
-	// Get the root hash from the snapshot
-	rootHash := rm.currentRound.Snapshot.GetRootHash()
-	require.NotEmpty(t, rootHash, "Root hash should not be empty")
+	// Get the raw 32-byte root hash from the snapshot (matches UC.IR.h / V2 wire format)
+	rootHashBytes := api.HexBytes(rm.currentRound.Snapshot.GetRootHashRaw())
+	require.NotEmpty(t, rootHashBytes, "Root hash should not be empty")
 
 	// After processBatch, SMT nodes are not yet persisted - they're stored in round state
 	// We need to finalize a block to trigger persistence
-	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
-	require.NoError(t, err, "Should parse root hash")
-
 	block := models.NewBlock(
 		blockNumber,
 		"unicity",
@@ -229,7 +228,6 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 		"mainnet",
 		rootHashBytes,
 		api.HexBytes{},
-		nil,
 		nil,
 	)
 
@@ -243,7 +241,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 
 	// Simulate service restart with new round manager
 	cfg = &config.Config{Processing: config.ProcessingConfig{RoundDuration: time.Second}}
-	newRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
+	newRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)), nil)
 	require.NoError(t, err, "NewRoundManager should succeed after restart")
 
 	// Call Start() to trigger SMT restoration
@@ -251,8 +249,8 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	require.NoError(t, err, "Start should succeed and restore SMT")
 	defer newRm.Stop(ctx)
 
-	// Verify restored SMT has correct data
-	restoredRootHash := newRm.smt.GetRootHash()
+	// Verify restored SMT has correct data (raw 32-byte form)
+	restoredRootHash := newRm.smt.GetRootHashRaw()
 	assert.NotEmpty(t, restoredRootHash, "Restored SMT should have non-empty root hash")
 
 	// Verify inclusion proofs work after restart
@@ -284,32 +282,30 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 		{Path: big.NewInt(0x120), Value: []byte("block_test_value_20")},
 		{Path: big.NewInt(0x130), Value: []byte("block_test_value_30")},
 	}
-	keyLen := 16 + 256
+	keyLen := api.StateTreeKeyLengthBits
 	for _, t := range testLeaves {
 		t.Path = new(big.Int).SetBit(t.Path, keyLen, 1)
 	}
 
-	// Create fresh SMT to get expected root hash
+	// Create fresh SMT to get expected root hash (raw 32-byte form matches UC.IR.h)
 	freshSmt := smt.NewSparseMerkleTree(api.SHA256, keyLen)
 	err = freshSmt.AddLeaves(testLeaves)
 	require.NoError(t, err, "Fresh SMT should accept leaves")
-	expectedRootHash := freshSmt.GetRootHashHex()
-	expectedRootHashBytes := freshSmt.GetRootHash()
+	expectedRootHashRaw := freshSmt.GetRootHashRaw()
 
-	// Create a block with the expected root hash
+	// Create a block with the expected raw root hash
 	block := &models.Block{
-		Index:                api.NewBigInt(big.NewInt(1)),
-		ChainID:              "test-chain",
-		ShardID:              0,
-		Version:              "1.0.0",
-		ForkID:               "test-fork",
-		RootHash:             api.HexBytes(expectedRootHashBytes), // Use bytes, not hex string
-		PreviousBlockHash:    api.HexBytes("0000000000000000000000000000000000000000000000000000000000000000"),
-		NoDeletionProofHash:  api.HexBytes(""),
-		CreatedAt:            api.NewTimestamp(time.Now()),
-		UnicityCertificate:   api.HexBytes("certificate_data"),
-		ParentMerkleTreePath: nil,
-		Finalized:            true, // Mark as finalized for test
+		Index:               api.NewBigInt(big.NewInt(1)),
+		ChainID:             "test-chain",
+		ShardID:             0,
+		Version:             "1.0.0",
+		ForkID:              "test-fork",
+		RootHash:            api.HexBytes(expectedRootHashRaw),
+		PreviousBlockHash:   api.HexBytes("0000000000000000000000000000000000000000000000000000000000000000"),
+		NoDeletionProofHash: api.HexBytes(""),
+		CreatedAt:           api.NewTimestamp(time.Now()),
+		UnicityCertificate:  api.HexBytes("certificate_data"),
+		Finalized:           true, // Mark as finalized for test
 	}
 
 	// Store the block
@@ -320,51 +316,51 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 	cfg := &config.Config{
 		Processing: config.ProcessingConfig{RoundDuration: time.Second},
 	}
-	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
+	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)), nil)
 	require.NoError(t, err, "Should create RoundManager")
 
 	// Persist SMT nodes to storage
-	smtNodes := rm.convertLeavesToNodes(testLeaves)
+	smtNodes, err := rm.convertLeavesToNodes(testLeaves)
+	require.NoError(t, err)
 	err = storage.SmtStorage().StoreBatch(ctx, smtNodes)
 	require.NoError(t, err, "Should persist SMT nodes")
 
 	// Test 1: Successful verification (matching root hash)
 	t.Run("SuccessfulVerification", func(t *testing.T) {
-		successRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
+		successRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)), nil)
 		require.NoError(t, err, "Should create RoundManager")
 
 		err = successRm.Start(ctx)
 		require.NoError(t, err, "SMT restoration should succeed when root hashes match")
 		defer successRm.Stop(ctx)
 
-		// Verify the restored SMT has the correct hash
-		restoredHash := successRm.smt.GetRootHash()
-		assert.Equal(t, expectedRootHash, restoredHash, "Restored SMT should have expected root hash")
+		// Verify the restored SMT has the correct hash (raw 32-byte form)
+		restoredHash := successRm.smt.GetRootHashRaw()
+		assert.Equal(t, expectedRootHashRaw, restoredHash, "Restored SMT should have expected root hash")
 	})
 
 	// Test 2: Failed verification (mismatched root hash)
 	t.Run("FailedVerification", func(t *testing.T) {
 		// Create a block with a different root hash to simulate mismatch
 		wrongBlock := &models.Block{
-			Index:                api.NewBigInt(big.NewInt(2)),
-			ChainID:              "test-chain",
-			ShardID:              0,
-			Version:              "1.0.0",
-			ForkID:               "test-fork",
-			RootHash:             api.HexBytes("wrong_root_hash_value"), // Intentionally wrong hash
-			PreviousBlockHash:    api.HexBytes("0000000000000000000000000000000000000000000000000000000000000001"),
-			NoDeletionProofHash:  api.HexBytes(""),
-			CreatedAt:            api.NewTimestamp(time.Now()),
-			UnicityCertificate:   api.HexBytes("certificate_data"),
-			ParentMerkleTreePath: nil,
-			Finalized:            true, // Mark as finalized for test
+			Index:               api.NewBigInt(big.NewInt(2)),
+			ChainID:             "test-chain",
+			ShardID:             0,
+			Version:             "1.0.0",
+			ForkID:              "test-fork",
+			RootHash:            api.HexBytes("wrong_root_hash_value"), // Intentionally wrong hash
+			PreviousBlockHash:   api.HexBytes("0000000000000000000000000000000000000000000000000000000000000001"),
+			NoDeletionProofHash: api.HexBytes(""),
+			CreatedAt:           api.NewTimestamp(time.Now()),
+			UnicityCertificate:  api.HexBytes("certificate_data"),
+			Finalized:           true, // Mark as finalized for test
 		}
 
 		// Store the wrong block (this will become the "latest" block)
 		err = storage.BlockStorage().Store(ctx, wrongBlock)
 		require.NoError(t, err, "Should store wrong test block")
 
-		failRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256)), nil)
+		failRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)), nil)
 		require.NoError(t, err, "Should create RoundManager")
 
 		// This should fail because the restored SMT root hash doesn't match the latest block

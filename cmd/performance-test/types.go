@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"golang.org/x/net/http2"
 )
 
@@ -50,9 +51,12 @@ type GetInclusionProofRequestV2 struct {
 }
 
 type shardTarget struct {
-	name      string
-	url       string
+	name string
+	url  string
+	// shardMask: LSB-first sentinel-int, set in app mode.
 	shardMask int
+	// shardBits: MSB-first binary bit string, set in bft mode.
+	shardBits string
 }
 
 // Metrics aggregates counters across submissions and proof checks.
@@ -60,11 +64,11 @@ type Metrics struct {
 	totalRequests       int64
 	successfulRequests  int64
 	failedRequests      int64
-	requestIdExistsErr  int64
+	stateIdExistsErr    int64
 	startTime           time.Time
 	submissionStartTime time.Time
 	submissionEndTime   time.Time
-	submittedRequestIDs sync.Map
+	submittedStateIDs   sync.Map
 	submissionTimes     sync.Map
 	errorCounts         sync.Map
 	activeConnections   atomic.Int64
@@ -90,7 +94,7 @@ type ShardMetrics struct {
 	totalRequests      atomic.Int64
 	successfulRequests atomic.Int64
 	failedRequests     atomic.Int64
-	requestIdExistsErr atomic.Int64
+	stateIdExistsErr   atomic.Int64
 	proofAttempts      atomic.Int64
 	proofSuccess       atomic.Int64
 	proofFailed        atomic.Int64
@@ -102,15 +106,16 @@ type ShardMetrics struct {
 type ShardClient struct {
 	name          string
 	url           string
-	shardMask     int
+	shardMask     int            // app mode
+	shardBits     string         // bft mode, MSB-first binary
 	client        *JSONRPCClient // For submissions
 	proofClient   *JSONRPCClient // Separate pool for proof requests
 	startingBlock int64
 }
 
 type proofJob struct {
-	shardIdx  int
-	requestID string
+	shardIdx int
+	request  *api.CertificationRequest
 }
 
 // RequestRateCounters tracks per-second client-side request activity.

@@ -17,6 +17,9 @@ type ThreadSafeSMT struct {
 
 // NewThreadSafeSMT creates a new thread-safe SMT wrapper
 func NewThreadSafeSMT(smtInstance *SparseMerkleTree) *ThreadSafeSMT {
+	// Prime hash caches before publishing the wrapper so no later read path
+	// under RLock needs to mutate node state on a freshly constructed tree.
+	smtInstance.ensureHashes()
 	return &ThreadSafeSMT{
 		smt: smtInstance,
 	}
@@ -42,7 +45,11 @@ func (ts *ThreadSafeSMT) AddLeaf(path *big.Int, value []byte) error {
 	ts.rwMux.Lock()
 	defer ts.rwMux.Unlock()
 
-	return ts.smt.AddLeaf(path, value)
+	if err := ts.smt.AddLeaf(path, value); err != nil {
+		return err
+	}
+	ts.smt.ensureHashes()
+	return nil
 }
 
 // AddPreHashedLeaf adds a leaf where the value is already a hash calculated externally
@@ -51,8 +58,10 @@ func (ts *ThreadSafeSMT) AddPreHashedLeaf(path *big.Int, hash []byte) error {
 	ts.rwMux.Lock()
 	defer ts.rwMux.Unlock()
 
-	// TODO(SMT): Implement AddPreHashedLeaf in SparseMerkleTree
-	//return ts.smt.AddPreHashedLeaf(path, hash)
+	if err := ts.smt.AddLeaf(path, hash); err != nil {
+		return err
+	}
+	ts.smt.ensureHashes()
 	return nil
 }
 
@@ -80,6 +89,49 @@ func (ts *ThreadSafeSMT) GetPath(path *big.Int) (*api.MerkleTreePath, error) {
 	ts.rwMux.RLock()
 	defer ts.rwMux.RUnlock()
 	return ts.smt.GetPath(path)
+}
+
+// GetRootHashRaw returns the raw 32-byte root hash without algorithm prefix.
+// This is a read operation and allows concurrent access.
+func (ts *ThreadSafeSMT) GetRootHashRaw() []byte {
+	ts.rwMux.RLock()
+	defer ts.rwMux.RUnlock()
+	return ts.smt.GetRootHashRaw()
+}
+
+// GetInclusionCert builds a v2 inclusion certificate for the leaf
+// at the given raw 32-byte key. This is a read operation and allows
+// concurrent access.
+func (ts *ThreadSafeSMT) GetInclusionCert(key []byte) (*api.InclusionCert, error) {
+	ts.rwMux.RLock()
+	defer ts.rwMux.RUnlock()
+	return ts.smt.GetInclusionCert(key)
+}
+
+// GetShardInclusionFragment builds the native parent proof fragment for the
+// given shard ID. This is only valid on parent-mode SMT instances.
+func (ts *ThreadSafeSMT) GetShardInclusionFragment(shardID api.ShardID) (*api.ParentInclusionFragment, error) {
+	ts.rwMux.RLock()
+	defer ts.rwMux.RUnlock()
+	return ts.smt.GetShardInclusionFragment(shardID)
+}
+
+// GetShardInclusionFragmentWithRoot atomically reads the parent fragment and
+// the raw SMT root from the same in-memory snapshot. This avoids serving a
+// fragment from one root and looking up a block for a newer root in a later
+// read section.
+func (ts *ThreadSafeSMT) GetShardInclusionFragmentWithRoot(shardID api.ShardID) (*api.ParentInclusionFragment, []byte, error) {
+	ts.rwMux.RLock()
+	defer ts.rwMux.RUnlock()
+
+	parentFragment, err := ts.smt.GetShardInclusionFragment(shardID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if parentFragment == nil {
+		return nil, nil, nil
+	}
+	return parentFragment, ts.smt.GetRootHashRaw(), nil
 }
 
 // GetKeyLength exposes the configured SMT key length.
@@ -124,7 +176,11 @@ func (ts *ThreadSafeSMT) WithReadLock(fn func() error) error {
 func (ts *ThreadSafeSMT) WithWriteLock(fn func() error) error {
 	ts.rwMux.Lock()
 	defer ts.rwMux.Unlock()
-	return fn()
+	if err := fn(); err != nil {
+		return err
+	}
+	ts.smt.ensureHashes()
+	return nil
 }
 
 // CreateSnapshot creates a thread-safe snapshot of the current SMT state

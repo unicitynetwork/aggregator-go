@@ -1,7 +1,6 @@
 package models
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -12,18 +11,19 @@ import (
 
 // Block represents a blockchain block
 type Block struct {
-	Index                *api.BigInt         `json:"index"`
-	ChainID              string              `json:"chainId"`
-	ShardID              api.ShardID         `json:"shardId"`
-	Version              string              `json:"version"`
-	ForkID               string              `json:"forkId"`
-	RootHash             api.HexBytes        `json:"rootHash"`
-	PreviousBlockHash    api.HexBytes        `json:"previousBlockHash"`
-	NoDeletionProofHash  api.HexBytes        `json:"noDeletionProofHash"`
-	CreatedAt            *api.Timestamp      `json:"createdAt"`
-	UnicityCertificate   api.HexBytes        `json:"unicityCertificate"`
-	ParentMerkleTreePath *api.MerkleTreePath `json:"parentMerkleTreePath,omitempty"` // child mode only
-	Finalized            bool                `json:"finalized"`                      // true when all data is persisted
+	Index               *api.BigInt                  `json:"index"`
+	ChainID             string                       `json:"chainId"`
+	ShardID             api.ShardID                  `json:"shardId"`
+	Version             string                       `json:"version"`
+	ForkID              string                       `json:"forkId"`
+	RootHash            api.HexBytes                 `json:"rootHash"`
+	PreviousBlockHash   api.HexBytes                 `json:"previousBlockHash"`
+	NoDeletionProofHash api.HexBytes                 `json:"noDeletionProofHash"`
+	CreatedAt           *api.Timestamp               `json:"createdAt"`
+	UnicityCertificate  api.HexBytes                 `json:"unicityCertificate"`
+	ParentFragment      *api.ParentInclusionFragment `json:"parentFragment,omitempty"`    // child mode only
+	ParentBlockNumber   uint64                       `json:"parentBlockNumber,omitempty"` // child mode only
+	Finalized           bool                         `json:"finalized"`                   // true when all data is persisted
 }
 
 // BlockBSON represents the BSON version of Block for MongoDB storage
@@ -38,8 +38,15 @@ type BlockBSON struct {
 	NoDeletionProofHash string               `bson:"noDeletionProofHash,omitempty"`
 	CreatedAt           time.Time            `bson:"createdAt"`
 	UnicityCertificate  string               `bson:"unicityCertificate"`
-	MerkleTreePath      string               `bson:"merkleTreePath,omitempty"` // child mode only
+	ParentFragment      *ParentFragmentBSON  `bson:"parentFragment,omitempty"` // child mode only
+	ParentBlockNumber   uint64               `bson:"parentBlockNumber,omitempty"`
 	Finalized           bool                 `bson:"finalized"`
+}
+
+// ParentFragmentBSON is the BSON representation of ParentInclusionFragment.
+type ParentFragmentBSON struct {
+	CertificateBytes []byte `bson:"certificateBytes"`
+	ShardLeafValue   []byte `bson:"shardLeafValue"`
 }
 
 // ToBSON converts Block to BlockBSON for MongoDB storage
@@ -48,13 +55,12 @@ func (b *Block) ToBSON() (*BlockBSON, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error converting block index to decimal-128: %w", err)
 	}
-	var merkleTreePath string
-	if b.ParentMerkleTreePath != nil {
-		merkleTreePathJson, err := json.Marshal(b.ParentMerkleTreePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal parent merkle tree path: %w", err)
+	var parentFragment *ParentFragmentBSON
+	if b.ParentFragment != nil {
+		parentFragment = &ParentFragmentBSON{
+			CertificateBytes: append([]byte(nil), b.ParentFragment.CertificateBytes...),
+			ShardLeafValue:   append([]byte(nil), b.ParentFragment.ShardLeafValue...),
 		}
-		merkleTreePath = api.NewHexBytes(merkleTreePathJson).String()
 	}
 	return &BlockBSON{
 		Index:               indexDecimal,
@@ -67,7 +73,8 @@ func (b *Block) ToBSON() (*BlockBSON, error) {
 		NoDeletionProofHash: b.NoDeletionProofHash.String(),
 		CreatedAt:           b.CreatedAt.Time,
 		UnicityCertificate:  b.UnicityCertificate.String(),
-		MerkleTreePath:      merkleTreePath,
+		ParentFragment:      parentFragment,
+		ParentBlockNumber:   b.ParentBlockNumber,
 		Finalized:           b.Finalized,
 	}, nil
 }
@@ -94,15 +101,11 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 		return nil, fmt.Errorf("failed to parse unicityCertificate: %w", err)
 	}
 
-	var parentMerkleTreePath *api.MerkleTreePath
-	if bb.MerkleTreePath != "" {
-		hexBytes, err := api.NewHexBytesFromString(bb.MerkleTreePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse parentMerkleTreePath: %w", err)
-		}
-		parentMerkleTreePath = &api.MerkleTreePath{}
-		if err := json.Unmarshal(hexBytes, parentMerkleTreePath); err != nil {
-			return nil, fmt.Errorf("failed to parse parentMerkleTreePath: %w", err)
+	var parentFragment *api.ParentInclusionFragment
+	if bb.ParentFragment != nil {
+		parentFragment = &api.ParentInclusionFragment{
+			CertificateBytes: append([]byte(nil), bb.ParentFragment.CertificateBytes...),
+			ShardLeafValue:   append([]byte(nil), bb.ParentFragment.ShardLeafValue...),
 		}
 	}
 
@@ -112,33 +115,41 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 	}
 
 	return &Block{
-		Index:                index,
-		ChainID:              bb.ChainID,
-		ShardID:              bb.ShardID,
-		Version:              bb.Version,
-		ForkID:               bb.ForkID,
-		RootHash:             rootHash,
-		PreviousBlockHash:    previousBlockHash,
-		NoDeletionProofHash:  noDeletionProofHash,
-		CreatedAt:            api.NewTimestamp(bb.CreatedAt),
-		UnicityCertificate:   unicityCertificate,
-		ParentMerkleTreePath: parentMerkleTreePath,
-		Finalized:            bb.Finalized,
+		Index:               index,
+		ChainID:             bb.ChainID,
+		ShardID:             bb.ShardID,
+		Version:             bb.Version,
+		ForkID:              bb.ForkID,
+		RootHash:            rootHash,
+		PreviousBlockHash:   previousBlockHash,
+		NoDeletionProofHash: noDeletionProofHash,
+		CreatedAt:           api.NewTimestamp(bb.CreatedAt),
+		UnicityCertificate:  unicityCertificate,
+		ParentFragment:      parentFragment,
+		ParentBlockNumber:   bb.ParentBlockNumber,
+		Finalized:           bb.Finalized,
 	}, nil
 }
 
 // NewBlock creates a new block
-func NewBlock(index *api.BigInt, chainID string, shardID api.ShardID, version, forkID string, rootHash, previousBlockHash, uc api.HexBytes, parentMerkleTreePath *api.MerkleTreePath) *Block {
+func NewBlock(index *api.BigInt, chainID string, shardID api.ShardID, version, forkID string, rootHash, previousBlockHash, uc api.HexBytes) *Block {
 	return &Block{
-		Index:                index,
-		ChainID:              chainID,
-		ShardID:              shardID,
-		Version:              version,
-		ForkID:               forkID,
-		RootHash:             rootHash,
-		PreviousBlockHash:    previousBlockHash,
-		CreatedAt:            api.Now(),
-		UnicityCertificate:   uc,
-		ParentMerkleTreePath: parentMerkleTreePath,
+		Index:              index,
+		ChainID:            chainID,
+		ShardID:            shardID,
+		Version:            version,
+		ForkID:             forkID,
+		RootHash:           rootHash,
+		PreviousBlockHash:  previousBlockHash,
+		CreatedAt:          api.Now(),
+		UnicityCertificate: uc,
 	}
+}
+
+// NewChildBlock creates a block for child mode with required parent proof metadata.
+func NewChildBlock(index *api.BigInt, chainID string, shardID api.ShardID, version, forkID string, rootHash, previousBlockHash, uc api.HexBytes, parentFragment *api.ParentInclusionFragment, parentBlockNumber uint64) *Block {
+	block := NewBlock(index, chainID, shardID, version, forkID, rootHash, previousBlockHash, uc)
+	block.ParentFragment = parentFragment
+	block.ParentBlockNumber = parentBlockNumber
+	return block
 }

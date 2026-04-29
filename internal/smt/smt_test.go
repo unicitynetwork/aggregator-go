@@ -16,42 +16,38 @@ import (
 
 // TestSMTGetRoot test basic SMT root hash computation
 func TestSMTGetRoot(t *testing.T) {
-	// "Singleton" example from the spec
+	// v2 reference values for basic tree shapes.
 	t.Run("EmptyTree", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
-		expected := "00001e54402898172f2948615fb17627733abbd120a85381c624ad060d28321be672"
+		expected := "000047dc540c94ceb704a23875c11273e16bb0b8a87aed84de911f2133568115f254"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
-	// "Left Child Only" example from the spec
 	t.Run("LeftLeaf", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
 		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
 
-		expected := "0000ccd73506d27518c983860a47a6a323d41038a74f9339f5302798563cb168f12f"
+		expected := "0000d4cb5334dcabbcaff56bfc78706f041b72c0d29337db87d8c85d4e1aaf9fea3a"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
-	// "Right Child Only" example from the spec
 	t.Run("RightLeaf", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
 		smt.AddLeaf(big.NewInt(0b111), []byte{0x62})
 
-		expected := "00005219d2dac90ad497a82a5231f10cffaf5a12dc65b762be39a6d739b4159136a3"
+		expected := "000064a2f31a60210df058e75a10312c486538f8874e4681de085e3e2d9985b5fd50"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
-	// "Two Leaves" example from the spec
 	t.Run("TwoLeaves", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
 		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
 		smt.AddLeaf(big.NewInt(0b111), []byte{0x62})
 
-		expected := "0000b5fcdedf0f5e9cdaec060d8963b5ea86fcd16b7a48fa8607a3347a213316b857"
+		expected := "0000f0698f0230044b700c1e5e433f7776b8af113199905b6122b19504274dd77111"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
-	// "Four Leaves" example from the spec
 	t.Run("FourLeaves", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 3)
 		smt.AddLeaf(big.NewInt(0b1000), []byte{0x61})
@@ -59,53 +55,48 @@ func TestSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b1011), []byte{0x63})
 		smt.AddLeaf(big.NewInt(0b1111), []byte{0x64})
 
-		expected := "000095005e568fdac5cc01a3a091c70ce89ab2da98c36b254dd2ddf29bd568c377ab"
+		expected := "0000728a4e5f71d239df87b57bdf1e3bd5ca3383d2b0d16758a9b3f2aedff02e4c24"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 }
 
 func TestChildSMTGetRoot(t *testing.T) {
-	// Left child of the "Two Leaves, Sharded" example from the spec
 	t.Run("LeftOfTwoLeaves", func(t *testing.T) {
 		smt := NewChildSparseMerkleTree(api.SHA256, 2, 0b10)
 		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
 
-		expected := "0000256aedd9f31e69a4b0803616beab77234bae5dff519a10e519a0753be49f0534"
+		expected := "0000d4cb5334dcabbcaff56bfc78706f041b72c0d29337db87d8c85d4e1aaf9fea3a"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
-	// Right child of the "Two Leaves, Sharded" example from the spec
 	t.Run("RightOfTwoLeaves", func(t *testing.T) {
 		smt := NewChildSparseMerkleTree(api.SHA256, 2, 0b11)
 		smt.AddLeaf(big.NewInt(0b111), []byte{0x62})
 
-		expected := "0000e777763b4ce391c2f8acdf480dd64758bc8063a3aa5f62670a499a61d3bc7b9a"
+		expected := "000064a2f31a60210df058e75a10312c486538f8874e4681de085e3e2d9985b5fd50"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
-	// Left child of the "Four Leaves, Sharded" example from the spec
 	t.Run("LeftOfFourLeaves", func(t *testing.T) {
 		smt := NewChildSparseMerkleTree(api.SHA256, 4, 0b110)
 		smt.AddLeaf(big.NewInt(0b10010), []byte{0x61})
 		smt.AddLeaf(big.NewInt(0b11010), []byte{0x62})
 
-		expected := "000010c1dc89e30d51613f2c1a182d16f87fe6709b9735db612adaadaa91955bdaf0"
+		expected := "0000564b213cf6cee27badc130c7b9c7f06c27b76e8bbe25149e1412646d24027d2d"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
-	// Right child of the "Four Leaves, Sharded" example from the spec
 	t.Run("RightOfFourLeaves", func(t *testing.T) {
 		smt := NewChildSparseMerkleTree(api.SHA256, 4, 0b101)
 		smt.AddLeaf(big.NewInt(0b10101), []byte{0x63})
 		smt.AddLeaf(big.NewInt(0b11101), []byte{0x64})
 
-		expected := "0000981d2f4e01189506c5a36430e7774e3f9498c1c4cc27801d8e6400d4965a8860"
+		expected := "0000c5f0538e97bb172a7e423848673faa84141b2201cc803b328f1824299f24dd7f"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 }
 
 func TestParentSMTGetRoot(t *testing.T) {
-	// Parent of the "Two Leaves, Sharded" example from the spec
 	t.Run("TwoLeaves", func(t *testing.T) {
 		left, _ := hex.DecodeString("256aedd9f31e69a4b0803616beab77234bae5dff519a10e519a0753be49f0534")
 		right, _ := hex.DecodeString("e777763b4ce391c2f8acdf480dd64758bc8063a3aa5f62670a499a61d3bc7b9a")
@@ -113,11 +104,10 @@ func TestParentSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b10), left)
 		smt.AddLeaf(big.NewInt(0b11), right)
 
-		expected := "0000413b961d0069adfea0b4e122cf6dbf98e0a01ef7fd573d68c084ddfa03e4f9d6"
+		expected := "0000245915b6e866e0dfa36eb5c1323325c6663bd0ea7fe9ea7c60efe54700901577"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
-	// Parent of the "Four Leaves, Sharded" example from the spec
 	t.Run("FourLeaves", func(t *testing.T) {
 		left, _ := hex.DecodeString("10c1dc89e30d51613f2c1a182d16f87fe6709b9735db612adaadaa91955bdaf0")
 		right, _ := hex.DecodeString("981d2f4e01189506c5a36430e7774e3f9498c1c4cc27801d8e6400d4965a8860")
@@ -125,7 +115,7 @@ func TestParentSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b110), left)
 		smt.AddLeaf(big.NewInt(0b101), right)
 
-		expected := "0000eb1a95574056c988f441a50bd18d0555f038276aecf3d155eb9e008a72afcb45"
+		expected := "00001f52283972b0b30de79673b0a889357af74859504f70a657c7516ab77b698302"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 }
@@ -237,7 +227,7 @@ func TestSMTBatchOperations(t *testing.T) {
 // TestSMTRootHashRegressionFixture pins an implementation reference root hash
 // for a fixed leaf set, so refactors cannot accidentally change hash behavior.
 func TestSMTRootHashRegressionFixture(t *testing.T) {
-	const expectedRoot = "0000273e7c3e2d1a8d9194babbff44377e27facc2007893f0dd0db09f6406e04390f"
+	const expectedRoot = "00008f12d069a0a8d02649dae4485d97ea1d98f2742b5c22de64a4f331b6f0b7b7dd"
 
 	leaves := []*Leaf{
 		NewLeaf(big.NewInt(0b110010000), []byte("value00010000")), // 400
@@ -264,9 +254,9 @@ func TestSMTRootHashRegressionFixture(t *testing.T) {
 // deterministic child-root inputs.
 func TestParentSMTRootHashRegressionFixture(t *testing.T) {
 	const (
-		expectedEmpty      = "00001ef37149189b0c122d9ffc5eac0652c0d136ba71061a98dab823e4ba2544ee3f"
-		expectedOneUpdate  = "0000be056f14098551f711bcf4ed2fa9becff6467565faffeaf612602d8a3fccdc9b"
-		expectedTwoUpdates = "000062a64635665e45b753e21e0489443a8589c8561094c3137201a2c275540d1aa8"
+		expectedEmpty      = "0000cd123cd6893ea82539bbce16cd69f196ad3770a1a16806acd624061684f04c22"
+		expectedOneUpdate  = "0000b3bf509ebc9114647fd69f72b817b257b07b8bd32ed82f6b85b8f5b19dedcfc8"
+		expectedTwoUpdates = "00000eb669e4b5572cd9c2cf3b4a18b491354f67c0591d549cc2879a63defe0a7759"
 	)
 
 	make32 := func(start byte) []byte {
@@ -546,11 +536,11 @@ func TestSMTProductionTiming(t *testing.T) {
 func TestSMTGetPath(t *testing.T) {
 
 	t.Run("ExpectedPath", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256, 272)
+		smt := NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
 
-		// Add some test data
-		path := big.NewInt(0)
-		path.SetString("7588617121771513359933852905331119149238064034818011809301695587375759386505263024", 10)
+		stateID := api.RequireNewImprintV2("563d50d4700ad7c4b9fe4e737a611ebe16c4bb8747ce4bfa4dbda3ad99930000")
+		path, err := stateID.GetPath()
+		require.NoError(t, err)
 
 		leafValue, err := hex.DecodeString("00000777e81da35187bc52073e96a10f89d7fe9aa826693982c8e748a96a3cc7d7b7")
 		require.NoError(t, err)
@@ -566,7 +556,7 @@ func TestSMTGetPath(t *testing.T) {
 		require.NotNil(t, merklePath.Steps, "Steps should not be nil")
 		require.Equal(t, 2, len(merklePath.Steps), "There should be exactly two steps in the path")
 		// First step should be the LeafNode hash step
-		require.Equal(t, "7588617121771513359933852905331119149238064034818011809301695587375759386505263024", merklePath.Steps[0].Path, "Leaf step path should match")
+		require.Equal(t, path.String(), merklePath.Steps[0].Path, "Leaf step path should match")
 		require.Equal(t, "00000777e81da35187bc52073e96a10f89d7fe9aa826693982c8e748a96a3cc7d7b7", *merklePath.Steps[0].Data, "Leaf step value should match")
 		// Second step should be the root hash step
 		require.Equal(t, "1", merklePath.Steps[1].Path, "Root step path should be empty")
@@ -1373,155 +1363,6 @@ func TestSMTAddingLeafAboveNode(t *testing.T) {
 		{Path: big.NewInt(2), Value: []byte("node_above_leaf_1")},
 	}
 	require.Error(t, smt2.AddLeaves(leaves2), "SMT should not allow adding leaves above existing nodes, even in a batch")
-}
-
-func TestJoinPaths(t *testing.T) {
-	// "Two Leaves, Sharded" example from the spec
-	t.Run("TwoLeaves", func(t *testing.T) {
-		left := NewChildSparseMerkleTree(api.SHA256, 2, 0b10)
-		left.AddLeaf(big.NewInt(0b100), []byte{0x61})
-
-		right := NewChildSparseMerkleTree(api.SHA256, 2, 0b11)
-		right.AddLeaf(big.NewInt(0b111), []byte{0x62})
-
-		parent := NewParentSparseMerkleTree(api.SHA256, 1)
-		parent.AddLeaf(big.NewInt(0b10), left.GetRootHash()[2:])
-		parent.AddLeaf(big.NewInt(0b11), right.GetRootHash()[2:])
-
-		leftChild, _ := left.GetPath(big.NewInt(0b100))
-		leftParent, _ := parent.GetPath(big.NewInt(0b10))
-		leftPath, err := JoinPaths(leftChild, leftParent)
-		assert.Nil(t, err)
-		assert.NotNil(t, leftPath)
-		leftRes, err := leftPath.Verify(big.NewInt(0b100))
-		assert.Nil(t, err)
-		assert.NotNil(t, leftRes)
-		assert.True(t, leftRes.PathValid)
-		assert.True(t, leftRes.PathIncluded)
-
-		rightChild, _ := right.GetPath(big.NewInt(0b111))
-		rightParent, _ := parent.GetPath(big.NewInt(0b11))
-		rightPath, err := JoinPaths(rightChild, rightParent)
-		assert.Nil(t, err)
-		assert.NotNil(t, rightPath)
-		rightRes, err := rightPath.Verify(big.NewInt(0b111))
-		assert.Nil(t, err)
-		assert.NotNil(t, rightRes)
-		assert.True(t, rightRes.PathValid)
-		assert.True(t, rightRes.PathIncluded)
-	})
-
-	// "Four Leaves, Sharded" example from the spec
-	t.Run("FourLeaves", func(t *testing.T) {
-		left := NewChildSparseMerkleTree(api.SHA256, 4, 0b110)
-		left.AddLeaf(big.NewInt(0b10010), []byte{0x61})
-		left.AddLeaf(big.NewInt(0b11010), []byte{0x62})
-
-		right := NewChildSparseMerkleTree(api.SHA256, 4, 0b101)
-		right.AddLeaf(big.NewInt(0b10101), []byte{0x63})
-		right.AddLeaf(big.NewInt(0b11101), []byte{0x64})
-
-		parent := NewParentSparseMerkleTree(api.SHA256, 2)
-		parent.AddLeaf(big.NewInt(0b110), left.GetRootHash()[2:])
-		parent.AddLeaf(big.NewInt(0b101), right.GetRootHash()[2:])
-
-		child1, _ := left.GetPath(big.NewInt(0b10010))
-		parent1, _ := parent.GetPath(big.NewInt(0b110))
-		path1, err := JoinPaths(child1, parent1)
-		assert.Nil(t, err)
-		assert.NotNil(t, path1)
-		res1, err := path1.Verify(big.NewInt(0b10010))
-		assert.Nil(t, err)
-		assert.NotNil(t, res1)
-		assert.True(t, res1.PathValid)
-		assert.True(t, res1.PathIncluded)
-
-		child2, _ := left.GetPath(big.NewInt(0b11010))
-		parent2, _ := parent.GetPath(big.NewInt(0b110))
-		path2, err := JoinPaths(child2, parent2)
-		assert.Nil(t, err)
-		assert.NotNil(t, path2)
-		res2, err := path2.Verify(big.NewInt(0b11010))
-		assert.Nil(t, err)
-		assert.NotNil(t, res2)
-		assert.True(t, res2.PathValid)
-		assert.True(t, res2.PathIncluded)
-
-		child3, _ := right.GetPath(big.NewInt(0b10101))
-		parent3, _ := parent.GetPath(big.NewInt(0b101))
-		path3, err := JoinPaths(child3, parent3)
-		assert.Nil(t, err)
-		assert.NotNil(t, path3)
-		res3, err := path3.Verify(big.NewInt(0b10101))
-		assert.Nil(t, err)
-		assert.NotNil(t, res3)
-		assert.True(t, res3.PathValid)
-		assert.True(t, res3.PathIncluded)
-
-		child4, _ := right.GetPath(big.NewInt(0b11101))
-		parent4, _ := parent.GetPath(big.NewInt(0b101))
-		path4, err := JoinPaths(child4, parent4)
-		assert.Nil(t, err)
-		assert.NotNil(t, path4)
-		res4, err := path4.Verify(big.NewInt(0b11101))
-		assert.Nil(t, err)
-		assert.NotNil(t, res4)
-		assert.True(t, res4.PathValid)
-		assert.True(t, res4.PathIncluded)
-	})
-
-	t.Run("NilInputDoesNotPanic", func(t *testing.T) {
-		dummy := &api.MerkleTreePath{Root: "0000"}
-
-		joinedPath, err := JoinPaths(nil, dummy)
-		assert.ErrorContains(t, err, "nil child path")
-		assert.Nil(t, joinedPath)
-
-		joinedPath, err = JoinPaths(dummy, nil)
-		assert.ErrorContains(t, err, "nil parent path")
-		assert.Nil(t, joinedPath)
-	})
-
-	t.Run("NilRootDoesNotPanic", func(t *testing.T) {
-		dummyNil := &api.MerkleTreePath{}
-		dummyShort := &api.MerkleTreePath{Root: ""}
-		dummyOK := &api.MerkleTreePath{Root: "0000"}
-
-		joinedPath, err := JoinPaths(dummyNil, dummyOK)
-		assert.ErrorContains(t, err, "invalid child root hash format")
-		assert.Nil(t, joinedPath)
-
-		joinedPath, err = JoinPaths(dummyShort, dummyOK)
-		assert.ErrorContains(t, err, "invalid child root hash format")
-		assert.Nil(t, joinedPath)
-
-		joinedPath, err = JoinPaths(dummyOK, dummyNil)
-		assert.ErrorContains(t, err, "invalid parent root hash format")
-		assert.Nil(t, joinedPath)
-
-		joinedPath, err = JoinPaths(dummyOK, dummyShort)
-		assert.ErrorContains(t, err, "invalid parent root hash format")
-		assert.Nil(t, joinedPath)
-	})
-
-	t.Run("HashFunctionMismatch", func(t *testing.T) {
-		child := &api.MerkleTreePath{Root: "0000"}
-		parent := &api.MerkleTreePath{Root: "0001"}
-
-		joinedPath, err := JoinPaths(child, parent)
-		assert.ErrorContains(t, err, "child hash algorithm does not match parent")
-		assert.Nil(t, joinedPath)
-	})
-
-	t.Run("HashValueMismatch", func(t *testing.T) {
-		smt := NewSparseMerkleTree(api.SHA256, 1)
-		smt.AddLeaf(big.NewInt(0b10), []byte{0})
-		path, _ := smt.GetPath(big.NewInt(0b10))
-
-		joinedPath, err := JoinPaths(path, path)
-		assert.ErrorContains(t, err, "child root hash does not match parent input hash")
-		assert.Nil(t, joinedPath)
-	})
 }
 
 // TestParentSMTSnapshotUpdateLeaf tests that parent SMT snapshots can update pre-populated leaves
