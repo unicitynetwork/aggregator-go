@@ -124,8 +124,6 @@ type RedisConfig struct {
 	MasterName       string        `mapstructure:"master_name"`
 	SentinelPassword string        `mapstructure:"sentinel_password"`
 	SentinelUsername string        `mapstructure:"sentinel_username"`
-	RouteByLatency   bool          `mapstructure:"route_by_latency"`
-	RouteRandomly    bool          `mapstructure:"route_randomly"`
 }
 
 // StorageConfig holds storage layer configuration
@@ -342,8 +340,6 @@ func Load() (*Config, error) {
 			MasterName:       getEnvOrDefault("REDIS_MASTER_NAME", ""),
 			SentinelPassword: getEnvOrDefault("REDIS_SENTINEL_PASSWORD", ""),
 			SentinelUsername: getEnvOrDefault("REDIS_SENTINEL_USERNAME", ""),
-			RouteByLatency:   getEnvBoolOrDefault("REDIS_ROUTE_BY_LATENCY", false),
-			RouteRandomly:    getEnvBoolOrDefault("REDIS_ROUTE_RANDOMLY", false),
 		},
 		Storage: StorageConfig{
 			UseRedisForCommitments: getEnvBoolOrDefault("USE_REDIS_FOR_COMMITMENTS", false),

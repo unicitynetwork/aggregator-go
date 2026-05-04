@@ -182,8 +182,6 @@ Set `REDIS_SENTINEL_ADDRS` to switch the client to Sentinel-backed failover. Whe
 | `REDIS_MASTER_NAME` | Sentinel master name to track. Required when `REDIS_SENTINEL_ADDRS` is set. | `` |
 | `REDIS_SENTINEL_PASSWORD` | Password for authenticating to Sentinel nodes. | `` |
 | `REDIS_SENTINEL_USERNAME` | ACL username for authenticating to Sentinel nodes. | `` |
-| `REDIS_ROUTE_BY_LATENCY` | Route read-only commands to the lowest-latency node. | `false` |
-| `REDIS_ROUTE_RANDOMLY` | Route read-only commands to a random master/replica. | `false` |
 
 Example:
 
