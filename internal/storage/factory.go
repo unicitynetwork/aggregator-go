@@ -24,7 +24,7 @@ func NewStorage(ctx context.Context, cfg *config.Config, log *logger.Logger) (in
 	// Choose commitment queue implementation
 	var commitmentQueue interfaces.CommitmentQueue
 	if cfg.Storage.UseRedisForCommitments {
-		commitmentQueue, err = createRedisCommitmentQueue(cfg, log)
+		commitmentQueue, err = createRedisCommitmentQueue(ctx, cfg, log)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create Redis commitment queue: %w", err)
 		}
@@ -37,7 +37,7 @@ func NewStorage(ctx context.Context, cfg *config.Config, log *logger.Logger) (in
 }
 
 // createRedisCommitmentQueue creates a Redis-based commitment queue
-func createRedisCommitmentQueue(cfg *config.Config, log *logger.Logger) (interfaces.CommitmentQueue, error) {
+func createRedisCommitmentQueue(ctx context.Context, cfg *config.Config, log *logger.Logger) (interfaces.CommitmentQueue, error) {
 	var redisClient *redislib.Client
 	if len(cfg.Redis.SentinelAddrs) > 0 {
 		if cfg.Redis.MasterName == "" {
@@ -57,7 +57,6 @@ func createRedisCommitmentQueue(cfg *config.Config, log *logger.Logger) (interfa
 			MaxRetries:       cfg.Redis.MaxRetries,
 			RouteByLatency:   cfg.Redis.RouteByLatency,
 			RouteRandomly:    cfg.Redis.RouteRandomly,
-			ReplicaOnly:      cfg.Redis.ReplicaOnly,
 		})
 		if log != nil {
 			log.Info("redis commitment queue using sentinel mode",
@@ -84,8 +83,6 @@ func createRedisCommitmentQueue(cfg *config.Config, log *logger.Logger) (interfa
 		}
 	}
 
-	// Test connection
-	ctx := context.Background()
 	if err := redisClient.Ping(ctx).Err(); err != nil {
 		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 	}

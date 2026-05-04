@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -19,7 +20,7 @@ func TestCreateRedisCommitmentQueue_SentinelRequiresMasterName(t *testing.T) {
 		},
 	}
 
-	q, err := createRedisCommitmentQueue(cfg, nil)
+	q, err := createRedisCommitmentQueue(context.Background(), cfg, nil)
 	if err == nil {
 		t.Fatalf("expected error when SentinelAddrs is set but MasterName is empty, got queue=%v", q)
 	}
@@ -49,7 +50,7 @@ func TestCreateRedisCommitmentQueue_MasterNameWithoutSentinelAddrs(t *testing.T)
 		},
 	}
 
-	q, err := createRedisCommitmentQueue(cfg, nil)
+	q, err := createRedisCommitmentQueue(context.Background(), cfg, nil)
 	if err == nil {
 		t.Fatalf("expected error when MasterName is set but SentinelAddrs is empty, got queue=%v", q)
 	}
