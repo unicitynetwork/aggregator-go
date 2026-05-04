@@ -164,13 +164,37 @@ The service is configured via environment variables:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `USE_REDIS_FOR_COMMITMENTS` | Use Redis for commitment queue (instead of MongoDB) | `false` |
-| `REDIS_HOST` | Redis server hostname | `localhost` |
-| `REDIS_PORT` | Redis server port | `6379` |
-| `REDIS_PASSWORD` | Redis server password | `` |
+| `REDIS_HOST` | Redis server hostname (single-endpoint mode) | `localhost` |
+| `REDIS_PORT` | Redis server port (single-endpoint mode) | `6379` |
+| `REDIS_PASSWORD` | Redis server password (data nodes) | `` |
 | `REDIS_DB` | Redis database number | `0` |
 | `REDIS_STREAM_NAME` | Redis stream name for commitments (allows multiple shards to share a Redis instance) | `commitments` |
 | `REDIS_FLUSH_INTERVAL` | Interval for flushing pending commitments to Redis | `50ms` |
 | `REDIS_MAX_BATCH_SIZE` | Maximum batch size before forcing flush | `2000` |
+
+#### Redis Sentinel (HA)
+
+Set `REDIS_SENTINEL_ADDRS` to switch the client to Sentinel-backed failover. When set, `REDIS_HOST`/`REDIS_PORT` are ignored and `REDIS_MASTER_NAME` is required.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `REDIS_SENTINEL_ADDRS` | Comma-separated `host:port` list of Sentinel nodes. Empty = single-endpoint mode. | `` |
+| `REDIS_MASTER_NAME` | Sentinel master name to track. Required when `REDIS_SENTINEL_ADDRS` is set. | `` |
+| `REDIS_SENTINEL_PASSWORD` | Password for authenticating to Sentinel nodes. | `` |
+| `REDIS_SENTINEL_USERNAME` | ACL username for authenticating to Sentinel nodes. | `` |
+| `REDIS_ROUTE_BY_LATENCY` | Route read-only commands to the lowest-latency node. | `false` |
+| `REDIS_ROUTE_RANDOMLY` | Route read-only commands to a random master/replica. | `false` |
+| `REDIS_REPLICA_ONLY` | Route all commands to replica read-only nodes. | `false` |
+
+Example:
+
+```bash
+USE_REDIS_FOR_COMMITMENTS=true \
+REDIS_SENTINEL_ADDRS=sentinel-1:26379,sentinel-2:26379,sentinel-3:26379 \
+REDIS_MASTER_NAME=mymaster \
+REDIS_PASSWORD=secret \
+make run
+```
 
 ### BFT Configuration
 

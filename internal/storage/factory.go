@@ -38,17 +38,39 @@ func NewStorage(ctx context.Context, cfg *config.Config, log *logger.Logger) (in
 
 // createRedisCommitmentQueue creates a Redis-based commitment queue
 func createRedisCommitmentQueue(cfg *config.Config, log *logger.Logger) (interfaces.CommitmentQueue, error) {
-	// Create Redis client
-	redisClient := redislib.NewClient(&redislib.Options{
-		Addr:         fmt.Sprintf("%s:%d", cfg.Redis.Host, cfg.Redis.Port),
-		Password:     cfg.Redis.Password,
-		DB:           cfg.Redis.DB,
-		DialTimeout:  cfg.Redis.DialTimeout,
-		ReadTimeout:  cfg.Redis.ReadTimeout,
-		WriteTimeout: cfg.Redis.WriteTimeout,
-		PoolSize:     cfg.Redis.PoolSize,
-		MaxRetries:   cfg.Redis.MaxRetries,
-	})
+	var redisClient *redislib.Client
+	if len(cfg.Redis.SentinelAddrs) > 0 {
+		if cfg.Redis.MasterName == "" {
+			return nil, fmt.Errorf("REDIS_MASTER_NAME is required when REDIS_SENTINEL_ADDRS is set")
+		}
+		redisClient = redislib.NewFailoverClient(&redislib.FailoverOptions{
+			MasterName:       cfg.Redis.MasterName,
+			SentinelAddrs:    cfg.Redis.SentinelAddrs,
+			SentinelUsername: cfg.Redis.SentinelUsername,
+			SentinelPassword: cfg.Redis.SentinelPassword,
+			Password:         cfg.Redis.Password,
+			DB:               cfg.Redis.DB,
+			DialTimeout:      cfg.Redis.DialTimeout,
+			ReadTimeout:      cfg.Redis.ReadTimeout,
+			WriteTimeout:     cfg.Redis.WriteTimeout,
+			PoolSize:         cfg.Redis.PoolSize,
+			MaxRetries:       cfg.Redis.MaxRetries,
+			RouteByLatency:   cfg.Redis.RouteByLatency,
+			RouteRandomly:    cfg.Redis.RouteRandomly,
+			ReplicaOnly:      cfg.Redis.ReplicaOnly,
+		})
+	} else {
+		redisClient = redislib.NewClient(&redislib.Options{
+			Addr:         fmt.Sprintf("%s:%d", cfg.Redis.Host, cfg.Redis.Port),
+			Password:     cfg.Redis.Password,
+			DB:           cfg.Redis.DB,
+			DialTimeout:  cfg.Redis.DialTimeout,
+			ReadTimeout:  cfg.Redis.ReadTimeout,
+			WriteTimeout: cfg.Redis.WriteTimeout,
+			PoolSize:     cfg.Redis.PoolSize,
+			MaxRetries:   cfg.Redis.MaxRetries,
+		})
+	}
 
 	// Test connection
 	ctx := context.Background()
