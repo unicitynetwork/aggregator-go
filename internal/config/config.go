@@ -126,7 +126,6 @@ type RedisConfig struct {
 	SentinelUsername string        `mapstructure:"sentinel_username"`
 	RouteByLatency   bool          `mapstructure:"route_by_latency"`
 	RouteRandomly    bool          `mapstructure:"route_randomly"`
-	ReplicaOnly      bool          `mapstructure:"replica_only"`
 }
 
 // StorageConfig holds storage layer configuration
@@ -345,7 +344,6 @@ func Load() (*Config, error) {
 			SentinelUsername: getEnvOrDefault("REDIS_SENTINEL_USERNAME", ""),
 			RouteByLatency:   getEnvBoolOrDefault("REDIS_ROUTE_BY_LATENCY", false),
 			RouteRandomly:    getEnvBoolOrDefault("REDIS_ROUTE_RANDOMLY", false),
-			ReplicaOnly:      getEnvBoolOrDefault("REDIS_REPLICA_ONLY", false),
 		},
 		Storage: StorageConfig{
 			UseRedisForCommitments: getEnvBoolOrDefault("USE_REDIS_FOR_COMMITMENTS", false),

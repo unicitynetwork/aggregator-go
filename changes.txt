@@ -3,10 +3,13 @@ CHANGELOG ENTRY - 04 May 2026 at 17:50 CET
 Add Redis Sentinel (HA) support for the commitment queue (#148).
 
 - Extend RedisConfig with SentinelAddrs, MasterName, SentinelPassword,
-  SentinelUsername, RouteByLatency, RouteRandomly, ReplicaOnly fields
-  driven by REDIS_SENTINEL_ADDRS, REDIS_MASTER_NAME,
-  REDIS_SENTINEL_PASSWORD, REDIS_SENTINEL_USERNAME,
-  REDIS_ROUTE_BY_LATENCY, REDIS_ROUTE_RANDOMLY and REDIS_REPLICA_ONLY.
+  SentinelUsername, RouteByLatency, RouteRandomly fields driven by
+  REDIS_SENTINEL_ADDRS, REDIS_MASTER_NAME, REDIS_SENTINEL_PASSWORD,
+  REDIS_SENTINEL_USERNAME, REDIS_ROUTE_BY_LATENCY and
+  REDIS_ROUTE_RANDOMLY. The ReplicaOnly knob is intentionally not
+  exposed because the commitment queue is write-heavy (XADD/XACK/
+  XReadGroup) and routing all commands to read-only replicas would
+  break it with READONLY errors at runtime.
 - internal/storage/factory.go now branches: if REDIS_SENTINEL_ADDRS is
   non-empty it builds a redis client via NewFailoverClient, otherwise
   falls back to the existing single-endpoint NewClient path. The factory
@@ -14,8 +17,13 @@ Add Redis Sentinel (HA) support for the commitment queue (#148).
   master name, and master name without sentinel addrs (which would
   otherwise silently fall back to single-endpoint mode).
 - The factory now logs the active mode (sentinel/direct) at startup so
-  operators can confirm HA wiring from the logs.
-- README.md documents the new env vars and a usage example.
+  operators can confirm HA wiring from the logs, and it propagates the
+  caller's context.Context through to the initial Redis Ping so
+  upstream timeouts/cancellations are honoured.
+- README.md documents the new env vars and a usage example, and the
+  pre-existing stale defaults for REDIS_FLUSH_INTERVAL and
+  REDIS_MAX_BATCH_SIZE are corrected to match the code (100ms and
+  5000).
 - Adds config-level unit tests covering sentinel env parsing, defaults
   and the new comma-separated string slice helper, plus factory-level
   tests covering both misconfiguration validations.

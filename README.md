@@ -169,8 +169,8 @@ The service is configured via environment variables:
 | `REDIS_PASSWORD` | Redis server password (data nodes) | `` |
 | `REDIS_DB` | Redis database number | `0` |
 | `REDIS_STREAM_NAME` | Redis stream name for commitments (allows multiple shards to share a Redis instance) | `commitments` |
-| `REDIS_FLUSH_INTERVAL` | Interval for flushing pending commitments to Redis | `50ms` |
-| `REDIS_MAX_BATCH_SIZE` | Maximum batch size before forcing flush | `2000` |
+| `REDIS_FLUSH_INTERVAL` | Interval for flushing pending commitments to Redis | `100ms` |
+| `REDIS_MAX_BATCH_SIZE` | Maximum batch size before forcing flush | `5000` |
 
 #### Redis Sentinel (HA)
 
@@ -184,7 +184,6 @@ Set `REDIS_SENTINEL_ADDRS` to switch the client to Sentinel-backed failover. Whe
 | `REDIS_SENTINEL_USERNAME` | ACL username for authenticating to Sentinel nodes. | `` |
 | `REDIS_ROUTE_BY_LATENCY` | Route read-only commands to the lowest-latency node. | `false` |
 | `REDIS_ROUTE_RANDOMLY` | Route read-only commands to a random master/replica. | `false` |
-| `REDIS_REPLICA_ONLY` | Route all commands to replica read-only nodes. | `false` |
 
 Example:
 

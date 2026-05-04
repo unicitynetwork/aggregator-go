@@ -13,7 +13,6 @@ func TestRedisSentinelEnvParsing(t *testing.T) {
 	t.Setenv("REDIS_PASSWORD", "datapass")
 	t.Setenv("REDIS_ROUTE_BY_LATENCY", "true")
 	t.Setenv("REDIS_ROUTE_RANDOMLY", "true")
-	t.Setenv("REDIS_REPLICA_ONLY", "true")
 
 	t.Setenv("BFT_ENABLED", "false")
 	t.Setenv("DISABLE_HIGH_AVAILABILITY", "true")
@@ -45,9 +44,6 @@ func TestRedisSentinelEnvParsing(t *testing.T) {
 	if !cfg.Redis.RouteRandomly {
 		t.Errorf("RouteRandomly = false, want true")
 	}
-	if !cfg.Redis.ReplicaOnly {
-		t.Errorf("ReplicaOnly = false, want true")
-	}
 }
 
 func TestRedisSentinelDefaults(t *testing.T) {
@@ -65,9 +61,9 @@ func TestRedisSentinelDefaults(t *testing.T) {
 	if cfg.Redis.MasterName != "" {
 		t.Errorf("MasterName default = %q, want empty", cfg.Redis.MasterName)
 	}
-	if cfg.Redis.RouteByLatency || cfg.Redis.RouteRandomly || cfg.Redis.ReplicaOnly {
-		t.Errorf("routing flags should default to false; got latency=%v randomly=%v replica=%v",
-			cfg.Redis.RouteByLatency, cfg.Redis.RouteRandomly, cfg.Redis.ReplicaOnly)
+	if cfg.Redis.RouteByLatency || cfg.Redis.RouteRandomly {
+		t.Errorf("routing flags should default to false; got latency=%v randomly=%v",
+			cfg.Redis.RouteByLatency, cfg.Redis.RouteRandomly)
 	}
 }
 
