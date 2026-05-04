@@ -59,7 +59,15 @@ func createRedisCommitmentQueue(cfg *config.Config, log *logger.Logger) (interfa
 			RouteRandomly:    cfg.Redis.RouteRandomly,
 			ReplicaOnly:      cfg.Redis.ReplicaOnly,
 		})
+		if log != nil {
+			log.Info("redis commitment queue using sentinel mode",
+				"master", cfg.Redis.MasterName,
+				"sentinels", cfg.Redis.SentinelAddrs)
+		}
 	} else {
+		if cfg.Redis.MasterName != "" {
+			return nil, fmt.Errorf("REDIS_MASTER_NAME is set but REDIS_SENTINEL_ADDRS is empty; either set REDIS_SENTINEL_ADDRS or unset REDIS_MASTER_NAME")
+		}
 		redisClient = redislib.NewClient(&redislib.Options{
 			Addr:         fmt.Sprintf("%s:%d", cfg.Redis.Host, cfg.Redis.Port),
 			Password:     cfg.Redis.Password,
@@ -70,6 +78,10 @@ func createRedisCommitmentQueue(cfg *config.Config, log *logger.Logger) (interfa
 			PoolSize:     cfg.Redis.PoolSize,
 			MaxRetries:   cfg.Redis.MaxRetries,
 		})
+		if log != nil {
+			log.Info("redis commitment queue using direct mode",
+				"addr", fmt.Sprintf("%s:%d", cfg.Redis.Host, cfg.Redis.Port))
+		}
 	}
 
 	// Test connection
