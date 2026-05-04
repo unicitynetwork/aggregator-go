@@ -1,0 +1,17 @@
+CHANGELOG ENTRY - 04 May 2026 at 17:50 CET
+
+Add Redis Sentinel (HA) support for the commitment queue (#148).
+
+- Extend RedisConfig with SentinelAddrs, MasterName, SentinelPassword,
+  SentinelUsername, RouteByLatency, RouteRandomly, ReplicaOnly fields
+  driven by REDIS_SENTINEL_ADDRS, REDIS_MASTER_NAME,
+  REDIS_SENTINEL_PASSWORD, REDIS_SENTINEL_USERNAME,
+  REDIS_ROUTE_BY_LATENCY, REDIS_ROUTE_RANDOMLY and REDIS_REPLICA_ONLY.
+- internal/storage/factory.go now branches: if REDIS_SENTINEL_ADDRS is
+  non-empty it builds a redis client via NewFailoverClient, otherwise
+  falls back to the existing single-endpoint NewClient path. A missing
+  REDIS_MASTER_NAME with sentinel addrs set is rejected with a clear
+  error.
+- README.md documents the new env vars and a usage example.
+- Adds config-level unit tests covering sentinel env parsing, defaults
+  and the new comma-separated string slice helper.
