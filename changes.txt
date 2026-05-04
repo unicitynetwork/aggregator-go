@@ -9,9 +9,13 @@ Add Redis Sentinel (HA) support for the commitment queue (#148).
   REDIS_ROUTE_BY_LATENCY, REDIS_ROUTE_RANDOMLY and REDIS_REPLICA_ONLY.
 - internal/storage/factory.go now branches: if REDIS_SENTINEL_ADDRS is
   non-empty it builds a redis client via NewFailoverClient, otherwise
-  falls back to the existing single-endpoint NewClient path. A missing
-  REDIS_MASTER_NAME with sentinel addrs set is rejected with a clear
-  error.
+  falls back to the existing single-endpoint NewClient path. The factory
+  rejects both misconfigurations symmetrically: sentinel addrs without
+  master name, and master name without sentinel addrs (which would
+  otherwise silently fall back to single-endpoint mode).
+- The factory now logs the active mode (sentinel/direct) at startup so
+  operators can confirm HA wiring from the logs.
 - README.md documents the new env vars and a usage example.
 - Adds config-level unit tests covering sentinel env parsing, defaults
-  and the new comma-separated string slice helper.
+  and the new comma-separated string slice helper, plus factory-level
+  tests covering both misconfiguration validations.
