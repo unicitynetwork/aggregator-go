@@ -54,9 +54,8 @@ func createRedisCommitmentQueue(ctx context.Context, cfg *config.Config, log *lo
 			ReadTimeout:      cfg.Redis.ReadTimeout,
 			WriteTimeout:     cfg.Redis.WriteTimeout,
 			PoolSize:         cfg.Redis.PoolSize,
+			MinIdleConns:     cfg.Redis.MinIdleConns,
 			MaxRetries:       cfg.Redis.MaxRetries,
-			RouteByLatency:   cfg.Redis.RouteByLatency,
-			RouteRandomly:    cfg.Redis.RouteRandomly,
 		})
 		if log != nil {
 			log.Info("redis commitment queue using sentinel mode",
@@ -75,6 +74,7 @@ func createRedisCommitmentQueue(ctx context.Context, cfg *config.Config, log *lo
 			ReadTimeout:  cfg.Redis.ReadTimeout,
 			WriteTimeout: cfg.Redis.WriteTimeout,
 			PoolSize:     cfg.Redis.PoolSize,
+			MinIdleConns: cfg.Redis.MinIdleConns,
 			MaxRetries:   cfg.Redis.MaxRetries,
 		})
 		if log != nil {

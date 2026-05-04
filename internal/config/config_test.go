@@ -11,8 +11,6 @@ func TestRedisSentinelEnvParsing(t *testing.T) {
 	t.Setenv("REDIS_SENTINEL_PASSWORD", "sentpass")
 	t.Setenv("REDIS_SENTINEL_USERNAME", "sentuser")
 	t.Setenv("REDIS_PASSWORD", "datapass")
-	t.Setenv("REDIS_ROUTE_BY_LATENCY", "true")
-	t.Setenv("REDIS_ROUTE_RANDOMLY", "true")
 
 	t.Setenv("BFT_ENABLED", "false")
 	t.Setenv("DISABLE_HIGH_AVAILABILITY", "true")
@@ -38,12 +36,6 @@ func TestRedisSentinelEnvParsing(t *testing.T) {
 	if cfg.Redis.Password != "datapass" {
 		t.Errorf("Password = %q, want %q", cfg.Redis.Password, "datapass")
 	}
-	if !cfg.Redis.RouteByLatency {
-		t.Errorf("RouteByLatency = false, want true")
-	}
-	if !cfg.Redis.RouteRandomly {
-		t.Errorf("RouteRandomly = false, want true")
-	}
 }
 
 func TestRedisSentinelDefaults(t *testing.T) {
@@ -60,10 +52,6 @@ func TestRedisSentinelDefaults(t *testing.T) {
 	}
 	if cfg.Redis.MasterName != "" {
 		t.Errorf("MasterName default = %q, want empty", cfg.Redis.MasterName)
-	}
-	if cfg.Redis.RouteByLatency || cfg.Redis.RouteRandomly {
-		t.Errorf("routing flags should default to false; got latency=%v randomly=%v",
-			cfg.Redis.RouteByLatency, cfg.Redis.RouteRandomly)
 	}
 }
 
