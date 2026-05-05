@@ -134,34 +134,56 @@ func (rr *RequestRateCounters) IncProofCompleted()  { rr.proofCompleted.Add(1) }
 func (rr *RequestRateCounters) IncProofRetries()    { rr.proofRetries.Add(1) }
 
 type aggregatorLogRaw struct {
-	Time             string `json:"time"`
-	Msg              string `json:"msg"`
-	Block            string `json:"block"`
-	Commitments      int    `json:"commitments"`
-	RoundTime        string `json:"roundTime"`
-	Processing       string `json:"processing"`
-	BftWait          string `json:"bftWait"`
-	Finalization     string `json:"finalization"`
-	ProofReadyMedian string `json:"proofReadyMedian"`
-	ProofReadyP95    string `json:"proofReadyP95"`
-	ProofReadyP99    string `json:"proofReadyP99"`
-	RedisTotal       int    `json:"redisTotal"`
-	RedisPending     int    `json:"redisPending"`
+	Time                 string `json:"time"`
+	Msg                  string `json:"msg"`
+	Block                string `json:"block"`
+	Commitments          int    `json:"commitments"`
+	RoundTime            string `json:"roundTime"`
+	Processing           string `json:"processing"`
+	BftWait              string `json:"bftWait"`
+	Finalization         string `json:"finalization"`
+	FinalizeScan         string `json:"finalizeScan"`
+	FinalizeConvert      string `json:"finalizeConvert"`
+	FinalizeStoreBlock   string `json:"finalizeStoreBlock"`
+	FinalizeStoreData    string `json:"finalizeStoreData"`
+	FinalizeStoreSmt     string `json:"finalizeStoreSmt"`
+	FinalizeStoreRecords string `json:"finalizeStoreRecords"`
+	FinalizeLockWait     string `json:"finalizeLockWait"`
+	FinalizeSmtCommit    string `json:"finalizeSmtCommit"`
+	FinalizeSetFinalized string `json:"finalizeSetFinalized"`
+	FinalizeAck          string `json:"finalizeAck"`
+	ProofReadyMedian     string `json:"proofReadyMedian"`
+	ProofReadyP95        string `json:"proofReadyP95"`
+	ProofReadyP99        string `json:"proofReadyP99"`
+	RedisTotal           int    `json:"redisTotal"`
+	RedisPending         int    `json:"redisPending"`
 }
 
 type aggregatorRoundSummary struct {
-	Timestamp    time.Time
-	Block        string
-	Commitments  int
-	RoundTime    time.Duration
-	Processing   time.Duration
-	BftWait      time.Duration
-	Finalization time.Duration
-	ProofMedian  time.Duration
-	ProofP95     time.Duration
-	ProofP99     time.Duration
-	RedisTotal   int
-	RedisPending int
+	Timestamp                time.Time
+	Block                    string
+	Commitments              int
+	RoundTime                time.Duration
+	Processing               time.Duration
+	BftWait                  time.Duration
+	Finalization             time.Duration
+	HasFinalizationBreakdown bool
+	FinalizeScan             time.Duration
+	FinalizeConvert          time.Duration
+	FinalizeStoreBlock       time.Duration
+	FinalizeStoreData        time.Duration
+	FinalizeStoreSmt         time.Duration
+	FinalizeStoreRecords     time.Duration
+	FinalizeLockWait         time.Duration
+	FinalizeSmtCommit        time.Duration
+	FinalizeSetFinalized     time.Duration
+	FinalizeAck              time.Duration
+	HasProofReady            bool
+	ProofMedian              time.Duration
+	ProofP95                 time.Duration
+	ProofP99                 time.Duration
+	RedisTotal               int
+	RedisPending             int
 }
 
 func (m *Metrics) addProofLatency(latency time.Duration) {

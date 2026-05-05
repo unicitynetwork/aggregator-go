@@ -828,6 +828,17 @@ func printShardFinalReport(metrics *Metrics, shardClients []*ShardClient) {
 	}
 }
 
+func parseOptionalLogDuration(raw string) (time.Duration, bool, error) {
+	if raw == "" {
+		return 0, false, nil
+	}
+	duration, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, true, err
+	}
+	return duration, true, nil
+}
+
 func parseAggregatorRoundLogs(path string, start, end time.Time) ([]aggregatorRoundSummary, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -882,32 +893,91 @@ func parseAggregatorRoundLogs(path string, start, end time.Time) ([]aggregatorRo
 		if err != nil {
 			continue
 		}
-		medianDur, err := time.ParseDuration(raw.ProofReadyMedian)
+
+		finalizeScan, hasFinalizeScan, err := parseOptionalLogDuration(raw.FinalizeScan)
 		if err != nil {
 			continue
 		}
-		p95Dur, err := time.ParseDuration(raw.ProofReadyP95)
+		finalizeConvert, hasFinalizeConvert, err := parseOptionalLogDuration(raw.FinalizeConvert)
 		if err != nil {
 			continue
 		}
-		p99Dur, err := time.ParseDuration(raw.ProofReadyP99)
+		finalizeStoreBlock, hasFinalizeStoreBlock, err := parseOptionalLogDuration(raw.FinalizeStoreBlock)
 		if err != nil {
+			continue
+		}
+		finalizeStoreData, hasFinalizeStoreData, err := parseOptionalLogDuration(raw.FinalizeStoreData)
+		if err != nil {
+			continue
+		}
+		finalizeStoreSmt, hasFinalizeStoreSmt, err := parseOptionalLogDuration(raw.FinalizeStoreSmt)
+		if err != nil {
+			continue
+		}
+		finalizeStoreRecords, hasFinalizeStoreRecords, err := parseOptionalLogDuration(raw.FinalizeStoreRecords)
+		if err != nil {
+			continue
+		}
+		finalizeLockWait, hasFinalizeLockWait, err := parseOptionalLogDuration(raw.FinalizeLockWait)
+		if err != nil {
+			continue
+		}
+		finalizeSmtCommit, hasFinalizeSmtCommit, err := parseOptionalLogDuration(raw.FinalizeSmtCommit)
+		if err != nil {
+			continue
+		}
+		finalizeSetFinalized, hasFinalizeSetFinalized, err := parseOptionalLogDuration(raw.FinalizeSetFinalized)
+		if err != nil {
+			continue
+		}
+		finalizeAck, hasFinalizeAck, err := parseOptionalLogDuration(raw.FinalizeAck)
+		if err != nil {
+			continue
+		}
+		hasFinalizationBreakdown := hasFinalizeScan || hasFinalizeConvert || hasFinalizeStoreBlock || hasFinalizeStoreData || hasFinalizeStoreSmt || hasFinalizeStoreRecords || hasFinalizeLockWait || hasFinalizeSmtCommit || hasFinalizeSetFinalized || hasFinalizeAck
+
+		medianDur, hasMedian, err := parseOptionalLogDuration(raw.ProofReadyMedian)
+		if err != nil {
+			continue
+		}
+		p95Dur, hasP95, err := parseOptionalLogDuration(raw.ProofReadyP95)
+		if err != nil {
+			continue
+		}
+		p99Dur, hasP99, err := parseOptionalLogDuration(raw.ProofReadyP99)
+		if err != nil {
+			continue
+		}
+		hasProofReady := hasMedian || hasP95 || hasP99
+		if hasProofReady && (!hasMedian || !hasP95 || !hasP99) {
 			continue
 		}
 
 		summaries = append(summaries, aggregatorRoundSummary{
-			Timestamp:    timestamp,
-			Block:        raw.Block,
-			Commitments:  raw.Commitments,
-			RoundTime:    roundDur,
-			Processing:   procDur,
-			BftWait:      bftDur,
-			Finalization: finalDur,
-			ProofMedian:  medianDur,
-			ProofP95:     p95Dur,
-			ProofP99:     p99Dur,
-			RedisTotal:   raw.RedisTotal,
-			RedisPending: raw.RedisPending,
+			Timestamp:                timestamp,
+			Block:                    raw.Block,
+			Commitments:              raw.Commitments,
+			RoundTime:                roundDur,
+			Processing:               procDur,
+			BftWait:                  bftDur,
+			Finalization:             finalDur,
+			HasFinalizationBreakdown: hasFinalizationBreakdown,
+			FinalizeScan:             finalizeScan,
+			FinalizeConvert:          finalizeConvert,
+			FinalizeStoreBlock:       finalizeStoreBlock,
+			FinalizeStoreData:        finalizeStoreData,
+			FinalizeStoreSmt:         finalizeStoreSmt,
+			FinalizeStoreRecords:     finalizeStoreRecords,
+			FinalizeLockWait:         finalizeLockWait,
+			FinalizeSmtCommit:        finalizeSmtCommit,
+			FinalizeSetFinalized:     finalizeSetFinalized,
+			FinalizeAck:              finalizeAck,
+			HasProofReady:            hasProofReady,
+			ProofMedian:              medianDur,
+			ProofP95:                 p95Dur,
+			ProofP99:                 p99Dur,
+			RedisTotal:               raw.RedisTotal,
+			RedisPending:             raw.RedisPending,
 		})
 	}
 
@@ -1018,6 +1088,116 @@ func discoverAggregatorLogSources(shardClients []*ShardClient) []aggregatorLogSo
 	return sources
 }
 
+func printFinalizationBreakdownSummary(label string, entries []aggregatorRoundSummary) {
+	prefix := "Average"
+	if label != "" {
+		prefix = label + " average"
+	}
+
+	withBreakdown := make([]aggregatorRoundSummary, 0, len(entries))
+	for _, entry := range entries {
+		if entry.HasFinalizationBreakdown {
+			withBreakdown = append(withBreakdown, entry)
+		}
+	}
+	if len(withBreakdown) == 0 {
+		return
+	}
+
+	var scanSum, convertSum, storeBlockSum, storeDataSum time.Duration
+	var storeSmtSum, storeRecordsSum, lockWaitSum time.Duration
+	var smtCommitSum, setFinalizedSum, ackSum time.Duration
+	for _, entry := range withBreakdown {
+		scanSum += entry.FinalizeScan
+		convertSum += entry.FinalizeConvert
+		storeBlockSum += entry.FinalizeStoreBlock
+		storeDataSum += entry.FinalizeStoreData
+		storeSmtSum += entry.FinalizeStoreSmt
+		storeRecordsSum += entry.FinalizeStoreRecords
+		lockWaitSum += entry.FinalizeLockWait
+		smtCommitSum += entry.FinalizeSmtCommit
+		setFinalizedSum += entry.FinalizeSetFinalized
+		ackSum += entry.FinalizeAck
+	}
+
+	count := time.Duration(len(withBreakdown))
+	fmt.Printf("%s finalization breakdown: scan=%v convert=%v storeBlock=%v storeData=%v (smt=%v records=%v) lockWait=%v smtCommit=%v setFinalized=%v ack=%v (%d rounds)\n",
+		prefix,
+		(scanSum / count).Truncate(time.Millisecond),
+		(convertSum / count).Truncate(time.Millisecond),
+		(storeBlockSum / count).Truncate(time.Millisecond),
+		(storeDataSum / count).Truncate(time.Millisecond),
+		(storeSmtSum / count).Truncate(time.Millisecond),
+		(storeRecordsSum / count).Truncate(time.Millisecond),
+		(lockWaitSum / count).Truncate(time.Millisecond),
+		(smtCommitSum / count).Truncate(time.Millisecond),
+		(setFinalizedSum / count).Truncate(time.Millisecond),
+		(ackSum / count).Truncate(time.Millisecond),
+		len(withBreakdown))
+}
+
+func printAggregatorAverages(label string, entries []aggregatorRoundSummary) {
+	prefix := "Average"
+	if label != "" {
+		prefix = label + " average"
+	}
+
+	if len(entries) == 0 {
+		return
+	}
+
+	var roundSum, finalSum, procSum, bftSum time.Duration
+	var proofMedSum, proofP95Sum, proofP99Sum time.Duration
+	totalCommitments := 0
+	proofCount := 0
+	for _, entry := range entries {
+		roundSum += entry.RoundTime
+		finalSum += entry.Finalization
+		procSum += entry.Processing
+		bftSum += entry.BftWait
+		totalCommitments += entry.Commitments
+		if entry.HasProofReady {
+			proofMedSum += entry.ProofMedian
+			proofP95Sum += entry.ProofP95
+			proofP99Sum += entry.ProofP99
+			proofCount++
+		}
+	}
+
+	count := time.Duration(len(entries))
+	avgFinal := finalSum / count
+	avgProcessing := procSum / count
+	avgBft := bftSum / count
+	avgCommit := float64(totalCommitments) / float64(len(entries))
+
+	finalPct := 0.0
+	procPct := 0.0
+	bftPct := 0.0
+	if roundSum > 0 {
+		finalPct = float64(finalSum) / float64(roundSum) * 100
+		procPct = float64(procSum) / float64(roundSum) * 100
+		bftPct = float64(bftSum) / float64(roundSum) * 100
+	}
+
+	fmt.Printf("%s round time: %v\n", prefix, (roundSum / count).Truncate(time.Millisecond))
+	fmt.Printf("%s finalization time: %v (%.1f%% of round time)\n", prefix, avgFinal.Truncate(time.Millisecond), finalPct)
+	fmt.Printf("%s commitments per round: %.0f\n", prefix, avgCommit)
+	fmt.Printf("%s processing time: %v (%.1f%% of round time)\n", prefix, avgProcessing.Truncate(time.Millisecond), procPct)
+	fmt.Printf("%s BFT wait: %v (%.1f%% of round time)\n", prefix, avgBft.Truncate(time.Millisecond), bftPct)
+	if proofCount > 0 {
+		proofCountDuration := time.Duration(proofCount)
+		fmt.Printf("%s proof readiness: median %v, p95 %v, p99 %v (%d rounds)\n",
+			prefix,
+			(proofMedSum / proofCountDuration).Truncate(time.Millisecond),
+			(proofP95Sum / proofCountDuration).Truncate(time.Millisecond),
+			(proofP99Sum / proofCountDuration).Truncate(time.Millisecond),
+			proofCount)
+	} else {
+		fmt.Printf("%s proof readiness: n/a (no proof-ready rounds in window)\n", prefix)
+	}
+	printFinalizationBreakdownSummary(label, entries)
+}
+
 func printAggregatorServerStatsSummary(header string, summaries []aggregatorRoundSummary) {
 	if len(summaries) == 0 {
 		return
@@ -1035,62 +1215,19 @@ func printAggregatorServerStatsSummary(header string, summaries []aggregatorRoun
 		usable = ordered
 	}
 
-	var roundSum time.Duration
-	var finalSum time.Duration
-	var procSum, bftSum time.Duration
-	var proofMedSum, proofP95Sum, proofP99Sum time.Duration
-	totalCommitments := 0
-	for _, entry := range usable {
-		roundSum += entry.RoundTime
-		finalSum += entry.Finalization
-		procSum += entry.Processing
-		bftSum += entry.BftWait
-		proofMedSum += entry.ProofMedian
-		proofP95Sum += entry.ProofP95
-		proofP99Sum += entry.ProofP99
-		totalCommitments += entry.Commitments
-	}
-
-	count := len(usable)
-
-	avgFinal := time.Duration(0)
-	avgProcessing := time.Duration(0)
-	avgBft := time.Duration(0)
-	avgProofMedian := time.Duration(0)
-	avgProofP95 := time.Duration(0)
-	avgProofP99 := time.Duration(0)
-	avgCommit := 0.0
-	if count > 0 {
-		avgFinal = finalSum / time.Duration(count)
-		avgProcessing = procSum / time.Duration(count)
-		avgBft = bftSum / time.Duration(count)
-		avgProofMedian = proofMedSum / time.Duration(count)
-		avgProofP95 = proofP95Sum / time.Duration(count)
-		avgProofP99 = proofP99Sum / time.Duration(count)
-		avgCommit = float64(totalCommitments) / float64(count)
-	}
-
-	finalPct := 0.0
-	procPct := 0.0
-	bftPct := 0.0
-	if roundSum > 0 {
-		finalPct = float64(finalSum) / float64(roundSum) * 100
-		procPct = float64(procSum) / float64(roundSum) * 100
-		bftPct = float64(bftSum) / float64(roundSum) * 100
-	}
-
 	fmt.Printf("\nAGGREGATOR SERVER STATS [%s] (%d rounds, averages exclude first/last when possible)\n", header, len(ordered))
-	fmt.Printf("Average finalization time: %v (%.1f%% of round time)\n",
-		avgFinal.Truncate(time.Millisecond), finalPct)
-	fmt.Printf("Average commitments per round: %.0f\n", avgCommit)
-	fmt.Printf("Average processing time: %v (%.1f%% of round time)\n",
-		avgProcessing.Truncate(time.Millisecond), procPct)
-	fmt.Printf("Average BFT wait: %v (%.1f%% of round time)\n",
-		avgBft.Truncate(time.Millisecond), bftPct)
-	fmt.Printf("Average proof readiness: median %v, p95 %v, p99 %v\n",
-		avgProofMedian.Truncate(time.Millisecond),
-		avgProofP95.Truncate(time.Millisecond),
-		avgProofP99.Truncate(time.Millisecond))
+	printAggregatorAverages("", usable)
+
+	active := make([]aggregatorRoundSummary, 0, len(usable))
+	for _, entry := range usable {
+		if entry.Commitments > 0 {
+			active = append(active, entry)
+		}
+	}
+	if len(active) > 0 && len(active) != len(usable) {
+		printAggregatorAverages("Active", active)
+	}
+
 	fmt.Printf("Log window: %s to %s\n",
 		ordered[0].Timestamp.Format(time.RFC3339),
 		ordered[len(ordered)-1].Timestamp.Format(time.RFC3339))
