@@ -73,6 +73,10 @@ type DatabaseConfig struct {
 	MaxPoolSize            uint64        `mapstructure:"max_pool_size"`
 	MinPoolSize            uint64        `mapstructure:"min_pool_size"`
 	MaxConnIdleTime        time.Duration `mapstructure:"max_conn_idle_time"`
+	// Optional finalization insert chunking. A zero chunk size keeps the
+	// existing single InsertMany behavior.
+	FinalizationInsertChunkSize    int `mapstructure:"finalization_insert_chunk_size"`
+	FinalizationInsertChunkWorkers int `mapstructure:"finalization_insert_chunk_workers"`
 }
 
 // HAConfig holds High Availability configuration
@@ -103,9 +107,11 @@ type LoggingConfig struct {
 
 // ProcessingConfig holds batch processing configuration
 type ProcessingConfig struct {
-	BatchLimit             int           `mapstructure:"batch_limit"`
-	RoundDuration          time.Duration `mapstructure:"round_duration"`
-	MaxCommitmentsPerRound int           `mapstructure:"max_commitments_per_round"` // Stop waiting once this many commitments collected
+	BatchLimit                 int           `mapstructure:"batch_limit"`
+	RoundDuration              time.Duration `mapstructure:"round_duration"`
+	MaxCommitmentsPerRound     int           `mapstructure:"max_commitments_per_round"`     // Stop waiting once this many commitments collected
+	CollectPhaseDuration       time.Duration `mapstructure:"collect_phase_duration"`        // Non-child fixed collection window before proposing a round
+	CommitmentStreamBufferSize int           `mapstructure:"commitment_stream_buffer_size"` // Buffer between queue streamer and round collection
 }
 
 // RedisConfig holds Redis connection configuration
@@ -293,6 +299,10 @@ func Load() (*Config, error) {
 			MaxPoolSize:            uint64(getEnvIntOrDefault("MONGODB_MAX_POOL_SIZE", 100)),
 			MinPoolSize:            uint64(getEnvIntOrDefault("MONGODB_MIN_POOL_SIZE", 5)),
 			MaxConnIdleTime:        getEnvDurationOrDefault("MONGODB_MAX_CONN_IDLE_TIME", "5m"),
+			FinalizationInsertChunkSize: getEnvIntOrDefault(
+				"MONGODB_FINALIZATION_INSERT_CHUNK_SIZE", 0),
+			FinalizationInsertChunkWorkers: getEnvIntOrDefault(
+				"MONGODB_FINALIZATION_INSERT_CHUNK_WORKERS", 1),
 		},
 		HA: HAConfig{
 			Enabled:                       !getEnvBoolOrDefault("DISABLE_HIGH_AVAILABILITY", false),
@@ -317,9 +327,11 @@ func Load() (*Config, error) {
 			CompressBackups: getEnvBoolOrDefault("LOG_COMPRESS_BACKUPS", true),
 		},
 		Processing: ProcessingConfig{
-			BatchLimit:             getEnvIntOrDefault("BATCH_LIMIT", 1000),
-			RoundDuration:          getEnvDurationOrDefault("ROUND_DURATION", "1s"),
-			MaxCommitmentsPerRound: getEnvIntOrDefault("MAX_COMMITMENTS_PER_ROUND", 10000), // Default 10k to keep rounds under 2s
+			BatchLimit:                 getEnvIntOrDefault("BATCH_LIMIT", 1000),
+			RoundDuration:              getEnvDurationOrDefault("ROUND_DURATION", "1s"),
+			MaxCommitmentsPerRound:     getEnvIntOrDefault("MAX_COMMITMENTS_PER_ROUND", 10000), // Default 10k to keep rounds under 2s
+			CollectPhaseDuration:       getEnvDurationOrDefault("COLLECT_PHASE_DURATION", "200ms"),
+			CommitmentStreamBufferSize: getEnvIntOrDefault("COMMITMENT_STREAM_BUFFER_SIZE", 10000),
 		},
 		Redis: RedisConfig{
 			Host:         getEnvOrDefault("REDIS_HOST", "localhost"),
@@ -427,6 +439,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.HTTP2MaxConcurrentStreams <= 0 {
 		return fmt.Errorf("HTTP/2 max concurrent streams must be positive")
+	}
+	if c.Processing.CommitmentStreamBufferSize <= 0 {
+		return fmt.Errorf("COMMITMENT_STREAM_BUFFER_SIZE must be positive")
+	}
+	if c.Processing.CollectPhaseDuration <= 0 {
+		return fmt.Errorf("COLLECT_PHASE_DURATION must be positive")
+	}
+	if c.Database.FinalizationInsertChunkSize < 0 {
+		return fmt.Errorf("MONGODB_FINALIZATION_INSERT_CHUNK_SIZE must be non-negative")
+	}
+	if c.Database.FinalizationInsertChunkSize > 0 && c.Database.FinalizationInsertChunkWorkers <= 0 {
+		return fmt.Errorf("MONGODB_FINALIZATION_INSERT_CHUNK_WORKERS must be positive when chunking is enabled")
 	}
 
 	// Validate log level

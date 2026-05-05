@@ -583,6 +583,9 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	logFields = append(logFields,
 		"redisTotal", redisTotal,
 		"redisPending", redisPending,
+		"collectPhaseDuration", rm.config.Processing.CollectPhaseDuration.String(),
+		"streamChannelSize", len(rm.commitmentStream),
+		"streamChannelCapacity", cap(rm.commitmentStream),
 	)
 	if proofWaitDuration > 0 {
 		logFields = append(logFields,

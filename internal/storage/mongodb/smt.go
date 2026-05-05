@@ -18,12 +18,18 @@ const smtCollection = "smt_nodes"
 // SmtStorage implements SMT storage for MongoDB
 type SmtStorage struct {
 	collection *mongo.Collection
+	insertOpts finalizationInsertOptions
 }
 
 // NewSmtStorage creates a new SMT storage instance
-func NewSmtStorage(db *mongo.Database) *SmtStorage {
+func NewSmtStorage(db *mongo.Database, insertOpts ...finalizationInsertOptions) *SmtStorage {
+	opts := finalizationInsertOptions{workers: 1}
+	if len(insertOpts) > 0 {
+		opts = insertOpts[0]
+	}
 	return &SmtStorage{
 		collection: db.Collection(smtCollection),
+		insertOpts: opts,
 	}
 }
 
@@ -82,12 +88,8 @@ func (ss *SmtStorage) StoreBatch(ctx context.Context, nodes []*models.SmtNode) e
 		docs[i] = node.ToBSON()
 	}
 
-	_, err := ss.collection.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
+	err := insertManyFinalizationBatch(ctx, ss.collection, docs, ss.insertOpts)
 	if err != nil {
-		// Ignore duplicate key errors - with SetOrdered(false), non-duplicates are still inserted
-		if mongo.IsDuplicateKeyError(err) {
-			return nil
-		}
 		return fmt.Errorf("failed to store SMT nodes batch: %w", err)
 	}
 	return nil

@@ -164,6 +164,11 @@ func NewRoundManager(
 	threadSafeSmt *smt.ThreadSafeSMT,
 	trustBaseProvider interfaces.TrustBaseProvider,
 ) (*RoundManager, error) {
+	commitmentStreamBufferSize := cfg.Processing.CommitmentStreamBufferSize
+	if commitmentStreamBufferSize <= 0 {
+		commitmentStreamBufferSize = 10000
+	}
+
 	rm := &RoundManager{
 		config:              cfg,
 		logger:              logger,
@@ -173,11 +178,11 @@ func NewRoundManager(
 		rootClient:          rootAggregatorClient,
 		stateTracker:        stateTracker,
 		eventBus:            eventBus,
-		roundDuration:       cfg.Processing.RoundDuration,                   // Configurable round duration (default 1s)
-		commitmentStream:    make(chan *models.CertificationRequest, 10000), // Reasonable buffer for streaming
-		avgProcessingRate:   1.0,                                            // Initial estimate: 1 commitment per ms
-		avgFinalizationTime: 200 * time.Millisecond,                         // Initial estimate (conservative)
-		avgSMTUpdateTime:    5 * time.Millisecond,                           // Initial estimate per batch
+		roundDuration:       cfg.Processing.RoundDuration,                                        // Configurable round duration (default 1s)
+		commitmentStream:    make(chan *models.CertificationRequest, commitmentStreamBufferSize), // Buffer for queue streamer
+		avgProcessingRate:   1.0,                                                                 // Initial estimate: 1 commitment per ms
+		avgFinalizationTime: 200 * time.Millisecond,                                              // Initial estimate (conservative)
+		avgSMTUpdateTime:    5 * time.Millisecond,                                                // Initial estimate per batch
 	}
 
 	if rm.storage != nil && rm.storage.SmtStorage() != nil {
@@ -457,7 +462,10 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 	rm.roundMutex.Unlock()
 
 	if !rm.config.Sharding.Mode.IsChild() {
-		collectDuration := 200 * time.Millisecond
+		collectDuration := rm.config.Processing.CollectPhaseDuration
+		if collectDuration <= 0 {
+			collectDuration = 200 * time.Millisecond
+		}
 		deadline := time.Now().Add(collectDuration)
 
 		for time.Now().Before(deadline) {
