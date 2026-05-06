@@ -151,18 +151,13 @@ func (brs *BlockRecordsStorage) GetLatestBlockNumber(ctx context.Context) (*api.
 	return api.NewBigInt(blockNumber), nil
 }
 
-// CreateIndexes creates necessary indexes for the block records collection
+// CreateIndexes creates the necessary indexes needed by block recovery and HA
+// block sync.
 func (brs *BlockRecordsStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
 		{
 			Keys:    bson.D{{Key: "blockNumber", Value: 1}},
 			Options: options.Index().SetUnique(true),
-		},
-		{
-			Keys: bson.D{{Key: "stateIds", Value: 1}},
-		},
-		{
-			Keys: bson.D{{Key: "createdAt", Value: -1}},
 		},
 	}
 

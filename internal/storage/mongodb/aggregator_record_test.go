@@ -256,6 +256,25 @@ func TestAggregatorRecordStorage_GetByBlockNumber(t *testing.T) {
 		require.True(t, stateIDs[state0103])
 	})
 
+	t.Run("should return records ordered by leaf index", func(t *testing.T) {
+		unorderedRecords := []*models.AggregatorRecord{
+			createTestAggregatorRecord("0203", 102, 2),
+			createTestAggregatorRecord("0201", 102, 0),
+			createTestAggregatorRecord("0202", 102, 1),
+		}
+		err := storage.StoreBatch(ctx, unorderedRecords)
+		require.NoError(t, err, "StoreBatch should not return an error")
+
+		blockNum := api.NewBigInt(big.NewInt(102))
+		retrieved, err := storage.GetByBlockNumber(ctx, blockNum)
+		require.NoError(t, err)
+		require.Len(t, retrieved, 3)
+
+		require.Equal(t, "0", retrieved[0].LeafIndex.String())
+		require.Equal(t, "1", retrieved[1].LeafIndex.String())
+		require.Equal(t, "2", retrieved[2].LeafIndex.String())
+	})
+
 	t.Run("should return empty slice for non-existent block number", func(t *testing.T) {
 		blockNum := api.NewBigInt(big.NewInt(999))
 		retrieved, err := storage.GetByBlockNumber(ctx, blockNum)

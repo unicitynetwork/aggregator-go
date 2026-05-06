@@ -20,9 +20,6 @@ db.commitments.createIndex({ processedAt: 1, createdAt: 1 });
 db.createCollection('aggregator_records');
 db.aggregator_records.createIndex({ stateId: 1 }, { unique: true });
 db.aggregator_records.createIndex({ blockNumber: 1 });
-db.aggregator_records.createIndex({ leafIndex: 1 });
-db.aggregator_records.createIndex({ finalizedAt: -1 });
-db.aggregator_records.createIndex({ blockNumber: 1, leafIndex: 1 });
 
 // Blocks collection
 db.createCollection('blocks');
@@ -33,14 +30,10 @@ db.blocks.createIndex({ chainId: 1 });
 // SMT nodes collection
 db.createCollection('smt_nodes');
 db.smt_nodes.createIndex({ key: 1 }, { unique: true });
-db.smt_nodes.createIndex({ hash: 1 });
-db.smt_nodes.createIndex({ createdAt: -1 });
 
 // Block records collection
 db.createCollection('block_records');
 db.block_records.createIndex({ blockNumber: 1 }, { unique: true });
-db.block_records.createIndex({ stateIds: 1 });
-db.block_records.createIndex({ createdAt: -1 });
 
 // Leadership collection
 db.createCollection('leadership');

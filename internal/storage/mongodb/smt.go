@@ -279,15 +279,12 @@ func (ss *SmtStorage) GetChunked(ctx context.Context, offset, limit int) ([]*mod
 	return nodes, nil
 }
 
-// CreateIndexes creates necessary indexes for the SMT collection
+// CreateIndexes creates the necessary indexes needed by the SMT node lookup.
 func (ss *SmtStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
 		{
 			Keys:    bson.D{{Key: "key", Value: 1}},
 			Options: options.Index().SetUnique(true),
-		},
-		{
-			Keys: bson.D{{Key: "createdAt", Value: -1}},
 		},
 	}
 
