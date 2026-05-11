@@ -24,7 +24,7 @@ func NewStorage(ctx context.Context, cfg *config.Config, log *logger.Logger) (in
 	// Choose commitment queue implementation
 	var commitmentQueue interfaces.CommitmentQueue
 	if cfg.Storage.UseRedisForCommitments {
-		commitmentQueue, err = createRedisCommitmentQueue(cfg, log)
+		commitmentQueue, err = createRedisCommitmentQueue(ctx, cfg, log)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create Redis commitment queue: %w", err)
 		}
@@ -37,21 +37,52 @@ func NewStorage(ctx context.Context, cfg *config.Config, log *logger.Logger) (in
 }
 
 // createRedisCommitmentQueue creates a Redis-based commitment queue
-func createRedisCommitmentQueue(cfg *config.Config, log *logger.Logger) (interfaces.CommitmentQueue, error) {
-	// Create Redis client
-	redisClient := redislib.NewClient(&redislib.Options{
-		Addr:         fmt.Sprintf("%s:%d", cfg.Redis.Host, cfg.Redis.Port),
-		Password:     cfg.Redis.Password,
-		DB:           cfg.Redis.DB,
-		DialTimeout:  cfg.Redis.DialTimeout,
-		ReadTimeout:  cfg.Redis.ReadTimeout,
-		WriteTimeout: cfg.Redis.WriteTimeout,
-		PoolSize:     cfg.Redis.PoolSize,
-		MaxRetries:   cfg.Redis.MaxRetries,
-	})
+func createRedisCommitmentQueue(ctx context.Context, cfg *config.Config, log *logger.Logger) (interfaces.CommitmentQueue, error) {
+	var redisClient *redislib.Client
+	if len(cfg.Redis.SentinelAddrs) > 0 {
+		if cfg.Redis.MasterName == "" {
+			return nil, fmt.Errorf("REDIS_MASTER_NAME is required when REDIS_SENTINEL_ADDRS is set")
+		}
+		redisClient = redislib.NewFailoverClient(&redislib.FailoverOptions{
+			MasterName:       cfg.Redis.MasterName,
+			SentinelAddrs:    cfg.Redis.SentinelAddrs,
+			SentinelUsername: cfg.Redis.SentinelUsername,
+			SentinelPassword: cfg.Redis.SentinelPassword,
+			Password:         cfg.Redis.Password,
+			DB:               cfg.Redis.DB,
+			DialTimeout:      cfg.Redis.DialTimeout,
+			ReadTimeout:      cfg.Redis.ReadTimeout,
+			WriteTimeout:     cfg.Redis.WriteTimeout,
+			PoolSize:         cfg.Redis.PoolSize,
+			MinIdleConns:     cfg.Redis.MinIdleConns,
+			MaxRetries:       cfg.Redis.MaxRetries,
+		})
+		if log != nil {
+			log.Info("redis commitment queue using sentinel mode",
+				"master", cfg.Redis.MasterName,
+				"sentinels", cfg.Redis.SentinelAddrs)
+		}
+	} else {
+		if cfg.Redis.MasterName != "" {
+			return nil, fmt.Errorf("REDIS_MASTER_NAME is set but REDIS_SENTINEL_ADDRS is empty; either set REDIS_SENTINEL_ADDRS or unset REDIS_MASTER_NAME")
+		}
+		redisClient = redislib.NewClient(&redislib.Options{
+			Addr:         fmt.Sprintf("%s:%d", cfg.Redis.Host, cfg.Redis.Port),
+			Password:     cfg.Redis.Password,
+			DB:           cfg.Redis.DB,
+			DialTimeout:  cfg.Redis.DialTimeout,
+			ReadTimeout:  cfg.Redis.ReadTimeout,
+			WriteTimeout: cfg.Redis.WriteTimeout,
+			PoolSize:     cfg.Redis.PoolSize,
+			MinIdleConns: cfg.Redis.MinIdleConns,
+			MaxRetries:   cfg.Redis.MaxRetries,
+		})
+		if log != nil {
+			log.Info("redis commitment queue using direct mode",
+				"addr", fmt.Sprintf("%s:%d", cfg.Redis.Host, cfg.Redis.Port))
+		}
+	}
 
-	// Test connection
-	ctx := context.Background()
 	if err := redisClient.Ping(ctx).Err(); err != nil {
 		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 	}

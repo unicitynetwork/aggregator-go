@@ -118,16 +118,20 @@ type ProcessingConfig struct {
 
 // RedisConfig holds Redis connection configuration
 type RedisConfig struct {
-	Host         string        `mapstructure:"host"`
-	Port         int           `mapstructure:"port"`
-	Password     string        `mapstructure:"password"`
-	DB           int           `mapstructure:"db"`
-	PoolSize     int           `mapstructure:"pool_size"`
-	MinIdleConns int           `mapstructure:"min_idle_conns"`
-	MaxRetries   int           `mapstructure:"max_retries"`
-	DialTimeout  time.Duration `mapstructure:"dial_timeout"`
-	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout time.Duration `mapstructure:"write_timeout"`
+	Host             string        `mapstructure:"host"`
+	Port             int           `mapstructure:"port"`
+	Password         string        `mapstructure:"password"`
+	DB               int           `mapstructure:"db"`
+	PoolSize         int           `mapstructure:"pool_size"`
+	MinIdleConns     int           `mapstructure:"min_idle_conns"`
+	MaxRetries       int           `mapstructure:"max_retries"`
+	DialTimeout      time.Duration `mapstructure:"dial_timeout"`
+	ReadTimeout      time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout     time.Duration `mapstructure:"write_timeout"`
+	SentinelAddrs    []string      `mapstructure:"sentinel_addrs"`
+	MasterName       string        `mapstructure:"master_name"`
+	SentinelPassword string        `mapstructure:"sentinel_password"`
+	SentinelUsername string        `mapstructure:"sentinel_username"`
 }
 
 // StorageConfig holds storage layer configuration
@@ -338,16 +342,20 @@ func Load() (*Config, error) {
 			SkipDuplicateCheck:         getEnvBoolOrDefault("SKIP_DUPLICATE_CHECK", true),
 		},
 		Redis: RedisConfig{
-			Host:         getEnvOrDefault("REDIS_HOST", "localhost"),
-			Port:         getEnvIntOrDefault("REDIS_PORT", 6379),
-			Password:     getEnvOrDefault("REDIS_PASSWORD", ""),
-			DB:           getEnvIntOrDefault("REDIS_DB", 0),
-			PoolSize:     getEnvIntOrDefault("REDIS_POOL_SIZE", 10),
-			MinIdleConns: getEnvIntOrDefault("REDIS_MIN_IDLE_CONNS", 2),
-			MaxRetries:   getEnvIntOrDefault("REDIS_MAX_RETRIES", 3),
-			DialTimeout:  getEnvDurationOrDefault("REDIS_DIAL_TIMEOUT", "5s"),
-			ReadTimeout:  getEnvDurationOrDefault("REDIS_READ_TIMEOUT", "3s"),
-			WriteTimeout: getEnvDurationOrDefault("REDIS_WRITE_TIMEOUT", "3s"),
+			Host:             getEnvOrDefault("REDIS_HOST", "localhost"),
+			Port:             getEnvIntOrDefault("REDIS_PORT", 6379),
+			Password:         getEnvOrDefault("REDIS_PASSWORD", ""),
+			DB:               getEnvIntOrDefault("REDIS_DB", 0),
+			PoolSize:         getEnvIntOrDefault("REDIS_POOL_SIZE", 10),
+			MinIdleConns:     getEnvIntOrDefault("REDIS_MIN_IDLE_CONNS", 2),
+			MaxRetries:       getEnvIntOrDefault("REDIS_MAX_RETRIES", 3),
+			DialTimeout:      getEnvDurationOrDefault("REDIS_DIAL_TIMEOUT", "5s"),
+			ReadTimeout:      getEnvDurationOrDefault("REDIS_READ_TIMEOUT", "3s"),
+			WriteTimeout:     getEnvDurationOrDefault("REDIS_WRITE_TIMEOUT", "3s"),
+			SentinelAddrs:    getEnvStringSliceOrDefault("REDIS_SENTINEL_ADDRS", nil),
+			MasterName:       getEnvOrDefault("REDIS_MASTER_NAME", ""),
+			SentinelPassword: getEnvOrDefault("REDIS_SENTINEL_PASSWORD", ""),
+			SentinelUsername: getEnvOrDefault("REDIS_SENTINEL_USERNAME", ""),
 		},
 		Storage: StorageConfig{
 			UseRedisForCommitments: getEnvBoolOrDefault("USE_REDIS_FOR_COMMITMENTS", false),
@@ -543,6 +551,25 @@ func getEnvDurationOrDefault(key string, defaultValue string) time.Duration {
 	}
 	duration, _ := time.ParseDuration(defaultValue)
 	return duration
+}
+
+func getEnvStringSliceOrDefault(key string, defaultValue []string) []string {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	if len(result) == 0 {
+		return defaultValue
+	}
+	return result
 }
 
 func generateServerID() string {

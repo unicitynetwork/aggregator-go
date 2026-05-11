@@ -1,0 +1,34 @@
+CHANGELOG ENTRY - 04 May 2026 at 17:50 CET
+
+Add Redis Sentinel (HA) support for the commitment queue (#148).
+
+- Extend RedisConfig with SentinelAddrs, MasterName, SentinelPassword
+  and SentinelUsername fields driven by REDIS_SENTINEL_ADDRS,
+  REDIS_MASTER_NAME, REDIS_SENTINEL_PASSWORD and
+  REDIS_SENTINEL_USERNAME. The ReplicaOnly, RouteByLatency and
+  RouteRandomly knobs are intentionally not exposed: the commitment
+  queue's only read-only command is XPendingExt; routing it to a
+  replica would observe replication-lagged consumer-group state and
+  silently re-deliver already-acked entries. Every other queue op
+  (XADD/XACK/XReadGroup/XAutoClaim) is a write and goes to master
+  unconditionally.
+- Wire the existing REDIS_MIN_IDLE_CONNS / RedisConfig.MinIdleConns
+  field through both client constructors. It was previously loaded
+  from env but never passed to redis options.
+- internal/storage/factory.go now branches: if REDIS_SENTINEL_ADDRS is
+  non-empty it builds a redis client via NewFailoverClient, otherwise
+  falls back to the existing single-endpoint NewClient path. The factory
+  rejects both misconfigurations symmetrically: sentinel addrs without
+  master name, and master name without sentinel addrs (which would
+  otherwise silently fall back to single-endpoint mode).
+- The factory now logs the active mode (sentinel/direct) at startup so
+  operators can confirm HA wiring from the logs, and it propagates the
+  caller's context.Context through to the initial Redis Ping so
+  upstream timeouts/cancellations are honoured.
+- README.md documents the new env vars and a usage example, and the
+  pre-existing stale defaults for REDIS_FLUSH_INTERVAL and
+  REDIS_MAX_BATCH_SIZE are corrected to match the code (100ms and
+  5000).
+- Adds config-level unit tests covering sentinel env parsing, defaults
+  and the new comma-separated string slice helper, plus factory-level
+  tests covering both misconfiguration validations.
