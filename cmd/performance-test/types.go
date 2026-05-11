@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -84,8 +85,11 @@ type Metrics struct {
 	proofRetries          int64
 	proofLatencies        []time.Duration
 	proofRequestDurations []time.Duration
+	firstProofStartLags   []time.Duration
+	proofSchedulerLags    []time.Duration
 	proofLatenciesMutex   sync.RWMutex
 	proofRequestDurMutex  sync.RWMutex
+	proofScheduleMutex    sync.RWMutex
 	proofSuccessAttempts  [proofMaxRetries]atomic.Int64
 	shardMetrics          []*ShardMetrics
 }
@@ -114,8 +118,10 @@ type ShardClient struct {
 }
 
 type proofJob struct {
-	shardIdx int
-	request  *api.CertificationRequest
+	shardIdx     int
+	request      *api.CertificationRequest
+	submittedAt  time.Time
+	firstProofAt time.Time
 }
 
 // RequestRateCounters tracks per-second client-side request activity.
@@ -134,56 +140,60 @@ func (rr *RequestRateCounters) IncProofCompleted()  { rr.proofCompleted.Add(1) }
 func (rr *RequestRateCounters) IncProofRetries()    { rr.proofRetries.Add(1) }
 
 type aggregatorLogRaw struct {
-	Time                 string `json:"time"`
-	Msg                  string `json:"msg"`
-	Block                string `json:"block"`
-	Commitments          int    `json:"commitments"`
-	RoundTime            string `json:"roundTime"`
-	Processing           string `json:"processing"`
-	BftWait              string `json:"bftWait"`
-	Finalization         string `json:"finalization"`
-	FinalizeScan         string `json:"finalizeScan"`
-	FinalizeConvert      string `json:"finalizeConvert"`
-	FinalizeStoreBlock   string `json:"finalizeStoreBlock"`
-	FinalizeStoreData    string `json:"finalizeStoreData"`
-	FinalizeStoreSmt     string `json:"finalizeStoreSmt"`
-	FinalizeStoreRecords string `json:"finalizeStoreRecords"`
-	FinalizeLockWait     string `json:"finalizeLockWait"`
-	FinalizeSmtCommit    string `json:"finalizeSmtCommit"`
-	FinalizeSetFinalized string `json:"finalizeSetFinalized"`
-	FinalizeAck          string `json:"finalizeAck"`
-	ProofReadyMedian     string `json:"proofReadyMedian"`
-	ProofReadyP95        string `json:"proofReadyP95"`
-	ProofReadyP99        string `json:"proofReadyP99"`
-	RedisTotal           int    `json:"redisTotal"`
-	RedisPending         int    `json:"redisPending"`
+	Time                      string `json:"time"`
+	Msg                       string `json:"msg"`
+	Block                     string `json:"block"`
+	Commitments               int    `json:"commitments"`
+	RoundTime                 string `json:"roundTime"`
+	Processing                string `json:"processing"`
+	BftWait                   string `json:"bftWait"`
+	Finalization              string `json:"finalization"`
+	FinalizeScan              string `json:"finalizeScan"`
+	FinalizeConvert           string `json:"finalizeConvert"`
+	FinalizeStoreBlock        string `json:"finalizeStoreBlock"`
+	FinalizeStoreBlockDoc     string `json:"finalizeStoreBlockDoc"`
+	FinalizeStoreBlockRecords string `json:"finalizeStoreBlockRecords"`
+	FinalizeStoreData         string `json:"finalizeStoreData"`
+	FinalizeStoreSmt          string `json:"finalizeStoreSmt"`
+	FinalizeStoreRecords      string `json:"finalizeStoreRecords"`
+	FinalizeLockWait          string `json:"finalizeLockWait"`
+	FinalizeSmtCommit         string `json:"finalizeSmtCommit"`
+	FinalizeSetFinalized      string `json:"finalizeSetFinalized"`
+	FinalizeAck               string `json:"finalizeAck"`
+	ProofReadyMedian          string `json:"proofReadyMedian"`
+	ProofReadyP95             string `json:"proofReadyP95"`
+	ProofReadyP99             string `json:"proofReadyP99"`
+	RedisTotal                int    `json:"redisTotal"`
+	RedisPending              int    `json:"redisPending"`
 }
 
 type aggregatorRoundSummary struct {
-	Timestamp                time.Time
-	Block                    string
-	Commitments              int
-	RoundTime                time.Duration
-	Processing               time.Duration
-	BftWait                  time.Duration
-	Finalization             time.Duration
-	HasFinalizationBreakdown bool
-	FinalizeScan             time.Duration
-	FinalizeConvert          time.Duration
-	FinalizeStoreBlock       time.Duration
-	FinalizeStoreData        time.Duration
-	FinalizeStoreSmt         time.Duration
-	FinalizeStoreRecords     time.Duration
-	FinalizeLockWait         time.Duration
-	FinalizeSmtCommit        time.Duration
-	FinalizeSetFinalized     time.Duration
-	FinalizeAck              time.Duration
-	HasProofReady            bool
-	ProofMedian              time.Duration
-	ProofP95                 time.Duration
-	ProofP99                 time.Duration
-	RedisTotal               int
-	RedisPending             int
+	Timestamp                 time.Time
+	Block                     string
+	Commitments               int
+	RoundTime                 time.Duration
+	Processing                time.Duration
+	BftWait                   time.Duration
+	Finalization              time.Duration
+	HasFinalizationBreakdown  bool
+	FinalizeScan              time.Duration
+	FinalizeConvert           time.Duration
+	FinalizeStoreBlock        time.Duration
+	FinalizeStoreBlockDoc     time.Duration
+	FinalizeStoreBlockRecords time.Duration
+	FinalizeStoreData         time.Duration
+	FinalizeStoreSmt          time.Duration
+	FinalizeStoreRecords      time.Duration
+	FinalizeLockWait          time.Duration
+	FinalizeSmtCommit         time.Duration
+	FinalizeSetFinalized      time.Duration
+	FinalizeAck               time.Duration
+	HasProofReady             bool
+	ProofMedian               time.Duration
+	ProofP95                  time.Duration
+	ProofP99                  time.Duration
+	RedisTotal                int
+	RedisPending              int
 }
 
 func (m *Metrics) addProofLatency(latency time.Duration) {
@@ -196,6 +206,13 @@ func (m *Metrics) addProofRequestDuration(duration time.Duration) {
 	m.proofRequestDurMutex.Lock()
 	defer m.proofRequestDurMutex.Unlock()
 	m.proofRequestDurations = append(m.proofRequestDurations, duration)
+}
+
+func (m *Metrics) addProofStartTiming(firstStartLag, schedulerLag time.Duration) {
+	m.proofScheduleMutex.Lock()
+	defer m.proofScheduleMutex.Unlock()
+	m.firstProofStartLags = append(m.firstProofStartLags, firstStartLag)
+	m.proofSchedulerLags = append(m.proofSchedulerLags, schedulerLag)
 }
 
 func (m *Metrics) recordProofSuccessAttempt(attempt int) {
@@ -230,8 +247,8 @@ func (m *Metrics) shard(idx int) *ShardMetrics {
 	return m.shardMetrics[idx]
 }
 
-func (m *Metrics) recordSubmissionTimestamp(id string) {
-	m.submissionTimes.Store(id, time.Now())
+func (m *Metrics) recordSubmissionTimestamp(id string, submittedAt time.Time) {
+	m.submissionTimes.Store(id, submittedAt)
 }
 
 func (m *Metrics) getSubmissionTimestamp(id string) (time.Time, bool) {
@@ -304,24 +321,7 @@ func (m *Metrics) getProofLatencyStats() (median, p95, p99 time.Duration) {
 	m.proofLatenciesMutex.RLock()
 	defer m.proofLatenciesMutex.RUnlock()
 
-	if len(m.proofLatencies) == 0 {
-		return 0, 0, 0
-	}
-
-	sorted := make([]time.Duration, len(m.proofLatencies))
-	copy(sorted, m.proofLatencies)
-	for i := 0; i < len(sorted); i++ {
-		for j := i + 1; j < len(sorted); j++ {
-			if sorted[i] > sorted[j] {
-				sorted[i], sorted[j] = sorted[j], sorted[i]
-			}
-		}
-	}
-
-	median = sorted[len(sorted)/2]
-	p95 = sorted[len(sorted)*95/100]
-	p99 = sorted[len(sorted)*99/100]
-	return
+	return durationPercentilesLocked(m.proofLatencies)
 }
 
 func (m *Metrics) getProofRequestStats() (avg, min, max, p50, p95, p99 time.Duration) {
@@ -357,6 +357,29 @@ func (m *Metrics) getProofRequestStats() (avg, min, max, p50, p95, p99 time.Dura
 	p99 = sorted[len(sorted)*99/100]
 
 	return avg, min, max, p50, p95, p99
+}
+
+func (m *Metrics) getProofStartTimingStats() (startMedian, startP95, startP99, schedulerMedian, schedulerP95, schedulerP99 time.Duration) {
+	m.proofScheduleMutex.RLock()
+	defer m.proofScheduleMutex.RUnlock()
+
+	startMedian, startP95, startP99 = durationPercentilesLocked(m.firstProofStartLags)
+	schedulerMedian, schedulerP95, schedulerP99 = durationPercentilesLocked(m.proofSchedulerLags)
+	return
+}
+
+func durationPercentilesLocked(values []time.Duration) (median, p95, p99 time.Duration) {
+	if len(values) == 0 {
+		return 0, 0, 0
+	}
+
+	sorted := make([]time.Duration, len(values))
+	copy(sorted, values)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i] < sorted[j]
+	})
+
+	return sorted[len(sorted)/2], sorted[len(sorted)*95/100], sorted[len(sorted)*99/100]
 }
 
 type JSONRPCClient struct {
@@ -558,6 +581,9 @@ func (c *JSONRPCClient) callWithContext(ctx context.Context, method string, para
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if stateID := stateIDHeaderFromParams(params); stateID != "" {
+		req.Header.Set("X-State-ID", stateID)
+	}
 
 	// Add auth header if provided
 	if c.authHeader != "" {
@@ -583,4 +609,28 @@ func (c *JSONRPCClient) callWithContext(ctx context.Context, method string, para
 	}
 
 	return &response, nil
+}
+
+func stateIDHeaderFromParams(params interface{}) string {
+	switch p := params.(type) {
+	case *api.CertificationRequest:
+		if p != nil {
+			return normalizeStateID(p.StateID.String())
+		}
+	case api.CertificationRequest:
+		return normalizeStateID(p.StateID.String())
+	case GetInclusionProofRequestV2:
+		return normalizeStateID(p.StateID)
+	case *GetInclusionProofRequestV2:
+		if p != nil {
+			return normalizeStateID(p.StateID)
+		}
+	case api.GetInclusionProofRequestV2:
+		return normalizeStateID(p.StateID.String())
+	case *api.GetInclusionProofRequestV2:
+		if p != nil {
+			return normalizeStateID(p.StateID.String())
+		}
+	}
+	return ""
 }

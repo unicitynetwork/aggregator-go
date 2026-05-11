@@ -31,15 +31,17 @@ import (
 const (
 	defaultAggregatorURL     = "https://localhost:3000"
 	defaultTestDuration      = 30 * time.Second
-	workerCount              = 20
-	proofWorkerCount         = 10 // Separate worker pool for proof requests
-	httpClientPoolSize       = 4
+	defaultWorkerCount       = 20
+	defaultProofWorkerCount  = 10 // Separate worker pool for proof requests
+	defaultHTTPClientPool    = 4
 	defaultRequestsPerSec    = 2000
 	aggregatorLogPath        = "logs/aggregator.log"
 	aggregatorLogPathsEnv    = "AGGREGATOR_LOG_PATHS"
 	proofMaxRetries          = 10
-	proofRetryDelay          = 1000 * time.Millisecond
+	defaultProofRetryDelay   = 1000 * time.Millisecond
 	defaultProofInitialDelay = 2500 * time.Millisecond
+	defaultStartupProbeWait  = 60 * time.Second
+	startupProbeInterval     = 250 * time.Millisecond
 )
 
 // Sharding modes for routing generated state IDs to shard endpoints.
@@ -52,12 +54,17 @@ const (
 
 // Configurable via environment variables
 var (
-	testDuration      = getEnvDuration("TEST_DURATION", defaultTestDuration)
-	requestsPerSec    = getEnvInt("REQUESTS_PER_SEC", defaultRequestsPerSec)
-	proofInitialDelay = getEnvDuration("PROOF_INITIAL_DELAY", defaultProofInitialDelay)
-	shardingMode      = getShardingMode()
-	shardTargets      = getEnvShardTargets()
-	enableH2C         = os.Getenv("ENABLE_H2C") != "false"
+	testDuration       = getEnvDuration("TEST_DURATION", defaultTestDuration)
+	requestsPerSec     = getEnvInt("REQUESTS_PER_SEC", defaultRequestsPerSec)
+	workerCount        = getEnvInt("SUBMISSION_WORKERS", defaultWorkerCount)
+	proofWorkerCount   = getEnvInt("PROOF_WORKERS", defaultProofWorkerCount)
+	httpClientPoolSize = getEnvInt("HTTP_CLIENT_POOL_SIZE", defaultHTTPClientPool)
+	proofRetryDelay    = getEnvDuration("PROOF_RETRY_DELAY", defaultProofRetryDelay)
+	proofInitialDelay  = getEnvDuration("PROOF_INITIAL_DELAY", defaultProofInitialDelay)
+	startupProbeWait   = getEnvDuration("STARTUP_PROBE_WAIT", defaultStartupProbeWait)
+	shardingMode       = getShardingMode()
+	shardTargets       = getEnvShardTargets()
+	enableH2C          = os.Getenv("ENABLE_H2C") != "false"
 )
 
 func getShardingMode() string {
@@ -93,6 +100,64 @@ func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
 		}
 	}
 	return defaultVal
+}
+
+func waitForStartingBlock(sc *ShardClient, timeout time.Duration) (int64, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+
+	for attempt := 1; ; attempt++ {
+		startingBlock, err := getStartingBlock(sc)
+		if err == nil {
+			if attempt > 1 {
+				fmt.Printf("✓ get_block_height succeeded for %s after %d attempts\n", sc.url, attempt)
+			}
+			return startingBlock, nil
+		}
+
+		lastErr = err
+		if time.Now().Add(startupProbeInterval).After(deadline) {
+			return 0, lastErr
+		}
+
+		if attempt == 1 || attempt%8 == 0 {
+			fmt.Printf("Waiting for get_block_height from %s: %v\n", sc.url, err)
+		}
+		time.Sleep(startupProbeInterval)
+	}
+}
+
+func getStartingBlock(sc *ShardClient) (int64, error) {
+	// Include shardId param so gateway proxies can route the request.
+	var blockHeightParams interface{}
+	if shardingMode == shardingModeBFT && sc.shardBits != "" {
+		blockHeightParams = map[string]interface{}{"shardId": sc.shardBits}
+	} else if sc.shardMask > 0 {
+		blockHeightParams = map[string]interface{}{"shardId": fmt.Sprintf("%d", sc.shardMask)}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := sc.client.callWithContext(ctx, "get_block_height", blockHeightParams)
+	if err != nil {
+		return 0, err
+	}
+	if resp.Error != nil {
+		return 0, fmt.Errorf("JSON-RPC error: %s", resp.Error.Message)
+	}
+
+	var heightResp GetBlockHeightResponse
+	respBytes, _ := json.Marshal(resp.Result)
+	if err := json.Unmarshal(respBytes, &heightResp); err != nil {
+		return 0, fmt.Errorf("parse block height response: %w", err)
+	}
+
+	var startingBlockNumber int64
+	if _, err := fmt.Sscanf(heightResp.BlockNumber, "%d", &startingBlockNumber); err != nil {
+		return 0, fmt.Errorf("parse starting block number %q: %w", heightResp.BlockNumber, err)
+	}
+	return startingBlockNumber, nil
 }
 
 // getEnvShardTargets parses SHARD_TARGETS. Each comma-separated entry is
@@ -486,6 +551,7 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 					if sm := metrics.shard(shardIdx); sm != nil {
 						sm.failedRequests.Add(1)
 					}
+					metrics.recordError(fmt.Sprintf("submit API error (code %d): %s", resp.Error.Code, resp.Error.Message))
 					if resp.Error.Message == "STATE_ID_EXISTS" {
 						atomic.AddInt64(&metrics.stateIdExistsErr, 1)
 						if sm := metrics.shard(shardIdx); sm != nil {
@@ -521,9 +587,11 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 					metrics.submittedStateIDs.Store(stateIDStr, true)
 
 					if proofQueue != nil {
-						metrics.recordSubmissionTimestamp(stateIDStr)
+						submittedAt := time.Now()
+						firstProofAt := submittedAt.Add(proofInitialDelay)
+						metrics.recordSubmissionTimestamp(stateIDStr, submittedAt)
 						select {
-						case proofQueue <- proofJob{shardIdx: shardIdx, request: req}:
+						case proofQueue <- proofJob{shardIdx: shardIdx, request: req, submittedAt: submittedAt, firstProofAt: firstProofAt}:
 						default:
 							// Queue full, skip proof verification for this one
 						}
@@ -542,148 +610,204 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 	}
 }
 
-// Worker function that continuously verifies inclusion proofs in a sharded setup.
-func proofVerificationWorker(ctx context.Context, shardClients []*ShardClient, metrics *Metrics, proofQueue chan proofJob, counters *RequestRateCounters) {
-	for {
-		select {
-		case <-ctx.Done():
+func sleepOrDone(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func verifyProofJob(ctx context.Context, shardClients []*ShardClient, metrics *Metrics, job proofJob, counters *RequestRateCounters) {
+	if job.request == nil {
+		metrics.recordError("Missing original request for proof verification")
+		atomic.AddInt64(&metrics.proofVerifyFailed, 1)
+		if sm := metrics.shard(job.shardIdx); sm != nil {
+			sm.proofVerifyFailed.Add(1)
+		}
+		return
+	}
+
+	stateID := normalizeStateID(job.request.StateID.String())
+	shardIdx := job.shardIdx
+	startTime := time.Now()
+	client := shardClients[shardIdx].proofClient // Use separate proof client pool
+
+	for attempt := 0; attempt < proofMaxRetries; attempt++ {
+		if ctx.Err() != nil {
 			return
-		case job := <-proofQueue:
-			go func(job proofJob) {
-				if job.request == nil {
-					metrics.recordError("Missing original request for proof verification")
-					atomic.AddInt64(&metrics.proofVerifyFailed, 1)
-					if sm := metrics.shard(job.shardIdx); sm != nil {
-						sm.proofVerifyFailed.Add(1)
-					}
-					return
-				}
+		}
 
-				stateID := normalizeStateID(job.request.StateID.String())
-				shardIdx := job.shardIdx
-				time.Sleep(proofInitialDelay)
-				startTime := time.Now()
-				normalizedID := stateID
-				client := shardClients[shardIdx].proofClient // Use separate proof client pool
+		atomic.AddInt64(&metrics.proofAttempts, 1)
+		if sm := metrics.shard(shardIdx); sm != nil {
+			sm.proofAttempts.Add(1)
+		}
+		if attempt > 0 {
+			atomic.AddInt64(&metrics.proofRetries, 1)
+			if sm := metrics.shard(shardIdx); sm != nil {
+				sm.proofRetries.Add(1)
+			}
+			if counters != nil {
+				counters.IncProofRetries()
+			}
+		}
 
-				for attempt := 0; attempt < proofMaxRetries; attempt++ {
-					atomic.AddInt64(&metrics.proofAttempts, 1)
-					if sm := metrics.shard(shardIdx); sm != nil {
-						sm.proofAttempts.Add(1)
-					}
-					if attempt > 0 {
-						atomic.AddInt64(&metrics.proofRetries, 1)
-						if sm := metrics.shard(shardIdx); sm != nil {
-							sm.proofRetries.Add(1)
-						}
-						if counters != nil {
-							counters.IncProofRetries()
-						}
-					}
+		proofReq := GetInclusionProofRequestV2{StateID: stateID}
 
-					proofReq := GetInclusionProofRequestV2{StateID: stateID}
+		requestStart := time.Now()
+		if attempt == 0 && !job.submittedAt.IsZero() {
+			firstStartLag := requestStart.Sub(job.submittedAt)
+			schedulerLag := time.Duration(0)
+			if !job.firstProofAt.IsZero() && requestStart.After(job.firstProofAt) {
+				schedulerLag = requestStart.Sub(job.firstProofAt)
+			}
+			metrics.addProofStartTiming(firstStartLag, schedulerLag)
+		}
 
-					atomic.AddInt64(&metrics.proofActiveRequests, 1)
-					if counters != nil {
-						counters.IncProofStarted()
-					}
-					requestStart := time.Now()
+		atomic.AddInt64(&metrics.proofActiveRequests, 1)
+		if counters != nil {
+			counters.IncProofStarted()
+		}
 
-					// Create a context with 5 second timeout for proof retrieval
-					proofCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					resp, err := client.callWithContext(proofCtx, "get_inclusion_proof.v2", proofReq)
-					cancel()
+		proofCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		resp, err := client.callWithContext(proofCtx, "get_inclusion_proof.v2", proofReq)
+		cancel()
 
-					if counters != nil {
-						counters.IncProofCompleted()
-					}
-					requestDuration := time.Since(requestStart)
-					atomic.AddInt64(&metrics.proofActiveRequests, -1)
+		if counters != nil {
+			counters.IncProofCompleted()
+		}
+		requestDuration := time.Since(requestStart)
+		atomic.AddInt64(&metrics.proofActiveRequests, -1)
 
-					if err != nil {
-						if attempt >= 3 {
-							metrics.recordError(fmt.Sprintf("Network error getting proof after %d attempts: %v", attempt+1, err))
-							atomic.AddInt64(&metrics.proofFailed, 1)
-							if sm := metrics.shard(shardIdx); sm != nil {
-								sm.proofFailed.Add(1)
-							}
-							return
-						}
-						time.Sleep(proofRetryDelay)
-						continue
-					}
-
-					if resp.Error != nil {
-						if attempt >= proofMaxRetries-1 {
-							metrics.recordError(fmt.Sprintf("API error getting proof (code %d): %s", resp.Error.Code, resp.Error.Message))
-							atomic.AddInt64(&metrics.proofFailed, 1)
-							if sm := metrics.shard(shardIdx); sm != nil {
-								sm.proofFailed.Add(1)
-							}
-							return
-						}
-						time.Sleep(proofRetryDelay)
-						continue
-					}
-
-					var proofResp api.GetInclusionProofResponseV2
-					respBytes, _ := json.Marshal(resp.Result)
-					if err := json.Unmarshal(respBytes, &proofResp); err != nil {
-						metrics.recordError(fmt.Sprintf("Failed to parse proof response: %v", err))
-						atomic.AddInt64(&metrics.proofFailed, 1)
-						if sm := metrics.shard(shardIdx); sm != nil {
-							sm.proofFailed.Add(1)
-						}
-						return
-					}
-
-					if proofResp.InclusionProof == nil || proofResp.InclusionProof.CertificationData == nil || proofResp.InclusionProof.CertificationData.TransactionHash == nil {
-						time.Sleep(proofRetryDelay)
-						continue
-					}
-
-					atomic.AddInt64(&metrics.proofSuccess, 1)
-					if sm := metrics.shard(shardIdx); sm != nil {
-						sm.proofSuccess.Add(1)
-					}
-					metrics.recordProofSuccessAttempt(attempt)
-					metrics.addProofRequestDuration(requestDuration)
-
-					submittedAt, hasSubmission := metrics.getSubmissionTimestamp(normalizedID)
-					var totalLatency time.Duration
-					if hasSubmission {
-						totalLatency = time.Since(submittedAt)
-						metrics.clearSubmissionTimestamp(normalizedID)
-					} else {
-						totalLatency = time.Since(startTime) + proofInitialDelay
-					}
-					metrics.addProofLatency(totalLatency)
-
-					if err := proofverify.VerifyInclusionProofLocal(proofResp.InclusionProof, job.request); err != nil {
-						if attempt < proofMaxRetries-1 {
-							time.Sleep(proofRetryDelay)
-							continue
-						}
-						metrics.recordError(fmt.Sprintf("Proof verification failed for state ID %s: %v", stateID, err))
-						atomic.AddInt64(&metrics.proofVerifyFailed, 1)
-						if sm := metrics.shard(shardIdx); sm != nil {
-							sm.proofVerifyFailed.Add(1)
-						}
-						return
-					}
-					atomic.AddInt64(&metrics.proofVerified, 1)
-					if sm := metrics.shard(shardIdx); sm != nil {
-						sm.proofVerified.Add(1)
-					}
-
-					return
-				}
-
-				metrics.recordError(fmt.Sprintf("Timeout getting proof after %d attempts", proofMaxRetries))
+		if err != nil {
+			if attempt >= 3 {
+				metrics.recordError(fmt.Sprintf("Network error getting proof after %d attempts: %v", attempt+1, err))
 				atomic.AddInt64(&metrics.proofFailed, 1)
 				if sm := metrics.shard(shardIdx); sm != nil {
 					sm.proofFailed.Add(1)
 				}
+				return
+			}
+			if !sleepOrDone(ctx, proofRetryDelay) {
+				return
+			}
+			continue
+		}
+
+		if resp.Error != nil {
+			if attempt >= proofMaxRetries-1 {
+				metrics.recordError(fmt.Sprintf("API error getting proof (code %d): %s", resp.Error.Code, resp.Error.Message))
+				atomic.AddInt64(&metrics.proofFailed, 1)
+				if sm := metrics.shard(shardIdx); sm != nil {
+					sm.proofFailed.Add(1)
+				}
+				return
+			}
+			if !sleepOrDone(ctx, proofRetryDelay) {
+				return
+			}
+			continue
+		}
+
+		var proofResp api.GetInclusionProofResponseV2
+		respBytes, _ := json.Marshal(resp.Result)
+		if err := json.Unmarshal(respBytes, &proofResp); err != nil {
+			metrics.recordError(fmt.Sprintf("Failed to parse proof response: %v", err))
+			atomic.AddInt64(&metrics.proofFailed, 1)
+			if sm := metrics.shard(shardIdx); sm != nil {
+				sm.proofFailed.Add(1)
+			}
+			return
+		}
+
+		if proofResp.InclusionProof == nil || proofResp.InclusionProof.CertificationData == nil || proofResp.InclusionProof.CertificationData.TransactionHash == nil {
+			if !sleepOrDone(ctx, proofRetryDelay) {
+				return
+			}
+			continue
+		}
+
+		atomic.AddInt64(&metrics.proofSuccess, 1)
+		if sm := metrics.shard(shardIdx); sm != nil {
+			sm.proofSuccess.Add(1)
+		}
+		metrics.recordProofSuccessAttempt(attempt)
+		metrics.addProofRequestDuration(requestDuration)
+
+		submittedAt, hasSubmission := metrics.getSubmissionTimestamp(stateID)
+		var totalLatency time.Duration
+		if !job.submittedAt.IsZero() {
+			totalLatency = time.Since(job.submittedAt)
+			metrics.clearSubmissionTimestamp(stateID)
+		} else if hasSubmission {
+			totalLatency = time.Since(submittedAt)
+			metrics.clearSubmissionTimestamp(stateID)
+		} else {
+			totalLatency = time.Since(startTime) + proofInitialDelay
+		}
+		metrics.addProofLatency(totalLatency)
+
+		if err := proofverify.VerifyInclusionProofLocal(proofResp.InclusionProof, job.request); err != nil {
+			if attempt < proofMaxRetries-1 {
+				if !sleepOrDone(ctx, proofRetryDelay) {
+					return
+				}
+				continue
+			}
+			metrics.recordError(fmt.Sprintf("Proof verification failed for state ID %s: %v", stateID, err))
+			atomic.AddInt64(&metrics.proofVerifyFailed, 1)
+			if sm := metrics.shard(shardIdx); sm != nil {
+				sm.proofVerifyFailed.Add(1)
+			}
+			return
+		}
+
+		atomic.AddInt64(&metrics.proofVerified, 1)
+		if sm := metrics.shard(shardIdx); sm != nil {
+			sm.proofVerified.Add(1)
+		}
+		return
+	}
+
+	metrics.recordError(fmt.Sprintf("Timeout getting proof after %d attempts", proofMaxRetries))
+	atomic.AddInt64(&metrics.proofFailed, 1)
+	if sm := metrics.shard(job.shardIdx); sm != nil {
+		sm.proofFailed.Add(1)
+	}
+}
+
+func sleepUntilOrDone(ctx context.Context, deadline time.Time) bool {
+	if deadline.IsZero() {
+		return true
+	}
+	return sleepOrDone(ctx, time.Until(deadline))
+}
+
+func scheduleProofJobs(ctx context.Context, proofQueue <-chan proofJob, shardClients []*ShardClient, metrics *Metrics, counters *RequestRateCounters, proofJobsWg *sync.WaitGroup) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job, ok := <-proofQueue:
+			if !ok {
+				return
+			}
+
+			proofJobsWg.Add(1)
+			go func(job proofJob) {
+				defer proofJobsWg.Done()
+				if !sleepUntilOrDone(ctx, job.firstProofAt) {
+					return
+				}
+				verifyProofJob(ctx, shardClients, metrics, job, counters)
 			}(job)
 		}
 	}
@@ -906,6 +1030,14 @@ func parseAggregatorRoundLogs(path string, start, end time.Time) ([]aggregatorRo
 		if err != nil {
 			continue
 		}
+		finalizeStoreBlockDoc, hasFinalizeStoreBlockDoc, err := parseOptionalLogDuration(raw.FinalizeStoreBlockDoc)
+		if err != nil {
+			continue
+		}
+		finalizeStoreBlockRecords, hasFinalizeStoreBlockRecords, err := parseOptionalLogDuration(raw.FinalizeStoreBlockRecords)
+		if err != nil {
+			continue
+		}
 		finalizeStoreData, hasFinalizeStoreData, err := parseOptionalLogDuration(raw.FinalizeStoreData)
 		if err != nil {
 			continue
@@ -934,7 +1066,7 @@ func parseAggregatorRoundLogs(path string, start, end time.Time) ([]aggregatorRo
 		if err != nil {
 			continue
 		}
-		hasFinalizationBreakdown := hasFinalizeScan || hasFinalizeConvert || hasFinalizeStoreBlock || hasFinalizeStoreData || hasFinalizeStoreSmt || hasFinalizeStoreRecords || hasFinalizeLockWait || hasFinalizeSmtCommit || hasFinalizeSetFinalized || hasFinalizeAck
+		hasFinalizationBreakdown := hasFinalizeScan || hasFinalizeConvert || hasFinalizeStoreBlock || hasFinalizeStoreBlockDoc || hasFinalizeStoreBlockRecords || hasFinalizeStoreData || hasFinalizeStoreSmt || hasFinalizeStoreRecords || hasFinalizeLockWait || hasFinalizeSmtCommit || hasFinalizeSetFinalized || hasFinalizeAck
 
 		medianDur, hasMedian, err := parseOptionalLogDuration(raw.ProofReadyMedian)
 		if err != nil {
@@ -954,30 +1086,32 @@ func parseAggregatorRoundLogs(path string, start, end time.Time) ([]aggregatorRo
 		}
 
 		summaries = append(summaries, aggregatorRoundSummary{
-			Timestamp:                timestamp,
-			Block:                    raw.Block,
-			Commitments:              raw.Commitments,
-			RoundTime:                roundDur,
-			Processing:               procDur,
-			BftWait:                  bftDur,
-			Finalization:             finalDur,
-			HasFinalizationBreakdown: hasFinalizationBreakdown,
-			FinalizeScan:             finalizeScan,
-			FinalizeConvert:          finalizeConvert,
-			FinalizeStoreBlock:       finalizeStoreBlock,
-			FinalizeStoreData:        finalizeStoreData,
-			FinalizeStoreSmt:         finalizeStoreSmt,
-			FinalizeStoreRecords:     finalizeStoreRecords,
-			FinalizeLockWait:         finalizeLockWait,
-			FinalizeSmtCommit:        finalizeSmtCommit,
-			FinalizeSetFinalized:     finalizeSetFinalized,
-			FinalizeAck:              finalizeAck,
-			HasProofReady:            hasProofReady,
-			ProofMedian:              medianDur,
-			ProofP95:                 p95Dur,
-			ProofP99:                 p99Dur,
-			RedisTotal:               raw.RedisTotal,
-			RedisPending:             raw.RedisPending,
+			Timestamp:                 timestamp,
+			Block:                     raw.Block,
+			Commitments:               raw.Commitments,
+			RoundTime:                 roundDur,
+			Processing:                procDur,
+			BftWait:                   bftDur,
+			Finalization:              finalDur,
+			HasFinalizationBreakdown:  hasFinalizationBreakdown,
+			FinalizeScan:              finalizeScan,
+			FinalizeConvert:           finalizeConvert,
+			FinalizeStoreBlock:        finalizeStoreBlock,
+			FinalizeStoreBlockDoc:     finalizeStoreBlockDoc,
+			FinalizeStoreBlockRecords: finalizeStoreBlockRecords,
+			FinalizeStoreData:         finalizeStoreData,
+			FinalizeStoreSmt:          finalizeStoreSmt,
+			FinalizeStoreRecords:      finalizeStoreRecords,
+			FinalizeLockWait:          finalizeLockWait,
+			FinalizeSmtCommit:         finalizeSmtCommit,
+			FinalizeSetFinalized:      finalizeSetFinalized,
+			FinalizeAck:               finalizeAck,
+			HasProofReady:             hasProofReady,
+			ProofMedian:               medianDur,
+			ProofP95:                  p95Dur,
+			ProofP99:                  p99Dur,
+			RedisTotal:                raw.RedisTotal,
+			RedisPending:              raw.RedisPending,
 		})
 	}
 
@@ -1104,13 +1238,15 @@ func printFinalizationBreakdownSummary(label string, entries []aggregatorRoundSu
 		return
 	}
 
-	var scanSum, convertSum, storeBlockSum, storeDataSum time.Duration
+	var scanSum, convertSum, storeBlockSum, storeBlockDocSum, storeBlockRecordsSum, storeDataSum time.Duration
 	var storeSmtSum, storeRecordsSum, lockWaitSum time.Duration
 	var smtCommitSum, setFinalizedSum, ackSum time.Duration
 	for _, entry := range withBreakdown {
 		scanSum += entry.FinalizeScan
 		convertSum += entry.FinalizeConvert
 		storeBlockSum += entry.FinalizeStoreBlock
+		storeBlockDocSum += entry.FinalizeStoreBlockDoc
+		storeBlockRecordsSum += entry.FinalizeStoreBlockRecords
 		storeDataSum += entry.FinalizeStoreData
 		storeSmtSum += entry.FinalizeStoreSmt
 		storeRecordsSum += entry.FinalizeStoreRecords
@@ -1121,11 +1257,13 @@ func printFinalizationBreakdownSummary(label string, entries []aggregatorRoundSu
 	}
 
 	count := time.Duration(len(withBreakdown))
-	fmt.Printf("%s finalization breakdown: scan=%v convert=%v storeBlock=%v storeData=%v (smt=%v records=%v) lockWait=%v smtCommit=%v setFinalized=%v ack=%v (%d rounds)\n",
+	fmt.Printf("%s finalization breakdown: scan=%v convert=%v storeBlock=%v (blockDoc=%v blockRecords=%v) storeData=%v (smt=%v records=%v) lockWait=%v smtCommit=%v setFinalized=%v ack=%v (%d rounds)\n",
 		prefix,
 		(scanSum / count).Truncate(time.Millisecond),
 		(convertSum / count).Truncate(time.Millisecond),
 		(storeBlockSum / count).Truncate(time.Millisecond),
+		(storeBlockDocSum / count).Truncate(time.Millisecond),
+		(storeBlockRecordsSum / count).Truncate(time.Millisecond),
 		(storeDataSum / count).Truncate(time.Millisecond),
 		(storeSmtSum / count).Truncate(time.Millisecond),
 		(storeRecordsSum / count).Truncate(time.Millisecond),
@@ -1333,7 +1471,9 @@ func main() {
 	}
 	fmt.Printf("Duration: %v\n", testDuration)
 	fmt.Printf("Submission workers: %d\n", workerCount)
-	fmt.Printf("Proof workers: %d\n", proofWorkerCount)
+	fmt.Printf("Proof scheduling: exact per-submission timer (PROOF_WORKERS ignored, value=%d)\n", proofWorkerCount)
+	fmt.Printf("Proof initial delay: %v\n", proofInitialDelay)
+	fmt.Printf("Proof retry delay: %v\n", proofRetryDelay)
 	fmt.Printf("HTTP client pool size: %d\n", httpClientPoolSize)
 	if enableH2C {
 		fmt.Printf("H2C: enabled (HTTP/2 cleartext for plain HTTP)\n")
@@ -1357,29 +1497,9 @@ func main() {
 	// Test connectivity and get starting block number for each shard
 	for _, sc := range shardClients {
 		fmt.Printf("Testing connectivity to %s...\n", sc.url)
-		// Include shardId param so gateway proxies can route the request
-		var blockHeightParams interface{}
-		if sc.shardMask > 0 {
-			blockHeightParams = map[string]interface{}{"shardId": fmt.Sprintf("%d", sc.shardMask)}
-		}
-		resp, err := sc.client.call("get_block_height", blockHeightParams)
+		startingBlockNumber, err := waitForStartingBlock(sc, startupProbeWait)
 		if err != nil {
-			log.Fatalf("Failed to connect to aggregator at %s: %v", sc.url, err)
-		}
-
-		if resp.Error != nil {
-			log.Fatalf("Error getting block height from %s: %v", sc.url, resp.Error.Message)
-		}
-
-		var heightResp GetBlockHeightResponse
-		respBytes, _ := json.Marshal(resp.Result)
-		if err := json.Unmarshal(respBytes, &heightResp); err != nil {
-			log.Fatalf("Failed to parse block height from %s: %v", sc.url, err)
-		}
-
-		var startingBlockNumber int64
-		if _, err := fmt.Sscanf(heightResp.BlockNumber, "%d", &startingBlockNumber); err != nil {
-			log.Fatalf("Failed to parse starting block number from %s: %v", sc.url, err)
+			log.Fatalf("Failed to connect to aggregator at %s after %v: %v", sc.url, startupProbeWait, err)
 		}
 		sc.startingBlock = startingBlockNumber
 
@@ -1387,7 +1507,9 @@ func main() {
 		fmt.Printf("✓ Starting block number for %s: %d\n", sc.url, startingBlockNumber)
 	}
 
-	// Create proof verification queue (buffered channel)
+	// proofQueue receives successful submissions. Each proof job owns its
+	// submittedAt+PROOF_INITIAL_DELAY timer so first-attempt latency matches an
+	// external client polling at that exact delay.
 	proofQueue := make(chan proofJob, 10000)
 
 	// Pre-generate commitment pool to eliminate client-side crypto overhead
@@ -1525,16 +1647,15 @@ func main() {
 		}()
 	}
 
-	// Start SEPARATE proof verification workers (use proofCtx - runs longer)
-	// These workers are dedicated to proof requests, so they don't compete with submissions
-	var proofWg sync.WaitGroup
-	for i := 0; i < proofWorkerCount; i++ {
-		proofWg.Add(1)
-		go func() {
-			defer proofWg.Done()
-			proofVerificationWorker(proofCtx, shardClients, metrics, proofQueue, rateCounters)
-		}()
-	}
+	// Start proof scheduling separately from submissions. The scheduler gives
+	// each successful submission its own absolute first-proof timestamp.
+	var proofDispatchWg sync.WaitGroup
+	var proofJobsWg sync.WaitGroup
+	proofDispatchWg.Add(1)
+	go func() {
+		defer proofDispatchWg.Done()
+		scheduleProofJobs(proofCtx, proofQueue, shardClients, metrics, rateCounters, &proofJobsWg)
+	}()
 
 	perfLogCtx := proofCtx
 	plannedRequests := int64(float64(requestsPerSec) * testDuration.Seconds())
@@ -1543,67 +1664,23 @@ func main() {
 	}
 	go logClientPerfRates(perfLogCtx, metrics, rateCounters, plannedRequests, shardClients)
 
-	// Monitor when submission phase completes
-	go func() {
-		<-submitCtx.Done()
-
-		// Wait for all outstanding submissions to complete
-		fmt.Printf("\n----------------------------------------\n")
-		fmt.Printf("Submission window closed; waiting for outstanding requests to complete...\n")
-		submissionWg.Wait()
-
-		metrics.submissionEndTime = time.Now()
-		fmt.Printf("All submissions completed.\n")
-	}()
-
-	// Wait for all workers to complete (both submission and proof verification)
-	// Note: Proof workers continue running for up to 20 seconds after submissions stop
+	// Wait for all workers to complete (both submission and proof verification).
+	// Proof jobs continue running for up to proofTimeout after submissions stop.
 	fmt.Printf("\n----------------------------------------\n")
 	fmt.Printf("Commitment submissions in progress; will verify proofs after...\n")
 
-	// Monitor proof verification progress and cancel early when all proofs are verified
-	lastProofCount := int64(0)
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
+	wg.Wait() // Wait for submission workers to stop accepting new work
 
-	go func() {
-		noProgressCount := 0
-		for {
-			select {
-			case <-proofCtx.Done():
-				return
-			case <-ticker.C:
-				currentProofs := atomic.LoadInt64(&metrics.proofVerified)
-				proofFailed := atomic.LoadInt64(&metrics.proofFailed)
-				successful := atomic.LoadInt64(&metrics.successfulRequests)
+	fmt.Printf("\n----------------------------------------\n")
+	fmt.Printf("Submission window closed; waiting for outstanding requests to complete...\n")
+	submissionWg.Wait()
+	metrics.submissionEndTime = time.Now()
+	close(proofQueue)
+	fmt.Printf("All submissions completed.\n")
 
-				// Check if all proofs are done (verified + failed = expected)
-				totalProcessed := currentProofs + proofFailed
-				if totalProcessed >= successful {
-					fmt.Printf("  All proofs processed (%d verified, %d failed). Finishing early...\n", currentProofs, proofFailed)
-					proofCancel() // Cancel early since we're done
-					return
-				}
-
-				// Also check if we haven't made progress in several seconds and queue is likely drained
-				if currentProofs > 0 && currentProofs == lastProofCount {
-					noProgressCount++
-					// If no progress for 5 seconds and we've verified most proofs, likely done
-					if noProgressCount >= 5 && totalProcessed >= successful*95/100 {
-						fmt.Printf("  No progress for 5s and %d%% complete. Finishing early...\n", totalProcessed*100/successful)
-						proofCancel()
-						return
-					}
-				} else {
-					noProgressCount = 0
-				}
-				lastProofCount = currentProofs
-			}
-		}
-	}()
-
-	wg.Wait()      // Wait for submission workers
-	proofWg.Wait() // Wait for proof workers
+	proofDispatchWg.Wait() // Wait for scheduler to drain proofQueue
+	proofJobsWg.Wait()     // Wait for delayed proof jobs to finish request/retry/verification
+	proofCancel()
 
 	// Stop submission phase and get counts
 	fmt.Printf("\n----------------------------------------\n")
@@ -1670,6 +1747,18 @@ func main() {
 			medianLatency.Truncate(time.Millisecond),
 			p95Latency.Truncate(time.Millisecond),
 			p99Latency.Truncate(time.Millisecond))
+
+		firstStartMedian, firstStartP95, firstStartP99, schedulerMedian, schedulerP95, schedulerP99 := metrics.getProofStartTimingStats()
+		if firstStartMedian > 0 || firstStartP95 > 0 || firstStartP99 > 0 {
+			fmt.Printf("First proof request start lag: median %v, p95 %v, p99 %v\n",
+				firstStartMedian.Truncate(time.Millisecond),
+				firstStartP95.Truncate(time.Millisecond),
+				firstStartP99.Truncate(time.Millisecond))
+			fmt.Printf("Proof scheduler lag after target: median %v, p95 %v, p99 %v\n",
+				schedulerMedian.Truncate(time.Millisecond),
+				schedulerP95.Truncate(time.Millisecond),
+				schedulerP99.Truncate(time.Millisecond))
+		}
 
 		// Display proof request duration statistics
 		avg, min, max, p50, p95, p99 := metrics.getProofRequestStats()
