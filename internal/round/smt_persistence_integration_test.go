@@ -210,7 +210,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 
 	// Process the commitments (processMiniBatch assumes caller holds mutex)
 	rm.roundMutex.Lock()
-	err = rm.processMiniBatch(ctx, testCommitments)
+	_, err = rm.processMiniBatch(ctx, testCommitments)
 	rm.roundMutex.Unlock()
 	require.NoError(t, err, "processMiniBatch should succeed")
 

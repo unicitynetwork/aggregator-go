@@ -83,6 +83,44 @@ func TestThreadSafeSMTSnapshot(t *testing.T) {
 		}
 	})
 
+	t.Run("ClassifiedBatchSkipsDuplicatesAndRejectsConflicts", func(t *testing.T) {
+		smtInstance := NewSparseMerkleTree(api.SHA256, 2)
+		threadSafeSMT := NewThreadSafeSMT(smtInstance)
+
+		initialSnapshot := threadSafeSMT.CreateSnapshot()
+		initial := []*Leaf{
+			NewLeaf(big.NewInt(0b100), []byte{1}),
+			NewLeaf(big.NewInt(0b101), []byte{2}),
+		}
+		initialResult := initialSnapshot.AddLeavesClassified(initial)
+		require.Equal(t, []int{0, 1}, initialResult.AddedIndexes)
+		require.Empty(t, initialResult.DuplicateIndexes)
+		require.Empty(t, initialResult.Rejected)
+		initialSnapshot.Commit(threadSafeSMT)
+
+		snapshot := threadSafeSMT.CreateSnapshot()
+		batch := []*Leaf{
+			NewLeaf(big.NewInt(0b100), []byte{1}),
+			NewLeaf(big.NewInt(0b100), []byte{9}),
+			NewLeaf(big.NewInt(0b111), []byte{3}),
+		}
+		result := snapshot.AddLeavesClassified(batch)
+
+		require.Equal(t, []int{2}, result.AddedIndexes)
+		require.Equal(t, []int{0}, result.DuplicateIndexes)
+		require.Len(t, result.Rejected, 1)
+		require.Equal(t, 1, result.Rejected[0].Index)
+		require.ErrorIs(t, result.Rejected[0].Err, ErrLeafModification)
+
+		snapshot.Commit(threadSafeSMT)
+		unchanged, err := threadSafeSMT.GetLeaf(big.NewInt(0b100))
+		require.NoError(t, err)
+		require.Equal(t, []byte{1}, unchanged.Value)
+		added, err := threadSafeSMT.GetLeaf(big.NewInt(0b111))
+		require.NoError(t, err)
+		require.Equal(t, []byte{3}, added.Value)
+	})
+
 	t.Run("ConcurrentSnapshots", func(t *testing.T) {
 		// Create ThreadSafeSMT instance with initial data
 		smtInstance := NewSparseMerkleTree(api.SHA256, 2)

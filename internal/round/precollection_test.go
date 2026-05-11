@@ -279,6 +279,155 @@ func newTestPrecollector(t *testing.T, stream chan *models.CertificationRequest,
 	return cp, smtInstance
 }
 
+func TestProcessMiniBatch_SkipsExistingDuplicateWithoutProofPending(t *testing.T) {
+	ctx := context.Background()
+	cfg := &config.Config{
+		Processing: config.ProcessingConfig{
+			RoundDuration: time.Second,
+			BatchLimit:    1000,
+		},
+		Sharding: config.ShardingConfig{
+			Mode: config.ShardingModeStandalone,
+		},
+	}
+	testLogger := newTestLogger(t)
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	rm, err := NewRoundManager(ctx, cfg, testLogger, nil, nil, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smtInstance, nil)
+	require.NoError(t, err)
+
+	existing := testutil.CreateTestCertificationRequest(t, "existing_duplicate")
+	initialSnapshot := smtInstance.CreateSnapshot()
+	_, err = initialSnapshot.AddLeaves([]*smt.Leaf{getLeafFromCommitment(t, existing)})
+	require.NoError(t, err)
+	initialSnapshot.Commit(smtInstance)
+
+	newCommitment := testutil.CreateTestCertificationRequest(t, "new_commitment")
+	duplicate := *existing
+	duplicate.StreamID = "duplicate-stream-id"
+
+	rm.currentRound = &Round{
+		Number:   api.NewBigInt(big.NewInt(1)),
+		State:    RoundStateProcessing,
+		Snapshot: smtInstance.CreateSnapshot(),
+	}
+
+	rm.roundMutex.Lock()
+	_, err = rm.processMiniBatch(ctx, []*models.CertificationRequest{&duplicate, newCommitment})
+	rm.roundMutex.Unlock()
+	require.NoError(t, err)
+
+	require.Len(t, rm.currentRound.PendingCommitments, 1)
+	require.Equal(t, newCommitment.StateID, rm.currentRound.PendingCommitments[0].StateID)
+	require.Len(t, rm.currentRound.PendingLeaves, 1)
+
+	rm.proofCacheMu.RLock()
+	_, duplicatePending := rm.proofPending[existing.StateID.String()]
+	_, newPending := rm.proofPending[newCommitment.StateID.String()]
+	rm.proofCacheMu.RUnlock()
+	require.False(t, duplicatePending)
+	require.True(t, newPending)
+}
+
+func TestReconcileRecoveredFinalization_CommitsMatchingSnapshotAndClearsProofPending(t *testing.T) {
+	ctx := context.Background()
+	cfg := &config.Config{
+		Processing: config.ProcessingConfig{
+			RoundDuration: time.Second,
+			BatchLimit:    1000,
+		},
+		Sharding: config.ShardingConfig{
+			Mode: config.ShardingModeStandalone,
+		},
+	}
+	testLogger := newTestLogger(t)
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	rm, err := NewRoundManager(ctx, cfg, testLogger, nil, nil, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smtInstance, nil)
+	require.NoError(t, err)
+
+	commitment := testutil.CreateTestCertificationRequest(t, "recovered_finalization")
+	blockNumber := api.NewBigInt(big.NewInt(12))
+	rm.currentRound = &Round{
+		Number:   blockNumber,
+		State:    RoundStateProcessing,
+		Snapshot: smtInstance.CreateSnapshot(),
+	}
+
+	rm.roundMutex.Lock()
+	_, err = rm.processMiniBatch(ctx, []*models.CertificationRequest{commitment})
+	rm.roundMutex.Unlock()
+	require.NoError(t, err)
+
+	key, err := commitment.StateID.GetTreeKey()
+	require.NoError(t, err)
+	_, err = smtInstance.GetInclusionCert(key)
+	require.Error(t, err)
+
+	rm.proofCacheMu.RLock()
+	_, pendingBefore := rm.proofPending[commitment.StateID.String()]
+	rm.proofCacheMu.RUnlock()
+	require.True(t, pendingBefore)
+
+	rm.reconcileRecoveredFinalization(blockNumber)
+
+	_, err = smtInstance.GetInclusionCert(key)
+	require.NoError(t, err)
+
+	rm.proofCacheMu.RLock()
+	_, pendingAfter := rm.proofPending[commitment.StateID.String()]
+	rm.proofCacheMu.RUnlock()
+	require.False(t, pendingAfter)
+}
+
+func TestReconcileRecoveredFinalization_MismatchedBlockClearsProofPendingOnly(t *testing.T) {
+	ctx := context.Background()
+	cfg := &config.Config{
+		Processing: config.ProcessingConfig{
+			RoundDuration: time.Second,
+			BatchLimit:    1000,
+		},
+		Sharding: config.ShardingConfig{
+			Mode: config.ShardingModeStandalone,
+		},
+	}
+	testLogger := newTestLogger(t)
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	rm, err := NewRoundManager(ctx, cfg, testLogger, nil, nil, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smtInstance, nil)
+	require.NoError(t, err)
+
+	commitment := testutil.CreateTestCertificationRequest(t, "mismatched_recovered_finalization")
+	currentBlockNumber := api.NewBigInt(big.NewInt(20))
+	recoveredBlockNumber := api.NewBigInt(big.NewInt(19))
+	rm.currentRound = &Round{
+		Number:   currentBlockNumber,
+		State:    RoundStateProcessing,
+		Snapshot: smtInstance.CreateSnapshot(),
+	}
+
+	originalRoot := smtInstance.GetRootHash()
+	rm.roundMutex.Lock()
+	_, err = rm.processMiniBatch(ctx, []*models.CertificationRequest{commitment})
+	rm.roundMutex.Unlock()
+	require.NoError(t, err)
+
+	rm.proofCacheMu.RLock()
+	_, pendingBefore := rm.proofPending[commitment.StateID.String()]
+	rm.proofCacheMu.RUnlock()
+	require.True(t, pendingBefore)
+
+	rm.reconcileRecoveredFinalization(recoveredBlockNumber)
+
+	require.Equal(t, originalRoot, smtInstance.GetRootHash())
+	key, err := commitment.StateID.GetTreeKey()
+	require.NoError(t, err)
+	_, err = smtInstance.GetInclusionCert(key)
+	require.Error(t, err)
+
+	rm.proofCacheMu.RLock()
+	_, pendingAfter := rm.proofPending[commitment.StateID.String()]
+	rm.proofCacheMu.RUnlock()
+	require.False(t, pendingAfter)
+}
+
 func TestDrainBufferedCommitments_StopsAtRoundBoundary(t *testing.T) {
 	stream := make(chan *models.CertificationRequest, 8)
 	pending := make([]*models.CertificationRequest, 0, miniBatchSize)

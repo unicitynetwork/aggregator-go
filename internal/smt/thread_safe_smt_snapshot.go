@@ -1,6 +1,7 @@
 package smt
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 	"sync"
@@ -14,6 +15,20 @@ import (
 type ThreadSafeSmtSnapshot struct {
 	snapshot *SmtSnapshot
 	rwMux    sync.RWMutex // RWMutex allows multiple readers but exclusive writers
+}
+
+// AddLeavesClassifiedResult reports input indexes for each add outcome.
+// Duplicates are normal no-ops; rejected leaves carry the add error.
+type AddLeavesClassifiedResult struct {
+	AddedIndexes     []int
+	DuplicateIndexes []int
+	Rejected         []RejectedLeaf
+}
+
+// RejectedLeaf records a leaf that could not be added to the snapshot.
+type RejectedLeaf struct {
+	Index int
+	Err   error
 }
 
 // NewThreadSafeSmtSnapshot creates a new thread-safe SMT snapshot wrapper
@@ -43,6 +58,36 @@ func (tss *ThreadSafeSmtSnapshot) addLeavesUnsafe(leaves []*Leaf) (string, error
 	}
 
 	return tss.snapshot.GetRootHashHex(), nil
+}
+
+// AddLeavesClassified adds valid leaves and reports duplicates/conflicts without aborting the batch.
+func (tss *ThreadSafeSmtSnapshot) AddLeavesClassified(leaves []*Leaf) AddLeavesClassifiedResult {
+	result := AddLeavesClassifiedResult{
+		AddedIndexes:     make([]int, 0, len(leaves)),
+		DuplicateIndexes: make([]int, 0),
+		Rejected:         make([]RejectedLeaf, 0),
+	}
+	if len(leaves) == 0 {
+		return result
+	}
+
+	tss.rwMux.Lock()
+	defer tss.rwMux.Unlock()
+
+	for i, leaf := range leaves {
+		if err := tss.snapshot.AddLeaf(leaf.Path, leaf.Value); err != nil {
+			if errors.Is(err, ErrDuplicateLeaf) {
+				result.DuplicateIndexes = append(result.DuplicateIndexes, i)
+				continue
+			}
+			result.Rejected = append(result.Rejected, RejectedLeaf{Index: i, Err: err})
+			continue
+		}
+		result.AddedIndexes = append(result.AddedIndexes, i)
+	}
+
+	tss.snapshot.ensureHashes()
+	return result
 }
 
 // AddLeaf adds a single leaf to the snapshot

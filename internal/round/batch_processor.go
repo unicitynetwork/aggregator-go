@@ -21,9 +21,10 @@ import (
 
 // processMiniBatch processes a small batch of commitments into the SMT for efficiency
 // NOTE: The caller is expected to hold rm.roundMutex when calling this function
-func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.CertificationRequest) error {
+// and ACK returned dropped entries after releasing it.
+func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.CertificationRequest) ([]interfaces.CertificationRequestAck, error) {
 	if len(commitments) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Convert commitments to SMT leaves, tracking valid commitments
@@ -55,28 +56,15 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 	// Add leaves to the current round's SMT snapshot
 	if rm.currentRound != nil && rm.currentRound.Snapshot != nil {
 		smtStart := time.Now()
-		_, err := rm.currentRound.Snapshot.AddLeaves(leaves)
+		addedCommitments, addedLeaves, dropped := addCommitmentLeaves(ctx, rm.logger, rm.currentRound.Snapshot, leaves, validCommitments)
 		metrics.SMTAddLeavesDuration.Observe(time.Since(smtStart).Seconds())
-		if err != nil {
-			result := tryAddLeavesOneByOne(ctx, rm.logger, rm.commitmentQueue, rm.currentRound.Snapshot, leaves, validCommitments)
-			rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, result.successLeaves...)
-			rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, result.successCommitments...)
-			rm.markProofsPending(result.successCommitments)
-		} else {
-			rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, leaves...)
-			rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, validCommitments...)
-			rm.markProofsPending(validCommitments)
-		}
+		rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, addedLeaves...)
+		rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, addedCommitments...)
+		rm.markProofsPending(addedCommitments)
+		return dropped, nil
 	}
 
-	return nil
-}
-
-// leafAddResult holds results of adding leaves one-by-one to an SMT snapshot.
-type leafAddResult struct {
-	successLeaves      []*smt.Leaf
-	successCommitments []*models.CertificationRequest
-	rejected           []interfaces.CertificationRequestAck
+	return nil, nil
 }
 
 // ProposeBlock creates and proposes a new block with the given data.
@@ -372,9 +360,12 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 		} else if len(unfinalizedBlocks) > 0 {
 			rm.logger.Info("Found unfinalized block, attempting recovery",
 				"blockNumber", unfinalizedBlocks[0].Index.String())
-			_, recoverErr := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+			recoveryResult, recoverErr := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
 			if recoverErr != nil {
 				return fmt.Errorf("recovery failed: %w", recoverErr)
+			}
+			if recoveryResult != nil && recoveryResult.Recovered {
+				rm.reconcileRecoveredFinalization(recoveryResult.BlockNumber)
 			}
 			rm.logger.Info("Recovery completed successfully")
 			return nil
@@ -386,6 +377,27 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 		}
 	}
 	return fmt.Errorf("FinalizeBlock failed after %d attempts", maxFinalizeRetries)
+}
+
+func (rm *RoundManager) reconcileRecoveredFinalization(blockNumber *api.BigInt) {
+	var snapshot *smt.ThreadSafeSmtSnapshot
+
+	rm.roundMutex.RLock()
+	if blockNumber != nil &&
+		rm.currentRound != nil &&
+		rm.currentRound.Number != nil &&
+		rm.currentRound.Snapshot != nil &&
+		rm.currentRound.Number.Cmp(blockNumber.Int) == 0 {
+		snapshot = rm.currentRound.Snapshot
+	}
+	rm.roundMutex.RUnlock()
+
+	rm.finalizationMu.Lock()
+	if snapshot != nil {
+		snapshot.Commit(rm.smt)
+	}
+	rm.clearProofPending()
+	rm.finalizationMu.Unlock()
 }
 
 // FinalizeBlock creates and persists a new block with the given data

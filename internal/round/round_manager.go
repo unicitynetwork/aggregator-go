@@ -528,11 +528,18 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 			case commitment := <-rm.commitmentStream:
 				rm.roundMutex.Lock()
 				rm.currentRound.Commitments = append(rm.currentRound.Commitments, commitment)
+				var dropped []interfaces.CertificationRequestAck
 				if len(rm.currentRound.Commitments)%100 == 0 {
 					batch := rm.currentRound.Commitments[len(rm.currentRound.Commitments)-100:]
-					rm.processMiniBatch(ctx, batch)
+					var err error
+					dropped, err = rm.processMiniBatch(ctx, batch)
+					if err != nil {
+						rm.roundMutex.Unlock()
+						return err
+					}
 				}
 				rm.roundMutex.Unlock()
+				ackDroppedCommitments(ctx, rm.logger, rm.commitmentQueue, dropped)
 			case <-ctx.Done():
 				return ctx.Err()
 			default:
@@ -542,11 +549,18 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 
 		rm.roundMutex.Lock()
 		remaining := len(rm.currentRound.Commitments) % 100
+		var dropped []interfaces.CertificationRequestAck
 		if remaining > 0 {
 			batch := rm.currentRound.Commitments[len(rm.currentRound.Commitments)-remaining:]
-			rm.processMiniBatch(ctx, batch)
+			var err error
+			dropped, err = rm.processMiniBatch(ctx, batch)
+			if err != nil {
+				rm.roundMutex.Unlock()
+				return err
+			}
 		}
 		rm.roundMutex.Unlock()
+		ackDroppedCommitments(ctx, rm.logger, rm.commitmentQueue, dropped)
 	}
 
 	rm.startActivePrecollectorIfNeeded(ctx)

@@ -2,7 +2,6 @@ package round
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
@@ -215,57 +214,7 @@ func (cp *childPrecollector) addBatch(
 		return nil, nil
 	}
 
-	if _, err := snapshot.AddLeaves(leavesToAdd); err != nil {
-		result := tryAddLeavesOneByOne(ctx, cp.logger, cp.commitmentQueue, snapshot, leavesToAdd, valid)
-		return result.successCommitments, result.successLeaves
-	}
-
-	return valid, leavesToAdd
-}
-
-// tryAddLeavesOneByOne adds leaves one-by-one to a snapshot and returns results.
-// Package-level function usable by both standalone processMiniBatch and childPrecollector.
-func tryAddLeavesOneByOne(
-	ctx context.Context,
-	log *logger.Logger,
-	queue interfaces.CommitmentQueue,
-	snapshot *smt.ThreadSafeSmtSnapshot,
-	leaves []*smt.Leaf,
-	commitments []*models.CertificationRequest,
-) leafAddResult {
-	result := leafAddResult{
-		successLeaves:      make([]*smt.Leaf, 0, len(leaves)),
-		successCommitments: make([]*models.CertificationRequest, 0, len(commitments)),
-		rejected:           nil,
-	}
-
-	for i, leaf := range leaves {
-		if err := snapshot.AddLeaf(leaf.Path, leaf.Value); err != nil {
-			if errors.Is(err, smt.ErrDuplicateLeaf) {
-				result.successLeaves = append(result.successLeaves, leaf)
-				result.successCommitments = append(result.successCommitments, commitments[i])
-				continue
-			}
-			log.WithContext(ctx).Warn("Rejected conflicting leaf",
-				"path", leaf.Path.String(),
-				"error", err.Error())
-			result.rejected = append(result.rejected, interfaces.CertificationRequestAck{
-				StateID:  commitments[i].StateID,
-				StreamID: commitments[i].StreamID,
-			})
-			continue
-		}
-		result.successLeaves = append(result.successLeaves, leaf)
-		result.successCommitments = append(result.successCommitments, commitments[i])
-	}
-
-	if len(result.rejected) > 0 && queue != nil {
-		if err := queue.MarkProcessed(ctx, result.rejected); err != nil {
-			log.WithContext(ctx).Error("Failed to mark rejected commitments as processed",
-				"count", len(result.rejected),
-				"error", err.Error())
-		}
-	}
-
-	return result
+	added, addedLeaves, dropped := addCommitmentLeaves(ctx, cp.logger, snapshot, leavesToAdd, valid)
+	ackDroppedCommitments(ctx, cp.logger, cp.commitmentQueue, dropped)
+	return added, addedLeaves
 }
