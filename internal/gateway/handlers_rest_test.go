@@ -93,6 +93,15 @@ func Test_GetTrustBases(t *testing.T) {
 	})
 }
 
+func TestIsLeaderHealthRole(t *testing.T) {
+	for _, role := range []string{"leader", "standalone", "parent-leader", "parent-standalone"} {
+		require.True(t, isLeaderHealthRole(role), role)
+	}
+	for _, role := range []string{"follower", "parent-follower", ""} {
+		require.False(t, isLeaderHealthRole(role), role)
+	}
+}
+
 func doRequest(t *testing.T, hf gin.HandlerFunc, method, path string) (*http.Response, []byte) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(method, path, nil)

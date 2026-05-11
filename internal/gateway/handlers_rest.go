@@ -35,6 +35,41 @@ func (s *Server) handleHealth(c *gin.Context) {
 	c.JSON(http.StatusOK, status)
 }
 
+// handleLeaderHealth handles readiness checks for leader-only traffic.
+func (s *Server) handleLeaderHealth(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	status, err := s.service.GetHealthStatus(ctx)
+	if err != nil {
+		s.logger.WithContext(ctx).Error("Failed to get leader health status", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	if status.Status == api.HealthStatusUnhealthy {
+		c.JSON(http.StatusServiceUnavailable, status)
+		return
+	}
+
+	if !isLeaderHealthRole(status.Role) {
+		status.Status = api.HealthStatusUnhealthy
+		status.AddDetail("leader", "false")
+		c.JSON(http.StatusServiceUnavailable, status)
+		return
+	}
+
+	c.JSON(http.StatusOK, status)
+}
+
+func isLeaderHealthRole(role string) bool {
+	switch role {
+	case "leader", "standalone", "parent-leader", "parent-standalone":
+		return true
+	default:
+		return false
+	}
+}
+
 // handleDocs handles the API documentation endpoint
 func (s *Server) handleDocs(c *gin.Context) {
 	html := GenerateDocsHTML()

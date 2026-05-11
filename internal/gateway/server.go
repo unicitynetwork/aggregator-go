@@ -118,6 +118,7 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 func (s *Server) setupRoutes() {
 	// Health and metrics endpoints
 	s.router.GET("/health", s.handleHealth)
+	s.router.GET("/health/leader", s.handleLeaderHealth)
 	s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	s.router.PUT("/api/v1/trustbases", s.handlePutTrustBase)
 	s.router.GET("/api/v1/trustbases", getTrustBaseHandler(s.logger, s.service))
