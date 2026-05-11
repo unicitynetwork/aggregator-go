@@ -241,9 +241,12 @@ func waitForStateBlockNumber(
 
 	var blockNumber *api.BigInt
 	require.Eventually(t, func() bool {
-		var err error
-		blockNumber, err = storage.BlockRecordsStorage().GetByStateID(ctx, stateID)
+		record, err := storage.AggregatorRecordStorage().GetByStateID(ctx, stateID)
 		require.NoError(t, err)
+		if record == nil {
+			return false
+		}
+		blockNumber = record.BlockNumber
 		return blockNumber != nil
 	}, timeout, 25*time.Millisecond)
 
