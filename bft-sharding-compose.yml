@@ -1,3 +1,35 @@
+# Example 4k/s perf run against this fixed 2-shard compose stack from the repo root:
+#   LOG_LEVEL=info make docker-run-bft-sh-clean
+#
+#   SHARDING_MODE=bft-shard \
+#   SHARD_TARGETS="http://localhost:3001:0,http://localhost:3002:1" \
+#   AGGREGATOR_LOG_PATHS="shard0=logs/bft-shard0/aggregator.log,shard1=logs/bft-shard1/aggregator.log" \
+#   REQUESTS_PER_SEC=4000 \
+#   TEST_DURATION=30s \
+#   SUBMISSION_WORKERS=300 \
+#   PROOF_WORKERS=300 \
+#   HTTP_CLIENT_POOL_SIZE=48 \
+#   PROOF_INITIAL_DELAY=2s \
+#   PROOF_RETRY_DELAY=1s \
+#   go run ./cmd/performance-test
+#
+# Example with faster BFT root cadence for lower proof latency, 1k/s single active shard:
+#
+#   LOG_LEVEL=info ROOT_BLOCK_RATE=400 PRECOLLECTOR_GRACE_PERIOD=100ms \
+#     make docker-run-bft-sh-clean
+#
+#   SHARDING_MODE=bft-shard \
+#   SHARD_TARGETS="http://localhost:3001:0" \
+#   AGGREGATOR_LOG_PATHS="shard0=logs/bft-shard0/aggregator.log" \
+#   REQUESTS_PER_SEC=1000 \
+#   TEST_DURATION=30s \
+#   SUBMISSION_WORKERS=300 \
+#   PROOF_WORKERS=300 \
+#   HTTP_CLIENT_POOL_SIZE=48 \
+#   PROOF_INITIAL_DELAY=1200ms \
+#   PROOF_RETRY_DELAY=1s \
+#   go run ./cmd/performance-test
+
 x-bft-base: &bft-base
   platform: linux/amd64
   user: "${USER_UID:-1001}:${USER_GID:-1001}"
@@ -12,34 +44,33 @@ services:
     ports:
       - "8002:8002"
     volumes:
-      - ./data/bft-sharding/genesis-root:/genesis/root
+      - ./data/bft-sharding/genesis-root:/genesis-root
       - ./data/bft-sharding/genesis:/genesis
     healthcheck:
-      test: ["CMD", "nc", "-zv", "localhost", "8000"]
+      test: ["CMD", "nc", "-zv", "localhost", "8002"]
       interval: 5s
       timeout: 3s
       retries: 12
     entrypoint: ["/busybox/sh", "-c"]
     command:
       - |
-        if [ -f /genesis/root/node-info.json ] && [ -f /genesis/trust-base.json ] && [ -f /genesis/root/trust-base-signed.json ]; then
+        if [ -f /genesis-root/node-info.json ] && [ -f /genesis/trust-base.json ] && [ -f /genesis-root/trust-base-signed.json ]; then
           echo "Genesis files already exist, skipping initialization."
         else
           echo "Creating root genesis..." &&
-          ubft root-node init --home /genesis/root -g &&
+          ubft root-node init --home /genesis-root -g &&
           echo "Creating root trust base..." &&
-          ubft trust-base generate --home /genesis --network-id 3 --node-info /genesis/root/node-info.json &&
+          ubft trust-base generate --home /genesis --network-id 3 --node-info /genesis-root/node-info.json &&
           echo "Signing root trust base..." &&
-          ubft trust-base sign --home /genesis/root --trust-base /genesis/trust-base.json
+          ubft trust-base sign --home /genesis-root --trust-base /genesis/trust-base.json
         fi
         echo "Starting root node..." &&
-        exec ubft root-node run --home /genesis/root --address "/ip4/0.0.0.0/tcp/8000" --trust-base /genesis/trust-base.json --rpc-server-address "0.0.0.0:8002"
+        exec ubft root-node run --home /genesis-root --address "/ip4/0.0.0.0/tcp/8000" --trust-base /genesis/trust-base.json --rpc-server-address "0.0.0.0:8002" --block-rate "${ROOT_BLOCK_RATE:-900}"
 
   bft-shard-genesis-gen:
     <<: *bft-base
     container_name: aggregator-bft-shard-genesis-gen
     volumes:
-      - ./data/bft-sharding/genesis-root:/genesis/root
       - ./data/bft-sharding/genesis:/genesis
     depends_on:
       bft-root:
@@ -58,7 +89,7 @@ services:
           ubft shard-node init --home /genesis/shard_1 --generate &&
           ubft shard-conf generate --home /genesis/shard_1 --t2-timeout 5000 --network-id 3 --partition-id 7 --partition-type-id 7 --shard-id 0xC0 --epoch-start 10 --node-info=/genesis/shard_1/node-info.json
         fi
-        chmod -R 755 /genesis/root /genesis/shard_0 /genesis/shard_1
+        chmod -R 755 /genesis/shard_0 /genesis/shard_1
         chmod 644 /genesis/trust-base.json /genesis/shard_0/shard-conf-7_0.json /genesis/shard_1/shard-conf-7_0.json
         ls -l /genesis/
         ls -l /genesis/shard_0
@@ -98,18 +129,35 @@ services:
           done
         done
 
-  mongodb:
+  mongodb-shard0:
     image: mongo:7.0
-    container_name: aggregator-bft-mongodb
+    container_name: aggregator-bft-mongodb-shard0
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
     restart: unless-stopped
     ports:
       - "27017:27017"
     volumes:
-      - ./data/bft-sharding/mongodb_data:/data/db
+      - ./data/bft-sharding/mongodb_shard0_data:/data/db
     command: ["--replSet", "rs0", "--bind_ip_all", "--noauth"]
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "try { rs.status().ok } catch(e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongodb:27017'}]}) }"]
+      test: ["CMD", "mongosh", "--eval", "try { rs.status().ok } catch(e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongodb-shard0:27017'}]}) }"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  mongodb-shard1:
+    image: mongo:7.0
+    container_name: aggregator-bft-mongodb-shard1
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
+    restart: unless-stopped
+    ports:
+      - "27018:27017"
+    volumes:
+      - ./data/bft-sharding/mongodb_shard1_data:/data/db
+    command: ["--replSet", "rs0", "--bind_ip_all", "--noauth"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "try { rs.status().ok } catch(e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongodb-shard1:27017'}]}) }"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -136,6 +184,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: aggregator-bft-shard0
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
     restart: unless-stopped
     ports:
       - "3001:3000"
@@ -145,21 +194,25 @@ services:
     depends_on:
       upload-configurations:
         condition: service_completed_successfully
-      mongodb:
+      mongodb-shard0:
         condition: service_healthy
       redis:
         condition: service_healthy
     environment: &aggregator-bft-env
       PORT: "3000"
       HOST: "0.0.0.0"
-      CONCURRENCY_LIMIT: "5000"
+      CONCURRENCY_LIMIT: "10000"
       ENABLE_DOCS: "true"
       ENABLE_CORS: "true"
 
-      MONGODB_URI: "mongodb://mongodb:27017/aggregator?replicaSet=rs0&directConnection=true"
+      MONGODB_URI: "mongodb://mongodb-shard0:27017/aggregator?replicaSet=rs0&directConnection=true"
       MONGODB_DATABASE: "aggregator_bft_shard_0"
       MONGODB_CONNECT_TIMEOUT: "10s"
       MONGODB_SERVER_SELECTION_TIMEOUT: "5s"
+      MONGODB_MAX_POOL_SIZE: "100"
+      MONGODB_MIN_POOL_SIZE: "5"
+      MONGODB_FINALIZATION_INSERT_CHUNK_SIZE: "1000"
+      MONGODB_FINALIZATION_INSERT_CHUNK_WORKERS: "16"
 
       REDIS_HOST: "redis"
       REDIS_PORT: "6379"
@@ -172,6 +225,9 @@ services:
       REDIS_STREAM_NAME: "commitments:bft-shard:0"
       REDIS_FLUSH_INTERVAL: "50ms"
       REDIS_MAX_BATCH_SIZE: "2000"
+      REDIS_READ_BATCH_SIZE: "2000"
+      REDIS_READ_BLOCK_TIMEOUT: "100ms"
+      REDIS_ACK_BATCH_SIZE: "10000"
 
       DISABLE_HIGH_AVAILABILITY: "true"
 
@@ -181,7 +237,10 @@ services:
       LOG_FILE_PATH: "/app/logs/aggregator.log"
 
       BATCH_LIMIT: "1000"
-      MAX_COMMITMENTS_PER_ROUND: "10000"
+      MAX_COMMITMENTS_PER_ROUND: "20000"
+      PRECOLLECTOR_GRACE_PERIOD: "${PRECOLLECTOR_GRACE_PERIOD:-150ms}"
+      COMMITMENT_STREAM_BUFFER_SIZE: "50000"
+      SKIP_DUPLICATE_CHECK: "true"
 
       SHARDING_MODE: "bft-shard"
 
@@ -223,8 +282,16 @@ services:
     volumes:
       - ./data/bft-sharding/genesis:/app/bft-config
       - ./logs/bft-shard1:/app/logs
+    depends_on:
+      upload-configurations:
+        condition: service_completed_successfully
+      mongodb-shard1:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       <<: *aggregator-bft-env
+      MONGODB_URI: "mongodb://mongodb-shard1:27017/aggregator?replicaSet=rs0&directConnection=true"
       MONGODB_DATABASE: "aggregator_bft_shard_1"
       REDIS_STREAM_NAME: "commitments:bft-shard:1"
       SIGNING_KEY_FILE: "/app/bft-config/shard_1/keys.json"
@@ -234,3 +301,5 @@ services:
 
 networks:
   default:
+    name: aggregator-go_default
+    external: true
