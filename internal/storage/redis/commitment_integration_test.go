@@ -952,6 +952,130 @@ Collect2:
 	}
 }
 
+// TestPendingExhausted_ResetWhileStreamerRunning: after a reset, the already
+// running streamer reclaims previously-unacked entries without being restarted.
+func (suite *RedisTestSuite) TestPendingExhausted_ResetWhileStreamerRunning() {
+	ctx := suite.ctx
+	t := suite.T()
+
+	commitments := []*models.CertificationRequest{
+		createTestCommitment(),
+		createTestCommitment(),
+		createTestCommitment(),
+	}
+	require.NoError(t, suite.storage.StoreBatch(ctx, commitments))
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ch := make(chan *models.CertificationRequest, 10)
+	done := make(chan struct{})
+	go func() {
+		_ = suite.storage.StreamCertificationRequests(streamCtx, ch)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	firstDelivery := make(map[string]struct{}, len(commitments))
+	firstDeadline := time.After(2 * time.Second)
+CollectFirst:
+	for len(firstDelivery) < len(commitments) {
+		select {
+		case c := <-ch:
+			firstDelivery[c.StateID.String()] = struct{}{}
+		case <-firstDeadline:
+			break CollectFirst
+		}
+	}
+	require.Len(t, firstDelivery, len(commitments), "streamer must deliver all stored commitments first")
+
+	suite.storage.ResetPendingSweep()
+
+	redelivered := make(map[string]struct{}, len(commitments))
+	secondDeadline := time.After(2 * time.Second)
+CollectSecond:
+	for len(redelivered) < len(commitments) {
+		select {
+		case c := <-ch:
+			redelivered[c.StateID.String()] = struct{}{}
+		case <-secondDeadline:
+			break CollectSecond
+		}
+	}
+
+	require.Len(t, redelivered, len(commitments),
+		"running streamer must redeliver all unacked PEL entries after reset")
+	for id := range firstDelivery {
+		_, found := redelivered[id]
+		assert.True(t, found, "pending commitment not redelivered after live reset (stateID=%s)", id)
+	}
+}
+
+// TestPendingExhausted_ResetAfterDiscardingLocalBuffer covers the precollector
+// discard path: entries already delivered into the local channel are stale when
+// Redis PEL is about to become the replay source again.
+func (suite *RedisTestSuite) TestPendingExhausted_ResetAfterDiscardingLocalBuffer() {
+	ctx := suite.ctx
+	t := suite.T()
+
+	commitments := []*models.CertificationRequest{
+		createTestCommitment(),
+		createTestCommitment(),
+		createTestCommitment(),
+	}
+	require.NoError(t, suite.storage.StoreBatch(ctx, commitments))
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ch := make(chan *models.CertificationRequest, len(commitments))
+	done := make(chan struct{})
+	go func() {
+		_ = suite.storage.StreamCertificationRequests(streamCtx, ch)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	require.Eventually(t, func() bool {
+		return len(ch) == len(commitments)
+	}, 2*time.Second, 25*time.Millisecond, "streamer should fill the local channel")
+
+	discarded := make(map[string]struct{}, len(commitments))
+	for len(discarded) < len(commitments) {
+		select {
+		case c := <-ch:
+			discarded[c.StateID.String()] = struct{}{}
+		default:
+			t.Fatalf("local buffer drained early: got %d/%d", len(discarded), len(commitments))
+		}
+	}
+	require.Len(t, discarded, len(commitments))
+
+	suite.storage.ResetPendingSweep()
+
+	redelivered := make(map[string]int, len(commitments))
+	deadline := time.After(2 * time.Second)
+CollectReplay:
+	for len(redelivered) < len(commitments) {
+		select {
+		case c := <-ch:
+			redelivered[c.StateID.String()]++
+		case <-deadline:
+			break CollectReplay
+		}
+	}
+
+	require.Len(t, redelivered, len(commitments),
+		"running streamer must replay all discarded local-buffer entries from PEL")
+	for id := range discarded {
+		assert.Equal(t, 1, redelivered[id], "stateID=%s should be redelivered exactly once", id)
+	}
+}
+
 // TestPendingSweep_DeliversEachEntryExactlyOnce: the pending sweep delivers
 // each PEL entry to commitmentChan exactly once, regardless of ack timing.
 func (suite *RedisTestSuite) TestPendingSweep_DeliversEachEntryExactlyOnce() {

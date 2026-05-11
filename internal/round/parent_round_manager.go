@@ -179,6 +179,12 @@ func (prm *ParentRoundManager) StartNewRound(ctx context.Context, roundNumber *a
 	return prm.startNewRound(ctx, roundNumber)
 }
 
+// StartNextRoundFromPrecollector exists to satisfy the BFT RoundManager
+// interface. Parent mode keeps its existing collect behavior.
+func (prm *ParentRoundManager) StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt) error {
+	return prm.StartNewRound(ctx, roundNumber)
+}
+
 // startNewRound is the internal implementation
 func (prm *ParentRoundManager) startNewRound(ctx context.Context, roundNumber *api.BigInt) error {
 	prm.roundMutex.Lock()
@@ -397,6 +403,10 @@ func (prm *ParentRoundManager) IsReady() bool {
 // FinalizationReadLock is a no-op for parent mode (no SMT/block finalize race).
 func (prm *ParentRoundManager) FinalizationReadLock() func() {
 	return func() {}
+}
+
+func (prm *ParentRoundManager) GetKnownNotReadyBlock(stateID api.StateID) (*models.Block, bool) {
+	return nil, false
 }
 
 // Activate starts active round processing (called when node becomes leader in HA mode)

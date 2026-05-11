@@ -61,9 +61,11 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 			result := tryAddLeavesOneByOne(ctx, rm.logger, rm.commitmentQueue, rm.currentRound.Snapshot, leaves, validCommitments)
 			rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, result.successLeaves...)
 			rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, result.successCommitments...)
+			rm.markProofsPending(result.successCommitments)
 		} else {
 			rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, leaves...)
 			rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, validCommitments...)
+			rm.markProofsPending(validCommitments)
 		}
 	}
 
@@ -471,8 +473,9 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		return fmt.Errorf("failed to set block as finalized: %w", err)
 	}
 	setFinalizedDuration := time.Since(setFinalizedStart)
-	rm.finalizationMu.Unlock()
 	block.Finalized = true
+	rm.markProofsReady(block, stateIDs)
+	rm.finalizationMu.Unlock()
 
 	// Proofs are requestable only after the SMT snapshot is committed and the block is visible as finalized.
 	// Redis ACK is recovery bookkeeping.

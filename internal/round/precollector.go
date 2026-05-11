@@ -31,6 +31,7 @@ type childPrecollector struct {
 	commitmentQueue  interfaces.CommitmentQueue
 	logger           *logger.Logger
 	maxPerRound      int
+	markProofPending func([]*models.CertificationRequest)
 
 	advanceCh chan advanceRequest
 	stopCh    chan struct{}
@@ -42,6 +43,7 @@ func newChildPrecollector(
 	queue interfaces.CommitmentQueue,
 	log *logger.Logger,
 	maxPerRound int,
+	markProofPending func([]*models.CertificationRequest),
 ) *childPrecollector {
 	if maxPerRound <= 0 {
 		maxPerRound = 10000
@@ -51,6 +53,7 @@ func newChildPrecollector(
 		commitmentQueue:  queue,
 		logger:           log,
 		maxPerRound:      maxPerRound,
+		markProofPending: markProofPending,
 		advanceCh:        make(chan advanceRequest),
 		stopCh:           make(chan struct{}),
 		doneCh:           make(chan struct{}),
@@ -102,6 +105,9 @@ func (cp *childPrecollector) run(ctx context.Context, baseSnapshot *smt.ThreadSa
 			return
 		}
 		added, addedLeaves := cp.addBatch(ctx, snapshot, pending)
+		if cp.markProofPending != nil {
+			cp.markProofPending(added)
+		}
 		commitments = append(commitments, added...)
 		leaves = append(leaves, addedLeaves...)
 		count += len(added)

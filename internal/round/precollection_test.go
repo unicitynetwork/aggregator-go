@@ -272,7 +272,7 @@ func newTestPrecollector(t *testing.T, stream chan *models.CertificationRequest,
 	if maxPerRound <= 0 {
 		maxPerRound = 10000
 	}
-	cp := newChildPrecollector(stream, nil, log, maxPerRound)
+	cp := newChildPrecollector(stream, nil, log, maxPerRound, nil)
 	return cp, smtInstance
 }
 
@@ -569,7 +569,7 @@ func TestPreCollectionReparenting(t *testing.T) {
 
 		// Start precollector from Round N's snapshot
 		stream := make(chan *models.CertificationRequest, 100)
-		cp := newChildPrecollector(stream, nil, testLogger, 10000)
+		cp := newChildPrecollector(stream, nil, testLogger, 10000, nil)
 		cp.Start(ctx, roundNSnapshot)
 		defer cp.Stop()
 
@@ -822,6 +822,178 @@ func TestStartNewRoundWithSnapshot(t *testing.T) {
 		elapsed := time.Since(startTime)
 		assert.Less(t, elapsed, 100*time.Millisecond, "Should not wait for collect phase")
 	})
+}
+
+func TestStandalonePrecollectorGraceIncludesLateCommitment(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{Database: "test_standalone_precollector_grace"},
+		Processing: config.ProcessingConfig{
+			RoundDuration:           100 * time.Millisecond,
+			PrecollectorGracePeriod: 150 * time.Millisecond,
+			MaxCommitmentsPerRound:  1000,
+		},
+		Storage:  config.StorageConfig{UseRedisForCommitments: true},
+		Sharding: config.ShardingConfig{Mode: config.ShardingModeStandalone},
+		BFT: config.BFTConfig{
+			Enabled: false,
+			// Keep the precollected round in-flight while the test inspects it.
+			StubDelay: 5 * time.Second,
+		},
+	}
+	storage := testutil.SetupTestStorage(t, cfg)
+
+	testLogger := newTestLogger(t)
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		storage.CommitmentQueue(),
+		storage,
+		nil,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		smtInstance,
+		nil,
+	)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer shutdownCancel()
+		_ = rm.Stop(shutdownCtx)
+	})
+
+	cp := newChildPrecollector(
+		rm.commitmentStream,
+		rm.commitmentQueue,
+		rm.logger,
+		rm.config.Processing.MaxCommitmentsPerRound,
+		rm.markProofsPending,
+	)
+	rm.roundMutex.Lock()
+	rm.precollectorDisabled = false
+	rm.precollectorDone = make(chan struct{})
+	rm.precollector = cp
+	rm.roundMutex.Unlock()
+	cp.Start(ctx, smtInstance.CreateSnapshot())
+
+	lateCommitment := testutil.CreateTestCertificationRequest(t, "during_grace")
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		rm.commitmentStream <- lateCommitment
+	}()
+
+	start := time.Now()
+	require.NoError(t, rm.StartNextRoundFromPrecollector(ctx, api.NewBigInt(big.NewInt(2))))
+	assert.GreaterOrEqual(t, time.Since(start), cfg.Processing.PrecollectorGracePeriod)
+
+	rm.roundMutex.RLock()
+	currentRound := rm.currentRound
+	var commitments []*models.CertificationRequest
+	if currentRound != nil {
+		commitments = append([]*models.CertificationRequest(nil), currentRound.Commitments...)
+	}
+	rm.roundMutex.RUnlock()
+
+	require.NotNil(t, currentRound)
+	assert.EqualValues(t, 2, currentRound.Number.Int64())
+	require.Len(t, commitments, 1)
+	assert.Equal(t, lateCommitment.StateID, commitments[0].StateID)
+}
+
+func TestStandaloneActivePrecollectorLifecycle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{Database: "test_standalone_active_precollector_lifecycle"},
+		Processing: config.ProcessingConfig{
+			RoundDuration:           100 * time.Millisecond,
+			PrecollectorGracePeriod: 50 * time.Millisecond,
+			MaxCommitmentsPerRound:  1000,
+			CollectPhaseDuration:    500 * time.Millisecond,
+		},
+		Storage:  config.StorageConfig{UseRedisForCommitments: true},
+		Sharding: config.ShardingConfig{Mode: config.ShardingModeStandalone},
+		BFT: config.BFTConfig{
+			Enabled:   false,
+			StubDelay: 1 * time.Second,
+		},
+	}
+	storage := testutil.SetupTestStorage(t, cfg)
+
+	testLogger := newTestLogger(t)
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		storage.CommitmentQueue(),
+		storage,
+		nil,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		smtInstance,
+		nil,
+	)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer shutdownCancel()
+		_ = rm.Stop(shutdownCtx)
+	})
+
+	require.NoError(t, rm.Start(ctx))
+	require.NoError(t, rm.Activate(ctx))
+
+	require.Eventually(t, func() bool {
+		rm.roundMutex.RLock()
+		defer rm.roundMutex.RUnlock()
+		return rm.precollector != nil
+	}, 2*time.Second, 25*time.Millisecond, "round 1 should start the active precollector after fixed collect")
+
+	lateCommitment := testutil.CreateTestCertificationRequest(t, "active_precollector_lifecycle")
+	select {
+	case rm.commitmentStream <- lateCommitment:
+	case <-time.After(time.Second):
+		t.Fatal("timed out sending commitment to active precollector")
+	}
+
+	require.Eventually(t, func() bool {
+		rm.roundMutex.RLock()
+		defer rm.roundMutex.RUnlock()
+		return rm.currentRound != nil &&
+			rm.currentRound.Number.Int64() == 2 &&
+			!rm.currentRound.ProposalTime.IsZero()
+	}, 4*time.Second, 25*time.Millisecond, "BFT stub finalization should advance to precollected round 2")
+
+	rm.roundMutex.RLock()
+	currentRound := rm.currentRound
+	roundNumber := currentRound.Number.Int64()
+	preCollected := currentRound.PreCollected
+	proposalPrep := currentRound.ProposalTime.Sub(currentRound.StartTime)
+	commitments := append([]*models.CertificationRequest(nil), currentRound.Commitments...)
+	rm.roundMutex.RUnlock()
+
+	assert.EqualValues(t, 2, roundNumber)
+	assert.True(t, preCollected, "round 2 should come from the active precollector handoff")
+	require.Len(t, commitments, 1)
+	assert.Equal(t, lateCommitment.StateID, commitments[0].StateID)
+	assert.Less(t, proposalPrep, cfg.Processing.CollectPhaseDuration/2,
+		"precollected round should skip the fixed collect phase")
+
+	block1, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(1)))
+	require.NoError(t, err)
+	assert.NotNil(t, block1, "round 2 should be reached through BFT stub finalization of round 1")
 }
 
 func TestPipelinedChildModeFlow(t *testing.T) {

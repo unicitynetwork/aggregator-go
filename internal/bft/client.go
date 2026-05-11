@@ -80,6 +80,7 @@ type (
 		FinalizeBlock(ctx context.Context, block *models.Block) error
 		FinalizeBlockWithRetry(ctx context.Context, block *models.Block) error
 		StartNewRound(ctx context.Context, roundNumber *api.BigInt) error
+		StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt) error
 	}
 
 	TrustBaseStore interface {
@@ -508,7 +509,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 	c.logger.WithContext(ctx).Info("Block finalized, starting new round",
 		"nextRoundNumber", nextRoundNumber.String())
 
-	err = c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+	err = c.roundManager.StartNextRoundFromPrecollector(ctx, api.NewBigInt(nextRoundNumber))
 	if err != nil {
 		c.logger.WithContext(ctx).Error("Failed to start new round",
 			"nextRoundNumber", nextRoundNumber.String(),

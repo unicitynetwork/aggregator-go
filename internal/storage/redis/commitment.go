@@ -94,9 +94,8 @@ func NewCommitmentStorage(client *redis.Client, streamName string, serverID stri
 	return cs
 }
 
-// ResetPendingSweep re-enables the pending-entry sweep for the next
-// StreamCertificationRequests invocation. Call before (re)starting the
-// streamer so a restarted consumer reclaims entries left unacked.
+// ResetPendingSweep re-enables the pending-entry sweep. A running streamer will
+// notice this before its next new-message read and reclaim entries left unacked.
 func (cs *CommitmentStorage) ResetPendingSweep() {
 	cs.pendingExhausted.Store(false)
 }
@@ -715,12 +714,6 @@ func (cs *CommitmentStorage) StreamCertificationRequests(ctx context.Context, co
 	windowStart := time.Now()
 	countThisWindow := 0
 
-	if !cs.pendingExhausted.Load() {
-		if err := cs.drainPendingForConsumer(ctx, commitmentChan); err != nil {
-			return err
-		}
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -728,6 +721,13 @@ func (cs *CommitmentStorage) StreamCertificationRequests(ctx context.Context, co
 		case <-cs.stopChan:
 			return nil
 		default:
+			if !cs.pendingExhausted.Load() {
+				if err := cs.drainPendingForConsumer(ctx, commitmentChan); err != nil {
+					return err
+				}
+				continue
+			}
+
 			streams := cs.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 				Group:    consumerGroup,
 				Consumer: cs.consumerID,
