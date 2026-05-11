@@ -148,7 +148,10 @@ func getStartingBlock(sc *ShardClient) (int64, error) {
 	}
 
 	var heightResp GetBlockHeightResponse
-	respBytes, _ := json.Marshal(resp.Result)
+	respBytes, err := json.Marshal(resp.Result)
+	if err != nil {
+		return 0, fmt.Errorf("marshal block height response: %w", err)
+	}
 	if err := json.Unmarshal(respBytes, &heightResp); err != nil {
 		return 0, fmt.Errorf("parse block height response: %w", err)
 	}
@@ -565,7 +568,15 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 
 				// Parse response
 				var submitResp api.CertificationResponse
-				respBytes, _ := json.Marshal(resp.Result)
+				respBytes, err := json.Marshal(resp.Result)
+				if err != nil {
+					atomic.AddInt64(&metrics.failedRequests, 1)
+					if sm := metrics.shard(shardIdx); sm != nil {
+						sm.failedRequests.Add(1)
+					}
+					metrics.recordError(fmt.Sprintf("submit failed: marshal response result: %v", err))
+					return
+				}
 				if err := json.Unmarshal(respBytes, &submitResp); err != nil {
 					atomic.AddInt64(&metrics.failedRequests, 1)
 					return
@@ -718,7 +729,15 @@ func verifyProofJob(ctx context.Context, shardClients []*ShardClient, metrics *M
 		}
 
 		var proofResp api.GetInclusionProofResponseV2
-		respBytes, _ := json.Marshal(resp.Result)
+		respBytes, err := json.Marshal(resp.Result)
+		if err != nil {
+			metrics.recordError(fmt.Sprintf("Failed to marshal proof response: %v", err))
+			atomic.AddInt64(&metrics.proofFailed, 1)
+			if sm := metrics.shard(shardIdx); sm != nil {
+				sm.proofFailed.Add(1)
+			}
+			return
+		}
 		if err := json.Unmarshal(respBytes, &proofResp); err != nil {
 			metrics.recordError(fmt.Sprintf("Failed to parse proof response: %v", err))
 			atomic.AddInt64(&metrics.proofFailed, 1)
