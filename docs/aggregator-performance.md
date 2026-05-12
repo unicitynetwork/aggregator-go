@@ -83,6 +83,15 @@ Current low-latency settings:
 | 8,000 | 239,807 / 239,807 | 239,807 / 239,807 | 1.129s | 1.677s | 975ms | 1.275s | 490ms | 86ms | 5,225 | 40.8% | 453% | 213% | pass |
 | 9,000 | 269,241 / 269,241 | 269,241 / 269,241 | 1.197s | 1.779s | 1.050s | 1.382s | 537ms | 103ms | 6,464 | 42.6% | 503% | 210% | boundary |
 
+### Lower BFT Cadence Variant
+
+This variant uses `ROOT_BLOCK_RATE=350`, `PRECOLLECTOR_GRACE_PERIOD=75ms`, `PROOF_INITIAL_DELAY=1s`, and `PROOF_RETRY_DELAY=500ms`. At 8k/s, most proofs are ready on the first 1s poll, while the remaining tail succeeds on the second poll.
+
+| Target RPS | Submitted | Proofs verified | Attempt 1 proofs | Client proof p50 | Client proof p95 | Server proofReady p50 | Server proofReady p95 | BFT wait | Finalization | Commitments / round | Host CPU busy | Aggregator CPU avg | Mongo CPU avg | Result |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 4,000 | 119,704 / 119,704 | 119,704 / 119,704 | 119,200 / 119,704 (99.6%) | 1.013s | 1.027s | 782ms | 998ms | 415ms | 40ms | 2,090 | 30.1% / 77.1% | 196% | 160% | pass |
+| 8,000 | 239,843 / 239,843 | 239,843 / 239,843 | 189,159 / 239,843 (78.9%) | 1.024s | 1.570s | 885ms | 1.161s | 442ms | 89ms | 4,818 | 41.3% / 82.4% | 404% | 208% | pass |
+
 ## Gateway Throughput
 
 Gateway tests use the fixed 2-shard `bft-sharding-compose.yml` stack. Request path: gateway -> HAProxy -> active shard leader.
