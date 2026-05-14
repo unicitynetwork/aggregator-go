@@ -168,16 +168,30 @@ func CreateStateID(ownerPredicate Predicate, sourceStateHash SourceStateHash) (S
 }
 
 func StateIDDataHash(ownerPredicate Predicate, sourceStateHash []byte) (*DataHash, error) {
-	predicateBytes, err := types.Cbor.Marshal(ownerPredicate)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal owner predicate: %w", err)
+	if len(sourceStateHash) != StateTreeKeyLengthBytes {
+		return nil, fmt.Errorf("invalid source state hash length: expected %d bytes, got %d", StateTreeKeyLengthBytes, len(sourceStateHash))
 	}
 
-	return NewDataHasher(SHA256).
-		AddData(CborArray(2)).
-		AddData(predicateBytes).
-		AddCborBytes(sourceStateHash).
-		GetHash(), nil
+	// We use an explicit struct to ensure canonical Core Deterministic CBOR
+	// encoding of the array and its elements. This also ensures no extra data
+	// is included in the hash computation.
+	type stateIDInput struct {
+		_               struct{} `cbor:",toarray"`
+		OwnerPredicate  Predicate
+		SourceStateHash []byte
+	}
+
+	input := stateIDInput{
+		OwnerPredicate:  ownerPredicate,
+		SourceStateHash: sourceStateHash,
+	}
+
+	inputBytes, err := types.Cbor.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal state ID inputs: %w", err)
+	}
+
+	return NewDataHasher(SHA256).AddData(inputBytes).GetHash(), nil
 }
 
 func ValidateStateID(stateID StateID, sourceStateHash SourceStateHash, ownerPredicate Predicate) (bool, error) {

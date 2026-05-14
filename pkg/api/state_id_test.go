@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 func TestStateID_CreateAndSerialize(t *testing.T) {
@@ -59,5 +60,40 @@ func TestStateID_CreateAndSerialize(t *testing.T) {
 		// Convert back to hex and verify
 		hexStr := hex.EncodeToString(bytes)
 		assert.Equal(t, stateIDStr, hexStr)
+	})
+
+	t.Run("should produce same hash as old manual construction", func(t *testing.T) {
+		// Valid inputs for v2
+		publicKey := []byte{0x01, 0x02, 0x03}
+		ownerPredicate := NewPayToPublicKeyPredicate(publicKey)
+		sourceStateHash := make([]byte, 32)
+		sourceStateHash[0] = 0xcd
+
+		// 1. Manual construction (old way)
+		predicateBytes, err := types.Cbor.Marshal(ownerPredicate)
+		require.NoError(t, err)
+
+		oldBytes := append([]byte{0x82}, predicateBytes...)
+		oldBytes = append(oldBytes, []byte{0x58, 0x20}...)
+		oldBytes = append(oldBytes, sourceStateHash...)
+		oldHash := NewDataHasher(SHA256).AddData(oldBytes).GetHash()
+
+		// 2. Struct-based construction (new way)
+		// We mirror the internal struct here to verify exact byte alignment
+		type stateIDInput struct {
+			_               struct{} `cbor:",toarray"`
+			OwnerPredicate  Predicate
+			SourceStateHash []byte
+		}
+		newBytes, err := types.Cbor.Marshal(stateIDInput{
+			OwnerPredicate:  ownerPredicate,
+			SourceStateHash: sourceStateHash,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, oldBytes, newBytes, "CBOR encoded bytes MUST be identical")
+
+		newHash, err := StateIDDataHash(ownerPredicate, sourceStateHash)
+		require.NoError(t, err)
+		assert.Equal(t, oldHash.RawHash, newHash.RawHash, "Final hashes MUST match")
 	})
 }

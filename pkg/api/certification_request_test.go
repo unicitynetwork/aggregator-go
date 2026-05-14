@@ -252,3 +252,164 @@ func createCertData(t *testing.T) CertificationData {
 		Witness:         NewHexBytes(witness),
 	}
 }
+
+func TestCertificationDataHashing_Compatibility(t *testing.T) {
+	t.Run("CertDataHash should produce same hash as old manual construction", func(t *testing.T) {
+		certData := createCertData(t)
+
+		// 1. Manual construction (old way)
+		predicateBytes, err := types.Cbor.Marshal(certData.OwnerPredicate)
+		require.NoError(t, err)
+
+		oldBytes := append([]byte{0x84}, predicateBytes...)
+		oldBytes = append(oldBytes, []byte{0x58, 0x20}...)
+		oldBytes = append(oldBytes, certData.SourceStateHash...)
+		oldBytes = append(oldBytes, []byte{0x58, 0x20}...)
+		oldBytes = append(oldBytes, certData.TransactionHash...)
+		oldBytes = append(oldBytes, append([]byte{0x58, byte(len(certData.Witness))}, certData.Witness...)...)
+		oldHash := NewDataHasher(SHA256).AddData(oldBytes).GetHash()
+
+		// 2. Struct-based construction (new way)
+		type certDataInput struct {
+			_               struct{} `cbor:",toarray"`
+			OwnerPredicate  Predicate
+			SourceStateHash []byte
+			TransactionHash []byte
+			Witness         []byte
+		}
+		newBytes, err := types.Cbor.Marshal(certDataInput{
+			OwnerPredicate:  certData.OwnerPredicate,
+			SourceStateHash: certData.SourceStateHash,
+			TransactionHash: certData.TransactionHash,
+			Witness:         certData.Witness,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, oldBytes, newBytes, "CBOR encoded bytes MUST be identical")
+
+		newHash, err := CertDataHash(certData.OwnerPredicate, certData.SourceStateHash, certData.TransactionHash, certData.Witness)
+		require.NoError(t, err)
+		assert.Equal(t, oldHash.RawHash, newHash.RawHash, "Final hashes MUST match")
+	})
+
+	t.Run("SigDataHash should produce same hash as old manual construction", func(t *testing.T) {
+		sourceStateHash := make([]byte, 32)
+		sourceStateHash[0] = 0xcd
+		transactionHash := make([]byte, 32)
+		transactionHash[0] = 0xef
+
+		// 1. Manual construction (old way)
+		oldBytes := append([]byte{0x82}, []byte{0x58, 0x20}...)
+		oldBytes = append(oldBytes, sourceStateHash...)
+		oldBytes = append(oldBytes, []byte{0x58, 0x20}...)
+		oldBytes = append(oldBytes, transactionHash...)
+		oldHash := NewDataHasher(SHA256).AddData(oldBytes).GetHash()
+
+		// 2. Function-based construction (new way)
+		newHash := SigDataHash(sourceStateHash, transactionHash)
+
+		assert.Equal(t, oldHash.RawHash, newHash.RawHash, "SigDataHash MUST match old manual construction for valid v2 inputs")
+	})
+}
+
+func TestCertificationDataHashing_InvalidLengths(t *testing.T) {
+	validPredicate := NewPayToPublicKeyPredicate([]byte{0x01, 0x02, 0x03})
+	validHash := make([]byte, 32)
+	shortHash := []byte{0x01, 0x02}
+	longHash := make([]byte, 64)
+
+	t.Run("CertDataHash should reject invalid hash lengths", func(t *testing.T) {
+		_, err := CertDataHash(validPredicate, shortHash, validHash, []byte{0x00})
+		assert.ErrorContains(t, err, "invalid source state hash length")
+
+		_, err = CertDataHash(validPredicate, validHash, longHash, []byte{0x00})
+		assert.ErrorContains(t, err, "invalid transaction hash length")
+
+		_, err = CertDataHash(validPredicate, []byte{}, validHash, []byte{0x00})
+		assert.ErrorContains(t, err, "invalid source state hash length")
+	})
+
+	t.Run("CertificationData.SigDataHash should reject invalid hash lengths", func(t *testing.T) {
+		cd := CertificationData{
+			OwnerPredicate:  validPredicate,
+			SourceStateHash: shortHash,
+			TransactionHash: validHash,
+		}
+		_, err := cd.SigDataHash()
+		assert.ErrorContains(t, err, "invalid source state hash length")
+
+		cd.SourceStateHash = validHash
+		cd.TransactionHash = longHash
+		_, err = cd.SigDataHash()
+		assert.ErrorContains(t, err, "invalid transaction hash length")
+
+		cd.TransactionHash = []byte{}
+		_, err = cd.SigDataHash()
+		assert.ErrorContains(t, err, "invalid transaction hash length")
+	})
+}
+
+func TestCertificationDataHashing_InvalidHashLengths(t *testing.T) {
+	certData := createCertData(t)
+	validSource := append([]byte(nil), certData.SourceStateHash...)
+	validTransaction := append([]byte(nil), certData.TransactionHash...)
+
+	cases := []struct {
+		name              string
+		sourceStateHash   []byte
+		transactionHash   []byte
+		expectedErrorPart string
+	}{
+		{
+			name:              "empty source hash",
+			sourceStateHash:   nil,
+			transactionHash:   validTransaction,
+			expectedErrorPart: "invalid source state hash length",
+		},
+		{
+			name:              "short source hash",
+			sourceStateHash:   []byte{0x01, 0x02},
+			transactionHash:   validTransaction,
+			expectedErrorPart: "invalid source state hash length",
+		},
+		{
+			name:              "large source hash",
+			sourceStateHash:   make([]byte, StateTreeKeyLengthBytes+1),
+			transactionHash:   validTransaction,
+			expectedErrorPart: "invalid source state hash length",
+		},
+		{
+			name:              "empty transaction hash",
+			sourceStateHash:   validSource,
+			transactionHash:   nil,
+			expectedErrorPart: "invalid transaction hash length",
+		},
+		{
+			name:              "short transaction hash",
+			sourceStateHash:   validSource,
+			transactionHash:   []byte{0x01, 0x02},
+			expectedErrorPart: "invalid transaction hash length",
+		},
+		{
+			name:              "large transaction hash",
+			sourceStateHash:   validSource,
+			transactionHash:   make([]byte, StateTreeKeyLengthBytes+1),
+			expectedErrorPart: "invalid transaction hash length",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run("CertDataHash rejects "+tc.name, func(t *testing.T) {
+			_, err := CertDataHash(certData.OwnerPredicate, tc.sourceStateHash, tc.transactionHash, certData.Witness)
+			require.ErrorContains(t, err, tc.expectedErrorPart)
+		})
+
+		t.Run("CertificationData.SigDataHash rejects "+tc.name, func(t *testing.T) {
+			certData := certData
+			certData.SourceStateHash = SourceStateHash(tc.sourceStateHash)
+			certData.TransactionHash = TransactionHash(tc.transactionHash)
+
+			_, err := certData.SigDataHash()
+			require.ErrorContains(t, err, tc.expectedErrorPart)
+		})
+	}
+}
