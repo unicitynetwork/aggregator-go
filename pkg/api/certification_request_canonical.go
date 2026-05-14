@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 
@@ -192,8 +193,17 @@ func (w *canonicalCBORValidator) readUint(n int) (uint64, error) {
 		return 0, fmt.Errorf("%w: premature end of data", ErrCertificationRequestNotCanonical)
 	}
 	var v uint64
-	for i := 0; i < n; i++ {
-		v = (v << 8) | uint64(w.data[w.pos+i])
+	switch n {
+	case 2:
+		v = uint64(binary.BigEndian.Uint16(w.data[w.pos:]))
+	case 4:
+		v = uint64(binary.BigEndian.Uint32(w.data[w.pos:]))
+	case 8:
+		v = binary.BigEndian.Uint64(w.data[w.pos:])
+	default:
+		for i := 0; i < n; i++ {
+			v = (v << 8) | uint64(w.data[w.pos+i])
+		}
 	}
 	w.pos += n
 	return v, nil
@@ -216,7 +226,7 @@ func (w *canonicalCBORValidator) readSimpleOrFloat(ai byte) error {
 		if err != nil {
 			return err
 		}
-		if b < cborAdditionalOneByte {
+		if b < 32 {
 			return fmt.Errorf("%w: reserved or non-shortest simple value encoding", ErrCertificationRequestNotCanonical)
 		}
 		return nil

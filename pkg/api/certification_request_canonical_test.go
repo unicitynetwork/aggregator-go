@@ -250,6 +250,13 @@ func TestValidateCanonicalCBOR_MapKeyOrdering(t *testing.T) {
 	require.ErrorIs(t, err, ErrCertificationRequestNotCanonical)
 }
 
+func TestValidateCanonicalCBOR_RejectsReservedSimpleValue(t *testing.T) {
+	err := validateCanonicalCBOR([]byte{0xf8, 0x18})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCertificationRequestNotCanonical)
+	require.Contains(t, err.Error(), "reserved or non-shortest simple value encoding")
+}
+
 func FuzzValidateCanonicalCBOR(f *testing.F) {
 	_, canonical := canonicalCertificationRequestFixture(f)
 	f.Add(canonical)
