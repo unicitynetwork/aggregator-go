@@ -12,8 +12,7 @@ import (
 // UnmarshalCanonicalCertificationRequestCBOR when the input is not encoded in
 // canonical (Core Deterministic) CBOR form. Non-canonical encodings are
 // rejected at the public API boundary so the same logical request cannot be
-// expressed by multiple distinct byte sequences. See
-// https://github.com/unicitynetwork/aggregator-go/issues/150.
+// expressed by multiple distinct byte sequences.
 var ErrCertificationRequestNotCanonical = errors.New("certification request CBOR is not canonical")
 
 // UnmarshalCanonicalCertificationRequestCBOR decodes data into out and rejects
