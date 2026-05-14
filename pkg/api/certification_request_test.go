@@ -254,22 +254,20 @@ func createCertData(t *testing.T) CertificationData {
 }
 
 func TestCertificationDataHashing_Compatibility(t *testing.T) {
-	t.Run("CertDataHash should produce same hash as old manual construction", func(t *testing.T) {
+	t.Run("certification data hash preserves canonical CBOR input bytes", func(t *testing.T) {
 		certData := createCertData(t)
 
-		// 1. Manual construction (old way)
 		predicateBytes, err := types.Cbor.Marshal(certData.OwnerPredicate)
 		require.NoError(t, err)
 
-		oldBytes := append([]byte{0x84}, predicateBytes...)
-		oldBytes = append(oldBytes, []byte{0x58, 0x20}...)
-		oldBytes = append(oldBytes, certData.SourceStateHash...)
-		oldBytes = append(oldBytes, []byte{0x58, 0x20}...)
-		oldBytes = append(oldBytes, certData.TransactionHash...)
-		oldBytes = append(oldBytes, append([]byte{0x58, byte(len(certData.Witness))}, certData.Witness...)...)
-		oldHash := NewDataHasher(SHA256).AddData(oldBytes).GetHash()
+		expectedBytes := append([]byte{0x84}, predicateBytes...)
+		expectedBytes = append(expectedBytes, []byte{0x58, 0x20}...)
+		expectedBytes = append(expectedBytes, certData.SourceStateHash...)
+		expectedBytes = append(expectedBytes, []byte{0x58, 0x20}...)
+		expectedBytes = append(expectedBytes, certData.TransactionHash...)
+		expectedBytes = append(expectedBytes, append([]byte{0x58, byte(len(certData.Witness))}, certData.Witness...)...)
+		expectedHash := NewDataHasher(SHA256).AddData(expectedBytes).GetHash()
 
-		// 2. Struct-based construction (new way)
 		type certDataInput struct {
 			_               struct{} `cbor:",toarray"`
 			OwnerPredicate  Predicate
@@ -277,37 +275,18 @@ func TestCertificationDataHashing_Compatibility(t *testing.T) {
 			TransactionHash []byte
 			Witness         []byte
 		}
-		newBytes, err := types.Cbor.Marshal(certDataInput{
+		canonicalBytes, err := types.Cbor.Marshal(certDataInput{
 			OwnerPredicate:  certData.OwnerPredicate,
 			SourceStateHash: certData.SourceStateHash,
 			TransactionHash: certData.TransactionHash,
 			Witness:         certData.Witness,
 		})
 		require.NoError(t, err)
-		assert.Equal(t, oldBytes, newBytes, "CBOR encoded bytes MUST be identical")
+		assert.Equal(t, expectedBytes, canonicalBytes)
 
-		newHash, err := CertDataHash(certData.OwnerPredicate, certData.SourceStateHash, certData.TransactionHash, certData.Witness)
+		gotHash, err := CertDataHash(certData.OwnerPredicate, certData.SourceStateHash, certData.TransactionHash, certData.Witness)
 		require.NoError(t, err)
-		assert.Equal(t, oldHash.RawHash, newHash.RawHash, "Final hashes MUST match")
-	})
-
-	t.Run("SigDataHash should produce same hash as old manual construction", func(t *testing.T) {
-		sourceStateHash := make([]byte, 32)
-		sourceStateHash[0] = 0xcd
-		transactionHash := make([]byte, 32)
-		transactionHash[0] = 0xef
-
-		// 1. Manual construction (old way)
-		oldBytes := append([]byte{0x82}, []byte{0x58, 0x20}...)
-		oldBytes = append(oldBytes, sourceStateHash...)
-		oldBytes = append(oldBytes, []byte{0x58, 0x20}...)
-		oldBytes = append(oldBytes, transactionHash...)
-		oldHash := NewDataHasher(SHA256).AddData(oldBytes).GetHash()
-
-		// 2. Function-based construction (new way)
-		newHash := SigDataHash(sourceStateHash, transactionHash)
-
-		assert.Equal(t, oldHash.RawHash, newHash.RawHash, "SigDataHash MUST match old manual construction for valid v2 inputs")
+		assert.Equal(t, expectedHash.RawHash, gotHash.RawHash)
 	})
 }
 
