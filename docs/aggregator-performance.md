@@ -19,7 +19,7 @@ The default-cadence single-shard matrix uses the relevant `bft-sharding-compose.
 | `MAX_COMMITMENTS_PER_ROUND` | `20000` |
 | `REDIS_ACK_BATCH_SIZE` | `10000` |
 | `CONCURRENCY_LIMIT` | `10000` |
-| `ROOT_BLOCK_RATE` | `900` |
+| `ROOT_BLOCK_RATE` (ms) | `900` |
 | `PROOF_INITIAL_DELAY` | `2s` |
 | `PROOF_RETRY_DELAY` | `1s` |
 | Host CPU | AMD Ryzen 9 5900XT, 16 cores / 32 threads |
@@ -56,13 +56,13 @@ On one machine, adding shards mostly redistributes work; it does not add CPU, di
 
 ## Low-Latency BFT Cadence
 
-These runs test whether lower BFT cadence can move proof latency closer to 1s. Keep this separate from the default `ROOT_BLOCK_RATE=900` throughput matrix because it changes consensus timing.
+These runs test whether lower BFT cadence can move proof latency closer to 1s. Keep this separate from the default `ROOT_BLOCK_RATE=900` millisecond throughput matrix because it changes consensus timing.
 
 Current low-latency settings:
 
 | Setting | Value |
 |---|---:|
-| `ROOT_BLOCK_RATE` | `400` |
+| `ROOT_BLOCK_RATE` (ms) | `400` |
 | `PRECOLLECTOR_GRACE_PERIOD` | `100ms` |
 | `MONGODB_FINALIZATION_INSERT_CHUNK_SIZE` | `1000` |
 | `MONGODB_FINALIZATION_INSERT_CHUNK_WORKERS` | `16` |
@@ -85,7 +85,7 @@ Current low-latency settings:
 
 ### Lower BFT Cadence Variant
 
-This variant uses `ROOT_BLOCK_RATE=350`, `PRECOLLECTOR_GRACE_PERIOD=75ms`, `PROOF_INITIAL_DELAY=1s`, and `PROOF_RETRY_DELAY=500ms`. At 8k/s, most proofs are ready on the first 1s poll, while the remaining tail succeeds on the second poll.
+This variant uses `ROOT_BLOCK_RATE=350` milliseconds, `PRECOLLECTOR_GRACE_PERIOD=75ms`, `PROOF_INITIAL_DELAY=1s`, and `PROOF_RETRY_DELAY=500ms`. At 8k/s, most proofs are ready on the first 1s poll, while the remaining tail succeeds on the second poll.
 
 | Target RPS | Submitted | Proofs verified | Attempt 1 proofs | Client proof p50 | Client proof p95 | Server proofReady p50 | Server proofReady p95 | BFT wait | Finalization | Commitments / round | Host CPU busy | Aggregator CPU avg | Mongo CPU avg | Result |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|

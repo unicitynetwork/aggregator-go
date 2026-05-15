@@ -235,6 +235,9 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		return nil, fmt.Errorf("unexpected SMT key length: got %d bits, want %d", keyLen, api.StateTreeKeyLengthBits)
 	}
 
+	// Known-pending requests return the latest finalized UC with an empty proof.
+	// This is only a cheap "not ready" response; it does not identify the block
+	// where the pending state will eventually finalize.
 	if block, ok := as.roundManager.GetKnownNotReadyBlock(req.StateID); ok {
 		responseBlockNumber, err := proofBundleBlockNumber(as.config.Sharding.Mode, block)
 		if err != nil {
@@ -435,12 +438,12 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 		}
 
 		if isLeader {
-			role = "leader"
+			role = api.HealthRoleLeader
 		} else {
-			role = "follower"
+			role = api.HealthRoleFollower
 		}
 	} else {
-		role = "standalone"
+		role = api.HealthRoleStandalone
 	}
 
 	sharding := buildShardingHealth(as.config)

@@ -251,6 +251,16 @@ const (
 	HealthStatusDegraded  = "degraded"
 )
 
+// Health role values returned by the health endpoint.
+const (
+	HealthRoleLeader           = "leader"
+	HealthRoleFollower         = "follower"
+	HealthRoleStandalone       = "standalone"
+	HealthRoleParentLeader     = "parent-leader"
+	HealthRoleParentFollower   = "parent-follower"
+	HealthRoleParentStandalone = "parent-standalone"
+)
+
 // SubmitShardRootRequest represents the submit_shard_root JSON-RPC request
 type SubmitShardRootRequest struct {
 	ShardID  ShardID  `json:"shardId"`

@@ -1,3 +1,8 @@
+# This stack uses the shared external Docker network `aggregator-go_default` so
+# gateway/proxy containers can join the same network. The Makefile targets create
+# it automatically; direct docker compose users can create it with:
+#   docker network create aggregator-go_default
+#
 # Example 4k/s perf run against this fixed 2-shard compose stack from the repo root:
 #   LOG_LEVEL=info make docker-run-bft-sh-clean
 #
@@ -64,6 +69,7 @@ services:
           echo "Signing root trust base..." &&
           ubft trust-base sign --home /genesis-root --trust-base /genesis/trust-base.json
         fi
+        # ROOT_BLOCK_RATE is in milliseconds.
         echo "Starting root node..." &&
         exec ubft root-node run --home /genesis-root --address "/ip4/0.0.0.0/tcp/8000" --trust-base /genesis/trust-base.json --rpc-server-address "0.0.0.0:8002" --block-rate "${ROOT_BLOCK_RATE:-900}"
 

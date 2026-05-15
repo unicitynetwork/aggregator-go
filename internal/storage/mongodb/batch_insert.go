@@ -13,6 +13,9 @@ type finalizationInsertOptions struct {
 	workers   int
 }
 
+// insertManyFinalizationBatch is used for idempotent finalization writes. On
+// non-duplicate errors, some chunks may already be inserted; callers must
+// tolerate retry/recovery, with duplicate-key errors ignored on replay.
 func insertManyFinalizationBatch(
 	ctx context.Context,
 	collection *mongo.Collection,

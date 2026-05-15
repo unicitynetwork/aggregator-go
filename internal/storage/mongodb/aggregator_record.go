@@ -134,6 +134,8 @@ func (ars *AggregatorRecordStorage) GetByBlockNumber(ctx context.Context, blockN
 		return nil, fmt.Errorf("cursor error: %w", err)
 	}
 
+	// Preserve get_block_records ordering after dropping the write-heavy
+	// {blockNumber, leafIndex} Mongo index.
 	sort.SliceStable(records, func(i, j int) bool {
 		left := records[i].LeafIndex
 		right := records[j].LeafIndex

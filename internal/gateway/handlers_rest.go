@@ -63,7 +63,7 @@ func (s *Server) handleLeaderHealth(c *gin.Context) {
 
 func isLeaderHealthRole(role string) bool {
 	switch role {
-	case "leader", "standalone", "parent-leader", "parent-standalone":
+	case api.HealthRoleLeader, api.HealthRoleStandalone, api.HealthRoleParentLeader, api.HealthRoleParentStandalone:
 		return true
 	default:
 		return false

@@ -173,11 +173,6 @@ func NewRoundManager(
 	threadSafeSmt *smt.ThreadSafeSMT,
 	trustBaseProvider interfaces.TrustBaseProvider,
 ) (*RoundManager, error) {
-	commitmentStreamBufferSize := cfg.Processing.CommitmentStreamBufferSize
-	if commitmentStreamBufferSize <= 0 {
-		commitmentStreamBufferSize = 10000
-	}
-
 	rm := &RoundManager{
 		config:              cfg,
 		logger:              logger,
@@ -187,8 +182,8 @@ func NewRoundManager(
 		rootClient:          rootAggregatorClient,
 		stateTracker:        stateTracker,
 		eventBus:            eventBus,
-		roundDuration:       cfg.Processing.RoundDuration,                                        // Configurable round duration (default 1s)
-		commitmentStream:    make(chan *models.CertificationRequest, commitmentStreamBufferSize), // Buffer for queue streamer
+		roundDuration:       cfg.Processing.RoundDuration,                                                       // Configurable round duration (default 1s)
+		commitmentStream:    make(chan *models.CertificationRequest, cfg.Processing.CommitmentStreamBufferSize), // Buffer for queue streamer
 		proofPending:        make(map[string]struct{}),
 		avgProcessingRate:   1.0,                    // Initial estimate: 1 commitment per ms
 		avgFinalizationTime: 200 * time.Millisecond, // Initial estimate (conservative)
