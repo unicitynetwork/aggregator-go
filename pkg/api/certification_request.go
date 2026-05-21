@@ -2,10 +2,18 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	corecbor "github.com/unicitynetwork/aggregator-go/pkg/cbor"
 )
+
+// ErrCertificationRequestNotCanonical is returned by
+// UnmarshalCertificationRequestCBOR when the input is not encoded in canonical
+// Core Deterministic CBOR form.
+var ErrCertificationRequestNotCanonical = corecbor.ErrNotCanonical
 
 // CertificationRequest represents the certification_request JSON-RPC request,
 // sometimes also referred to as StateTransitionCertificationRequest, Commitment or UnicityServiceRequest.
@@ -55,15 +63,35 @@ func (c *CertificationRequest) MarshalJSON() ([]byte, error) {
 }
 
 // UnmarshalJSON expects a hex-encoded CBOR string, decodes it, and then unmarshals the CBOR data.
-// The CBOR payload must be in canonical (Core Deterministic) form; non-canonical
-// inputs are rejected so the same logical request cannot be expressed by
-// multiple distinct byte sequences (see issue #150).
 func (c *CertificationRequest) UnmarshalJSON(data []byte) error {
 	var hb HexBytes
 	if err := json.Unmarshal(data, &hb); err != nil {
 		return fmt.Errorf("failed to unmarshal JSON to HexBytes: %w", err)
 	}
-	return UnmarshalCanonicalCertificationRequestCBOR(hb, c)
+	return UnmarshalCertificationRequestCBOR(hb, c)
+}
+
+// UnmarshalCertificationRequestCBOR decodes data into out. The CBOR payload
+// must be canonical Core Deterministic CBOR; non-canonical inputs are rejected
+// so the same logical request cannot be expressed by multiple distinct byte
+// sequences (see issue #150).
+func UnmarshalCertificationRequestCBOR(data []byte, out *CertificationRequest) error {
+	if out == nil {
+		return errors.New("nil CertificationRequest output")
+	}
+	if err := corecbor.ValidateCoreDeterministic(data); err != nil {
+		return err
+	}
+	if err := types.Cbor.Unmarshal(data, out); err != nil {
+		return err
+	}
+	if out.Version != 1 {
+		return fmt.Errorf("unsupported CertificationRequest version: %d", out.Version)
+	}
+	if out.CertificationData.Version != 1 {
+		return fmt.Errorf("unsupported CertificationData version: %d", out.CertificationData.Version)
+	}
+	return nil
 }
 
 // CertificationResponse represents the certification_request JSON-RPC response.

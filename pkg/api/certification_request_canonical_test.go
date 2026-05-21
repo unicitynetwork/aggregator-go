@@ -34,41 +34,41 @@ func canonicalCertificationRequestFixture(t testing.TB) (*CertificationRequest, 
 	return req, b
 }
 
-func TestUnmarshalCanonicalCertificationRequestCBOR_AcceptsCanonical(t *testing.T) {
+func TestUnmarshalCertificationRequestCBOR_AcceptsCanonical(t *testing.T) {
 	want, canonical := canonicalCertificationRequestFixture(t)
 
 	var got CertificationRequest
-	err := UnmarshalCanonicalCertificationRequestCBOR(canonical, &got)
+	err := UnmarshalCertificationRequestCBOR(canonical, &got)
 	require.NoError(t, err)
 
 	require.Equal(t, want.StateID, got.StateID)
 	require.Equal(t, want.CertificationData, got.CertificationData)
 }
 
-func TestUnmarshalCanonicalCertificationRequestCBOR_NilOutput(t *testing.T) {
+func TestUnmarshalCertificationRequestCBOR_NilOutput(t *testing.T) {
 	_, canonical := canonicalCertificationRequestFixture(t)
 
-	err := UnmarshalCanonicalCertificationRequestCBOR(canonical, nil)
+	err := UnmarshalCertificationRequestCBOR(canonical, nil)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrCertificationRequestNotCanonical)
 }
 
-func TestUnmarshalCanonicalCertificationRequestCBOR_RejectsTrailingData(t *testing.T) {
+func TestUnmarshalCertificationRequestCBOR_RejectsTrailingData(t *testing.T) {
 	_, canonical := canonicalCertificationRequestFixture(t)
 
 	tainted := append(append([]byte{}, canonical...), 0xf6) // append CBOR null
 
 	var got CertificationRequest
-	err := UnmarshalCanonicalCertificationRequestCBOR(tainted, &got)
+	err := UnmarshalCertificationRequestCBOR(tainted, &got)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrCertificationRequestNotCanonical)
 }
 
-// TestUnmarshalCanonicalCertificationRequestCBOR_RejectsNonCanonicalVersionInteger
+// TestUnmarshalCertificationRequestCBOR_RejectsNonCanonicalVersionInteger
 // verifies that a decode-succeeds-but-non-canonical input is rejected. We
 // re-encode the Version uint (canonical: 0x01) using the 1-byte length form
 // (0x18 0x01), which is decoded as uint(1) but is not shortest-form.
-func TestUnmarshalCanonicalCertificationRequestCBOR_RejectsNonCanonicalVersionInteger(t *testing.T) {
+func TestUnmarshalCertificationRequestCBOR_RejectsNonCanonicalVersionInteger(t *testing.T) {
 	_, canonical := canonicalCertificationRequestFixture(t)
 
 	// Outer wrapper: 0xd9 0x98 0x76 (tag 39030 = CertificationRequestTag),
@@ -81,12 +81,12 @@ func TestUnmarshalCanonicalCertificationRequestCBOR_RejectsNonCanonicalVersionIn
 	tainted = append(tainted, canonical[5:]...)
 
 	var got CertificationRequest
-	err := UnmarshalCanonicalCertificationRequestCBOR(tainted, &got)
+	err := UnmarshalCertificationRequestCBOR(tainted, &got)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrCertificationRequestNotCanonical)
 }
 
-func TestUnmarshalCanonicalCertificationRequestCBOR_RejectsNonCanonicalTag(t *testing.T) {
+func TestUnmarshalCertificationRequestCBOR_RejectsNonCanonicalTag(t *testing.T) {
 	_, canonical := canonicalCertificationRequestFixture(t)
 
 	require.Equal(t, []byte{0xd9, 0x98, 0x76}, canonical[:3], "fixture invariant: request tag")
@@ -96,16 +96,16 @@ func TestUnmarshalCanonicalCertificationRequestCBOR_RejectsNonCanonicalTag(t *te
 	tainted = append(tainted, canonical[3:]...)
 
 	var got CertificationRequest
-	err := UnmarshalCanonicalCertificationRequestCBOR(tainted, &got)
+	err := UnmarshalCertificationRequestCBOR(tainted, &got)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrCertificationRequestNotCanonical)
 }
 
-// TestUnmarshalCanonicalCertificationRequestCBOR_RejectsNonCanonicalByteStringLength
+// TestUnmarshalCertificationRequestCBOR_RejectsNonCanonicalByteStringLength
 // re-encodes the 32-byte StateID's length header in a non-shortest form. The
 // canonical header for a 32-byte byte string is 0x58 0x20; the 2-byte form
 // 0x59 0x00 0x20 decodes identically but is not canonical.
-func TestUnmarshalCanonicalCertificationRequestCBOR_RejectsNonCanonicalByteStringLength(t *testing.T) {
+func TestUnmarshalCertificationRequestCBOR_RejectsNonCanonicalByteStringLength(t *testing.T) {
 	_, canonical := canonicalCertificationRequestFixture(t)
 
 	// Locate the StateID byte string by its canonical header. It immediately
@@ -120,16 +120,16 @@ func TestUnmarshalCanonicalCertificationRequestCBOR_RejectsNonCanonicalByteStrin
 	tainted = append(tainted, canonical[idx+2:]...)
 
 	var got CertificationRequest
-	err := UnmarshalCanonicalCertificationRequestCBOR(tainted, &got)
+	err := UnmarshalCertificationRequestCBOR(tainted, &got)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrCertificationRequestNotCanonical)
 }
 
-// TestUnmarshalCanonicalCertificationRequestCBOR_RejectsNonCanonicalNestedPredicateInteger
+// TestUnmarshalCertificationRequestCBOR_RejectsNonCanonicalNestedPredicateInteger
 // surfaces non-canonical encoding inside the nested OwnerPredicate. The
 // predicate's Engine field is uint(1) and canonically encoded as 0x01. We
 // re-encode it as 0x18 0x01, which still decodes but is not canonical.
-func TestUnmarshalCanonicalCertificationRequestCBOR_RejectsNonCanonicalNestedPredicateInteger(t *testing.T) {
+func TestUnmarshalCertificationRequestCBOR_RejectsNonCanonicalNestedPredicateInteger(t *testing.T) {
 	_, canonical := canonicalCertificationRequestFixture(t)
 
 	// Find the nested Predicate tag head (39032 = 0x9878), followed by 0x83
@@ -147,12 +147,12 @@ func TestUnmarshalCanonicalCertificationRequestCBOR_RejectsNonCanonicalNestedPre
 	tainted = append(tainted, canonical[enginePos+1:]...)
 
 	var got CertificationRequest
-	err := UnmarshalCanonicalCertificationRequestCBOR(tainted, &got)
+	err := UnmarshalCertificationRequestCBOR(tainted, &got)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrCertificationRequestNotCanonical)
 }
 
-func TestUnmarshalCanonicalCertificationRequestCBOR_IndefiniteLengthArray(t *testing.T) {
+func TestUnmarshalCertificationRequestCBOR_IndefiniteLengthArray(t *testing.T) {
 	_, canonical := canonicalCertificationRequestFixture(t)
 
 	require.Equal(t, byte(0x84), canonical[3], "fixture invariant: outer array header at offset 3")
@@ -164,12 +164,12 @@ func TestUnmarshalCanonicalCertificationRequestCBOR_IndefiniteLengthArray(t *tes
 	tainted = append(tainted, 0xff) // break
 
 	var got CertificationRequest
-	err := UnmarshalCanonicalCertificationRequestCBOR(tainted, &got)
+	err := UnmarshalCertificationRequestCBOR(tainted, &got)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrCertificationRequestNotCanonical)
 }
 
-func TestUnmarshalCanonicalCertificationRequestCBOR_VersionZero(t *testing.T) {
+func TestUnmarshalCertificationRequestCBOR_VersionZero(t *testing.T) {
 	_, canonical := canonicalCertificationRequestFixture(t)
 
 	require.Equal(t, byte(0x01), canonical[4], "fixture invariant: Version byte at offset 4")
@@ -177,12 +177,12 @@ func TestUnmarshalCanonicalCertificationRequestCBOR_VersionZero(t *testing.T) {
 	tainted[4] = 0x00 // uint(0), shortest-form, decodes to Version=0
 
 	var got CertificationRequest
-	err := UnmarshalCanonicalCertificationRequestCBOR(tainted, &got)
+	err := UnmarshalCertificationRequestCBOR(tainted, &got)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unsupported CertificationRequest version: 0")
 }
 
-func TestUnmarshalCanonicalCertificationRequestCBOR_NestedVersionZero(t *testing.T) {
+func TestUnmarshalCertificationRequestCBOR_NestedVersionZero(t *testing.T) {
 	_, canonical := canonicalCertificationRequestFixture(t)
 
 	certDataMarker := []byte{0xd9, 0x98, 0x77, 0x85, 0x01}
@@ -194,7 +194,7 @@ func TestUnmarshalCanonicalCertificationRequestCBOR_NestedVersionZero(t *testing
 	tainted[versionPos] = 0x00
 
 	var got CertificationRequest
-	err := UnmarshalCanonicalCertificationRequestCBOR(tainted, &got)
+	err := UnmarshalCertificationRequestCBOR(tainted, &got)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unsupported CertificationData version: 0")
 }
@@ -224,48 +224,4 @@ func TestCertificationRequest_UnmarshalJSON_RoutesThroughCanonicalCheck(t *testi
 	err = rejected.UnmarshalJSON(taintedJSON)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrCertificationRequestNotCanonical)
-}
-
-func TestValidateCanonicalCBOR_MapKeyOrdering(t *testing.T) {
-	require.NoError(t, validateCanonicalCBOR([]byte{
-		0xa2,
-		0x01, 0x61, 'a',
-		0x02, 0x61, 'b',
-	}))
-
-	err := validateCanonicalCBOR([]byte{
-		0xa2,
-		0x02, 0x61, 'b',
-		0x01, 0x61, 'a',
-	})
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrCertificationRequestNotCanonical)
-
-	err = validateCanonicalCBOR([]byte{
-		0xa2,
-		0x01, 0x61, 'a',
-		0x01, 0x61, 'b',
-	})
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrCertificationRequestNotCanonical)
-}
-
-func TestValidateCanonicalCBOR_RejectsReservedSimpleValue(t *testing.T) {
-	err := validateCanonicalCBOR([]byte{0xf8, 0x18})
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrCertificationRequestNotCanonical)
-	require.Contains(t, err.Error(), "reserved or non-shortest simple value encoding")
-}
-
-func FuzzValidateCanonicalCBOR(f *testing.F) {
-	_, canonical := canonicalCertificationRequestFixture(f)
-	f.Add(canonical)
-	f.Add([]byte{})
-	f.Add([]byte{0xff})
-	f.Add([]byte{0x9f, 0xff})
-	f.Add([]byte{0xa2, 0x02, 0x61, 'b', 0x01, 0x61, 'a'})
-
-	f.Fuzz(func(t *testing.T, data []byte) {
-		_ = validateCanonicalCBOR(data)
-	})
 }

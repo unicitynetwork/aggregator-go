@@ -42,7 +42,7 @@ func (s *Server) parseCertificationRequest(params json.RawMessage) (*api.Certifi
 		return nil, fmt.Errorf("failed to parse params: %w", err)
 	}
 	req := &api.CertificationRequest{}
-	if err := api.UnmarshalCanonicalCertificationRequestCBOR(cborBytes, req); err != nil {
+	if err := api.UnmarshalCertificationRequestCBOR(cborBytes, req); err != nil {
 		return nil, fmt.Errorf("failed to parse request: %w", err)
 	}
 	return req, nil
