@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -18,12 +19,18 @@ const aggregatorRecordCollection = "aggregator_records"
 // AggregatorRecordStorage implements aggregator record storage for MongoDB
 type AggregatorRecordStorage struct {
 	collection *mongo.Collection
+	insertOpts finalizationInsertOptions
 }
 
 // NewAggregatorRecordStorage creates a new aggregator record storage instance
-func NewAggregatorRecordStorage(db *mongo.Database) *AggregatorRecordStorage {
+func NewAggregatorRecordStorage(db *mongo.Database, insertOpts ...finalizationInsertOptions) *AggregatorRecordStorage {
+	opts := finalizationInsertOptions{workers: 1}
+	if len(insertOpts) > 0 {
+		opts = insertOpts[0]
+	}
 	return &AggregatorRecordStorage{
 		collection: db.Collection(aggregatorRecordCollection),
+		insertOpts: opts,
 	}
 }
 
@@ -55,12 +62,8 @@ func (ars *AggregatorRecordStorage) StoreBatch(ctx context.Context, records []*m
 		docs[i] = recordBSON
 	}
 
-	_, err := ars.collection.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
+	err := insertManyFinalizationBatch(ctx, ars.collection, docs, ars.insertOpts)
 	if err != nil {
-		// Ignore duplicate key errors - with SetOrdered(false), non-duplicates are still inserted
-		if mongo.IsDuplicateKeyError(err) {
-			return nil
-		}
 		return fmt.Errorf("failed to store aggregator records batch: %w", err)
 	}
 	return nil
@@ -131,6 +134,20 @@ func (ars *AggregatorRecordStorage) GetByBlockNumber(ctx context.Context, blockN
 		return nil, fmt.Errorf("cursor error: %w", err)
 	}
 
+	// Preserve get_block_records ordering after dropping the write-heavy
+	// {blockNumber, leafIndex} Mongo index.
+	sort.SliceStable(records, func(i, j int) bool {
+		left := records[i].LeafIndex
+		right := records[j].LeafIndex
+		if left == nil || left.Int == nil {
+			return right != nil && right.Int != nil
+		}
+		if right == nil || right.Int == nil {
+			return false
+		}
+		return left.Int.Cmp(right.Int) < 0
+	})
+
 	return records, nil
 }
 
@@ -166,7 +183,8 @@ func (ars *AggregatorRecordStorage) Count(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
-// CreateIndexes creates necessary indexes for the aggregator record collection
+// CreateIndexes creates the necessary indexes needed by the submit, proof, and
+// block-record lookup paths.
 func (ars *AggregatorRecordStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
 		{
@@ -175,18 +193,6 @@ func (ars *AggregatorRecordStorage) CreateIndexes(ctx context.Context) error {
 		},
 		{
 			Keys: bson.D{{Key: "blockNumber", Value: 1}},
-		},
-		{
-			Keys: bson.D{{Key: "leafIndex", Value: 1}},
-		},
-		{
-			Keys: bson.D{{Key: "finalizedAt", Value: -1}},
-		},
-		{
-			Keys: bson.D{
-				{Key: "blockNumber", Value: 1},
-				{Key: "leafIndex", Value: 1},
-			},
 		},
 	}
 

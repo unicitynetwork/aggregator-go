@@ -181,16 +181,18 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 		}, nil
 	}
 
-	// Check if certificationRequest already processed
-	existingRecord, err := as.storage.AggregatorRecordStorage().GetByStateID(ctx, req.StateID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check existing aggregator record: %w", err)
-	}
+	if !as.config.Processing.SkipDuplicateCheck {
+		// Check if certificationRequest already processed
+		existingRecord, err := as.storage.AggregatorRecordStorage().GetByStateID(ctx, req.StateID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check existing aggregator record: %w", err)
+		}
 
-	if existingRecord != nil {
-		return &api.CertificationResponse{
-			Status: "STATE_ID_EXISTS",
-		}, nil
+		if existingRecord != nil {
+			return &api.CertificationResponse{
+				Status: "STATE_ID_EXISTS",
+			}, nil
+		}
 	}
 
 	// Store certificationRequest
@@ -233,6 +235,17 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		return nil, fmt.Errorf("unexpected SMT key length: got %d bits, want %d", keyLen, api.StateTreeKeyLengthBits)
 	}
 
+	// Known-pending requests return the latest finalized UC with an empty proof.
+	// This is only a cheap "not ready" response; it does not identify the block
+	// where the pending state will eventually finalize.
+	if block, ok := as.roundManager.GetKnownNotReadyBlock(req.StateID); ok {
+		responseBlockNumber, err := proofBundleBlockNumber(as.config.Sharding.Mode, block)
+		if err != nil {
+			return nil, err
+		}
+		return emptyInclusionProofResponse(responseBlockNumber, block), nil
+	}
+
 	// Bind the UC via the block whose stored rootHash matches the current
 	// raw 32-byte SMT root (which also lives in UC.IR.h).
 	rootHashRaw := api.HexBytes(smtInstance.GetRootHashRaw())
@@ -255,14 +268,7 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 	if record == nil || record.BlockNumber.Cmp(block.Index.Int) > 0 {
 		// Non-inclusion is not implemented yet. Return an empty v2 proof
 		// payload so verifiers short-circuit with ErrExclusionNotImpl.
-		return &api.GetInclusionProofResponseV2{
-			BlockNumber: responseBlockNumber,
-			InclusionProof: &api.InclusionProofV2{
-				CertificationData:  nil,
-				CertificateBytes:   nil,
-				UnicityCertificate: types.RawCBOR(block.UnicityCertificate),
-			},
-		}, nil
+		return emptyInclusionProofResponse(responseBlockNumber, block), nil
 	}
 	if record.Version != 2 {
 		return nil, fmt.Errorf("invalid aggregator record version got %d expected 2", record.Version)
@@ -300,6 +306,17 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		BlockNumber:    responseBlockNumber,
 		InclusionProof: proof,
 	}, nil
+}
+
+func emptyInclusionProofResponse(blockNumber uint64, block *models.Block) *api.GetInclusionProofResponseV2 {
+	return &api.GetInclusionProofResponseV2{
+		BlockNumber: blockNumber,
+		InclusionProof: &api.InclusionProofV2{
+			CertificationData:  nil,
+			CertificateBytes:   nil,
+			UnicityCertificate: types.RawCBOR(block.UnicityCertificate),
+		},
+	}
 }
 
 func proofBundleBlockNumber(mode config.ShardingMode, block *models.Block) (uint64, error) {
@@ -421,12 +438,12 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 		}
 
 		if isLeader {
-			role = "leader"
+			role = api.HealthRoleLeader
 		} else {
-			role = "follower"
+			role = api.HealthRoleFollower
 		}
 	} else {
-		role = "standalone"
+		role = api.HealthRoleStandalone
 	}
 
 	sharding := buildShardingHealth(as.config)

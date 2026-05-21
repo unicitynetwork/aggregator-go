@@ -289,12 +289,12 @@ func (pas *ParentAggregatorService) GetHealthStatus(ctx context.Context) (*api.H
 		}
 
 		if isLeader {
-			role = "parent-leader"
+			role = api.HealthRoleParentLeader
 		} else {
-			role = "parent-follower"
+			role = api.HealthRoleParentFollower
 		}
 	} else {
-		role = "parent-standalone"
+		role = api.HealthRoleParentStandalone
 		isLeader = true
 	}
 

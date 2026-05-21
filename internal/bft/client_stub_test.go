@@ -32,6 +32,10 @@ func (m *stubRoundManager) StartNewRound(ctx context.Context, roundNumber *api.B
 	return nil
 }
 
+func (m *stubRoundManager) StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt) error {
+	return m.StartNewRound(ctx, roundNumber)
+}
+
 func TestBFTClientStub_CertificationRequest_PopulatesSyntheticUC(t *testing.T) {
 	rm := &stubRoundManager{}
 	log, err := logger.New("warn", "json", "", false)

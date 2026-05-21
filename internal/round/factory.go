@@ -10,9 +10,11 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // Manager interface for both standalone and parent round managers
@@ -25,6 +27,7 @@ type Manager interface {
 	CheckParentHealth(ctx context.Context) error
 	// FinalizationReadLock blocks during the SMT commit+finalize window to keep root/block consistent.
 	FinalizationReadLock() func()
+	GetKnownNotReadyBlock(stateID api.StateID) (*models.Block, bool)
 }
 
 // NewManager creates the appropriate round manager based on sharding mode

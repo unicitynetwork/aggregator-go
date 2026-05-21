@@ -72,12 +72,16 @@ func NewStorage(ctx context.Context, config config.Config) (*Storage, error) {
 		database: database,
 		config:   &cfg,
 	}
+	finalizationInsertOpts := finalizationInsertOptions{
+		chunkSize: cfg.FinalizationInsertChunkSize,
+		workers:   cfg.FinalizationInsertChunkWorkers,
+	}
 
 	// Initialize storage implementations
 	storage.commitmentStorage = NewCommitmentStorage(database)
-	storage.aggregatorRecordStorage = NewAggregatorRecordStorage(database)
+	storage.aggregatorRecordStorage = NewAggregatorRecordStorage(database, finalizationInsertOpts)
 	storage.blockStorage = NewBlockStorage(database)
-	storage.smtStorage = NewSmtStorage(database)
+	storage.smtStorage = NewSmtStorage(database, finalizationInsertOpts)
 	storage.blockRecordsStorage = NewBlockRecordsStorage(database)
 	storage.leadershipStorage = NewLeadershipStorage(database, config.HA.LockTTLSeconds)
 	storage.cachedTrustBaseStorage = NewCachedTrustBaseStorage(NewTrustBaseStorage(database))

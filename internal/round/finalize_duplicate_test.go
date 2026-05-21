@@ -81,7 +81,7 @@ func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 
 	// Process commitments to populate PendingLeaves
 	rm.roundMutex.Lock()
-	err = rm.processMiniBatch(ctx, commitments)
+	_, err = rm.processMiniBatch(ctx, commitments)
 	rm.roundMutex.Unlock()
 	require.NoError(t, err)
 
@@ -163,7 +163,7 @@ func (s *FinalizeDuplicateTestSuite) Test2_NoDuplicates() {
 	}
 
 	rm.roundMutex.Lock()
-	err = rm.processMiniBatch(ctx, commitments)
+	_, err = rm.processMiniBatch(ctx, commitments)
 	rm.roundMutex.Unlock()
 	require.NoError(t, err)
 
@@ -214,7 +214,7 @@ func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 	}
 
 	rm.roundMutex.Lock()
-	err = rm.processMiniBatch(ctx, commitments)
+	_, err = rm.processMiniBatch(ctx, commitments)
 	rm.roundMutex.Unlock()
 	require.NoError(t, err)
 
@@ -285,7 +285,7 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 	}
 
 	rm.roundMutex.Lock()
-	err = rm.processMiniBatch(ctx, commitments)
+	_, err = rm.processMiniBatch(ctx, commitments)
 	rm.roundMutex.Unlock()
 	require.NoError(t, err)
 
@@ -366,7 +366,7 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	}
 
 	rm.roundMutex.Lock()
-	err = rm.processMiniBatch(ctx, commitments)
+	_, err = rm.processMiniBatch(ctx, commitments)
 	rm.roundMutex.Unlock()
 	require.NoError(t, err)
 
@@ -454,7 +454,7 @@ func (s *FinalizeDuplicateTestSuite) Test6_BlockRecordsMatchPendingCommitmentsOn
 	}
 
 	rm.roundMutex.Lock()
-	err = rm.processMiniBatch(ctx, commitments)
+	_, err = rm.processMiniBatch(ctx, commitments)
 	rm.roundMutex.Unlock()
 	require.NoError(t, err)
 

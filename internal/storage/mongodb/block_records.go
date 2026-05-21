@@ -67,30 +67,6 @@ func (brs *BlockRecordsStorage) GetByBlockNumber(ctx context.Context, blockNumbe
 	return blockRecords, nil
 }
 
-// GetByStateID retrieves the block number for a state ID.
-func (brs *BlockRecordsStorage) GetByStateID(ctx context.Context, stateID api.StateID) (*api.BigInt, error) {
-	filter := bson.M{"stateIds": stateID.String()}
-	opts := options.FindOne().SetProjection(bson.M{"blockNumber": 1})
-
-	var result struct {
-		BlockNumber primitive.Decimal128 `bson:"blockNumber"`
-	}
-
-	err := brs.collection.FindOne(ctx, filter, opts).Decode(&result)
-	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("failed to get block number by state ID: %w", err)
-	}
-
-	blockNumber, err := api.NewBigIntFromString(result.BlockNumber.String())
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse block number: %w", err)
-	}
-	return blockNumber, nil
-}
-
 // Count returns the total number of block records
 func (brs *BlockRecordsStorage) Count(ctx context.Context) (int64, error) {
 	count, err := brs.collection.CountDocuments(ctx, bson.M{})
@@ -151,18 +127,13 @@ func (brs *BlockRecordsStorage) GetLatestBlockNumber(ctx context.Context) (*api.
 	return api.NewBigInt(blockNumber), nil
 }
 
-// CreateIndexes creates necessary indexes for the block records collection
+// CreateIndexes creates the necessary indexes needed by block recovery and HA
+// block sync.
 func (brs *BlockRecordsStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
 		{
 			Keys:    bson.D{{Key: "blockNumber", Value: 1}},
 			Options: options.Index().SetUnique(true),
-		},
-		{
-			Keys: bson.D{{Key: "stateIds", Value: 1}},
-		},
-		{
-			Keys: bson.D{{Key: "createdAt", Value: -1}},
 		},
 	}
 

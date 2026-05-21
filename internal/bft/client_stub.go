@@ -83,7 +83,7 @@ func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.
 	nextRoundNumber.Add(block.Index.Int, big.NewInt(1))
 
 	go func() {
-		if err := n.roundManager.StartNewRound(ctx, nextRoundNumber); err != nil {
+		if err := n.roundManager.StartNextRoundFromPrecollector(ctx, nextRoundNumber); err != nil {
 			n.logger.Error("Failed to start next round", "error", err.Error())
 		}
 	}()

@@ -470,6 +470,51 @@ func TestSmtStorage_StoreBatch_DuplicateHandling(t *testing.T) {
 	require.Equal(t, []byte("newvalue"), []byte(newNode.Value), "New node should have correct value")
 }
 
+func TestSmtStorage_StoreBatch_ChunkedDuplicateHandling(t *testing.T) {
+	db := setupSmtTestDB(t)
+	storage := NewSmtStorage(db, finalizationInsertOptions{
+		chunkSize: 2,
+		workers:   2,
+	})
+	ctx := context.Background()
+
+	err := storage.CreateIndexes(ctx)
+	require.NoError(t, err, "CreateIndexes should not return an error")
+
+	initialNodes := createTestSmtNodes(3)
+	newNodes := createTestSmtNodes(5)
+	mixedNodes := []*models.SmtNode{
+		models.NewSmtNode(initialNodes[0].Key, []byte("duplicate_value_0")),
+		newNodes[3],
+		models.NewSmtNode(initialNodes[1].Key, []byte("duplicate_value_1")),
+		newNodes[4],
+	}
+
+	err = storage.StoreBatch(ctx, initialNodes)
+	require.NoError(t, err, "Initial StoreBatch should not return an error")
+
+	err = storage.StoreBatch(ctx, mixedNodes)
+	require.NoError(t, err, "Chunked StoreBatch should ignore duplicate key errors")
+
+	count, err := storage.Count(ctx)
+	require.NoError(t, err, "Count should not return an error")
+	require.Equal(t, int64(5), count, "Should have exactly 5 unique SMT nodes")
+
+	for i := 0; i < 2; i++ {
+		storedNode, err := storage.GetByKey(ctx, initialNodes[i].Key)
+		require.NoError(t, err, "GetByKey should not return an error for original node %d", i)
+		require.NotNil(t, storedNode, "Original node %d should still exist", i)
+		require.Equal(t, initialNodes[i].Value, storedNode.Value, "Duplicate chunk insert should not overwrite original node %d", i)
+	}
+
+	for _, node := range []*models.SmtNode{newNodes[3], newNodes[4]} {
+		storedNode, err := storage.GetByKey(ctx, node.Key)
+		require.NoError(t, err, "GetByKey should not return an error for new node")
+		require.NotNil(t, storedNode, "New node should be inserted from a chunk with a duplicate")
+		require.Equal(t, node.Value, storedNode.Value)
+	}
+}
+
 func TestSmtStorage_GetByKeys(t *testing.T) {
 	db := setupSmtTestDB(t)
 	storage := NewSmtStorage(db)

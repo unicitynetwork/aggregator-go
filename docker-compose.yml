@@ -13,7 +13,7 @@ services:
       - ./data/genesis-root:/genesis/root
       - ./data/genesis:/genesis
     healthcheck:
-      test: ["CMD", "nc", "-zv", "bft-root", "8000"]
+      test: ["CMD", "nc", "-zv", "bft-root", "8002"]
       interval: 5s
     networks:
       - default

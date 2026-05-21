@@ -11,7 +11,7 @@ services:
       - ./data/genesis-root:/genesis/root
       - ./data/genesis:/genesis
     healthcheck:
-      test: ["CMD", "nc", "-zv", "bft-root", "8000"]
+      test: ["CMD", "nc", "-zv", "bft-root", "8002"]
       interval: 5s
     networks:
       - default
@@ -222,6 +222,10 @@ services:
     restart: unless-stopped
     ports:
       - "3001:3000" # External port 3001 maps to internal HAProxy port 3000
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
     networks:
       - default
     volumes:
@@ -251,6 +255,10 @@ services:
     restart: unless-stopped
     ports:
       - "3002:3000" # External port 3002 maps to internal HAProxy port 3000
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
     networks:
       - default
     volumes:

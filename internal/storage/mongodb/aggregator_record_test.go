@@ -155,6 +155,55 @@ func TestAggregatorRecordStorage_StoreBatch_DuplicateHandling(t *testing.T) {
 	assert.Equal(t, int64(5), count, "Should have exactly 5 records now")
 }
 
+func TestAggregatorRecordStorage_StoreBatch_ChunkedDuplicateHandling(t *testing.T) {
+	db := setupAggregatorRecordTestDB(t)
+
+	storage := NewAggregatorRecordStorage(db, finalizationInsertOptions{
+		chunkSize: 2,
+		workers:   2,
+	})
+	ctx := context.Background()
+
+	err := storage.CreateIndexes(ctx)
+	require.NoError(t, err, "CreateIndexes should not return an error")
+
+	state1 := testStateIDHex("01")
+	state2 := testStateIDHex("02")
+	state3 := testStateIDHex("03")
+	state4 := testStateIDHex("04")
+	state5 := testStateIDHex("05")
+
+	initialRecords := []*models.AggregatorRecord{
+		createTestAggregatorRecord(state1, 1, 0),
+		createTestAggregatorRecord(state2, 1, 1),
+		createTestAggregatorRecord(state3, 1, 2),
+	}
+	mixedRecords := []*models.AggregatorRecord{
+		createTestAggregatorRecord(state1, 1, 0),
+		createTestAggregatorRecord(state4, 1, 3),
+		createTestAggregatorRecord(state2, 1, 1),
+		createTestAggregatorRecord(state5, 1, 4),
+	}
+
+	err = storage.StoreBatch(ctx, initialRecords)
+	require.NoError(t, err, "Initial StoreBatch should not return an error")
+
+	err = storage.StoreBatch(ctx, mixedRecords)
+	require.NoError(t, err, "Chunked StoreBatch should ignore duplicate key errors")
+
+	count, err := storage.Count(ctx)
+	require.NoError(t, err, "Count should not return an error")
+	assert.Equal(t, int64(5), count, "Should have exactly 5 unique records")
+
+	record4, err := storage.GetByStateID(ctx, api.RequireNewImprintV2(state4))
+	require.NoError(t, err, "GetByStateID should not return an error for state4")
+	require.NotNil(t, record4, "state4 should be inserted from a chunk with a duplicate")
+
+	record5, err := storage.GetByStateID(ctx, api.RequireNewImprintV2(state5))
+	require.NoError(t, err, "GetByStateID should not return an error for state5")
+	require.NotNil(t, record5, "state5 should be inserted from a chunk with a duplicate")
+}
+
 func TestAggregatorRecordStorage_GetByBlockNumber(t *testing.T) {
 	db := setupAggregatorRecordTestDB(t)
 	storage := NewAggregatorRecordStorage(db)
@@ -205,6 +254,25 @@ func TestAggregatorRecordStorage_GetByBlockNumber(t *testing.T) {
 		require.True(t, stateIDs[state0101])
 		require.True(t, stateIDs[state0102])
 		require.True(t, stateIDs[state0103])
+	})
+
+	t.Run("should return records ordered by leaf index", func(t *testing.T) {
+		unorderedRecords := []*models.AggregatorRecord{
+			createTestAggregatorRecord("0203", 102, 2),
+			createTestAggregatorRecord("0201", 102, 0),
+			createTestAggregatorRecord("0202", 102, 1),
+		}
+		err := storage.StoreBatch(ctx, unorderedRecords)
+		require.NoError(t, err, "StoreBatch should not return an error")
+
+		blockNum := api.NewBigInt(big.NewInt(102))
+		retrieved, err := storage.GetByBlockNumber(ctx, blockNum)
+		require.NoError(t, err)
+		require.Len(t, retrieved, 3)
+
+		require.Equal(t, "0", retrieved[0].LeafIndex.String())
+		require.Equal(t, "1", retrieved[1].LeafIndex.String())
+		require.Equal(t, "2", retrieved[2].LeafIndex.String())
 	})
 
 	t.Run("should return empty slice for non-existent block number", func(t *testing.T) {

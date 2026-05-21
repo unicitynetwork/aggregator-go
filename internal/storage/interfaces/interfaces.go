@@ -159,9 +159,6 @@ type BlockRecordsStorage interface {
 	// GetByBlockNumber retrieves block records by block number
 	GetByBlockNumber(ctx context.Context, blockNumber *api.BigInt) (*models.BlockRecords, error)
 
-	// GetByStateID retrieves the block number for a state ID
-	GetByStateID(ctx context.Context, stateID api.StateID) (*api.BigInt, error)
-
 	// Count returns the total number of block records
 	Count(ctx context.Context) (int64, error)
 

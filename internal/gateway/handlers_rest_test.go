@@ -16,6 +16,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 func Test_GetTrustBases(t *testing.T) {
@@ -91,6 +92,15 @@ func Test_GetTrustBases(t *testing.T) {
 		res, _ := doRequest(t, hf, http.MethodGet, "/api/v1/trustbases?to=999")
 		require.Equal(t, http.StatusBadRequest, res.StatusCode)
 	})
+}
+
+func TestIsLeaderHealthRole(t *testing.T) {
+	for _, role := range []string{api.HealthRoleLeader, api.HealthRoleStandalone, api.HealthRoleParentLeader, api.HealthRoleParentStandalone} {
+		require.True(t, isLeaderHealthRole(role), role)
+	}
+	for _, role := range []string{api.HealthRoleFollower, api.HealthRoleParentFollower, ""} {
+		require.False(t, isLeaderHealthRole(role), role)
+	}
 }
 
 func doRequest(t *testing.T, hf gin.HandlerFunc, method, path string) (*http.Response, []byte) {

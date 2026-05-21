@@ -67,6 +67,9 @@ type Round struct {
 	// PendingCommitments contains only commitments whose leaves were successfully added
 	// This is used for creating aggregator records (must match PendingLeaves)
 	PendingCommitments []*models.CertificationRequest
+	// PreCollected is true when this round starts from a precollector snapshot.
+	// These rounds skip the fixed collect window.
+	PreCollected bool
 	// Timing metrics for this round
 	ProcessingTime     time.Duration
 	ProposalTime       time.Time     // When block was proposed to BFT
@@ -105,6 +108,10 @@ type RoundManager struct {
 	finalizationMu sync.RWMutex
 	wg             sync.WaitGroup
 
+	proofCacheMu          sync.RWMutex
+	proofPending          map[string]struct{}
+	latestProofReadyBlock *models.Block
+
 	// Round duration (configurable, default 1 second)
 	roundDuration time.Duration
 
@@ -113,6 +120,7 @@ type RoundManager struct {
 	streamMutex      sync.RWMutex
 	lastFetchedID    string             // Cursor for MongoDB pagination
 	prefetchCancel   context.CancelFunc // Cancel function for running streamer/prefetcher
+	prefetchDone     chan struct{}
 
 	// Adaptive throughput tracking
 	avgProcessingRate float64 // commitments per millisecond
@@ -126,6 +134,7 @@ type RoundManager struct {
 	// Both fields are protected by roundMutex.
 	precollector         *childPrecollector
 	precollectorDisabled bool
+	precollectorDone     chan struct{}
 
 	// Child mode tracks the newest parent UC already accepted for finalization.
 	// This prevents empty rounds from immediately reusing an older parent proof.
@@ -173,11 +182,12 @@ func NewRoundManager(
 		rootClient:          rootAggregatorClient,
 		stateTracker:        stateTracker,
 		eventBus:            eventBus,
-		roundDuration:       cfg.Processing.RoundDuration,                   // Configurable round duration (default 1s)
-		commitmentStream:    make(chan *models.CertificationRequest, 10000), // Reasonable buffer for streaming
-		avgProcessingRate:   1.0,                                            // Initial estimate: 1 commitment per ms
-		avgFinalizationTime: 200 * time.Millisecond,                         // Initial estimate (conservative)
-		avgSMTUpdateTime:    5 * time.Millisecond,                           // Initial estimate per batch
+		roundDuration:       cfg.Processing.RoundDuration,                                                       // Configurable round duration (default 1s)
+		commitmentStream:    make(chan *models.CertificationRequest, cfg.Processing.CommitmentStreamBufferSize), // Buffer for queue streamer
+		proofPending:        make(map[string]struct{}),
+		avgProcessingRate:   1.0,                    // Initial estimate: 1 commitment per ms
+		avgFinalizationTime: 200 * time.Millisecond, // Initial estimate (conservative)
+		avgSMTUpdateTime:    5 * time.Millisecond,   // Initial estimate per batch
 	}
 
 	if rm.storage != nil && rm.storage.SmtStorage() != nil {
@@ -323,6 +333,46 @@ func (rm *RoundManager) FinalizationReadLock() func() {
 	return func() { rm.finalizationMu.RUnlock() }
 }
 
+func (rm *RoundManager) GetKnownNotReadyBlock(stateID api.StateID) (*models.Block, bool) {
+	rm.proofCacheMu.RLock()
+	defer rm.proofCacheMu.RUnlock()
+
+	if _, ok := rm.proofPending[stateID.String()]; !ok || rm.latestProofReadyBlock == nil {
+		return nil, false
+	}
+	return rm.latestProofReadyBlock, true
+}
+
+func (rm *RoundManager) markProofsPending(commitments []*models.CertificationRequest) {
+	if len(commitments) == 0 {
+		return
+	}
+
+	rm.proofCacheMu.Lock()
+	defer rm.proofCacheMu.Unlock()
+	for _, commitment := range commitments {
+		if commitment != nil {
+			rm.proofPending[commitment.StateID.String()] = struct{}{}
+		}
+	}
+}
+
+func (rm *RoundManager) markProofsReady(block *models.Block, stateIDs []api.StateID) {
+	rm.proofCacheMu.Lock()
+	defer rm.proofCacheMu.Unlock()
+
+	rm.latestProofReadyBlock = block
+	for _, stateID := range stateIDs {
+		delete(rm.proofPending, stateID.String())
+	}
+}
+
+func (rm *RoundManager) clearProofPending() {
+	rm.proofCacheMu.Lock()
+	defer rm.proofCacheMu.Unlock()
+	rm.proofPending = make(map[string]struct{})
+}
+
 // GetStats returns round manager statistics
 func (rm *RoundManager) GetStats() map[string]interface{} {
 	rm.roundMutex.RLock()
@@ -349,12 +399,13 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 
 // StartNewRound starts a new round for processing commitments (delegates to unified function)
 func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
+	rm.discardActivePrecollector(ctx)
 	return rm.StartNewRoundWithSnapshot(ctx, roundNumber, nil, nil, nil)
 }
 
 // StartNewRoundWithSnapshot starts a new round, optionally with pre-collected data.
-// If snapshot/commitments are nil (first round), an empty snapshot is created.
-// All rounds are processed the same way - no separate collect phase.
+// If snapshot/commitments are nil, an empty snapshot is created and the fixed
+// collect path is used.
 // ErrDeactivated is returned by StartNewRoundWithSnapshot when the round manager
 // has been deactivated. The check and the decision not to start are atomic under roundMutex.
 var ErrDeactivated = fmt.Errorf("round manager deactivated")
@@ -374,7 +425,7 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 
 	if rm.precollectorDisabled {
 		rm.roundMutex.Unlock()
-		rm.logger.WithContext(ctx).Info("Skipping round start — deactivated",
+		rm.logger.WithContext(ctx).Info("Skipping round start - deactivated",
 			"roundNumber", roundNumber.String())
 		return ErrDeactivated
 	}
@@ -386,6 +437,7 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 			"previousRoundAge", time.Since(rm.currentRound.StartTime).String())
 	}
 
+	preCollected := snapshot != nil
 	if snapshot == nil {
 		snapshot = rm.smt.CreateSnapshot()
 	}
@@ -404,6 +456,7 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 		Snapshot:           snapshot,
 		PendingLeaves:      leaves,
 		PendingCommitments: commitments, // In child mode, commitments are already filtered by pre-collection
+		PreCollected:       preCollected,
 	}
 
 	// Start precollector on the first child-mode round so it begins collecting
@@ -414,6 +467,7 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 			rm.commitmentQueue,
 			rm.logger,
 			rm.config.Processing.MaxCommitmentsPerRound,
+			rm.markProofsPending,
 		)
 		rm.precollector = cp
 		cp.Start(ctx, snapshot)
@@ -454,10 +508,14 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 		return fmt.Errorf("no current round to process")
 	}
 	roundNumber := rm.currentRound.Number
+	preCollected := rm.currentRound.PreCollected
 	rm.roundMutex.Unlock()
 
-	if !rm.config.Sharding.Mode.IsChild() {
-		collectDuration := 200 * time.Millisecond
+	if !preCollected && !rm.config.Sharding.Mode.IsChild() {
+		collectDuration := rm.config.Processing.CollectPhaseDuration
+		if collectDuration <= 0 {
+			collectDuration = 200 * time.Millisecond
+		}
 		deadline := time.Now().Add(collectDuration)
 
 		for time.Now().Before(deadline) {
@@ -465,11 +523,18 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 			case commitment := <-rm.commitmentStream:
 				rm.roundMutex.Lock()
 				rm.currentRound.Commitments = append(rm.currentRound.Commitments, commitment)
+				var dropped []interfaces.CertificationRequestAck
 				if len(rm.currentRound.Commitments)%100 == 0 {
 					batch := rm.currentRound.Commitments[len(rm.currentRound.Commitments)-100:]
-					rm.processMiniBatch(ctx, batch)
+					var err error
+					dropped, err = rm.processMiniBatch(ctx, batch)
+					if err != nil {
+						rm.roundMutex.Unlock()
+						return err
+					}
 				}
 				rm.roundMutex.Unlock()
+				ackDroppedCommitments(ctx, rm.logger, rm.commitmentQueue, dropped)
 			case <-ctx.Done():
 				return ctx.Err()
 			default:
@@ -479,12 +544,22 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 
 		rm.roundMutex.Lock()
 		remaining := len(rm.currentRound.Commitments) % 100
+		var dropped []interfaces.CertificationRequestAck
 		if remaining > 0 {
 			batch := rm.currentRound.Commitments[len(rm.currentRound.Commitments)-remaining:]
-			rm.processMiniBatch(ctx, batch)
+			var err error
+			dropped, err = rm.processMiniBatch(ctx, batch)
+			if err != nil {
+				rm.roundMutex.Unlock()
+				return err
+			}
 		}
 		rm.roundMutex.Unlock()
+		ackDroppedCommitments(ctx, rm.logger, rm.commitmentQueue, dropped)
 	}
+
+	rm.startActivePrecollectorIfNeeded(ctx)
+
 	rm.roundMutex.Lock()
 	commitmentCount := len(rm.currentRound.Commitments)
 	var rootHash api.HexBytes
@@ -741,6 +816,9 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 
 	rm.roundMutex.Lock()
 	rm.precollectorDisabled = false
+	if rm.precollectorDone == nil {
+		rm.precollectorDone = make(chan struct{})
+	}
 	rm.roundMutex.Unlock()
 
 	if rm.config.HA.Enabled {
@@ -854,6 +932,10 @@ func (rm *RoundManager) Deactivate(ctx context.Context) error {
 	var cp *childPrecollector
 	rm.roundMutex.Lock()
 	rm.precollectorDisabled = true
+	if rm.precollectorDone != nil {
+		close(rm.precollectorDone)
+		rm.precollectorDone = nil
+	}
 	cp = rm.precollector
 	rm.precollector = nil
 	rm.roundMutex.Unlock()
@@ -861,12 +943,182 @@ func (rm *RoundManager) Deactivate(ctx context.Context) error {
 	if cp != nil {
 		cp.Stop()
 	}
+	rm.clearProofPending()
 	rm.stopCommitmentPrefetcher()
 	if rm.bftClient != nil {
 		rm.bftClient.Stop()
 	}
 
 	return nil
+}
+
+func (rm *RoundManager) usesActivePrecollector() bool {
+	if rm.config.Processing.PrecollectorGracePeriod <= 0 {
+		return false
+	}
+	if !rm.config.Storage.UseRedisForCommitments {
+		return false
+	}
+
+	switch rm.config.Sharding.Mode {
+	case config.ShardingModeStandalone, config.ShardingModeBFTShard:
+		return true
+	default:
+		return false
+	}
+}
+
+func (rm *RoundManager) discardActivePrecollector(ctx context.Context) {
+	if !rm.usesActivePrecollector() {
+		return
+	}
+
+	var cp *childPrecollector
+	rm.roundMutex.Lock()
+	cp = rm.precollector
+	rm.precollector = nil
+	rm.roundMutex.Unlock()
+
+	if cp != nil {
+		cp.Stop()
+		rm.clearProofPending()
+		if cs, ok := rm.commitmentQueue.(*redis.CommitmentStorage); ok {
+			restartPrefetcher := rm.stopCommitmentPrefetcherAndWait()
+			rm.drainCommitmentStream()
+			cs.ResetPendingSweep()
+			if restartPrefetcher {
+				rm.startCommitmentPrefetcher(ctx)
+			}
+		}
+	}
+}
+
+func (rm *RoundManager) drainCommitmentStream() int {
+	drained := 0
+	for {
+		select {
+		case _, ok := <-rm.commitmentStream:
+			if !ok {
+				return drained
+			}
+			drained++
+		default:
+			return drained
+		}
+	}
+}
+
+// startActivePrecollectorIfNeeded starts the next-round precollector for
+// standalone/bft-shard only after processRound has finished the fixed collect
+// window, so it is the sole reader of commitmentStream while BFT is pending.
+func (rm *RoundManager) startActivePrecollectorIfNeeded(ctx context.Context) {
+	if !rm.usesActivePrecollector() {
+		return
+	}
+
+	rm.roundMutex.Lock()
+	if rm.precollector != nil ||
+		rm.precollectorDisabled ||
+		rm.currentRound == nil ||
+		rm.currentRound.Snapshot == nil {
+		rm.roundMutex.Unlock()
+		return
+	}
+
+	snapshot := rm.currentRound.Snapshot
+	cp := newChildPrecollector(
+		rm.commitmentStream,
+		rm.commitmentQueue,
+		rm.logger,
+		rm.config.Processing.MaxCommitmentsPerRound,
+		rm.markProofsPending,
+	)
+	rm.precollector = cp
+	rm.roundMutex.Unlock()
+
+	cp.Start(ctx, snapshot)
+}
+
+// StartNextRoundFromPrecollector starts the next standalone/bft-shard round
+// from the active precollector snapshot. If precollection is disabled or no
+// precollector is available, it falls back to the fixed collect path.
+func (rm *RoundManager) StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt) error {
+	if !rm.usesActivePrecollector() {
+		return rm.StartNewRound(ctx, roundNumber)
+	}
+
+	rm.roundMutex.RLock()
+	cpExists := rm.precollector != nil
+	precollectorDone := rm.precollectorDone
+	precollectorDisabled := rm.precollectorDisabled
+	rm.roundMutex.RUnlock()
+
+	if precollectorDisabled {
+		return nil
+	}
+
+	if cpExists {
+		if err := rm.waitBeforePrecollectorHandoff(ctx, precollectorDone); err != nil {
+			if errors.Is(err, ErrDeactivated) {
+				return nil
+			}
+			return err
+		}
+	}
+
+	rm.roundMutex.RLock()
+	cp := rm.precollector
+	precollectorDisabled = rm.precollectorDisabled
+	rm.roundMutex.RUnlock()
+
+	if precollectorDisabled {
+		return nil
+	}
+	if cp == nil {
+		return rm.StartNewRound(ctx, roundNumber)
+	}
+
+	preResult, err := cp.AdvanceRound()
+	if err != nil {
+		rm.roundMutex.RLock()
+		precollectorDisabled = rm.precollectorDisabled
+		rm.roundMutex.RUnlock()
+		if precollectorDisabled {
+			return nil
+		}
+
+		rm.logger.WithContext(ctx).Warn("Failed to advance precollector, falling back to fixed collect round",
+			"error", err.Error())
+		return rm.StartNewRound(ctx, roundNumber)
+	}
+
+	preResult.snapshot.SetCommitTarget(rm.smt)
+	if err := rm.StartNewRoundWithSnapshot(ctx, roundNumber, preResult.snapshot, preResult.commitments, preResult.leaves); err != nil {
+		if errors.Is(err, ErrDeactivated) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (rm *RoundManager) waitBeforePrecollectorHandoff(ctx context.Context, done <-chan struct{}) error {
+	grace := rm.config.Processing.PrecollectorGracePeriod
+	if grace <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+		return ErrDeactivated
+	}
 }
 
 func (rm *RoundManager) startCommitmentPrefetcher(ctx context.Context) {
@@ -879,7 +1131,9 @@ func (rm *RoundManager) startCommitmentPrefetcher(ctx context.Context) {
 	}
 
 	prefetcherCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
 	rm.prefetchCancel = cancel
+	rm.prefetchDone = done
 
 	if rm.config.Storage.UseRedisForCommitments {
 		if cs, ok := rm.commitmentQueue.(*redis.CommitmentStorage); ok {
@@ -887,25 +1141,39 @@ func (rm *RoundManager) startCommitmentPrefetcher(ctx context.Context) {
 		}
 		rm.logger.WithContext(ctx).Info("Starting Redis commitment streamer")
 		rm.wg.Go(func() {
+			defer close(done)
 			rm.redisCommitmentStreamer(prefetcherCtx)
 		})
 	} else {
 		rm.logger.WithContext(ctx).Info("Starting MongoDB commitment prefetcher")
 		rm.lastFetchedID = ""
 		rm.wg.Go(func() {
+			defer close(done)
 			rm.commitmentPrefetcher(prefetcherCtx)
 		})
 	}
 }
 
 func (rm *RoundManager) stopCommitmentPrefetcher() {
-	rm.streamMutex.Lock()
-	defer rm.streamMutex.Unlock()
+	rm.stopCommitmentPrefetcherAndWait()
+}
 
+func (rm *RoundManager) stopCommitmentPrefetcherAndWait() bool {
+	rm.streamMutex.Lock()
 	if rm.prefetchCancel == nil {
+		rm.streamMutex.Unlock()
 		rm.logger.Warn("stopCommitmentPrefetcher called but no prefetcher running")
-		return
+		return false
 	}
-	rm.prefetchCancel()
+	cancel := rm.prefetchCancel
+	done := rm.prefetchDone
 	rm.prefetchCancel = nil
+	rm.prefetchDone = nil
+	rm.streamMutex.Unlock()
+
+	cancel()
+	if done != nil {
+		<-done
+	}
+	return true
 }

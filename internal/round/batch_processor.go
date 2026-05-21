@@ -21,9 +21,10 @@ import (
 
 // processMiniBatch processes a small batch of commitments into the SMT for efficiency
 // NOTE: The caller is expected to hold rm.roundMutex when calling this function
-func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.CertificationRequest) error {
+// and ACK returned dropped entries after releasing it.
+func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.CertificationRequest) ([]interfaces.CertificationRequestAck, error) {
 	if len(commitments) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Convert commitments to SMT leaves, tracking valid commitments
@@ -55,26 +56,15 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 	// Add leaves to the current round's SMT snapshot
 	if rm.currentRound != nil && rm.currentRound.Snapshot != nil {
 		smtStart := time.Now()
-		_, err := rm.currentRound.Snapshot.AddLeaves(leaves)
+		addedCommitments, addedLeaves, dropped := addCommitmentLeaves(ctx, rm.logger, rm.currentRound.Snapshot, leaves, validCommitments)
 		metrics.SMTAddLeavesDuration.Observe(time.Since(smtStart).Seconds())
-		if err != nil {
-			result := tryAddLeavesOneByOne(ctx, rm.logger, rm.commitmentQueue, rm.currentRound.Snapshot, leaves, validCommitments)
-			rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, result.successLeaves...)
-			rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, result.successCommitments...)
-		} else {
-			rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, leaves...)
-			rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, validCommitments...)
-		}
+		rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, addedLeaves...)
+		rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, addedCommitments...)
+		rm.markProofsPending(addedCommitments)
+		return dropped, nil
 	}
 
-	return nil
-}
-
-// leafAddResult holds results of adding leaves one-by-one to an SMT snapshot.
-type leafAddResult struct {
-	successLeaves      []*smt.Leaf
-	successCommitments []*models.CertificationRequest
-	rejected           []interfaces.CertificationRequestAck
+	return nil, nil
 }
 
 // ProposeBlock creates and proposes a new block with the given data.
@@ -370,9 +360,12 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 		} else if len(unfinalizedBlocks) > 0 {
 			rm.logger.Info("Found unfinalized block, attempting recovery",
 				"blockNumber", unfinalizedBlocks[0].Index.String())
-			_, recoverErr := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+			recoveryResult, recoverErr := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
 			if recoverErr != nil {
 				return fmt.Errorf("recovery failed: %w", recoverErr)
+			}
+			if recoveryResult != nil && recoveryResult.Recovered {
+				rm.reconcileRecoveredFinalization(recoveryResult.BlockNumber)
 			}
 			rm.logger.Info("Recovery completed successfully")
 			return nil
@@ -384,6 +377,27 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 		}
 	}
 	return fmt.Errorf("FinalizeBlock failed after %d attempts", maxFinalizeRetries)
+}
+
+func (rm *RoundManager) reconcileRecoveredFinalization(blockNumber *api.BigInt) {
+	var snapshot *smt.ThreadSafeSmtSnapshot
+
+	rm.roundMutex.RLock()
+	if blockNumber != nil &&
+		rm.currentRound != nil &&
+		rm.currentRound.Number != nil &&
+		rm.currentRound.Snapshot != nil &&
+		rm.currentRound.Number.Cmp(blockNumber.Int) == 0 {
+		snapshot = rm.currentRound.Snapshot
+	}
+	rm.roundMutex.RUnlock()
+
+	rm.finalizationMu.Lock()
+	if snapshot != nil {
+		snapshot.Commit(rm.smt)
+	}
+	rm.clearProofPending()
+	rm.finalizationMu.Unlock()
 }
 
 // FinalizeBlock creates and persists a new block with the given data
@@ -400,8 +414,6 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	finalizationStartTime := time.Now()
 	var proposalTime time.Time
 	var processingTime time.Duration
-	var markProcessedStart, persistDataStart, commitSnapshotStart time.Time
-	var markProcessedTime, persistDataTime, commitSnapshotTime time.Duration
 	commitmentCount := 0
 
 	rm.roundMutex.Lock()
@@ -425,30 +437,24 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	commitmentCount = len(pendingCommitments)
 	stateIDs := make([]api.StateID, commitmentCount)
 	ackEntries := make([]interfaces.CertificationRequestAck, commitmentCount)
-	var proofTimes []time.Duration
 
-	now := time.Now()
+	finalizationScanStart := time.Now()
 	for i, commitment := range pendingCommitments {
 		stateIDs[i] = commitment.StateID
 		ackEntries[i] = interfaces.CertificationRequestAck{StateID: commitment.StateID, StreamID: commitment.StreamID}
-
-		if commitment.CreatedAt != nil {
-			proofReadyTime := now.Sub(commitment.CreatedAt.Time)
-			if proofReadyTime > 0 {
-				metrics.ProofReadinessDuration.Observe(proofReadyTime.Seconds())
-				proofTimes = append(proofTimes, proofReadyTime)
-			}
-		}
 	}
+	finalizationScanDuration := time.Since(finalizationScanStart)
 
-	persistDataStart = time.Now()
+	finalizationConvertStart := time.Now()
 	smtNodes, err := rm.convertLeavesToNodes(pendingLeaves)
 	if err != nil {
 		return fmt.Errorf("failed to convert leaves to storage nodes: %w", err)
 	}
 	records := rm.convertCommitmentsToRecords(pendingCommitments, block.Index)
+	finalizationConvertDuration := time.Since(finalizationConvertStart)
 
 	block.Finalized = false
+	storeBlockStart := time.Now()
 	if err := rm.storeBlockAndRecords(ctx, block, stateIDs); err != nil {
 		if !errors.Is(err, interfaces.ErrDuplicateKey) {
 			return fmt.Errorf("failed to store block and records: %w", err)
@@ -456,33 +462,45 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		rm.logger.WithContext(ctx).Info("Block already exists, continuing with remaining steps",
 			"blockNumber", block.Index.String())
 	}
+	storeBlockDuration := time.Since(storeBlockStart)
 
-	if err := rm.storeDataParallel(ctx, block.Index, smtNodes, records); err != nil {
+	storeDataTiming, err := rm.storeDataParallel(ctx, block.Index, smtNodes, records)
+	if err != nil {
 		return fmt.Errorf("failed to store SMT nodes and aggregator records: %w", err)
 	}
-	persistDataTime = time.Since(persistDataStart)
 
+	lockWaitStart := time.Now()
 	rm.finalizationMu.Lock()
-	if snapshot != nil {
-		commitSnapshotStart = time.Now()
-		snapshot.Commit(rm.smt)
-		commitSnapshotTime = time.Since(commitSnapshotStart)
-	}
+	finalizationLockWaitDuration := time.Since(lockWaitStart)
 
+	smtCommitStart := time.Now()
+	if snapshot != nil {
+		snapshot.Commit(rm.smt)
+	}
+	smtCommitDuration := time.Since(smtCommitStart)
+
+	setFinalizedStart := time.Now()
 	if err := rm.storage.BlockStorage().SetFinalized(ctx, block.Index, true); err != nil {
 		rm.finalizationMu.Unlock()
 		return fmt.Errorf("failed to set block as finalized: %w", err)
 	}
-	rm.finalizationMu.Unlock()
+	setFinalizedDuration := time.Since(setFinalizedStart)
 	block.Finalized = true
-	metrics.RoundFinalizationDuration.Observe(time.Since(finalizationStartTime).Seconds())
+	rm.markProofsReady(block, stateIDs)
+	rm.finalizationMu.Unlock()
 
+	// Proofs are requestable only after the SMT snapshot is committed and the block is visible as finalized.
+	// Redis ACK is recovery bookkeeping.
+	proofReadyAt := time.Now()
+	metrics.RoundFinalizationDuration.Observe(proofReadyAt.Sub(finalizationStartTime).Seconds())
+
+	ackDuration := time.Duration(0)
 	if len(ackEntries) > 0 {
-		markProcessedStart = time.Now()
+		ackStart := time.Now()
 		if err := rm.commitmentQueue.MarkProcessed(ctx, ackEntries); err != nil {
 			return fmt.Errorf("failed to mark commitments as processed: %w", err)
 		}
-		markProcessedTime = time.Since(markProcessedStart)
+		ackDuration = time.Since(ackStart)
 	}
 
 	rm.roundMutex.Lock()
@@ -496,7 +514,18 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	rm.roundMutex.Unlock()
 
 	actualFinalizationTime := time.Since(finalizationStartTime)
-	finalizationWorkDuration := markProcessedTime + persistDataTime + commitSnapshotTime
+	proofTimes := make([]time.Duration, 0, len(pendingCommitments))
+	for _, commitment := range pendingCommitments {
+		if commitment.CreatedAt == nil {
+			continue
+		}
+		proofReadyTime := proofReadyAt.Sub(commitment.CreatedAt.Time)
+		if proofReadyTime > 0 {
+			metrics.ProofReadinessDuration.Observe(proofReadyTime.Seconds())
+			proofTimes = append(proofTimes, proofReadyTime)
+		}
+	}
+
 	var totalRoundTime time.Duration
 	var bftWaitTime time.Duration
 	if !proposalTime.IsZero() {
@@ -531,7 +560,17 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		"roundTime", shortDur(totalRoundTime),
 		"processing", shortDur(processingTime),
 		"bftWait", shortDur(bftWaitTime),
-		"finalization", shortDur(finalizationWorkDuration),
+		"finalization", shortDur(actualFinalizationTime),
+		"finalizeScan", shortDur(finalizationScanDuration),
+		"finalizeConvert", shortDur(finalizationConvertDuration),
+		"finalizeStoreBlock", shortDur(storeBlockDuration),
+		"finalizeStoreData", shortDur(storeDataTiming.total),
+		"finalizeStoreSmt", shortDur(storeDataTiming.smt),
+		"finalizeStoreRecords", shortDur(storeDataTiming.records),
+		"finalizeLockWait", shortDur(finalizationLockWaitDuration),
+		"finalizeSmtCommit", shortDur(smtCommitDuration),
+		"finalizeSetFinalized", shortDur(setFinalizedDuration),
+		"finalizeAck", shortDur(ackDuration),
 	}
 
 	if len(proofTimes) > 0 {
@@ -559,6 +598,9 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	logFields = append(logFields,
 		"redisTotal", redisTotal,
 		"redisPending", redisPending,
+		"collectPhaseDuration", rm.config.Processing.CollectPhaseDuration.String(),
+		"streamChannelSize", len(rm.commitmentStream),
+		"streamChannelCapacity", cap(rm.commitmentStream),
 	)
 	if proofWaitDuration > 0 {
 		logFields = append(logFields,
@@ -656,6 +698,12 @@ func (rm *RoundManager) storeBlockAndRecords(ctx context.Context, block *models.
 	})
 }
 
+type storeDataTiming struct {
+	total   time.Duration
+	smt     time.Duration
+	records time.Duration
+}
+
 // storeDataParallel stores SMT nodes and aggregator records in parallel.
 // StoreBatch handles duplicates internally (ignores duplicate key errors).
 func (rm *RoundManager) storeDataParallel(
@@ -663,7 +711,7 @@ func (rm *RoundManager) storeDataParallel(
 	blockNumber *api.BigInt,
 	smtNodes []*models.SmtNode,
 	records []*models.AggregatorRecord,
-) error {
+) (storeDataTiming, error) {
 	start := time.Now()
 
 	var smtErr, recordsErr error
@@ -690,20 +738,26 @@ func (rm *RoundManager) storeDataParallel(
 
 	wg.Wait()
 
+	timing := storeDataTiming{
+		total:   time.Since(start),
+		smt:     smtTime,
+		records: recordsTime,
+	}
+
 	rm.logger.WithContext(ctx).Debug("PARALLEL_TIMING",
 		"block", blockNumber.String(),
 		"storeSmtNodes", smtTime.Milliseconds(),
 		"storeAggRecords", recordsTime.Milliseconds(),
 		"smtCount", len(smtNodes),
 		"recordCount", len(records),
-		"totalMs", time.Since(start).Milliseconds())
+		"totalMs", timing.total.Milliseconds())
 
 	if smtErr != nil {
-		return fmt.Errorf("failed to store SMT nodes: %w", smtErr)
+		return timing, fmt.Errorf("failed to store SMT nodes: %w", smtErr)
 	}
 	if recordsErr != nil {
-		return fmt.Errorf("failed to store aggregator records: %w", recordsErr)
+		return timing, fmt.Errorf("failed to store aggregator records: %w", recordsErr)
 	}
 
-	return nil
+	return timing, nil
 }
