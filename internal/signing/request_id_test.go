@@ -14,7 +14,8 @@ func TestStateIDGenerator_CreateStateID(t *testing.T) {
 	// Test with known values
 	publicKey := []byte{0x03, 0xd8, 0xe2, 0xb2, 0xff, 0x8a, 0xc4, 0xf0, 0x2b, 0x2b, 0x5c, 0x45, 0x12, 0xc5, 0xe4, 0xe6, 0xb1, 0xc7, 0xd2, 0xe3, 0xa8, 0xb9, 0xc1, 0xf8, 0xe9, 0xd1, 0xc2, 0xa3, 0xb4, 0xe5, 0xf6, 0xa7}
 	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKey)
-	stateHash := []byte{0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64} // "Hello World"
+	stateHash := make([]byte, 32)
+	copy(stateHash, []byte("Hello World"))
 
 	stateID, err := api.CreateStateID(ownerPredicate, stateHash)
 	if err != nil {
@@ -48,7 +49,8 @@ func TestStateIDGenerator_ValidateStateID(t *testing.T) {
 
 	publicKey := []byte{0x03, 0xd8, 0xe2, 0xb2, 0xff, 0x8a, 0xc4, 0xf0, 0x2b, 0x2b, 0x5c, 0x45, 0x12, 0xc5, 0xe4, 0xe6, 0xb1, 0xc7, 0xd2, 0xe3, 0xa8, 0xb9, 0xc1, 0xf8, 0xe9, 0xd1, 0xc2, 0xa3, 0xb4, 0xe5, 0xf6, 0xa7}
 	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKey)
-	sourceStateHash := []byte("test-state-for-validation")
+	sourceStateHash := make([]byte, 32)
+	copy(sourceStateHash, []byte("test-state-for-validation"))
 
 	// Create a valid state ID
 	validStateID, err := api.CreateStateID(ownerPredicate, sourceStateHash)
@@ -90,7 +92,8 @@ func TestStateIDGenerator_ValidateStateID(t *testing.T) {
 	}
 
 	// Test with different state hash (should be invalid)
-	differentStateHash := []byte("different-state-hash")
+	differentStateHash := make([]byte, 32)
+	copy(differentStateHash, []byte("different-state-hash"))
 	isValid, err = api.ValidateStateID(validStateID, differentStateHash, ownerPredicate)
 	if err != nil {
 		t.Fatalf("Failed to validate state ID with different state hash: %v", err)
@@ -103,10 +106,11 @@ func TestStateIDGenerator_ValidateStateID(t *testing.T) {
 func TestStateIDGenerator_EmptyInputs(t *testing.T) {
 	// Using api.CreateStateID and api.ValidateStateID
 
-	// Test with empty public key
+	// Test with empty public key (this is still allowed by the predicate marshal)
 	emptyPublicKey := []byte{}
 	emptyOwnerPredicate := api.NewPayToPublicKeyPredicate(emptyPublicKey)
-	stateHash := []byte("test-state")
+	stateHash := make([]byte, 32)
+	copy(stateHash, []byte("test-state"))
 
 	stateID, err := api.CreateStateID(emptyOwnerPredicate, stateHash)
 	if err != nil {
@@ -123,25 +127,21 @@ func TestStateIDGenerator_EmptyInputs(t *testing.T) {
 		t.Error("State ID should be deterministic even with empty public key")
 	}
 
-	// Test with empty state hash
+	// Test with invalid state hash length (too short)
 	publicKey := []byte{0x03, 0xd8}
 	ownerPredicate := api.NewPayToPublicKeyPredicate(publicKey)
-	emptyStateHash := api.SourceStateHash([]byte{})
+	invalidStateHash := []byte{0x01, 0x02}
 
-	stateID, err = api.CreateStateID(ownerPredicate, emptyStateHash)
-	if err != nil {
-		t.Fatalf("Failed to create state ID with empty state hash: %v", err)
+	_, err = api.CreateStateID(ownerPredicate, invalidStateHash)
+	if err == nil {
+		t.Error("Expected error for too short state hash, got nil")
 	}
 
-	// Test with both empty
-	stateID, err = api.CreateStateID(emptyOwnerPredicate, emptyStateHash)
-	if err != nil {
-		t.Fatalf("Failed to create state ID with both inputs empty: %v", err)
-	}
-
-	// Should still produce valid hex string
-	if len(stateID) != 32 {
-		t.Errorf("Expected state ID length 32 even with empty inputs, got %d", len(stateID))
+	// Test with empty state hash
+	emptyStateHash := []byte{}
+	_, err = api.CreateStateID(ownerPredicate, emptyStateHash)
+	if err == nil {
+		t.Error("Expected error for empty state hash, got nil")
 	}
 }
 
@@ -155,33 +155,30 @@ func TestStateIDGenerator_LargeInputs(t *testing.T) {
 	}
 	largeOwnerPredicate := api.NewPayToPublicKeyPredicate(largePublicKey)
 
-	// Test with large state hash
+	// Test with large state hash (invalid length for v2)
 	largeStateHash := make([]byte, 2048)
 	for i := range largeStateHash {
 		largeStateHash[i] = byte((i * 7) % 256)
 	}
 
-	stateID, err := api.CreateStateID(largeOwnerPredicate, largeStateHash)
-	if err != nil {
-		t.Fatalf("Failed to create state ID with large inputs: %v", err)
+	_, err := api.CreateStateID(largeOwnerPredicate, largeStateHash)
+	if err == nil {
+		t.Error("Expected error for too large state hash, got nil")
 	}
 
-	// Verify deterministic behavior
-	stateID2, err := api.CreateStateID(largeOwnerPredicate, largeStateHash)
+	// Verify deterministic behavior with VALID 32-byte hash but large predicate
+	validStateHash := make([]byte, 32)
+	stateID, err := api.CreateStateID(largeOwnerPredicate, validStateHash)
 	if err != nil {
-		t.Fatalf("Failed to create state ID with large inputs second time: %v", err)
+		t.Fatalf("Failed to create state ID with large predicate: %v", err)
+	}
+
+	stateID2, err := api.CreateStateID(largeOwnerPredicate, validStateHash)
+	if err != nil {
+		t.Fatalf("Failed to create state ID second time: %v", err)
 	}
 
 	if !bytes.Equal(stateID, stateID2) {
-		t.Error("State ID should be deterministic with large inputs")
-	}
-
-	// Verify validation works with large inputs
-	isValid, err := api.ValidateStateID(stateID, largeStateHash, largeOwnerPredicate)
-	if err != nil {
-		t.Fatalf("Failed to validate state ID with large inputs: %v", err)
-	}
-	if !isValid {
-		t.Error("State ID should be valid with large inputs")
+		t.Error("State ID should be deterministic with large predicate")
 	}
 }
