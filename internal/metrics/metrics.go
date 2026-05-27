@@ -291,6 +291,31 @@ var (
 		},
 	)
 
+	// Counts recovery actions, not startup attempts. A single startup may emit
+	// multiple actions, for example await_finalize followed by finalize_stuck.
+	SMTStartupRecoveryActions = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_smt_startup_recovery_actions_total",
+			Help: "SMT startup recovery actions by outcome.",
+		},
+		[]string{"action"},
+	)
+
+	SMTDiskProofSnapshotsActive = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "aggregator_smt_disk_proof_snapshots_active",
+			Help: "Currently active disk SMT proof-read RocksDB snapshots.",
+		},
+	)
+
+	SMTDiskProofSnapshotHoldDuration = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "aggregator_smt_disk_proof_snapshot_hold_duration_seconds",
+			Help:    "How long disk SMT proof-read RocksDB snapshots are held.",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+
 	SMTNodesPersistedTotal = promauto.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Name: "aggregator_smt_nodes_persisted_total",

@@ -6,13 +6,21 @@ import (
 )
 
 type Store interface {
+	ReadStore
 	Close() error
 	CommittedState() (CommittedState, error)
-	GetNode(disk.NodeKey) ([]byte, bool, error)
-	GetNodes([]disk.NodeKey, bool) ([]NodeReadResult, error)
 	NewBatch() Batch
 	Counters() Counters
 	Metrics() Metrics
+}
+
+type ReadStore interface {
+	GetNode(disk.NodeKey) ([]byte, bool, error)
+	GetNodes([]disk.NodeKey, bool) ([]NodeReadResult, error)
+}
+
+type ReadSnapshotter interface {
+	NewReadSnapshot() (ReadStore, func(), error)
 }
 
 type Batch interface {

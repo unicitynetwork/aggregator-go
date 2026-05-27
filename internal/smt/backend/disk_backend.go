@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
+	"time"
 
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk"
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk/persist"
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk/storage"
@@ -18,6 +21,7 @@ type DiskBackend struct {
 
 	mu              sync.RWMutex
 	lastCommitStats persist.CommitStats
+	snapshotWarning sync.Once
 }
 
 func NewDiskBackend(store storage.Store, opts persist.Options) (*DiskBackend, error) {
@@ -74,7 +78,32 @@ func (b *DiskBackend) GetInclusionCert(_ context.Context, key []byte) (*api.Incl
 	if b == nil || b.tree == nil {
 		return nil, fmt.Errorf("disk SMT backend not initialized")
 	}
-	return b.tree.GetInclusionCert(key)
+	snapshotter, ok := b.store.(storage.ReadSnapshotter)
+	if !ok {
+		b.snapshotWarning.Do(func() {
+			slog.Warn("Disk SMT backend store does not implement read snapshots; inclusion proofs use live store reads",
+				"component", "smt_backend",
+				"backend", "disk",
+			)
+		})
+		return b.tree.GetInclusionCert(key)
+	}
+	openSnapshot := func() (storage.ReadStore, func(), error) {
+		reader, closeSnapshot, err := snapshotter.NewReadSnapshot()
+		if err != nil {
+			return nil, nil, err
+		}
+		metrics.SMTDiskProofSnapshotsActive.Inc()
+		start := time.Now()
+		return reader, func() {
+			if closeSnapshot != nil {
+				closeSnapshot()
+			}
+			metrics.SMTDiskProofSnapshotsActive.Dec()
+			metrics.SMTDiskProofSnapshotHoldDuration.Observe(time.Since(start).Seconds())
+		}, nil
+	}
+	return b.tree.GetInclusionCertWithReadSnapshot(key, openSnapshot)
 }
 
 func (b *DiskBackend) Stats(ctx context.Context) BackendStats {

@@ -267,19 +267,36 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 		"roundDuration", rm.roundDuration.String(),
 		"batchLimit", rm.config.Processing.BatchLimit)
 
-	recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
-	if err != nil {
-		return fmt.Errorf("failed to recover unfinalized block: %w", err)
-	}
-	if recoveryResult.Recovered {
-		rm.logger.Info("Recovered unfinalized block during startup",
-			"blockNumber", recoveryResult.BlockNumber.String(),
-			"stateCount", len(recoveryResult.StateIDs))
-	}
+	if rm.usesDiskSMTBackend() {
+		if _, err := rm.restoreOrVerifySMT(ctx); err != nil {
+			return fmt.Errorf("failed to restore SMT from storage: %w", err)
+		}
+		recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+		if err != nil {
+			return fmt.Errorf("failed to recover unfinalized block: %w", err)
+		}
+		if recoveryResult.Recovered {
+			rm.logger.Info("Recovered unfinalized block during startup",
+				"blockNumber", recoveryResult.BlockNumber.String(),
+				"stateCount", len(recoveryResult.StateIDs))
+			if err := rm.syncDiskSMTAfterRecoveredBlock(ctx, recoveryResult); err != nil {
+				return fmt.Errorf("failed to sync disk SMT after recovered block: %w", err)
+			}
+		}
+	} else {
+		recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+		if err != nil {
+			return fmt.Errorf("failed to recover unfinalized block: %w", err)
+		}
+		if recoveryResult.Recovered {
+			rm.logger.Info("Recovered unfinalized block during startup",
+				"blockNumber", recoveryResult.BlockNumber.String(),
+				"stateCount", len(recoveryResult.StateIDs))
+		}
 
-	_, err = rm.restoreOrVerifySMT(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to restore SMT from storage: %w", err)
+		if _, err := rm.restoreOrVerifySMT(ctx); err != nil {
+			return fmt.Errorf("failed to restore SMT from storage: %w", err)
+		}
 	}
 
 	rm.logger.Info("Round Manager started successfully.")

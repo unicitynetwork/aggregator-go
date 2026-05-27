@@ -193,6 +193,44 @@ func (t *Tree) CreateSnapshot() (*Snapshot, error) {
 }
 
 func (t *Tree) GetInclusionCert(key []byte) (*api.InclusionCert, error) {
+	if t == nil {
+		return nil, fmt.Errorf("disk SMT persist: nil tree")
+	}
+	rootHash := t.RootHash()
+	return BuildInclusionCert(rootHash, t.store, key)
+}
+
+func (t *Tree) GetInclusionCertWithReadSnapshot(key []byte, openReadSnapshot func() (storage.ReadStore, func(), error)) (*api.InclusionCert, error) {
+	if len(key) != api.StateTreeKeyLengthBytes {
+		return nil, fmt.Errorf("%w: got %d, want %d", api.ErrCertKeyLength, len(key), api.StateTreeKeyLengthBytes)
+	}
+	if t == nil {
+		return nil, fmt.Errorf("disk SMT persist: nil tree")
+	}
+	t.mu.RLock()
+	rootHash := t.rootHash
+	if rootHash == disk.EmptyRootHash() || openReadSnapshot == nil {
+		t.mu.RUnlock()
+		// The fallback path is not isolated from concurrent commits. It is
+		// intended for empty roots and non-production stores that do not expose
+		// RocksDB read snapshots.
+		return BuildInclusionCert(rootHash, t.store, key)
+	}
+	reader, closeSnapshot, err := openReadSnapshot()
+	t.mu.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	if closeSnapshot != nil {
+		defer closeSnapshot()
+	}
+	return BuildInclusionCert(rootHash, reader, key)
+}
+
+// BuildInclusionCert builds a proof from a fixed root hash and read store.
+// Snapshot-backed callers intentionally bypass Tree's decoded-node cache: cache
+// entries describe the latest committed RocksDB view, not the snapshot sequence.
+func BuildInclusionCert(rootHash disk.Hash, reader storage.ReadStore, key []byte) (*api.InclusionCert, error) {
 	if len(key) != api.StateTreeKeyLengthBytes {
 		return nil, fmt.Errorf("%w: got %d, want %d", api.ErrCertKeyLength, len(key), api.StateTreeKeyLengthBytes)
 	}
@@ -200,21 +238,91 @@ func (t *Tree) GetInclusionCert(key []byte) (*api.InclusionCert, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	snapshot, err := t.CreateSnapshot()
-	if err != nil {
-		return nil, err
+	root := stubForRoot(rootHash)
+	if root != nil {
+		if reader == nil {
+			return nil, fmt.Errorf("disk SMT persist: nil read store")
+		}
+		if err := materializeProofKey(&root, reader, diskKey); err != nil {
+			return nil, err
+		}
 	}
-	defer snapshot.Discard()
-	if err := snapshot.materializeKey(diskKey); err != nil {
-		return nil, err
-	}
-
 	var cert api.InclusionCert
-	if err := buildInclusionCert(snapshot.tree.Root(), diskKey, &cert); err != nil {
+	if err := buildInclusionCert(root, diskKey, &cert); err != nil {
 		return nil, err
 	}
 	return &cert, nil
+}
+
+func materializeProofKey(root **disk.Branch, reader storage.ReadStore, key disk.Key) error {
+	if root == nil || *root == nil {
+		return nil
+	}
+	return materializeProofSlot(root, reader, disk.RootNodeKey(), disk.PrefixBits{}, 0, key)
+}
+
+func materializeProofSlot(slot **disk.Branch, reader storage.ReadStore, nodeKey disk.NodeKey, prefix disk.PrefixBits, startBit int, key disk.Key) error {
+	if slot == nil || *slot == nil {
+		return nil
+	}
+	branch := *slot
+	if branch.Kind == disk.BranchKindStub {
+		loaded, err := loadProofBranch(reader, nodeKey, branch.StubHash)
+		if err != nil {
+			return err
+		}
+		*slot = loaded
+		branch = loaded
+	}
+	if branch.Kind != disk.BranchKindInternal {
+		return nil
+	}
+	node := branch.Internal
+	if node == nil {
+		return fmt.Errorf("disk SMT persist: malformed internal node")
+	}
+	firstDiv, err := firstDivergenceInPath(node.Path, key, startBit)
+	if err != nil {
+		return err
+	}
+	if firstDiv < node.Path.Len() {
+		return nil
+	}
+	split := startBit + node.Path.Len()
+	if split < 0 || split >= disk.KeyBits {
+		return fmt.Errorf("disk SMT persist: invalid internal split bit %d", split)
+	}
+	direction := disk.KeyBit(key, split)
+	childKey, childPrefix, childStart, err := childNodeKey(prefix, startBit, node.Path, direction)
+	if err != nil {
+		return err
+	}
+	if direction == 1 {
+		return materializeProofSlot(&node.Right, reader, childKey, childPrefix, childStart, key)
+	}
+	return materializeProofSlot(&node.Left, reader, childKey, childPrefix, childStart, key)
+}
+
+func loadProofBranch(reader storage.ReadStore, key disk.NodeKey, expectedHash disk.Hash) (*disk.Branch, error) {
+	encoded, ok, err := reader.GetNode(key)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("disk SMT persist: node %x missing from store", key.Bytes())
+	}
+	branch, err := decodeBranch(encoded)
+	if err != nil {
+		return nil, err
+	}
+	hash, err := branch.HashValue()
+	if err != nil {
+		return nil, err
+	}
+	if hash != expectedHash {
+		return nil, fmt.Errorf("disk SMT persist: node %x hash mismatch: got %x want %x", key.Bytes(), hash, expectedHash)
+	}
+	return branch, nil
 }
 
 type Snapshot struct {

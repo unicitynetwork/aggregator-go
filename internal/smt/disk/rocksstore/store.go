@@ -127,6 +127,16 @@ type Store struct {
 	counters storeCounters
 }
 
+type ReadSnapshot struct {
+	store    *Store
+	snapshot *C.rocksdb_snapshot_t
+	readOpts *C.rocksdb_readoptions_t
+	once     sync.Once
+}
+
+var _ storage.ReadSnapshotter = (*Store)(nil)
+var _ storage.ReadStore = (*ReadSnapshot)(nil)
+
 type storeCounters struct {
 	pointReads       atomic.Int64
 	metaPointReads   atomic.Int64
@@ -379,7 +389,71 @@ func (s *Store) GetNode(key disk.NodeKey) ([]byte, bool, error) {
 }
 
 func (s *Store) GetNodes(keys []disk.NodeKey, sortedInput bool) ([]storage.NodeReadResult, error) {
+	return s.getNodesWithReadOptions(keys, sortedInput, s.readOpts)
+}
+
+func (s *Store) NewReadSnapshot() (storage.ReadStore, func(), error) {
 	if s == nil || s.db == nil {
+		return nil, nil, fmt.Errorf("nil RocksDB SMT store")
+	}
+	readOpts := C.rocksdb_readoptions_create()
+	if readOpts == nil {
+		return nil, nil, fmt.Errorf("create RocksDB snapshot read options")
+	}
+	snapshot := C.rocksdb_create_snapshot(s.db)
+	if snapshot == nil {
+		C.rocksdb_readoptions_destroy(readOpts)
+		return nil, nil, fmt.Errorf("create RocksDB snapshot")
+	}
+	C.rocksdb_readoptions_set_snapshot(readOpts, snapshot)
+	readSnapshot := &ReadSnapshot{
+		store:    s,
+		snapshot: snapshot,
+		readOpts: readOpts,
+	}
+	return readSnapshot, readSnapshot.Close, nil
+}
+
+func (s *Store) NumSnapshots() uint64 {
+	return s.propertyUint("rocksdb.num-snapshots")
+}
+
+func (r *ReadSnapshot) Close() {
+	if r == nil {
+		return
+	}
+	r.once.Do(func() {
+		if r.readOpts != nil {
+			C.rocksdb_readoptions_destroy(r.readOpts)
+			r.readOpts = nil
+		}
+		if r.store != nil && r.store.db != nil && r.snapshot != nil {
+			C.rocksdb_release_snapshot(r.store.db, r.snapshot)
+			r.snapshot = nil
+		}
+	})
+}
+
+func (r *ReadSnapshot) GetNode(key disk.NodeKey) ([]byte, bool, error) {
+	if r == nil || r.store == nil || r.readOpts == nil {
+		return nil, false, fmt.Errorf("closed RocksDB SMT read snapshot")
+	}
+	value, ok, err := r.store.getCFWithReadOptions(r.store.nodesCF, nodeKey(key), readKindNode, r.readOpts)
+	if err != nil {
+		return nil, false, err
+	}
+	return value, ok, nil
+}
+
+func (r *ReadSnapshot) GetNodes(keys []disk.NodeKey, sortedInput bool) ([]storage.NodeReadResult, error) {
+	if r == nil || r.store == nil || r.readOpts == nil {
+		return nil, fmt.Errorf("closed RocksDB SMT read snapshot")
+	}
+	return r.store.getNodesWithReadOptions(keys, sortedInput, r.readOpts)
+}
+
+func (s *Store) getNodesWithReadOptions(keys []disk.NodeKey, sortedInput bool, readOpts *C.rocksdb_readoptions_t) ([]storage.NodeReadResult, error) {
+	if s == nil || s.db == nil || readOpts == nil {
 		return nil, fmt.Errorf("nil RocksDB SMT store")
 	}
 	results := make([]storage.NodeReadResult, len(keys))
@@ -387,7 +461,7 @@ func (s *Store) GetNodes(keys []disk.NodeKey, sortedInput bool) ([]storage.NodeR
 		return results, nil
 	}
 	if len(keys) == 1 {
-		value, ok, err := s.GetNode(keys[0])
+		value, ok, err := s.getCFWithReadOptions(s.nodesCF, nodeKey(keys[0]), readKindNode, readOpts)
 		if err != nil {
 			return nil, err
 		}
@@ -438,15 +512,15 @@ func (s *Store) GetNodes(keys []disk.NodeKey, sortedInput bool) ([]storage.NodeR
 
 	C.go_rocksdb_batched_multi_get_cf(
 		s.db,
-		s.readOpts,
+		readOpts,
 		s.nodesCF,
 		C.size_t(len(keys)),
 		(**C.char)(keyPtrsMem),
-			(*C.size_t)(keyLensMem),
-			(**C.rocksdb_pinnableslice_t)(valuesMem),
-			(**C.char)(errsMem),
-			boolToUChar(sortedInput),
-		)
+		(*C.size_t)(keyLensMem),
+		(**C.rocksdb_pinnableslice_t)(valuesMem),
+		(**C.char)(errsMem),
+		boolToUChar(sortedInput),
+	)
 	s.counters.pointReads.Add(int64(len(keys)))
 	s.counters.nodePointReads.Add(int64(len(keys)))
 
@@ -589,8 +663,15 @@ const (
 )
 
 func (s *Store) getCF(cf *C.rocksdb_column_family_handle_t, key []byte, kind readKind) ([]byte, bool, error) {
+	return s.getCFWithReadOptions(cf, key, kind, s.readOpts)
+}
+
+func (s *Store) getCFWithReadOptions(cf *C.rocksdb_column_family_handle_t, key []byte, kind readKind, readOpts *C.rocksdb_readoptions_t) ([]byte, bool, error) {
 	if s == nil || s.db == nil {
 		return nil, false, fmt.Errorf("nil RocksDB SMT store")
+	}
+	if readOpts == nil {
+		return nil, false, fmt.Errorf("nil RocksDB read options")
 	}
 	s.counters.pointReads.Add(1)
 	switch kind {
@@ -606,7 +687,7 @@ func (s *Store) getCF(cf *C.rocksdb_column_family_handle_t, key []byte, kind rea
 	keyPtr, keyLen := bytesPointer(key)
 	var valueLen C.size_t
 	var errPtr *C.char
-	value := C.rocksdb_get_cf(s.db, s.readOpts, cf, keyPtr, keyLen, &valueLen, &errPtr)
+	value := C.rocksdb_get_cf(s.db, readOpts, cf, keyPtr, keyLen, &valueLen, &errPtr)
 	if err := takeError(errPtr); err != nil {
 		return nil, false, fmt.Errorf("rocksdb get %q: %w", string(key), err)
 	}
@@ -626,6 +707,20 @@ func (s *Store) propertyUintCF(name string) uint64 {
 
 	var out C.uint64_t
 	if C.rocksdb_property_int_cf(s.db, s.nodesCF, cName, &out) != 0 {
+		return 0
+	}
+	return uint64(out)
+}
+
+func (s *Store) propertyUint(name string) uint64 {
+	if s == nil || s.db == nil {
+		return 0
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+
+	var out C.uint64_t
+	if C.rocksdb_property_int(s.db, cName, &out) != 0 {
 		return 0
 	}
 	return uint64(out)

@@ -1,6 +1,7 @@
 package round
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
@@ -267,6 +268,16 @@ func LoadRecoveredNodesIntoBackend(
 	if backend == nil {
 		return fmt.Errorf("SMT backend not initialized")
 	}
+	var expectedRoot []byte
+	if blockNumber != nil {
+		block, err := storage.BlockStorage().GetByNumber(ctx, blockNumber)
+		if err != nil {
+			return fmt.Errorf("failed to load recovered finalized block %s: %w", blockNumber.String(), err)
+		}
+		if block != nil {
+			expectedRoot = block.RootHash
+		}
+	}
 	if len(stateIDs) == 0 {
 		if blockNumber == nil {
 			return nil
@@ -279,7 +290,15 @@ func LoadRecoveredNodesIntoBackend(
 		if err != nil {
 			return fmt.Errorf("failed to create SMT snapshot: %w", err)
 		}
-		if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: blockNumber, RootHash: state.RootHash}); err != nil {
+		rootHash := state.RootHash
+		if expectedRoot != nil {
+			if !bytes.Equal(state.RootHash, expectedRoot) {
+				return fmt.Errorf("recovered empty block root mismatch: SMT=%s block=%s",
+					api.HexBytes(state.RootHash).String(), api.HexBytes(expectedRoot).String())
+			}
+			rootHash = expectedRoot
+		}
+		if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: blockNumber, RootHash: rootHash}); err != nil {
 			return fmt.Errorf("failed to advance recovered SMT metadata: %w", err)
 		}
 		log.WithContext(ctx).Info("Advanced recovered SMT metadata", "blockNumber", blockNumber.String())
@@ -333,7 +352,15 @@ func LoadRecoveredNodesIntoBackend(
 	if err := result.ValidateAllAccepted(len(leaves)); err != nil {
 		return fmt.Errorf("failed to add recovered nodes to SMT: %w", err)
 	}
-	if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: blockNumber, RootHash: result.CandidateRoot}); err != nil {
+	rootHash := result.CandidateRoot
+	if expectedRoot != nil {
+		if !bytes.Equal(result.CandidateRoot, expectedRoot) {
+			return fmt.Errorf("recovered SMT root mismatch: candidate=%s block=%s",
+				api.HexBytes(result.CandidateRoot).String(), api.HexBytes(expectedRoot).String())
+		}
+		rootHash = expectedRoot
+	}
+	if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: blockNumber, RootHash: rootHash}); err != nil {
 		return fmt.Errorf("failed to commit recovered nodes to SMT: %w", err)
 	}
 

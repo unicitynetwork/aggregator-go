@@ -3,6 +3,7 @@ package round
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -130,6 +131,187 @@ func TestDiskSMTStartupDiskAheadFails(t *testing.T) {
 	require.ErrorContains(t, err, "ahead of latest finalized block")
 }
 
+func TestDiskSMTStartupAllowsDiskAtUnfinalizedNextBlock(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackendForStartup(t)
+	leaf1 := diskStartupLeaf(1, 11)
+	root1 := commitDiskStartupLeaves(t, ctx, backend, 1, []smtbackend.LeafInput{leaf1})
+	leaf2 := diskStartupLeaf(2, 22)
+	root2 := commitDiskStartupLeaves(t, ctx, backend, 2, []smtbackend.LeafInput{leaf2})
+
+	unfinalized := diskStartupBlock(2, root2)
+	unfinalized.Finalized = false
+	storage := &diskStartupStorage{
+		blocks: newDiskStartupBlockStorage(diskStartupBlock(1, root1), unfinalized),
+	}
+	rm := newDiskStartupRoundManager(t, backend, storage)
+
+	block, err := rm.verifyDiskSMTStartup(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), block.Uint64())
+}
+
+func TestDiskSMTStartReplaysFinalizedBeforeRecoveringUnfinalizedBlock(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackendForStartup(t)
+	leaf1 := diskStartupLeaf(1, 11)
+	root1 := commitDiskStartupLeaves(t, ctx, backend, 1, []smtbackend.LeafInput{leaf1})
+	leaf2 := diskStartupLeaf(2, 22)
+	leaf3 := diskStartupLeaf(3, 33)
+
+	snapshot, err := backend.CreateSnapshot(ctx)
+	require.NoError(t, err)
+	result, err := snapshot.AddLeavesClassified(ctx, []smtbackend.LeafInput{leaf2})
+	require.NoError(t, err)
+	root2 := result.CandidateRoot
+	snapshot.Discard(ctx)
+
+	snapshot, err = backend.CreateSnapshot(ctx)
+	require.NoError(t, err)
+	result, err = snapshot.AddLeavesClassified(ctx, []smtbackend.LeafInput{leaf2, leaf3})
+	require.NoError(t, err)
+	root3 := result.CandidateRoot
+	snapshot.Discard(ctx)
+
+	block3 := diskStartupBlock(3, root3)
+	block3.Finalized = false
+	stateID2 := api.StateID(leaf2.Key)
+	stateID3 := api.StateID(leaf3.Key)
+	storage := &diskStartupStorage{
+		blocks: newDiskStartupBlockStorage(
+			diskStartupBlock(1, root1),
+			diskStartupBlock(2, root2),
+			block3,
+		),
+		records:    newDiskStartupBlockRecordsStorage(models.NewBlockRecords(api.NewBigIntFromUint64(2), []api.StateID{stateID2}), models.NewBlockRecords(api.NewBigIntFromUint64(3), []api.StateID{stateID3})),
+		smt:        newDiskStartupSMTStorage(models.NewSmtNode(leaf2.Key, leaf2.Value), models.NewSmtNode(leaf3.Key, leaf3.Value)),
+		aggregator: newDiskStartupAggregatorRecordStorage(stateID3),
+	}
+	rm := newDiskStartupRoundManager(t, backend, storage)
+	rm.commitmentQueue = &diskStartupCommitmentQueue{}
+
+	require.NoError(t, rm.Start(ctx))
+	state, err := backend.CommittedState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), state.BlockNumber.Uint64())
+	require.Equal(t, root3, state.RootHash)
+	latest, err := storage.BlockStorage().GetLatest(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), latest.Index.Uint64())
+	require.Equal(t, int64(3), rm.stateTracker.GetLastSyncedBlock().Int64())
+}
+
+func TestDiskSMTStartFinalizesAlreadyCommittedUnfinalizedBlock(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackendForStartup(t)
+	leaf1 := diskStartupLeaf(1, 11)
+	root1 := commitDiskStartupLeaves(t, ctx, backend, 1, []smtbackend.LeafInput{leaf1})
+	leaf2 := diskStartupLeaf(2, 22)
+	root2 := commitDiskStartupLeaves(t, ctx, backend, 2, []smtbackend.LeafInput{leaf2})
+
+	block2 := diskStartupBlock(2, root2)
+	block2.Finalized = false
+	stateID2 := api.StateID(leaf2.Key)
+	storage := &diskStartupStorage{
+		blocks:     newDiskStartupBlockStorage(diskStartupBlock(1, root1), block2),
+		records:    newDiskStartupBlockRecordsStorage(models.NewBlockRecords(api.NewBigIntFromUint64(2), []api.StateID{stateID2})),
+		smt:        newDiskStartupSMTStorage(models.NewSmtNode(leaf2.Key, leaf2.Value)),
+		aggregator: newDiskStartupAggregatorRecordStorage(stateID2),
+	}
+	rm := newDiskStartupRoundManager(t, backend, storage)
+	rm.commitmentQueue = &diskStartupCommitmentQueue{}
+
+	require.NoError(t, rm.Start(ctx))
+	state, err := backend.CommittedState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), state.BlockNumber.Uint64())
+	require.Equal(t, root2, state.RootHash)
+	finalized, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigIntFromUint64(2))
+	require.NoError(t, err)
+	require.NotNil(t, finalized)
+}
+
+func TestDiskSMTStartFinalizesAlreadyCommittedFirstBlock(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackendForStartup(t)
+	leaf := diskStartupLeaf(1, 11)
+	root := commitDiskStartupLeaves(t, ctx, backend, 1, []smtbackend.LeafInput{leaf})
+
+	block := diskStartupBlock(1, root)
+	block.Finalized = false
+	stateID := api.StateID(leaf.Key)
+	storage := &diskStartupStorage{
+		blocks:     newDiskStartupBlockStorage(block),
+		records:    newDiskStartupBlockRecordsStorage(models.NewBlockRecords(api.NewBigIntFromUint64(1), []api.StateID{stateID})),
+		smt:        newDiskStartupSMTStorage(models.NewSmtNode(leaf.Key, leaf.Value)),
+		aggregator: newDiskStartupAggregatorRecordStorage(stateID),
+	}
+	rm := newDiskStartupRoundManager(t, backend, storage)
+	rm.commitmentQueue = &diskStartupCommitmentQueue{}
+
+	require.NoError(t, rm.Start(ctx))
+	state, err := backend.CommittedState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), state.BlockNumber.Uint64())
+	require.Equal(t, root, state.RootHash)
+	finalized, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigIntFromUint64(1))
+	require.NoError(t, err)
+	require.NotNil(t, finalized)
+	require.Equal(t, int64(1), rm.stateTracker.GetLastSyncedBlock().Int64())
+}
+
+func TestDiskSMTStartAppliesUnfinalizedFirstBlockFromEmptyDisk(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackendForStartup(t)
+	leaf := diskStartupLeaf(1, 11)
+
+	snapshot, err := backend.CreateSnapshot(ctx)
+	require.NoError(t, err)
+	result, err := snapshot.AddLeavesClassified(ctx, []smtbackend.LeafInput{leaf})
+	require.NoError(t, err)
+	root := result.CandidateRoot
+	snapshot.Discard(ctx)
+
+	block := diskStartupBlock(1, root)
+	block.Finalized = false
+	stateID := api.StateID(leaf.Key)
+	storage := &diskStartupStorage{
+		blocks:     newDiskStartupBlockStorage(block),
+		records:    newDiskStartupBlockRecordsStorage(models.NewBlockRecords(api.NewBigIntFromUint64(1), []api.StateID{stateID})),
+		smt:        newDiskStartupSMTStorage(models.NewSmtNode(leaf.Key, leaf.Value)),
+		aggregator: newDiskStartupAggregatorRecordStorage(stateID),
+	}
+	rm := newDiskStartupRoundManager(t, backend, storage)
+	rm.commitmentQueue = &diskStartupCommitmentQueue{}
+
+	require.NoError(t, rm.Start(ctx))
+	state, err := backend.CommittedState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), state.BlockNumber.Uint64())
+	require.Equal(t, root, state.RootHash)
+	finalized, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigIntFromUint64(1))
+	require.NoError(t, err)
+	require.NotNil(t, finalized)
+	require.Equal(t, int64(1), rm.stateTracker.GetLastSyncedBlock().Int64())
+}
+
+func TestLoadRecoveredNodesIntoBackendRejectsRecoveredRootMismatch(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackendForStartup(t)
+	leaf := diskStartupLeaf(1, 11)
+	wrongRoot := append([]byte(nil), leaf.Value...)
+	wrongRoot[0] ^= 0xff
+	blockNumber := api.NewBigIntFromUint64(1)
+	storage := &diskStartupStorage{
+		blocks: newDiskStartupBlockStorage(diskStartupBlock(1, wrongRoot)),
+		smt:    newDiskStartupSMTStorage(models.NewSmtNode(leaf.Key, leaf.Value)),
+	}
+	rm := newDiskStartupRoundManager(t, backend, storage)
+
+	err := LoadRecoveredNodesIntoBackend(ctx, rm.logger, storage, backend, blockNumber, []api.StateID{api.StateID(leaf.Key)})
+	require.ErrorContains(t, err, "recovered SMT root mismatch")
+}
+
 func newTestDiskBackendForStartup(t *testing.T) *smtbackend.DiskBackend {
 	t.Helper()
 	store, err := diskstore.Open(t.TempDir(), diskstore.Options{})
@@ -195,12 +377,18 @@ func diskStartupBlock(number uint64, root []byte) *models.Block {
 }
 
 type diskStartupStorage struct {
-	blocks  *diskStartupBlockStorage
-	records *diskStartupBlockRecordsStorage
-	smt     *diskStartupSMTStorage
+	blocks     *diskStartupBlockStorage
+	records    *diskStartupBlockRecordsStorage
+	smt        *diskStartupSMTStorage
+	aggregator *diskStartupAggregatorRecordStorage
 }
 
-func (s *diskStartupStorage) AggregatorRecordStorage() interfaces.AggregatorRecordStorage { return nil }
+func (s *diskStartupStorage) AggregatorRecordStorage() interfaces.AggregatorRecordStorage {
+	if s.aggregator == nil {
+		return newDiskStartupAggregatorRecordStorage()
+	}
+	return s.aggregator
+}
 func (s *diskStartupStorage) BlockStorage() interfaces.BlockStorage {
 	if s.blocks == nil {
 		return newDiskStartupBlockStorage()
@@ -237,16 +425,26 @@ func newDiskStartupBlockStorage(blocks ...*models.Block) *diskStartupBlockStorag
 	out := &diskStartupBlockStorage{blocks: make(map[string]*models.Block)}
 	for _, block := range blocks {
 		out.blocks[block.Index.String()] = block
-		if out.latest == nil || block.Index.Cmp(out.latest.Index.Int) > 0 {
+		if block.Finalized && (out.latest == nil || block.Index.Cmp(out.latest.Index.Int) > 0) {
 			out.latest = block
 		}
 	}
 	return out
 }
 
-func (s *diskStartupBlockStorage) Store(context.Context, *models.Block) error { return nil }
+func (s *diskStartupBlockStorage) Store(_ context.Context, block *models.Block) error {
+	s.blocks[block.Index.String()] = block
+	if block.Finalized && (s.latest == nil || block.Index.Cmp(s.latest.Index.Int) > 0) {
+		s.latest = block
+	}
+	return nil
+}
 func (s *diskStartupBlockStorage) GetByNumber(_ context.Context, blockNumber *api.BigInt) (*models.Block, error) {
-	return s.blocks[blockNumber.String()], nil
+	block := s.blocks[blockNumber.String()]
+	if block == nil || !block.Finalized {
+		return nil, nil
+	}
+	return block, nil
 }
 func (s *diskStartupBlockStorage) GetLatest(context.Context) (*models.Block, error) {
 	return s.latest, nil
@@ -266,11 +464,84 @@ func (s *diskStartupBlockStorage) Count(context.Context) (int64, error) {
 func (s *diskStartupBlockStorage) GetRange(context.Context, *api.BigInt, *api.BigInt) ([]*models.Block, error) {
 	return nil, nil
 }
-func (s *diskStartupBlockStorage) SetFinalized(context.Context, *api.BigInt, bool) error {
+func (s *diskStartupBlockStorage) SetFinalized(_ context.Context, blockNumber *api.BigInt, finalized bool) error {
+	block := s.blocks[blockNumber.String()]
+	if block == nil {
+		return errors.New("block not found")
+	}
+	block.Finalized = finalized
+	s.latest = nil
+	for _, candidate := range s.blocks {
+		if candidate.Finalized && (s.latest == nil || candidate.Index.Cmp(s.latest.Index.Int) > 0) {
+			s.latest = candidate
+		}
+	}
 	return nil
 }
 func (s *diskStartupBlockStorage) GetUnfinalized(context.Context) ([]*models.Block, error) {
-	return nil, nil
+	blocks := make([]*models.Block, 0)
+	for _, block := range s.blocks {
+		if !block.Finalized {
+			blocks = append(blocks, block)
+		}
+	}
+	sort.Slice(blocks, func(i, j int) bool {
+		return blocks[i].Index.Cmp(blocks[j].Index.Int) < 0
+	})
+	return blocks, nil
+}
+
+type diskStartupAggregatorRecordStorage struct {
+	records map[string]*models.AggregatorRecord
+}
+
+func newDiskStartupAggregatorRecordStorage(stateIDs ...api.StateID) *diskStartupAggregatorRecordStorage {
+	out := &diskStartupAggregatorRecordStorage{records: make(map[string]*models.AggregatorRecord)}
+	for i, stateID := range stateIDs {
+		out.records[stateID.String()] = &models.AggregatorRecord{
+			StateID:   stateID,
+			LeafIndex: api.NewBigIntFromUint64(uint64(i)),
+		}
+	}
+	return out
+}
+
+func (s *diskStartupAggregatorRecordStorage) Store(_ context.Context, record *models.AggregatorRecord) error {
+	s.records[record.StateID.String()] = record
+	return nil
+}
+
+func (s *diskStartupAggregatorRecordStorage) StoreBatch(_ context.Context, records []*models.AggregatorRecord) error {
+	for _, record := range records {
+		s.records[record.StateID.String()] = record
+	}
+	return nil
+}
+
+func (s *diskStartupAggregatorRecordStorage) GetByStateID(_ context.Context, stateID api.StateID) (*models.AggregatorRecord, error) {
+	return s.records[stateID.String()], nil
+}
+
+func (s *diskStartupAggregatorRecordStorage) GetByBlockNumber(context.Context, *api.BigInt) ([]*models.AggregatorRecord, error) {
+	records := make([]*models.AggregatorRecord, 0, len(s.records))
+	for _, record := range s.records {
+		records = append(records, record)
+	}
+	return records, nil
+}
+
+func (s *diskStartupAggregatorRecordStorage) Count(context.Context) (int64, error) {
+	return int64(len(s.records)), nil
+}
+
+func (s *diskStartupAggregatorRecordStorage) GetExistingStateIDs(_ context.Context, stateIDs []string) (map[string]bool, error) {
+	existing := make(map[string]bool, len(stateIDs))
+	for _, stateID := range stateIDs {
+		if s.records[stateID] != nil {
+			existing[stateID] = true
+		}
+	}
+	return existing, nil
 }
 
 type diskStartupBlockRecordsStorage struct {
@@ -347,13 +618,75 @@ func (s *diskStartupSMTStorage) GetAll(context.Context) ([]*models.SmtNode, erro
 func (s *diskStartupSMTStorage) GetChunked(context.Context, int, int) ([]*models.SmtNode, error) {
 	return nil, errors.New("not implemented")
 }
-func (s *diskStartupSMTStorage) GetExistingKeys(context.Context, []string) (map[string]bool, error) {
-	return nil, errors.New("not implemented")
+func (s *diskStartupSMTStorage) GetExistingKeys(_ context.Context, keys []string) (map[string]bool, error) {
+	existing := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		if s.nodes[key] != nil {
+			existing[key] = true
+		}
+	}
+	return existing, nil
+}
+
+type diskStartupCommitmentQueue struct{}
+
+func (q *diskStartupCommitmentQueue) Store(context.Context, *models.CertificationRequest) error {
+	return nil
+}
+
+func (q *diskStartupCommitmentQueue) GetByStateID(context.Context, api.StateID) (*models.CertificationRequest, error) {
+	return nil, nil
+}
+
+func (q *diskStartupCommitmentQueue) GetUnprocessedBatch(context.Context, int) ([]*models.CertificationRequest, error) {
+	return nil, nil
+}
+
+func (q *diskStartupCommitmentQueue) GetUnprocessedBatchWithCursor(context.Context, string, int) ([]*models.CertificationRequest, string, error) {
+	return nil, "", nil
+}
+
+func (q *diskStartupCommitmentQueue) StreamCertificationRequests(context.Context, chan<- *models.CertificationRequest) error {
+	return nil
+}
+
+func (q *diskStartupCommitmentQueue) MarkProcessed(context.Context, []interfaces.CertificationRequestAck) error {
+	return nil
+}
+
+func (q *diskStartupCommitmentQueue) Delete(context.Context, []api.StateID) error {
+	return nil
+}
+
+func (q *diskStartupCommitmentQueue) Count(context.Context) (int64, error) {
+	return 0, nil
+}
+
+func (q *diskStartupCommitmentQueue) CountUnprocessed(context.Context) (int64, error) {
+	return 0, nil
+}
+
+func (q *diskStartupCommitmentQueue) GetAllPending(context.Context) ([]*models.CertificationRequest, error) {
+	return nil, nil
+}
+
+func (q *diskStartupCommitmentQueue) GetByStateIDs(context.Context, []api.StateID) (map[string]*models.CertificationRequest, error) {
+	return nil, nil
+}
+
+func (q *diskStartupCommitmentQueue) Initialize(context.Context) error {
+	return nil
+}
+
+func (q *diskStartupCommitmentQueue) Close(context.Context) error {
+	return nil
 }
 
 var (
-	_ interfaces.Storage             = (*diskStartupStorage)(nil)
-	_ interfaces.BlockStorage        = (*diskStartupBlockStorage)(nil)
-	_ interfaces.BlockRecordsStorage = (*diskStartupBlockRecordsStorage)(nil)
-	_ interfaces.SmtStorage          = (*diskStartupSMTStorage)(nil)
+	_ interfaces.Storage                 = (*diskStartupStorage)(nil)
+	_ interfaces.BlockStorage            = (*diskStartupBlockStorage)(nil)
+	_ interfaces.BlockRecordsStorage     = (*diskStartupBlockRecordsStorage)(nil)
+	_ interfaces.SmtStorage              = (*diskStartupSMTStorage)(nil)
+	_ interfaces.AggregatorRecordStorage = (*diskStartupAggregatorRecordStorage)(nil)
+	_ interfaces.CommitmentQueue         = (*diskStartupCommitmentQueue)(nil)
 )
