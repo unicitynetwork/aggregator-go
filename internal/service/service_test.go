@@ -36,6 +36,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -609,7 +610,13 @@ func (s *stubRoundManager) Activate(context.Context) error { return nil }
 func (s *stubRoundManager) Deactivate(context.Context) error {
 	return nil
 }
-func (s *stubRoundManager) GetSMT() *smt.ThreadSafeSMT              { return s.smt }
+func (s *stubRoundManager) GetSMT() *smt.ThreadSafeSMT { return s.smt }
+func (s *stubRoundManager) GetSMTBackend() smtbackend.Backend {
+	if s.smt == nil {
+		return nil
+	}
+	return smtbackend.NewMemoryBackend(s.smt)
+}
 func (s *stubRoundManager) CheckParentHealth(context.Context) error { return nil }
 func (s *stubRoundManager) FinalizationReadLock() func()            { return func() {} }
 func (s *stubRoundManager) GetKnownNotReadyBlock(api.StateID) (*models.Block, bool) {

@@ -227,11 +227,11 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		return nil, fmt.Errorf("invalid state ID: %w", err)
 	}
 
-	smtInstance := as.roundManager.GetSMT()
-	if smtInstance == nil {
+	smtBackend := as.roundManager.GetSMTBackend()
+	if smtBackend == nil {
 		return nil, fmt.Errorf("merkle tree not initialized")
 	}
-	if keyLen := smtInstance.GetKeyLength(); keyLen != api.StateTreeKeyLengthBits {
+	if keyLen := smtBackend.KeyLength(); keyLen != api.StateTreeKeyLengthBits {
 		return nil, fmt.Errorf("unexpected SMT key length: got %d bits, want %d", keyLen, api.StateTreeKeyLengthBits)
 	}
 
@@ -248,7 +248,11 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 
 	// Bind the UC via the block whose stored rootHash matches the current
 	// raw 32-byte SMT root (which also lives in UC.IR.h).
-	rootHashRaw := api.HexBytes(smtInstance.GetRootHashRaw())
+	rootHash, err := smtBackend.RootHashRaw(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get SMT root hash: %w", err)
+	}
+	rootHashRaw := api.HexBytes(rootHash)
 	block, err := as.storage.BlockStorage().GetLatestByRootHash(ctx, rootHashRaw)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get latest block by root hash: %w", err)
@@ -274,7 +278,7 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		return nil, fmt.Errorf("invalid aggregator record version got %d expected 2", record.Version)
 	}
 
-	childCert, err := smtInstance.GetInclusionCert(key)
+	childCert, err := smtBackend.GetInclusionCert(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build inclusion cert for state ID %s: %w", req.StateID, err)
 	}
@@ -284,7 +288,10 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		if block.ParentFragment == nil {
 			return nil, fmt.Errorf("current child block %s is missing parent fragment", block.Index.String())
 		}
-		childRoot := smtInstance.GetRootHashRaw()
+		childRoot, err := smtBackend.RootHashRaw(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get child SMT root hash: %w", err)
+		}
 		cert, err = api.ComposeInclusionCert(block.ParentFragment, childCert, childRoot)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compose child and parent inclusion certs: %w", err)

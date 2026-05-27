@@ -76,7 +76,7 @@ func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 		Number:      api.NewBigInt(big.NewInt(1)),
 		State:       RoundStateProcessing,
 		Commitments: commitments,
-		Snapshot:    rm.smt.CreateSnapshot(),
+		Snapshot:    testRMSnapshot(t, ctx, rm),
 	}
 
 	// Process commitments to populate PendingLeaves
@@ -107,7 +107,7 @@ func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 	require.Equal(t, recordCountBefore+2, recordCount, "Should have added 2 pre-existing aggregator records")
 
 	// Get root hash from snapshot
-	rootHash := rm.currentRound.Snapshot.GetRootHash()
+	rootHash := testSnapshotRootHex(t, ctx, rm.currentRound.Snapshot)
 	require.NotEmpty(t, rootHash)
 	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
 	require.NoError(t, err)
@@ -159,7 +159,7 @@ func (s *FinalizeDuplicateTestSuite) Test2_NoDuplicates() {
 		Number:      api.NewBigInt(big.NewInt(2)),
 		State:       RoundStateProcessing,
 		Commitments: commitments,
-		Snapshot:    rm.smt.CreateSnapshot(),
+		Snapshot:    testRMSnapshot(t, ctx, rm),
 	}
 
 	rm.roundMutex.Lock()
@@ -167,7 +167,7 @@ func (s *FinalizeDuplicateTestSuite) Test2_NoDuplicates() {
 	rm.roundMutex.Unlock()
 	require.NoError(t, err)
 
-	rootHash := rm.currentRound.Snapshot.GetRootHash()
+	rootHash := testSnapshotRootHex(t, ctx, rm.currentRound.Snapshot)
 	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
 	require.NoError(t, err)
 
@@ -210,7 +210,7 @@ func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 		Number:      api.NewBigInt(big.NewInt(3)),
 		State:       RoundStateProcessing,
 		Commitments: commitments,
-		Snapshot:    rm.smt.CreateSnapshot(),
+		Snapshot:    testRMSnapshot(t, ctx, rm),
 	}
 
 	rm.roundMutex.Lock()
@@ -232,7 +232,7 @@ func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 	err = s.storage.AggregatorRecordStorage().StoreBatch(ctx, allRecords)
 	require.NoError(t, err)
 
-	rootHash := rm.currentRound.Snapshot.GetRootHash()
+	rootHash := testSnapshotRootHex(t, ctx, rm.currentRound.Snapshot)
 	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
 	require.NoError(t, err)
 
@@ -281,7 +281,7 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 		Number:      api.NewBigInt(big.NewInt(4)),
 		State:       RoundStateProcessing,
 		Commitments: commitments,
-		Snapshot:    rm.smt.CreateSnapshot(),
+		Snapshot:    testRMSnapshot(t, ctx, rm),
 	}
 
 	rm.roundMutex.Lock()
@@ -289,7 +289,7 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 	rm.roundMutex.Unlock()
 	require.NoError(t, err)
 
-	rootHash := rm.currentRound.Snapshot.GetRootHash()
+	rootHash := testSnapshotRootHex(t, ctx, rm.currentRound.Snapshot)
 	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
 	require.NoError(t, err)
 
@@ -362,7 +362,7 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 		Number:      api.NewBigInt(big.NewInt(5)),
 		State:       RoundStateProcessing,
 		Commitments: commitments,
-		Snapshot:    rm.smt.CreateSnapshot(),
+		Snapshot:    testRMSnapshot(t, ctx, rm),
 	}
 
 	rm.roundMutex.Lock()
@@ -370,7 +370,7 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	rm.roundMutex.Unlock()
 	require.NoError(t, err)
 
-	rootHash := rm.currentRound.Snapshot.GetRootHash()
+	rootHash := testSnapshotRootHex(t, ctx, rm.currentRound.Snapshot)
 	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
 	require.NoError(t, err)
 
@@ -450,7 +450,7 @@ func (s *FinalizeDuplicateTestSuite) Test6_BlockRecordsMatchPendingCommitmentsOn
 		Number:      api.NewBigInt(big.NewInt(6)),
 		State:       RoundStateProcessing,
 		Commitments: commitments,
-		Snapshot:    rm.smt.CreateSnapshot(),
+		Snapshot:    testRMSnapshot(t, ctx, rm),
 	}
 
 	rm.roundMutex.Lock()
@@ -469,7 +469,7 @@ func (s *FinalizeDuplicateTestSuite) Test6_BlockRecordsMatchPendingCommitmentsOn
 	recordCountBefore, err := s.storage.AggregatorRecordStorage().Count(ctx)
 	require.NoError(t, err)
 
-	rootHash := rm.currentRound.Snapshot.GetRootHash()
+	rootHash := testSnapshotRootHex(t, ctx, rm.currentRound.Snapshot)
 	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
 	require.NoError(t, err)
 

@@ -19,6 +19,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -45,12 +46,13 @@ type ParentRound struct {
 
 // ParentRoundManager handles round processing for parent aggregator mode
 type ParentRoundManager struct {
-	config    *config.Config
-	logger    *logger.Logger
-	storage   interfaces.Storage
-	parentSMT *smt.ThreadSafeSMT
-	bftClient bft.BFTClient
-	eventBus  *events.EventBus
+	config     *config.Config
+	logger     *logger.Logger
+	storage    interfaces.Storage
+	parentSMT  *smt.ThreadSafeSMT
+	smtBackend *smtbackend.MemoryBackend
+	bftClient  bft.BFTClient
+	eventBus   *events.EventBus
 
 	// Round management
 	currentRound *ParentRound
@@ -79,12 +81,13 @@ func NewParentRoundManager(
 	trustBaseProvider interfaces.TrustBaseProvider,
 ) (*ParentRoundManager, error) {
 	prm := &ParentRoundManager{
-		config:    cfg,
-		logger:    logger,
-		storage:   storage,
-		parentSMT: threadSafeSmt,
-		stopChan:  make(chan struct{}),
-		eventBus:  eventBus,
+		config:     cfg,
+		logger:     logger,
+		storage:    storage,
+		parentSMT:  threadSafeSmt,
+		smtBackend: smtbackend.NewMemoryBackend(threadSafeSmt),
+		stopChan:   make(chan struct{}),
+		eventBus:   eventBus,
 	}
 
 	if prm.storage != nil && prm.storage.SmtStorage() != nil {
@@ -395,6 +398,10 @@ func (prm *ParentRoundManager) GetSMT() *smt.ThreadSafeSMT {
 	return prm.parentSMT
 }
 
+func (prm *ParentRoundManager) GetSMTBackend() smtbackend.Backend {
+	return prm.smtBackend
+}
+
 // IsReady reports whether the parent round manager is ready to accept shard roots.
 func (prm *ParentRoundManager) IsReady() bool {
 	return prm.ready.Load()
@@ -569,6 +576,7 @@ func (prm *ParentRoundManager) FinalizeBlock(ctx context.Context, block *models.
 			"blockNumber", block.Index.String())
 
 		snapshot.Commit(prm.parentSMT)
+		prm.smtBackend.SetCommittedBlockNumber(block.Index)
 
 		prm.logger.WithContext(ctx).Info("Successfully committed parent SMT snapshot to main tree",
 			"blockNumber", block.Index.String())
@@ -657,6 +665,7 @@ func (prm *ParentRoundManager) reconstructParentSMT(ctx context.Context) error {
 		prm.logger.WithContext(ctx).Info("Parent SMT root hash verification passed",
 			"rootHash", reconstructedHash.String(),
 			"blockNumber", latestBlock.Index.String())
+		prm.smtBackend.SetCommittedBlockNumber(latestBlock.Index)
 	}
 
 	return nil

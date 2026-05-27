@@ -24,6 +24,7 @@ type Config struct {
 	Database   DatabaseConfig   `mapstructure:"database"`
 	Redis      RedisConfig      `mapstructure:"redis"`
 	Storage    StorageConfig    `mapstructure:"storage"`
+	SMT        SMTConfig        `mapstructure:"smt"`
 	HA         HAConfig         `mapstructure:"ha"`
 	Logging    LoggingConfig    `mapstructure:"logging"`
 	BFT        BFTConfig        `mapstructure:"bft"`
@@ -142,6 +143,41 @@ type StorageConfig struct {
 	RedisMaxBatchSize      int           `mapstructure:"redis_max_batch_size"`
 	RedisCleanupInterval   time.Duration `mapstructure:"redis_cleanup_interval"`
 	RedisMaxStreamLength   int64         `mapstructure:"redis_max_stream_length"`
+}
+
+type SMTBackend string
+
+const (
+	SMTBackendMemory  SMTBackend = "memory"
+	SMTBackendRocksDB SMTBackend = "rocksdb"
+)
+
+func (b SMTBackend) OrDefault() SMTBackend {
+	if b == "" {
+		return SMTBackendMemory
+	}
+	return b
+}
+
+func (b SMTBackend) IsValid() bool {
+	switch b.OrDefault() {
+	case SMTBackendMemory, SMTBackendRocksDB:
+		return true
+	default:
+		return false
+	}
+}
+
+type SMTConfig struct {
+	Backend                  SMTBackend `mapstructure:"backend"`
+	DiskPath                 string     `mapstructure:"disk_path"`
+	RocksDBCacheMB           int        `mapstructure:"rocksdb_cache_mb"`
+	RocksDBBGJobs            int        `mapstructure:"rocksdb_bg_jobs"`
+	RocksDBSubcompactions    int        `mapstructure:"rocksdb_subcompactions"`
+	RocksDBBloomBits         float64    `mapstructure:"rocksdb_bloom_bits"`
+	RocksDBMemTableMB        int        `mapstructure:"rocksdb_memtable_mb"`
+	MaterializeWorkers       int        `mapstructure:"materialize_workers"`
+	StartupReplayLimitBlocks int        `mapstructure:"startup_replay_limit_blocks"`
 }
 
 // ShardingMode represents the aggregator operating mode
@@ -365,6 +401,17 @@ func Load() (*Config, error) {
 			RedisCleanupInterval:   getEnvDurationOrDefault("REDIS_CLEANUP_INTERVAL", "5m"),
 			RedisMaxStreamLength:   int64(getEnvIntOrDefault("REDIS_MAX_STREAM_LENGTH", 1000000)),
 		},
+		SMT: SMTConfig{
+			Backend:                  SMTBackend(getEnvOrDefault("SMT_BACKEND", string(SMTBackendMemory))),
+			DiskPath:                 getEnvOrDefault("SMT_DISK_PATH", ""),
+			RocksDBCacheMB:           getEnvIntOrDefault("SMT_ROCKSDB_CACHE_MB", 1024),
+			RocksDBBGJobs:            getEnvIntOrDefault("SMT_ROCKSDB_BG_JOBS", 8),
+			RocksDBSubcompactions:    getEnvIntOrDefault("SMT_ROCKSDB_SUBCOMPACTIONS", 4),
+			RocksDBBloomBits:         getEnvFloatOrDefault("SMT_ROCKSDB_BLOOM_BITS", 10),
+			RocksDBMemTableMB:        getEnvIntOrDefault("SMT_ROCKSDB_MEMTABLE_MB", 64),
+			MaterializeWorkers:       getEnvIntOrDefault("SMT_MATERIALIZE_WORKERS", 64),
+			StartupReplayLimitBlocks: getEnvIntOrDefault("SMT_STARTUP_REPLAY_LIMIT_BLOCKS", 100),
+		},
 		Sharding: ShardingConfig{
 			Mode:                       ShardingMode(getEnvOrDefault("SHARDING_MODE", "standalone")),
 			ShardIDLength:              getEnvIntOrDefault("SHARD_ID_LENGTH", 4),
@@ -467,6 +514,41 @@ func (c *Config) Validate() error {
 	if c.Database.FinalizationInsertChunkSize > 0 && c.Database.FinalizationInsertChunkWorkers <= 0 {
 		return fmt.Errorf("MONGODB_FINALIZATION_INSERT_CHUNK_WORKERS must be positive when chunking is enabled")
 	}
+	if !c.SMT.Backend.IsValid() {
+		return fmt.Errorf("invalid SMT_BACKEND: %s, must be one of: memory, rocksdb", c.SMT.Backend)
+	}
+	if c.SMT.RocksDBCacheMB < 0 {
+		return fmt.Errorf("SMT_ROCKSDB_CACHE_MB must be non-negative")
+	}
+	if c.SMT.RocksDBBGJobs < 0 {
+		return fmt.Errorf("SMT_ROCKSDB_BG_JOBS must be non-negative")
+	}
+	if c.SMT.RocksDBSubcompactions < 0 {
+		return fmt.Errorf("SMT_ROCKSDB_SUBCOMPACTIONS must be non-negative")
+	}
+	if c.SMT.RocksDBBloomBits < 0 {
+		return fmt.Errorf("SMT_ROCKSDB_BLOOM_BITS must be non-negative")
+	}
+	if c.SMT.RocksDBMemTableMB < 0 {
+		return fmt.Errorf("SMT_ROCKSDB_MEMTABLE_MB must be non-negative")
+	}
+	if c.SMT.MaterializeWorkers < 0 {
+		return fmt.Errorf("SMT_MATERIALIZE_WORKERS must be non-negative")
+	}
+	if c.SMT.StartupReplayLimitBlocks < 0 {
+		return fmt.Errorf("SMT_STARTUP_REPLAY_LIMIT_BLOCKS must be non-negative")
+	}
+	if c.SMT.Backend.OrDefault() == SMTBackendRocksDB {
+		if c.SMT.DiskPath == "" {
+			return fmt.Errorf("SMT_DISK_PATH is required when SMT_BACKEND=rocksdb")
+		}
+		if c.HA.Enabled {
+			return fmt.Errorf("SMT_BACKEND=rocksdb is not supported with HA enabled yet; see docs/disk-backed-smt-ha-replication.md")
+		}
+		if c.Sharding.Mode == ShardingModeParent || c.Sharding.Mode == ShardingModeChild {
+			return fmt.Errorf("SMT_BACKEND=rocksdb is not supported with SHARDING_MODE=%s in this phase", c.Sharding.Mode)
+		}
+	}
 
 	// Validate log level
 	validLevels := []string{"debug", "info", "warn", "error", "fatal", "panic"}
@@ -538,6 +620,15 @@ func getEnvBoolOrDefault(key string, defaultValue bool) bool {
 	if value := os.Getenv(key); value != "" {
 		if boolVal, err := strconv.ParseBool(value); err == nil {
 			return boolVal
+		}
+	}
+	return defaultValue
+}
+
+func getEnvFloatOrDefault(key string, defaultValue float64) float64 {
+	if value := os.Getenv(key); value != "" {
+		if floatVal, err := strconv.ParseFloat(value, 64); err == nil {
+			return floatVal
 		}
 	}
 	return defaultValue

@@ -20,6 +20,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/redis"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -60,10 +61,10 @@ type Round struct {
 	// Raw 32-byte SMT root (no algorithm-id prefix), matching the V2 wire format.
 	PendingRootHash api.HexBytes
 	// SMT snapshot for this round - allows accumulating changes before committing
-	Snapshot *smt.ThreadSafeSmtSnapshot
+	Snapshot smtbackend.Snapshot
 	// Store data for persistence during FinalizeBlock
 	// PendingLeaves contains only leaves that were successfully added to the SMT
-	PendingLeaves []*smt.Leaf
+	PendingLeaves []smtbackend.LeafInput
 	// PendingCommitments contains only commitments whose leaves were successfully added
 	// This is used for creating aggregator records (must match PendingLeaves)
 	PendingCommitments []*models.CertificationRequest
@@ -96,6 +97,7 @@ type RoundManager struct {
 	commitmentQueue interfaces.CommitmentQueue
 	storage         interfaces.Storage
 	smt             *smt.ThreadSafeSMT
+	smtBackend      smtbackend.Backend
 	rootClient      RootAggregatorClient
 	bftClient       bft.BFTClient
 	stateTracker    *state.Tracker
@@ -173,12 +175,42 @@ func NewRoundManager(
 	threadSafeSmt *smt.ThreadSafeSMT,
 	trustBaseProvider interfaces.TrustBaseProvider,
 ) (*RoundManager, error) {
+	smtBackend, err := newConfiguredSMTBackend(cfg, threadSafeSmt)
+	if err != nil {
+		return nil, err
+	}
+	rm, err := NewRoundManagerWithBackend(ctx, cfg, logger, commitmentQueue, storage, rootAggregatorClient, stateTracker, luc, eventBus, threadSafeSmt, smtBackend, trustBaseProvider)
+	if err != nil {
+		_ = smtBackend.Close()
+		return nil, err
+	}
+	return rm, nil
+}
+
+func NewRoundManagerWithBackend(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *logger.Logger,
+	commitmentQueue interfaces.CommitmentQueue,
+	storage interfaces.Storage,
+	rootAggregatorClient RootAggregatorClient,
+	stateTracker *state.Tracker,
+	luc *types.UnicityCertificate,
+	eventBus *events.EventBus,
+	threadSafeSmt *smt.ThreadSafeSMT,
+	smtBackend smtbackend.Backend,
+	trustBaseProvider interfaces.TrustBaseProvider,
+) (*RoundManager, error) {
+	if smtBackend == nil {
+		smtBackend = smtbackend.NewMemoryBackend(threadSafeSmt)
+	}
 	rm := &RoundManager{
 		config:              cfg,
 		logger:              logger,
 		commitmentQueue:     commitmentQueue,
 		storage:             storage,
 		smt:                 threadSafeSmt,
+		smtBackend:          smtBackend,
 		rootClient:          rootAggregatorClient,
 		stateTracker:        stateTracker,
 		eventBus:            eventBus,
@@ -245,7 +277,7 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 			"stateCount", len(recoveryResult.StateIDs))
 	}
 
-	_, err = rm.restoreSmtFromStorage(ctx)
+	_, err = rm.restoreOrVerifySMT(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to restore SMT from storage: %w", err)
 	}
@@ -264,6 +296,12 @@ func (rm *RoundManager) Stop(ctx context.Context) error {
 
 	// Wait for goroutines to finish
 	rm.wg.Wait()
+
+	if rm.smtBackend != nil {
+		if err := rm.smtBackend.Close(); err != nil {
+			return fmt.Errorf("failed to close SMT backend: %w", err)
+		}
+	}
 
 	rm.logger.Info("Round Manager stopped")
 	return nil
@@ -325,6 +363,10 @@ func (rm *RoundManager) GetStreamingMetrics() map[string]interface{} {
 // GetSMT returns the thread-safe SMT instance for inclusion proof generation
 func (rm *RoundManager) GetSMT() *smt.ThreadSafeSMT {
 	return rm.smt
+}
+
+func (rm *RoundManager) GetSMTBackend() smtbackend.Backend {
+	return rm.smtBackend
 }
 
 // FinalizationReadLock blocks only during the commit+finalize window to avoid root/block mismatches in proofs.
@@ -413,9 +455,9 @@ var ErrDeactivated = fmt.Errorf("round manager deactivated")
 func (rm *RoundManager) StartNewRoundWithSnapshot(
 	ctx context.Context,
 	roundNumber *api.BigInt,
-	snapshot *smt.ThreadSafeSmtSnapshot,
+	snapshot smtbackend.Snapshot,
 	commitments []*models.CertificationRequest,
-	leaves []*smt.Leaf,
+	leaves []smtbackend.LeafInput,
 ) error {
 	rm.logger.WithContext(ctx).Info("StartNewRound called",
 		"roundNumber", roundNumber.String(),
@@ -439,13 +481,18 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 
 	preCollected := snapshot != nil
 	if snapshot == nil {
-		snapshot = rm.smt.CreateSnapshot()
+		var err error
+		snapshot, err = rm.smtBackend.CreateSnapshot(ctx)
+		if err != nil {
+			rm.roundMutex.Unlock()
+			return fmt.Errorf("failed to create SMT snapshot: %w", err)
+		}
 	}
 	if commitments == nil {
 		commitments = make([]*models.CertificationRequest, 0)
 	}
 	if leaves == nil {
-		leaves = make([]*smt.Leaf, 0)
+		leaves = make([]smtbackend.LeafInput, 0)
 	}
 
 	rm.currentRound = &Round{
@@ -564,7 +611,12 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 	commitmentCount := len(rm.currentRound.Commitments)
 	var rootHash api.HexBytes
 	if rm.currentRound.Snapshot != nil {
-		rootHash = rm.currentRound.Snapshot.GetRootHashRaw()
+		rootHashRaw, err := rm.currentRound.Snapshot.RootHashRaw(ctx)
+		if err != nil {
+			rm.roundMutex.Unlock()
+			return fmt.Errorf("failed to get SMT snapshot root: %w", err)
+		}
+		rootHash = rootHashRaw
 	}
 	rm.currentRound.PendingRootHash = rootHash
 	rm.currentRound.ProposalTime = time.Now()
@@ -724,6 +776,11 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 
 	rm.logger.Info("Found SMT nodes in storage, starting restoration", "totalNodes", totalCount)
 
+	snapshot, err := rm.smtBackend.CreateSnapshot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create SMT restoration snapshot: %w", err)
+	}
+
 	const chunkSize = 10000
 	offset := 0
 	restoredCount := 0
@@ -739,21 +796,21 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 			break // No more data
 		}
 
-		// Convert storage nodes to SMT leaves
-		leaves := make([]*smt.Leaf, len(nodes))
+		// Convert storage nodes to backend leaf inputs. Keys in storage are raw
+		// fixed-width SMT keys, which is the format the disk backend will use too.
+		leaves := make([]smtbackend.LeafInput, len(nodes))
 		for i, node := range nodes {
-			// Restore the sentinel-bit path from the fixed-bytes storage key.
-			// Keys were written via api.PathToFixedBytes (which clears the
-			// sentinel bit); FixedBytesToPath is the inverse and the SMT
-			// AddLeaf path strictly requires the sentinel bit to be set.
-			path, err := api.FixedBytesToPath(node.Key, rm.smt.GetKeyLength())
-			if err != nil {
-				return nil, fmt.Errorf("failed to convert SMT key to path: %w", err)
+			leaves[i] = smtbackend.LeafInput{
+				Key:   node.Key,
+				Value: node.Value,
 			}
-			leaves[i] = smt.NewLeaf(path, node.Value)
 		}
 
-		if _, err := rm.smt.AddLeaves(leaves); err != nil {
+		result, err := snapshot.AddLeavesClassified(ctx, leaves)
+		if err != nil {
+			return nil, fmt.Errorf("failed to restore SMT leaves at offset %d: %w", offset, err)
+		}
+		if err := result.ValidateAllAccepted(len(leaves)); err != nil {
 			return nil, fmt.Errorf("failed to restore SMT leaves at offset %d: %w", offset, err)
 		}
 
@@ -773,7 +830,11 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 	}
 
 	// Log final state (raw 32-byte root matching UC.IR.h / V2 wire format)
-	finalRootHash := api.HexBytes(rm.smt.GetRootHashRaw())
+	finalRootHashRaw, err := snapshot.RootHashRaw(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get restored SMT root hash: %w", err)
+	}
+	finalRootHash := api.HexBytes(finalRootHashRaw)
 	rm.logger.Info("SMT restoration complete",
 		"restoredNodes", restoredCount,
 		"totalNodes", totalCount,
@@ -791,6 +852,9 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 		return nil, fmt.Errorf("failed to get latest block for SMT verification: %w", err)
 	} else if latestBlock == nil {
 		rm.logger.Info("No latest block found, skipping SMT verification")
+		if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{}); err != nil {
+			return nil, fmt.Errorf("failed to commit restored SMT snapshot: %w", err)
+		}
 		return nil, nil
 	} else {
 		if !bytes.Equal(finalRootHash, latestBlock.RootHash) {
@@ -806,6 +870,10 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 			"latestBlockNumber", latestBlock.Index.String())
 
 		rm.stateTracker.SetLastSyncedBlock(latestBlock.Index.Int)
+	}
+
+	if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: latestBlock.Index, RootHash: latestBlock.RootHash}); err != nil {
+		return nil, fmt.Errorf("failed to commit restored SMT snapshot: %w", err)
 	}
 
 	return latestBlock.Index, nil
@@ -831,7 +899,7 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 				"blockNumber", recoveryResult.BlockNumber.String(),
 				"stateCount", len(recoveryResult.StateIDs))
 
-			if err := LoadRecoveredNodesIntoSMT(ctx, rm.logger, rm.storage, rm.smt, recoveryResult.StateIDs); err != nil {
+			if err := LoadRecoveredNodesIntoBackend(ctx, rm.logger, rm.storage, rm.smtBackend, recoveryResult.BlockNumber, recoveryResult.StateIDs); err != nil {
 				return fmt.Errorf("failed to load recovered nodes into SMT: %w", err)
 			}
 		}
@@ -1092,7 +1160,9 @@ func (rm *RoundManager) StartNextRoundFromPrecollector(ctx context.Context, roun
 		return rm.StartNewRound(ctx, roundNumber)
 	}
 
-	preResult.snapshot.SetCommitTarget(rm.smt)
+	if err := preResult.snapshot.SetCommitTarget(ctx, rm.smtBackend); err != nil {
+		return fmt.Errorf("failed to set precollector commit target: %w", err)
+	}
 	if err := rm.StartNewRoundWithSnapshot(ctx, roundNumber, preResult.snapshot, preResult.commitments, preResult.leaves); err != nil {
 		if errors.Is(err, ErrDeactivated) {
 			return nil

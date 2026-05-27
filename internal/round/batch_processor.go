@@ -14,7 +14,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
-	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -27,36 +27,29 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 		return nil, nil
 	}
 
-	// Convert commitments to SMT leaves, tracking valid commitments
-	leaves := make([]*smt.Leaf, 0, len(commitments))
+	// Convert commitments to backend leaf inputs, tracking valid commitments.
+	leaves := make([]smtbackend.LeafInput, 0, len(commitments))
 	validCommitments := make([]*models.CertificationRequest, 0, len(commitments))
 	for _, commitment := range commitments {
-		// Generate leaf path from stateID
-		path, err := commitment.StateID.GetPath()
+		leaf, err := commitmentLeafInput(commitment)
 		if err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
+			rm.logger.WithContext(ctx).Error("Failed to create leaf input",
 				"stateID", commitment.StateID.String(),
 				"error", err.Error())
 			continue
 		}
 
-		// Create leaf value (hash of certification request data)
-		leafValue, err := commitment.LeafValue()
-		if err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to create leaf value",
-				"stateID", commitment.StateID.String(),
-				"error", err.Error())
-			continue
-		}
-
-		leaves = append(leaves, smt.NewLeaf(path, leafValue))
+		leaves = append(leaves, leaf)
 		validCommitments = append(validCommitments, commitment)
 	}
 
 	// Add leaves to the current round's SMT snapshot
 	if rm.currentRound != nil && rm.currentRound.Snapshot != nil {
 		smtStart := time.Now()
-		addedCommitments, addedLeaves, dropped := addCommitmentLeaves(ctx, rm.logger, rm.currentRound.Snapshot, leaves, validCommitments)
+		addedCommitments, addedLeaves, dropped, err := addCommitmentLeaves(ctx, rm.logger, rm.currentRound.Snapshot, leaves, validCommitments)
+		if err != nil {
+			return nil, err
+		}
 		metrics.SMTAddLeavesDuration.Observe(time.Since(smtStart).Seconds())
 		rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, addedLeaves...)
 		rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, addedCommitments...)
@@ -219,7 +212,10 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		if cp != nil {
 			preResult, advErr := cp.AdvanceRound()
 			if advErr == nil {
-				preResult.snapshot.SetCommitTarget(rm.smt)
+				if err := preResult.snapshot.SetCommitTarget(ctx, rm.smtBackend); err != nil {
+					rm.logger.WithContext(ctx).Error("Failed to set precollector commit target.", "error", err.Error())
+					return err
+				}
 				// StartNewRoundWithSnapshot atomically checks precollectorDisabled
 				// under roundMutex — no race with concurrent Deactivate.
 				if err := rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(nextRoundNumber), preResult.snapshot, preResult.commitments, preResult.leaves); err != nil && !errors.Is(err, ErrDeactivated) {
@@ -380,7 +376,7 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 }
 
 func (rm *RoundManager) reconcileRecoveredFinalization(blockNumber *api.BigInt) {
-	var snapshot *smt.ThreadSafeSmtSnapshot
+	var snapshot smtbackend.Snapshot
 
 	rm.roundMutex.RLock()
 	if blockNumber != nil &&
@@ -394,7 +390,9 @@ func (rm *RoundManager) reconcileRecoveredFinalization(blockNumber *api.BigInt) 
 
 	rm.finalizationMu.Lock()
 	if snapshot != nil {
-		snapshot.Commit(rm.smt)
+		if err := snapshot.Commit(context.Background(), smtbackend.CommitMetadata{BlockNumber: blockNumber}); err != nil {
+			rm.logger.Error("Failed to commit recovered SMT snapshot", "error", err.Error())
+		}
 	}
 	rm.clearProofPending()
 	rm.finalizationMu.Unlock()
@@ -424,9 +422,9 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	rm.roundMutex.Unlock()
 
 	rm.roundMutex.Lock()
-	var pendingLeaves []*smt.Leaf
+	var pendingLeaves []smtbackend.LeafInput
 	var pendingCommitments []*models.CertificationRequest
-	var snapshot *smt.ThreadSafeSmtSnapshot
+	var snapshot smtbackend.Snapshot
 	if rm.currentRound != nil {
 		pendingLeaves = rm.currentRound.PendingLeaves
 		pendingCommitments = rm.currentRound.PendingCommitments
@@ -475,7 +473,10 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 
 	smtCommitStart := time.Now()
 	if snapshot != nil {
-		snapshot.Commit(rm.smt)
+		if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: block.Index, RootHash: block.RootHash}); err != nil {
+			rm.finalizationMu.Unlock()
+			return fmt.Errorf("failed to commit SMT snapshot: %w", err)
+		}
 	}
 	smtCommitDuration := time.Since(smtCommitStart)
 
@@ -649,20 +650,18 @@ func (rm *RoundManager) validateBlockForMode(block *models.Block) error {
 	return nil
 }
 
-// convertLeavesToNodes converts SMT leaves to storage models
-func (rm *RoundManager) convertLeavesToNodes(leaves []*smt.Leaf) ([]*models.SmtNode, error) {
+// convertLeavesToNodes converts backend leaf inputs to storage models.
+func (rm *RoundManager) convertLeavesToNodes(leaves []smtbackend.LeafInput) ([]*models.SmtNode, error) {
 	if len(leaves) == 0 {
 		return nil, nil
 	}
 
-	keyLength := rm.smt.GetKeyLength()
 	smtNodes := make([]*models.SmtNode, 0, len(leaves))
 	for _, leaf := range leaves {
-		keyBytes, err := api.PathToFixedBytes(leaf.Path, keyLength)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert leaf path %s to SMT storage key: %w", leaf.Path.String(), err)
+		if len(leaf.Key) != api.StateTreeKeyLengthBytes {
+			return nil, fmt.Errorf("invalid SMT leaf key length: got %d, want %d", len(leaf.Key), api.StateTreeKeyLengthBytes)
 		}
-		key := api.NewHexBytes(keyBytes)
+		key := api.NewHexBytes(leaf.Key)
 		value := api.NewHexBytes(leaf.Value)
 		smtNodes = append(smtNodes, models.NewSmtNode(key, value))
 	}

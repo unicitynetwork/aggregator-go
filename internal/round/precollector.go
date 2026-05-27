@@ -6,14 +6,14 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
-	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
 type preCollectionResult struct {
-	snapshot    *smt.ThreadSafeSmtSnapshot
+	snapshot    smtbackend.Snapshot
 	commitments []*models.CertificationRequest
-	leaves      []*smt.Leaf
+	leaves      []smtbackend.LeafInput
 }
 
 type advanceRequest struct {
@@ -59,7 +59,7 @@ func newChildPrecollector(
 	}
 }
 
-func (cp *childPrecollector) Start(ctx context.Context, baseSnapshot *smt.ThreadSafeSmtSnapshot) {
+func (cp *childPrecollector) Start(ctx context.Context, baseSnapshot smtbackend.Snapshot) {
 	go cp.run(ctx, baseSnapshot)
 }
 
@@ -90,12 +90,16 @@ func (cp *childPrecollector) Stop() {
 	<-cp.doneCh
 }
 
-func (cp *childPrecollector) run(ctx context.Context, baseSnapshot *smt.ThreadSafeSmtSnapshot) {
+func (cp *childPrecollector) run(ctx context.Context, baseSnapshot smtbackend.Snapshot) {
 	defer close(cp.doneCh)
 
-	snapshot := baseSnapshot.CreateSnapshot()
+	snapshot, err := baseSnapshot.Fork(ctx)
+	if err != nil {
+		cp.logger.WithContext(ctx).Error("Failed to fork precollector snapshot", "error", err.Error())
+		return
+	}
 	commitments := make([]*models.CertificationRequest, 0)
-	leaves := make([]*smt.Leaf, 0)
+	leaves := make([]smtbackend.LeafInput, 0)
 	pending := make([]*models.CertificationRequest, 0, miniBatchSize)
 	count := 0
 
@@ -139,9 +143,14 @@ func (cp *childPrecollector) run(ctx context.Context, baseSnapshot *smt.ThreadSa
 				leaves:      leaves,
 			}
 			// Chain new collection from current snapshot
-			snapshot = snapshot.CreateSnapshot()
+			nextSnapshot, err := snapshot.Fork(ctx)
+			if err != nil {
+				req.resultCh <- advanceResponse{err: fmt.Errorf("failed to fork next precollector snapshot: %w", err)}
+				return
+			}
+			snapshot = nextSnapshot
 			commitments = make([]*models.CertificationRequest, 0)
-			leaves = make([]*smt.Leaf, 0)
+			leaves = make([]smtbackend.LeafInput, 0)
 			count = 0
 			req.resultCh <- advanceResponse{result: result}
 
@@ -183,30 +192,24 @@ func drainBufferedCommitments(
 
 func (cp *childPrecollector) addBatch(
 	ctx context.Context,
-	snapshot *smt.ThreadSafeSmtSnapshot,
+	snapshot smtbackend.Snapshot,
 	commitments []*models.CertificationRequest,
-) ([]*models.CertificationRequest, []*smt.Leaf) {
+) ([]*models.CertificationRequest, []smtbackend.LeafInput) {
 	if len(commitments) == 0 {
 		return nil, nil
 	}
 
-	leavesToAdd := make([]*smt.Leaf, 0, len(commitments))
+	leavesToAdd := make([]smtbackend.LeafInput, 0, len(commitments))
 	valid := make([]*models.CertificationRequest, 0, len(commitments))
 
 	for _, c := range commitments {
-		path, err := c.StateID.GetPath()
+		leaf, err := commitmentLeafInput(c)
 		if err != nil {
-			cp.logger.WithContext(ctx).Error("Failed to get path for commitment",
+			cp.logger.WithContext(ctx).Error("Failed to create leaf input",
 				"stateID", c.StateID.String(), "error", err.Error())
 			continue
 		}
-		leafValue, err := c.LeafValue()
-		if err != nil {
-			cp.logger.WithContext(ctx).Error("Failed to create leaf value",
-				"stateID", c.StateID.String(), "error", err.Error())
-			continue
-		}
-		leavesToAdd = append(leavesToAdd, smt.NewLeaf(path, leafValue))
+		leavesToAdd = append(leavesToAdd, leaf)
 		valid = append(valid, c)
 	}
 
@@ -214,7 +217,11 @@ func (cp *childPrecollector) addBatch(
 		return nil, nil
 	}
 
-	added, addedLeaves, dropped := addCommitmentLeaves(ctx, cp.logger, snapshot, leavesToAdd, valid)
+	added, addedLeaves, dropped, err := addCommitmentLeaves(ctx, cp.logger, snapshot, leavesToAdd, valid)
+	if err != nil {
+		cp.logger.WithContext(ctx).Error("Failed to add precollector leaves", "error", err.Error())
+		return nil, nil
+	}
 	ackDroppedCommitments(ctx, cp.logger, cp.commitmentQueue, dropped)
 	return added, addedLeaves
 }

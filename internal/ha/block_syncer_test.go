@@ -14,6 +14,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -53,7 +54,7 @@ func TestBlockSyncer(t *testing.T) {
 	mockLeader := &mockLeaderSelector{}
 	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
 	stateTracker := state.NewSyncStateTracker()
-	syncer := NewBlockSyncer(testLogger, mockLeader, storage, smtInstance, 0, cfg.Processing.RoundDuration, stateTracker)
+	syncer := NewBlockSyncer(testLogger, mockLeader, storage, smtbackend.NewMemoryBackend(smtInstance), 0, cfg.Processing.RoundDuration, stateTracker)
 
 	// simulate leader creating a block
 	rootHash := createBlock(t, storage, 1)

@@ -4,12 +4,17 @@
 BINARY_NAME=aggregator
 BUILD_DIR=bin
 MAIN_PATH=./cmd/aggregator
+GO_BUILD_TAGS ?=
+GO_BUILD_FLAGS :=
+ifneq ($(strip $(GO_BUILD_TAGS)),)
+GO_BUILD_FLAGS += -tags $(GO_BUILD_TAGS)
+endif
 
 # Build the application
 build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
-	@go build -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
+	@go build $(GO_BUILD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
 
 # Run the application
 run: build
@@ -19,17 +24,17 @@ run: build
 # Run tests
 test:
 	@echo "Running tests..."
-	@go test -v ./...
+	@go test $(GO_BUILD_FLAGS) -v ./...
 
 # Run tests with race detection
 test-race:
 	@echo "Running tests with race detection..."
-	@go test -race -v ./...
+	@go test $(GO_BUILD_FLAGS) -race -v ./...
 
 # Run benchmarks
 benchmark:
 	@echo "Running benchmarks..."
-	@go test -bench=. -benchmem ./...
+	@go test $(GO_BUILD_FLAGS) -bench=. -benchmem ./...
 
 # Build and run performance test
 performance-test:

@@ -214,7 +214,7 @@ func main() {
 			log.WithComponent("main").Info("Block syncing disabled for parent aggregator mode - SMT will be reconstructed on leadership transition")
 		} else {
 			log.WithComponent("main").Info("Starting block syncer")
-			bs = ha.NewBlockSyncer(log, ls, storageInstance, threadSafeSmt, cfg.Sharding.Child.ShardID, cfg.Processing.RoundDuration, stateTracker)
+			bs = ha.NewBlockSyncer(log, ls, storageInstance, roundManager.GetSMTBackend(), cfg.Sharding.Child.ShardID, cfg.Processing.RoundDuration, stateTracker)
 			bs.Start(ctx)
 		}
 

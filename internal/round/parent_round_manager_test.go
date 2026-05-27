@@ -14,6 +14,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -461,4 +462,20 @@ func (suite *ParentRoundManagerTestSuite) TestBlockRootMatchesSMTRoot() {
 // TestParentRoundManagerSuite runs the test suite
 func TestParentRoundManagerSuite(t *testing.T) {
 	suite.Run(t, new(ParentRoundManagerTestSuite))
+}
+
+func TestParentRoundManagerGetSMTBackendIsPersistent(t *testing.T) {
+	tree := smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, 4))
+	backend := smtbackend.NewMemoryBackend(tree)
+	prm := &ParentRoundManager{
+		parentSMT:  tree,
+		smtBackend: backend,
+	}
+
+	require.Same(t, backend, prm.GetSMTBackend())
+	backend.SetCommittedBlockNumber(api.NewBigIntFromUint64(9))
+
+	state, err := prm.GetSMTBackend().CommittedState(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, uint64(9), state.BlockNumber.Uint64())
 }

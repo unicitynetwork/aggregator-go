@@ -11,7 +11,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
-	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -28,7 +28,7 @@ type (
 		logger         *logger.Logger
 		leaderSelector LeaderSelector
 		storage        interfaces.Storage
-		smt            *smt.ThreadSafeSMT
+		smtBackend     smtbackend.Backend
 		shardID        api.ShardID
 		syncInterval   time.Duration
 		stateTracker   *state.Tracker
@@ -42,7 +42,7 @@ func NewBlockSyncer(
 	logger *logger.Logger,
 	leaderSelector LeaderSelector,
 	storage interfaces.Storage,
-	smt *smt.ThreadSafeSMT,
+	smtBackend smtbackend.Backend,
 	shardID api.ShardID,
 	syncInterval time.Duration,
 	stateTracker *state.Tracker,
@@ -51,7 +51,7 @@ func NewBlockSyncer(
 		logger:         logger,
 		leaderSelector: leaderSelector,
 		storage:        storage,
-		smt:            smt,
+		smtBackend:     smtBackend,
 		shardID:        shardID,
 		syncInterval:   syncInterval,
 		stateTracker:   stateTracker,
@@ -179,28 +179,40 @@ func (bs *BlockSyncer) updateSMTForBlock(ctx context.Context, blockRecord *model
 	if err != nil {
 		return fmt.Errorf("failed to load smt nodes by keys: %w", err)
 	}
-	// convert smt nodes to leaves
-	leaves := make([]*smt.Leaf, 0, len(smtNodes))
+	// convert smt nodes to backend leaves
+	leaves := make([]smtbackend.LeafInput, 0, len(smtNodes))
 	for _, smtNode := range smtNodes {
-		path, err := api.FixedBytesToPath(smtNode.Key, bs.smt.GetKeyLength())
-		if err != nil {
-			return fmt.Errorf("failed to convert SMT key to path: %w", err)
-		}
-		leaves = append(leaves, smt.NewLeaf(path, smtNode.Value))
+		leaves = append(leaves, smtbackend.LeafInput{
+			Key:   smtNode.Key,
+			Value: smtNode.Value,
+		})
 	}
 
 	// apply changes to smt snapshot
-	snapshot := bs.smt.CreateSnapshot()
-	if _, err := snapshot.AddLeaves(leaves); err != nil {
+	snapshot, err := bs.smtBackend.CreateSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create SMT snapshot: %w", err)
+	}
+	result, err := snapshot.AddLeavesClassified(ctx, leaves)
+	if err != nil {
 		return fmt.Errorf("failed to apply SMT updates for block %s: %w", blockRecord.BlockNumber.String(), err)
 	}
-	smtRootHash := api.HexBytes(snapshot.GetRootHashRaw())
+	if err := result.ValidateAllAccepted(len(leaves)); err != nil {
+		return fmt.Errorf("failed to apply SMT updates for block %s: %w", blockRecord.BlockNumber.String(), err)
+	}
+	smtRootRaw, err := snapshot.RootHashRaw(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get SMT snapshot root: %w", err)
+	}
+	smtRootHash := api.HexBytes(smtRootRaw)
 	// verify smt root hash matches the raw 32-byte block root hash
 	if err := bs.verifySMTForBlock(ctx, smtRootHash, blockRecord.BlockNumber); err != nil {
 		return fmt.Errorf("failed to verify SMT: %w", err)
 	}
 	// commit smt snapshot
-	snapshot.Commit(bs.smt)
+	if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: blockRecord.BlockNumber, RootHash: smtRootHash}); err != nil {
+		return fmt.Errorf("failed to commit SMT snapshot: %w", err)
+	}
 
 	return nil
 }

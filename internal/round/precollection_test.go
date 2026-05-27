@@ -20,6 +20,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	testsharding "github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -308,7 +309,7 @@ func TestProcessMiniBatch_SkipsExistingDuplicateWithoutProofPending(t *testing.T
 	rm.currentRound = &Round{
 		Number:   api.NewBigInt(big.NewInt(1)),
 		State:    RoundStateProcessing,
-		Snapshot: smtInstance.CreateSnapshot(),
+		Snapshot: testRMSnapshot(t, ctx, rm),
 	}
 
 	rm.roundMutex.Lock()
@@ -349,7 +350,7 @@ func TestReconcileRecoveredFinalization_CommitsMatchingSnapshotAndClearsProofPen
 	rm.currentRound = &Round{
 		Number:   blockNumber,
 		State:    RoundStateProcessing,
-		Snapshot: smtInstance.CreateSnapshot(),
+		Snapshot: testRMSnapshot(t, ctx, rm),
 	}
 
 	rm.roundMutex.Lock()
@@ -400,7 +401,7 @@ func TestReconcileRecoveredFinalization_MismatchedBlockClearsProofPendingOnly(t 
 	rm.currentRound = &Round{
 		Number:   currentBlockNumber,
 		State:    RoundStateProcessing,
-		Snapshot: smtInstance.CreateSnapshot(),
+		Snapshot: testRMSnapshot(t, ctx, rm),
 	}
 
 	originalRoot := smtInstance.GetRootHash()
@@ -460,7 +461,7 @@ func TestChildPrecollector_CollectsContinuouslyAcrossRound(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	baseSnapshot := smtInstance.CreateSnapshot()
+	baseSnapshot := testBackendSnapshot(t, ctx, testMemoryBackend(smtInstance))
 	cp.Start(ctx, baseSnapshot)
 	defer cp.Stop()
 
@@ -491,7 +492,7 @@ func TestChildPrecollector_CollectsContinuouslyAcrossRound(t *testing.T) {
 	assert.Equal(t, c3, result2.commitments[0])
 
 	// Snapshots should be different (round 2 has round 1 data + round 2 data)
-	assert.NotEqual(t, result.snapshot.GetRootHash(), result2.snapshot.GetRootHash())
+	assert.NotEqual(t, testSnapshotRootHex(t, ctx, result.snapshot), testSnapshotRootHex(t, ctx, result2.snapshot))
 }
 
 func TestChildPrecollector_AdvanceRound_FlushesPendingBatch(t *testing.T) {
@@ -500,7 +501,7 @@ func TestChildPrecollector_AdvanceRound_FlushesPendingBatch(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	baseSnapshot := smtInstance.CreateSnapshot()
+	baseSnapshot := testBackendSnapshot(t, ctx, testMemoryBackend(smtInstance))
 	cp.Start(ctx, baseSnapshot)
 	defer cp.Stop()
 
@@ -523,7 +524,7 @@ func TestChildPrecollector_AdvanceRound_NoDropAcrossBoundary(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	baseSnapshot := smtInstance.CreateSnapshot()
+	baseSnapshot := testBackendSnapshot(t, ctx, testMemoryBackend(smtInstance))
 	cp.Start(ctx, baseSnapshot)
 	defer cp.Stop()
 
@@ -560,7 +561,7 @@ func TestChildPrecollector_HonorsMaxCommitmentsWithoutConsumingAndDropping(t *te
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	baseSnapshot := smtInstance.CreateSnapshot()
+	baseSnapshot := testBackendSnapshot(t, ctx, testMemoryBackend(smtInstance))
 	cp.Start(ctx, baseSnapshot)
 	defer cp.Stop()
 
@@ -588,7 +589,7 @@ func TestChildPrecollector_ControlMessagesProgressUnderBackpressure(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	baseSnapshot := smtInstance.CreateSnapshot()
+	baseSnapshot := testBackendSnapshot(t, ctx, testMemoryBackend(smtInstance))
 	cp.Start(ctx, baseSnapshot)
 	defer cp.Stop()
 
@@ -618,7 +619,7 @@ func TestChildPrecollector_StopCancelsCleanly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	baseSnapshot := smtInstance.CreateSnapshot()
+	baseSnapshot := testBackendSnapshot(t, ctx, testMemoryBackend(smtInstance))
 	cp.Start(ctx, baseSnapshot)
 
 	// Send some data
@@ -649,7 +650,7 @@ func TestChildPrecollector_AdvanceRoundWithNoData(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	baseSnapshot := smtInstance.CreateSnapshot()
+	baseSnapshot := testBackendSnapshot(t, ctx, testMemoryBackend(smtInstance))
 	cp.Start(ctx, baseSnapshot)
 	defer cp.Stop()
 
@@ -667,7 +668,7 @@ func TestChildPrecollector_BatchWithBadLeafFallsBackToOneByOne(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	baseSnapshot := smtInstance.CreateSnapshot()
+	baseSnapshot := testBackendSnapshot(t, ctx, testMemoryBackend(smtInstance))
 	cp.Start(ctx, baseSnapshot)
 	defer cp.Stop()
 
@@ -706,18 +707,18 @@ func TestPreCollectionReparenting(t *testing.T) {
 
 		testLogger := newTestLogger(t)
 		smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
-		initialMainRootHash := smtInstance.GetRootHash()
+		backend := testMemoryBackend(smtInstance)
+		initialMainRootHash := testSMTRawRootHex(smtInstance)
 
 		// Round N: Create snapshot and add a leaf
 		roundNCommitment := testutil.CreateTestCertificationRequest(t, "round_n")
 		roundNLeaf := getLeafFromCommitment(t, roundNCommitment)
 
-		roundNSnapshot := smtInstance.CreateSnapshot()
-		_, err := roundNSnapshot.AddLeaves([]*smt.Leaf{roundNLeaf})
-		require.NoError(t, err)
-		roundNRootHash := roundNSnapshot.GetRootHash()
+		roundNSnapshot := testBackendSnapshot(t, ctx, backend)
+		testAddLegacyLeavesToBackendSnapshot(t, ctx, roundNSnapshot, []*smt.Leaf{roundNLeaf})
+		roundNRootHash := testSnapshotRootHex(t, ctx, roundNSnapshot)
 
-		assert.Equal(t, initialMainRootHash, smtInstance.GetRootHash())
+		assert.Equal(t, initialMainRootHash, testSMTRawRootHex(smtInstance))
 
 		// Start precollector from Round N's snapshot
 		stream := make(chan *models.CertificationRequest, 100)
@@ -734,18 +735,18 @@ func TestPreCollectionReparenting(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, result.commitments, 1)
 
-		preCollectedRootHash := result.snapshot.GetRootHash()
+		preCollectedRootHash := testSnapshotRootHex(t, ctx, result.snapshot)
 		assert.NotEqual(t, roundNRootHash, preCollectedRootHash)
 
 		// Commit Round N to main SMT (simulating FinalizeBlock)
-		roundNSnapshot.Commit(smtInstance)
-		assert.Equal(t, roundNRootHash, smtInstance.GetRootHash())
+		testCommitSnapshot(t, ctx, roundNSnapshot)
+		assert.Equal(t, roundNRootHash, testSMTRawRootHex(smtInstance))
 
 		// Reparent and commit pre-collection snapshot to main SMT
-		result.snapshot.SetCommitTarget(smtInstance)
-		result.snapshot.Commit(smtInstance)
+		testSetSnapshotCommitTarget(t, ctx, result.snapshot, backend)
+		testCommitSnapshot(t, ctx, result.snapshot)
 
-		assert.Equal(t, preCollectedRootHash, smtInstance.GetRootHash())
+		assert.Equal(t, preCollectedRootHash, testSMTRawRootHex(smtInstance))
 
 		// Verify both leaves are in main SMT
 		roundNPath, err := roundNCommitment.StateID.GetPath()
@@ -950,14 +951,13 @@ func TestStartNewRoundWithSnapshot(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		preSnapshot := smtInstance.CreateSnapshot()
+		preSnapshot := testBackendSnapshot(t, ctx, testMemoryBackend(smtInstance))
 		commitment := testutil.CreateTestCertificationRequest(t, "precollected_round")
 		leaf := getLeafFromCommitment(t, commitment)
-		_, err = preSnapshot.AddLeaves([]*smt.Leaf{leaf})
-		require.NoError(t, err)
+		testAddLegacyLeavesToBackendSnapshot(t, ctx, preSnapshot, []*smt.Leaf{leaf})
 
 		preCommitments := []*models.CertificationRequest{commitment}
-		preLeaves := []*smt.Leaf{leaf}
+		preLeaves := []smtbackend.LeafInput{testLeafInputFromLegacyLeaf(t, leaf)}
 
 		startTime := time.Now()
 		err = rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(big.NewInt(1)), preSnapshot, preCommitments, preLeaves)
@@ -1033,7 +1033,7 @@ func TestStandalonePrecollectorGraceIncludesLateCommitment(t *testing.T) {
 	rm.precollectorDone = make(chan struct{})
 	rm.precollector = cp
 	rm.roundMutex.Unlock()
-	cp.Start(ctx, smtInstance.CreateSnapshot())
+	cp.Start(ctx, testBackendSnapshot(t, ctx, testMemoryBackend(smtInstance)))
 
 	lateCommitment := testutil.CreateTestCertificationRequest(t, "during_grace")
 	go func() {

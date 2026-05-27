@@ -1,5 +1,7 @@
 .idea
 .claude
+.codex-temp/
+.codex
 bin
 /aggregator
 aggregator.log
