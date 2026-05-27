@@ -600,8 +600,36 @@ func createTestCertificationRequests(t *testing.T, count int) []*api.Certificati
 	return requests
 }
 
+func TestCertificationRequestDoesNotTouchSMTBackend(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	backend := &countingSMTBackend{}
+	queue := &recordingCommitmentQueue{}
+	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+	service := &AggregatorService{
+		config: &config.Config{
+			Processing: config.ProcessingConfig{SkipDuplicateCheck: true},
+			Sharding:   shardingCfg,
+		},
+		logger:                        log,
+		commitmentQueue:               queue,
+		roundManager:                  &stubRoundManager{backend: backend},
+		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+	}
+
+	req := createTestCertificationRequests(t, 1)[0]
+	resp, err := service.CertificationRequest(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, "SUCCESS", resp.Status)
+	require.Len(t, queue.stored, 1)
+	require.Equal(t, 0, backend.calls, "submit path must not read or write the SMT")
+}
+
 type stubRoundManager struct {
-	smt *smt.ThreadSafeSMT
+	smt     *smt.ThreadSafeSMT
+	backend smtbackend.Backend
 }
 
 func (s *stubRoundManager) Start(context.Context) error    { return nil }
@@ -612,6 +640,9 @@ func (s *stubRoundManager) Deactivate(context.Context) error {
 }
 func (s *stubRoundManager) GetSMT() *smt.ThreadSafeSMT { return s.smt }
 func (s *stubRoundManager) GetSMTBackend() smtbackend.Backend {
+	if s.backend != nil {
+		return s.backend
+	}
 	if s.smt == nil {
 		return nil
 	}
@@ -621,6 +652,106 @@ func (s *stubRoundManager) CheckParentHealth(context.Context) error { return nil
 func (s *stubRoundManager) FinalizationReadLock() func()            { return func() {} }
 func (s *stubRoundManager) GetKnownNotReadyBlock(api.StateID) (*models.Block, bool) {
 	return nil, false
+}
+
+type countingSMTBackend struct {
+	calls int
+}
+
+func (b *countingSMTBackend) touch() {
+	b.calls++
+}
+
+func (b *countingSMTBackend) KeyLength() int {
+	b.touch()
+	return api.StateTreeKeyLengthBits
+}
+
+func (b *countingSMTBackend) RootHashRaw(context.Context) ([]byte, error) {
+	b.touch()
+	return make([]byte, api.StateTreeKeyLengthBytes), nil
+}
+
+func (b *countingSMTBackend) CommittedState(context.Context) (smtbackend.CommittedState, error) {
+	b.touch()
+	return smtbackend.CommittedState{}, nil
+}
+
+func (b *countingSMTBackend) CreateSnapshot(context.Context) (smtbackend.Snapshot, error) {
+	b.touch()
+	return nil, nil
+}
+
+func (b *countingSMTBackend) GetInclusionCert(context.Context, []byte) (*api.InclusionCert, error) {
+	b.touch()
+	return nil, nil
+}
+
+func (b *countingSMTBackend) Stats(context.Context) smtbackend.BackendStats {
+	b.touch()
+	return smtbackend.BackendStats{}
+}
+
+func (b *countingSMTBackend) Close() error {
+	b.touch()
+	return nil
+}
+
+type recordingCommitmentQueue struct {
+	stored []*models.CertificationRequest
+}
+
+func (q *recordingCommitmentQueue) Store(_ context.Context, certificationRequest *models.CertificationRequest) error {
+	q.stored = append(q.stored, certificationRequest)
+	return nil
+}
+
+func (q *recordingCommitmentQueue) GetByStateID(context.Context, api.StateID) (*models.CertificationRequest, error) {
+	return nil, nil
+}
+
+func (q *recordingCommitmentQueue) GetUnprocessedBatch(context.Context, int) ([]*models.CertificationRequest, error) {
+	return nil, nil
+}
+
+func (q *recordingCommitmentQueue) GetUnprocessedBatchWithCursor(context.Context, string, int) ([]*models.CertificationRequest, string, error) {
+	return nil, "", nil
+}
+
+func (q *recordingCommitmentQueue) StreamCertificationRequests(context.Context, chan<- *models.CertificationRequest) error {
+	return nil
+}
+
+func (q *recordingCommitmentQueue) MarkProcessed(context.Context, []interfaces.CertificationRequestAck) error {
+	return nil
+}
+
+func (q *recordingCommitmentQueue) Delete(context.Context, []api.StateID) error {
+	return nil
+}
+
+func (q *recordingCommitmentQueue) Count(context.Context) (int64, error) {
+	return int64(len(q.stored)), nil
+}
+
+func (q *recordingCommitmentQueue) CountUnprocessed(context.Context) (int64, error) {
+	return int64(len(q.stored)), nil
+}
+
+func (q *recordingCommitmentQueue) GetAllPending(context.Context) ([]*models.CertificationRequest, error) {
+	return nil, nil
+}
+
+func (q *recordingCommitmentQueue) GetByStateIDs(context.Context, []api.StateID) (map[string]*models.CertificationRequest, error) {
+	return nil, nil
+}
+
+func (q *recordingCommitmentQueue) Initialize(context.Context) error {
+	return nil
+}
+
+func (q *recordingCommitmentQueue) Close(context.Context) error {
+	return nil
 }
 
 func newAggregatorServiceForTest(t *testing.T, shardingCfg config.ShardingConfig, baseTree *smt.SparseMerkleTree) *AggregatorService {

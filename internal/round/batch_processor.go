@@ -479,6 +479,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		}
 	}
 	smtCommitDuration := time.Since(smtCommitStart)
+	metrics.SMTCommitDuration.Observe(smtCommitDuration.Seconds())
 
 	setFinalizedStart := time.Now()
 	if err := rm.storage.BlockStorage().SetFinalized(ctx, block.Index, true); err != nil {

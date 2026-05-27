@@ -3,6 +3,7 @@ package mongodb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,6 +14,29 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
+
+func TestIsPrimaryTransitionError(t *testing.T) {
+	transitionErrors := []mongo.CommandError{
+		{Code: 91},
+		{Code: 189},
+		{Code: 10107},
+		{Code: 11602},
+		{Code: 13435},
+		{Code: 13436},
+		{Name: "NotWritablePrimary"},
+		{Name: "NotPrimaryNoSecondaryOk"},
+		{Name: "InterruptedDueToReplStateChange"},
+		{Name: "PrimarySteppedDown"},
+		{Name: "ShutdownInProgress"},
+	}
+	for _, err := range transitionErrors {
+		require.True(t, isPrimaryTransitionError(err))
+		require.True(t, isPrimaryTransitionError(fmt.Errorf("wrapped: %w", err)))
+	}
+
+	require.False(t, isPrimaryTransitionError(mongo.CommandError{Code: 11000, Name: "DuplicateKey"}))
+	require.False(t, isPrimaryTransitionError(errors.New("plain error")))
+}
 
 func setupTransactionTestDB(t *testing.T) (*mongo.Client, *mongo.Database, func()) {
 	ctx := context.Background()

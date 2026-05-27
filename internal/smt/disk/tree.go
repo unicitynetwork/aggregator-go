@@ -51,6 +51,7 @@ type ApplyStats struct {
 	// Materialized* counts nodes decoded from storage. The pure in-memory tree
 	// does not populate these; persisted materialization will.
 	MaterializedNodes         int
+	NodeReads                 int
 	MaterializedBytes         int64
 	MaterializeDuration       time.Duration
 	MaterializeSortDuration   time.Duration

@@ -217,6 +217,7 @@ func TestNodeCacheServesRepeatedMaterializationWithoutPebbleRead(t *testing.T) {
 	require.Equal(t, result.CandidateRoot, duplicate.CandidateRoot)
 	require.Equal(t, []int{0}, duplicate.DuplicateIndexes)
 	require.Equal(t, 1, duplicate.Stats.MaterializedNodes)
+	require.Zero(t, duplicate.Stats.NodeReads)
 	require.Equal(t, 1, duplicate.Stats.MaterializeCacheHits)
 	require.Positive(t, duplicate.Stats.MaterializeCacheBytes)
 	require.Equal(t, before.NodePointReads, after.NodePointReads)
@@ -254,6 +255,7 @@ func TestNodeCacheUpdatesRootAfterCommit(t *testing.T) {
 
 	require.Equal(t, result.CandidateRoot, duplicate.CandidateRoot)
 	require.Equal(t, []int{0}, duplicate.DuplicateIndexes)
+	require.Equal(t, 1, duplicate.Stats.NodeReads)
 	require.Equal(t, 1, duplicate.Stats.MaterializeCacheHits)
 	require.Equal(t, before.NodePointReads+1, after.NodePointReads)
 }
@@ -359,6 +361,7 @@ func TestSnapshotCommitPersistsNonRootLoadedNodeMovement(t *testing.T) {
 	next, err := snapshot.AddLeaves([]disk.LeafInput{leafInput(k3, v3)})
 	require.NoError(t, err)
 	require.Equal(t, 2, next.Stats.MaterializedNodes) // root + non-root internal
+	require.Equal(t, 2, next.Stats.NodeReads)
 	require.Equal(t, memoryRootAfterLeaves(t,
 		memoryLeaf{key: k0, value: v0},
 		memoryLeaf{key: k1, value: v1},

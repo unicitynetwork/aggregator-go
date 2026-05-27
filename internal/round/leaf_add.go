@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
@@ -35,6 +36,10 @@ func addCommitmentLeaves(
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	metrics.SMTBatchMaterializedNodes.Observe(float64(result.Stats.MaterializedNodes))
+	metrics.SMTBatchNodeReads.Observe(float64(result.Stats.NodeReads))
+	metrics.SMTBatchOverlayEntries.Observe(float64(result.Stats.OverlayEntries))
+	metrics.SMTBatchOverlayBytes.Observe(float64(result.Stats.OverlayBytes))
 
 	addedCommitments := make([]*models.CertificationRequest, 0, len(result.AcceptedIndexes))
 	addedLeaves := make([]smtbackend.LeafInput, 0, len(result.AcceptedIndexes))

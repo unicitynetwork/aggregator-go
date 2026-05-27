@@ -215,7 +215,7 @@ func fromDiskApplyResult(result disk.ApplyResult) BatchApplyResult {
 		Rejected:         rejected,
 		Stats: BatchApplyStats{
 			MaterializedNodes: result.Stats.MaterializedNodes,
-			NodeReads:         result.Stats.MaterializedNodes,
+			NodeReads:         result.Stats.NodeReads,
 			OverlayEntries:    result.Stats.OverlayEntries,
 			OverlayBytes:      result.Stats.OverlayBytes,
 		},

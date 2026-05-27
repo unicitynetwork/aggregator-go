@@ -358,6 +358,7 @@ func (s *Snapshot) AddLeaves(inputs []disk.LeafInput) (disk.ApplyResult, error) 
 	}
 
 	materializedBefore := s.stats.MaterializedNodes
+	nodeReadsBefore := s.stats.NodeReads
 	materializedBytesBefore := s.stats.MaterializedBytes
 	materializeSortBefore := s.stats.MaterializeSortDuration
 	materializeReadBefore := s.stats.MaterializeReadDuration
@@ -389,6 +390,7 @@ func (s *Snapshot) AddLeaves(inputs []disk.LeafInput) (disk.ApplyResult, error) 
 		return result, err
 	}
 	result.Stats.MaterializedNodes += s.stats.MaterializedNodes - materializedBefore
+	result.Stats.NodeReads += s.stats.NodeReads - nodeReadsBefore
 	result.Stats.MaterializedBytes += s.stats.MaterializedBytes - materializedBytesBefore
 	result.Stats.MaterializeDuration += materializeDuration
 	result.Stats.MaterializeSortDuration += s.stats.MaterializeSortDuration - materializeSortBefore
@@ -843,6 +845,7 @@ func (s *Snapshot) loadBranchParallel(key disk.NodeKey, expectedHash disk.Hash) 
 	readStart := time.Now()
 	encoded, ok, err := s.parent.store.GetNode(key)
 	readDuration := time.Since(readStart)
+	s.recordNodeReads(1)
 	if err != nil {
 		return nil, err
 	}
@@ -954,6 +957,12 @@ func (s *Snapshot) recordMaterialized(key disk.NodeKey, kind disk.BranchKind, en
 	s.stats.MaterializeReadDuration += readDuration
 	s.stats.MaterializeDecodeDuration += decodeDuration
 	s.stats.MaterializeHashDuration += hashDuration
+}
+
+func (s *Snapshot) recordNodeReads(count int) {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	s.stats.NodeReads += count
 }
 
 func (s *Snapshot) recordMaterializeRoute(duration time.Duration) {
@@ -1084,6 +1093,7 @@ func (s *Snapshot) loadFrontier(loads []frontierLoadReq) error {
 	readStart := time.Now()
 	results, err := s.parent.store.GetNodes(keys, s.parent.frontierReadMode == FrontierReadIterator)
 	s.stats.MaterializeReadDuration += time.Since(readStart)
+	s.stats.NodeReads += len(keys)
 	if err != nil {
 		return err
 	}
@@ -1195,6 +1205,7 @@ func (s *Snapshot) loadFrontierParallel(loads []frontierLoadReq) error {
 	close(jobs)
 	wg.Wait()
 	s.stats.MaterializeReadDuration += time.Since(readStart)
+	s.stats.NodeReads += len(misses)
 
 	for i, result := range results {
 		if result.err != nil {
@@ -1413,6 +1424,7 @@ func (s *Snapshot) loadBranch(key disk.NodeKey, expectedHash disk.Hash) (*disk.B
 	readStart := time.Now()
 	encoded, ok, err := s.parent.store.GetNode(key)
 	s.stats.MaterializeReadDuration += time.Since(readStart)
+	s.stats.NodeReads++
 	if err != nil {
 		return nil, err
 	}

@@ -251,6 +251,46 @@ var (
 		},
 	)
 
+	SMTCommitDuration = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "aggregator_smt_commit_duration_seconds",
+			Help:    "SMT snapshot commit latency during block finalization.",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+
+	SMTBatchMaterializedNodes = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "aggregator_smt_batch_materialized_nodes",
+			Help:    "Logical SMT nodes materialized while applying a batch.",
+			Buckets: []float64{0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000},
+		},
+	)
+
+	SMTBatchNodeReads = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "aggregator_smt_batch_node_reads",
+			Help:    "Physical SMT node reads while applying a batch.",
+			Buckets: []float64{0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000},
+		},
+	)
+
+	SMTBatchOverlayEntries = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "aggregator_smt_batch_overlay_entries",
+			Help:    "SMT overlay entries produced by a batch.",
+			Buckets: []float64{0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000},
+		},
+	)
+
+	SMTBatchOverlayBytes = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "aggregator_smt_batch_overlay_bytes",
+			Help:    "Estimated SMT overlay bytes produced by a batch.",
+			Buckets: prometheus.ExponentialBuckets(128, 2, 18),
+		},
+	)
+
 	SMTNodesPersistedTotal = promauto.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Name: "aggregator_smt_nodes_persisted_total",
