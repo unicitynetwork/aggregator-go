@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
@@ -506,4 +507,161 @@ func (s *FinalizeDuplicateTestSuite) Test6_BlockRecordsMatchPendingCommitmentsOn
 	recordCountAfter, err := s.storage.AggregatorRecordStorage().Count(ctx)
 	require.NoError(t, err)
 	require.Equal(t, recordCountBefore+2, recordCountAfter, "should persist only filtered aggregator records")
+}
+
+// Test7_FinalizeBlockRejectsRoundNumberMismatch verifies that a finalized block
+// cannot consume pending leaves from a different currentRound. This is the
+// corruption shape where a stale finalization writes newer-round commitments
+// under an older block number.
+func (s *FinalizeDuplicateTestSuite) Test7_FinalizeBlockRejectsRoundNumberMismatch() {
+	t := s.T()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	testLogger, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
+	require.NoError(t, err)
+
+	commitments := testutil.CreateTestCertificationRequests(t, 3, "t7_req")
+
+	rm.currentRound = &Round{
+		Number:      api.NewBigInt(big.NewInt(70)),
+		State:       RoundStateProcessing,
+		Commitments: commitments,
+		Snapshot:    rm.smt.CreateSnapshot(),
+	}
+
+	rm.roundMutex.Lock()
+	err = rm.processMiniBatch(ctx, commitments)
+	rm.roundMutex.Unlock()
+	require.NoError(t, err)
+
+	rootHash := rm.currentRound.Snapshot.GetRootHash()
+	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
+	require.NoError(t, err)
+
+	block := models.NewBlock(
+		api.NewBigInt(big.NewInt(69)),
+		"unicity",
+		0,
+		"1.0",
+		"mainnet",
+		rootHashBytes,
+		api.HexBytes{},
+		api.HexBytes{},
+		nil,
+	)
+
+	blockCountBefore, err := s.storage.BlockStorage().Count(ctx)
+	require.NoError(t, err)
+	blockRecordsCountBefore, err := s.storage.BlockRecordsStorage().Count(ctx)
+	require.NoError(t, err)
+	smtCountBefore, err := s.storage.SmtStorage().Count(ctx)
+	require.NoError(t, err)
+	recordCountBefore, err := s.storage.AggregatorRecordStorage().Count(ctx)
+	require.NoError(t, err)
+
+	err = rm.FinalizeBlock(ctx, block)
+	assert.Error(t, err, "FinalizeBlock should reject block 69 while currentRound is 70")
+
+	blockCountAfter, countErr := s.storage.BlockStorage().Count(ctx)
+	require.NoError(t, countErr)
+	assert.Equal(t, blockCountBefore, blockCountAfter, "stale finalization must not store a block")
+
+	blockRecordsCountAfter, countErr := s.storage.BlockRecordsStorage().Count(ctx)
+	require.NoError(t, countErr)
+	assert.Equal(t, blockRecordsCountBefore, blockRecordsCountAfter, "stale finalization must not store block_records")
+
+	smtCountAfter, countErr := s.storage.SmtStorage().Count(ctx)
+	require.NoError(t, countErr)
+	assert.Equal(t, smtCountBefore, smtCountAfter, "stale finalization must not store SMT nodes")
+
+	recordCountAfter, countErr := s.storage.AggregatorRecordStorage().Count(ctx)
+	require.NoError(t, countErr)
+	assert.Equal(t, recordCountBefore, recordCountAfter, "stale finalization must not store aggregator records")
+
+	rm.roundMutex.RLock()
+	defer rm.roundMutex.RUnlock()
+	if assert.NotNil(t, rm.currentRound, "stale finalization must not clear the active currentRound") {
+		assert.Equal(t, "70", rm.currentRound.Number.String())
+		assert.Len(t, rm.currentRound.PendingCommitments, 3)
+		assert.NotNil(t, rm.currentRound.Snapshot)
+	}
+}
+
+// Test8_DuplicateFinalizedBlockMustNotCommitDifferentSnapshot verifies that a
+// retry for an already-finalized block is only idempotent if it is replaying the
+// same block state. A duplicate block must not commit whatever snapshot happens
+// to be in currentRound.
+func (s *FinalizeDuplicateTestSuite) Test8_DuplicateFinalizedBlockMustNotCommitDifferentSnapshot() {
+	t := s.T()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	testLogger, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
+	require.NoError(t, err)
+
+	emptyRoot := rm.smt.GetRootHash()
+	emptyRootBytes, err := api.NewHexBytesFromString(emptyRoot)
+	require.NoError(t, err)
+
+	block := models.NewBlock(
+		api.NewBigInt(big.NewInt(71)),
+		"unicity",
+		0,
+		"1.0",
+		"mainnet",
+		emptyRootBytes,
+		api.HexBytes{},
+		api.HexBytes{},
+		nil,
+	)
+	block.Finalized = true
+	require.NoError(t, s.storage.BlockStorage().Store(ctx, block))
+	require.NoError(t, s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, nil)))
+
+	commitments := testutil.CreateTestCertificationRequests(t, 2, "t8_req")
+	rm.currentRound = &Round{
+		Number:      api.NewBigInt(big.NewInt(71)),
+		State:       RoundStateProcessing,
+		Commitments: commitments,
+		Snapshot:    rm.smt.CreateSnapshot(),
+	}
+
+	rm.roundMutex.Lock()
+	err = rm.processMiniBatch(ctx, commitments)
+	rm.roundMutex.Unlock()
+	require.NoError(t, err)
+	require.NotEqual(t, emptyRoot, rm.currentRound.Snapshot.GetRootHash(), "test setup must create a different pending root")
+
+	smtCountBefore, err := s.storage.SmtStorage().Count(ctx)
+	require.NoError(t, err)
+	recordCountBefore, err := s.storage.AggregatorRecordStorage().Count(ctx)
+	require.NoError(t, err)
+
+	block.Finalized = false
+	err = rm.FinalizeBlock(ctx, block)
+	assert.Error(t, err, "FinalizeBlock should reject duplicate block 71 when current snapshot root differs from the stored block root")
+
+	assert.Equal(t, emptyRoot, rm.smt.GetRootHash(), "duplicate finalized block must not commit a different currentRound snapshot")
+
+	smtCountAfter, countErr := s.storage.SmtStorage().Count(ctx)
+	require.NoError(t, countErr)
+	assert.Equal(t, smtCountBefore, smtCountAfter, "duplicate finalized block must not store unrelated SMT nodes")
+
+	recordCountAfter, countErr := s.storage.AggregatorRecordStorage().Count(ctx)
+	require.NoError(t, countErr)
+	assert.Equal(t, recordCountBefore, recordCountAfter, "duplicate finalized block must not store unrelated aggregator records")
+
+	storedBlock, err := s.storage.BlockStorage().GetByNumber(ctx, block.Index)
+	require.NoError(t, err)
+	require.NotNil(t, storedBlock)
+	assert.Equal(t, emptyRoot, storedBlock.RootHash.String(), "stored block root should remain unchanged")
 }

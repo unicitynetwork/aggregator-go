@@ -31,10 +31,12 @@ type signalingRootAggregatorClient struct {
 }
 
 type blockingProofRootAggregatorClient struct {
-	inner            *testsharding.RootAggregatorClientStub
-	proofPollStarted chan struct{}
-	releaseProof     chan struct{}
-	startOnce        sync.Once
+	inner             *testsharding.RootAggregatorClientStub
+	proofPollStarted  chan struct{}
+	proofPollCanceled chan struct{}
+	releaseProof      chan struct{}
+	startOnce         sync.Once
+	cancelOnce        sync.Once
 }
 
 type countingProofRootAggregatorClient struct {
@@ -66,9 +68,10 @@ func newSignalingRootAggregatorClient() *signalingRootAggregatorClient {
 
 func newBlockingProofRootAggregatorClient() *blockingProofRootAggregatorClient {
 	return &blockingProofRootAggregatorClient{
-		inner:            testsharding.NewRootAggregatorClientStub(),
-		proofPollStarted: make(chan struct{}),
-		releaseProof:     make(chan struct{}),
+		inner:             testsharding.NewRootAggregatorClientStub(),
+		proofPollStarted:  make(chan struct{}),
+		proofPollCanceled: make(chan struct{}),
+		releaseProof:      make(chan struct{}),
 	}
 }
 
@@ -120,6 +123,9 @@ func (c *blockingProofRootAggregatorClient) GetShardProof(ctx context.Context, r
 	select {
 	case <-c.releaseProof:
 	case <-ctx.Done():
+		c.cancelOnce.Do(func() {
+			close(c.proofPollCanceled)
+		})
 		return nil, ctx.Err()
 	}
 
@@ -607,11 +613,9 @@ func TestPreCollectionReparenting(t *testing.T) {
 	})
 }
 
-// TestChildPrecollector_DeactivateDuringInFlightRound deactivates while the
-// first child round is blocked waiting for the parent proof. The in-flight
-// round should still finish block 1 once the proof is released, but it must
-// not start round 2.
-func TestChildPrecollector_DeactivateDuringInFlightRound(t *testing.T) {
+// TestChildPrecollector_DeactivateCancelsInFlightRound verifies leadership
+// loss cancels parent-proof polling before the stale round can finalize.
+func TestChildPrecollector_DeactivateCancelsInFlightRound(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -662,26 +666,102 @@ func TestChildPrecollector_DeactivateDuringInFlightRound(t *testing.T) {
 		t.Fatal("timed out waiting for round 1 to enter proof polling")
 	}
 
-	// Deactivate while round 1 is still in-flight.
 	require.NoError(t, rm.Deactivate(ctx))
 
-	// Let the in-flight round finish block 1.
+	select {
+	case <-rootClient.proofPollCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for in-flight proof polling to be cancelled")
+	}
+
 	close(rootClient.releaseProof)
 
-	require.Eventually(t, func() bool {
-		block, err := store.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(1)))
-		return err == nil && block != nil
-	}, 3*time.Second, 25*time.Millisecond, "block 1 should be created after proof release")
-
-	// If the bug exists, round 2 would appear shortly after block 1 finalization.
-	time.Sleep(500 * time.Millisecond)
-
-	block2, err := store.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(2)))
+	block1, err := store.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(1)))
 	require.NoError(t, err)
-	assert.Nil(t, block2, "no block 2 should be created after Deactivate")
+	assert.Nil(t, block1, "deactivated in-flight round must not finalize block 1")
+}
 
-	// Wait for goroutines to drain
-	rm.wg.Wait()
+func TestChildRound_ReactivateStartsFreshRoundAfterCanceledInFlight(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{
+			Database: "test_child_reactivate_inflight",
+		},
+		Processing: config.ProcessingConfig{
+			RoundDuration:          100 * time.Millisecond,
+			MaxCommitmentsPerRound: 1000,
+		},
+		HA: config.HAConfig{
+			Enabled: true,
+		},
+		Sharding: config.ShardingConfig{
+			Mode: config.ShardingModeChild,
+			Child: config.ChildConfig{
+				ShardID:            0b11,
+				ParentPollTimeout:  5 * time.Second,
+				ParentPollInterval: 10 * time.Millisecond,
+			},
+		},
+	}
+	store := testutil.SetupTestStorage(t, cfg)
+
+	testLogger := newTestLogger(t)
+	rootClient := newBlockingProofRootAggregatorClient()
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		store.CommitmentQueue(),
+		store,
+		rootClient,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		smtInstance,
+		nil,
+	)
+	require.NoError(t, err)
+
+	releaseOnce := sync.Once{}
+	releaseProof := func() {
+		releaseOnce.Do(func() {
+			close(rootClient.releaseProof)
+		})
+	}
+	defer func() {
+		releaseProof()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer shutdownCancel()
+		_ = rm.Stop(shutdownCtx)
+	}()
+
+	require.NoError(t, rm.Start(ctx))
+	require.NoError(t, rm.Activate(ctx))
+
+	select {
+	case <-rootClient.proofPollStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first round to enter proof polling")
+	}
+	require.Equal(t, 1, rootClient.inner.SubmissionCount(), "first activation should submit exactly one child root")
+
+	require.NoError(t, rm.Deactivate(ctx))
+
+	select {
+	case <-rootClient.proofPollCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first proof polling to be cancelled")
+	}
+
+	require.NoError(t, rm.Activate(ctx))
+
+	require.Eventually(t, func() bool {
+		return rootClient.inner.SubmissionCount() == 2
+	}, 2*time.Second, 25*time.Millisecond, "reactivation should submit a fresh child round after cancelling the old one")
 }
 
 func TestChildRound_ParentProofTimeoutIsRetriable(t *testing.T) {
