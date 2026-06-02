@@ -1,3 +1,5 @@
+//go:build rocksdb
+
 package round
 
 import (
@@ -14,7 +16,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk/persist"
-	diskstore "github.com/unicitynetwork/aggregator-go/internal/smt/disk/store"
+	rocksstore "github.com/unicitynetwork/aggregator-go/internal/smt/disk/rocksstore"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -312,9 +314,26 @@ func TestLoadRecoveredNodesIntoBackendRejectsRecoveredRootMismatch(t *testing.T)
 	require.ErrorContains(t, err, "recovered SMT root mismatch")
 }
 
+func TestDiskSMTRecoveredFinalizationReconciliationErrorIsReturned(t *testing.T) {
+	ctx := context.Background()
+	rm := newDiskStartupRoundManager(t, newTestDiskBackendForStartup(t), &diskStartupStorage{})
+	rm.proofPending = map[string]struct{}{"pending-state": {}}
+
+	err := rm.reconcileRecoveredFinalization(ctx, &RecoveryResult{
+		Recovered:   true,
+		BlockNumber: api.NewBigIntFromUint64(99),
+	})
+	require.ErrorContains(t, err, "recovered block 99 is not finalized")
+
+	rm.proofCacheMu.RLock()
+	_, stillPending := rm.proofPending["pending-state"]
+	rm.proofCacheMu.RUnlock()
+	require.True(t, stillPending, "proof-pending state must not be cleared after failed disk SMT reconciliation")
+}
+
 func newTestDiskBackendForStartup(t *testing.T) *smtbackend.DiskBackend {
 	t.Helper()
-	store, err := diskstore.Open(t.TempDir(), diskstore.Options{})
+	store, err := rocksstore.Open(t.TempDir(), rocksstore.Options{DisableWAL: true, NoSyncWrites: true})
 	require.NoError(t, err)
 	backend, err := smtbackend.NewDiskBackend(store, persist.DefaultOptions())
 	require.NoError(t, err)

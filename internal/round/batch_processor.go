@@ -213,7 +213,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		rm.roundMutex.RUnlock()
 
 		if cp != nil {
-			preResult, advErr := cp.AdvanceRound()
+			preResult, advErr := rm.advancePrecollectorForHandoff(cp)
 			if advErr == nil {
 				if err := preResult.snapshot.SetCommitTarget(ctx, rm.smtBackend); err != nil {
 					rm.logger.WithContext(ctx).Error("Failed to set precollector commit target.", "error", err.Error())
@@ -364,7 +364,9 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 				return fmt.Errorf("recovery failed: %w", recoverErr)
 			}
 			if recoveryResult != nil && recoveryResult.Recovered {
-				rm.reconcileRecoveredFinalization(recoveryResult.BlockNumber)
+				if err := rm.reconcileRecoveredFinalization(ctx, recoveryResult); err != nil {
+					return fmt.Errorf("failed to reconcile recovered finalization: %w", err)
+				}
 			}
 			rm.logger.Info("Recovery completed successfully")
 			return nil
@@ -378,7 +380,11 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 	return fmt.Errorf("FinalizeBlock failed after %d attempts", maxFinalizeRetries)
 }
 
-func (rm *RoundManager) reconcileRecoveredFinalization(blockNumber *api.BigInt) {
+func (rm *RoundManager) reconcileRecoveredFinalization(ctx context.Context, recoveryResult *RecoveryResult) error {
+	if recoveryResult == nil || !recoveryResult.Recovered {
+		return nil
+	}
+	blockNumber := recoveryResult.BlockNumber
 	var snapshot smtbackend.Snapshot
 
 	rm.roundMutex.RLock()
@@ -392,13 +398,24 @@ func (rm *RoundManager) reconcileRecoveredFinalization(blockNumber *api.BigInt) 
 	rm.roundMutex.RUnlock()
 
 	rm.finalizationMu.Lock()
+	defer rm.finalizationMu.Unlock()
+
+	if rm.usesDiskSMTBackend() {
+		if err := rm.syncDiskSMTAfterRecoveredBlock(ctx, recoveryResult); err != nil {
+			return err
+		}
+		rm.clearProofPending()
+		return nil
+	}
+
 	if snapshot != nil {
-		if err := snapshot.Commit(context.Background(), smtbackend.CommitMetadata{BlockNumber: blockNumber}); err != nil {
-			rm.logger.Error("Failed to commit recovered SMT snapshot", "error", err.Error())
+		if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: blockNumber}); err != nil {
+			return fmt.Errorf("failed to commit recovered SMT snapshot: %w", err)
 		}
 	}
+
 	rm.clearProofPending()
-	rm.finalizationMu.Unlock()
+	return nil
 }
 
 // FinalizeBlock creates and persists a new block with the given data
@@ -477,7 +494,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		}
 	} else {
 		var err error
-		storeDataTiming, err = rm.storeDataParallel(ctx, block.Index, smtNodes, records)
+		storeDataTiming, err = rm.storeDataParallel(ctx, smtNodes, records)
 		if err != nil {
 			return fmt.Errorf("failed to store SMT nodes and aggregator records: %w", err)
 		}
@@ -932,7 +949,7 @@ func (rm *RoundManager) storeDataAndCommitDiskSnapshot(
 ) (storeDataTiming, time.Duration, time.Duration, error) {
 	storeCh := make(chan storeDataResult, 1)
 	go func() {
-		timing, err := rm.storeDataParallel(ctx, block.Index, smtNodes, records)
+		timing, err := rm.storeDataParallel(ctx, smtNodes, records)
 		storeCh <- storeDataResult{timing: timing, err: err}
 	}()
 
@@ -966,7 +983,6 @@ func (rm *RoundManager) storeDataAndCommitDiskSnapshot(
 // StoreBatch handles duplicates internally (ignores duplicate key errors).
 func (rm *RoundManager) storeDataParallel(
 	ctx context.Context,
-	blockNumber *api.BigInt,
 	smtNodes []*models.SmtNode,
 	records []*models.AggregatorRecord,
 ) (storeDataTiming, error) {
@@ -1001,14 +1017,6 @@ func (rm *RoundManager) storeDataParallel(
 		smt:     smtTime,
 		records: recordsTime,
 	}
-
-	rm.logger.WithContext(ctx).Debug("PARALLEL_TIMING",
-		"block", blockNumber.String(),
-		"storeSmtNodes", smtTime.Milliseconds(),
-		"storeAggRecords", recordsTime.Milliseconds(),
-		"smtCount", len(smtNodes),
-		"recordCount", len(records),
-		"totalMs", timing.total.Milliseconds())
 
 	if smtErr != nil {
 		return timing, fmt.Errorf("failed to store SMT nodes: %w", smtErr)

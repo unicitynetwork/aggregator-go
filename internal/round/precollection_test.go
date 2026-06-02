@@ -369,7 +369,8 @@ func TestReconcileRecoveredFinalization_CommitsMatchingSnapshotAndClearsProofPen
 	rm.proofCacheMu.RUnlock()
 	require.True(t, pendingBefore)
 
-	rm.reconcileRecoveredFinalization(blockNumber)
+	err = rm.reconcileRecoveredFinalization(ctx, &RecoveryResult{Recovered: true, BlockNumber: blockNumber})
+	require.NoError(t, err)
 
 	_, err = smtInstance.GetInclusionCert(key)
 	require.NoError(t, err)
@@ -416,7 +417,8 @@ func TestReconcileRecoveredFinalization_MismatchedBlockClearsProofPendingOnly(t 
 	rm.proofCacheMu.RUnlock()
 	require.True(t, pendingBefore)
 
-	rm.reconcileRecoveredFinalization(recoveredBlockNumber)
+	err = rm.reconcileRecoveredFinalization(ctx, &RecoveryResult{Recovered: true, BlockNumber: recoveredBlockNumber})
+	require.NoError(t, err)
 
 	require.Equal(t, originalRoot, smtInstance.GetRootHash())
 	key, err := commitment.StateID.GetTreeKey()

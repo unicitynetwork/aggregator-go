@@ -8,6 +8,9 @@ package rocksstore
 #include <stdlib.h>
 #include <rocksdb/c.h>
 
+// These wrappers keep large SMT reads/writes inside one cgo call. Calling the
+// RocksDB C API once per node from Go was much slower in benchmarks because
+// every node paid the Go<->C boundary cost.
 static void go_rocksdb_batched_multi_get_cf(
 	rocksdb_t* db,
 	const rocksdb_readoptions_t* options,
@@ -63,6 +66,8 @@ const (
 	SchemaVersion = "1"
 	TreeLayout    = "yellowpaper-rsmt-sha256-v1"
 	KeyBits       = "256"
+
+	maxCInt = int(^uint32(0) >> 1)
 )
 
 const (
@@ -524,12 +529,15 @@ func (s *Store) getNodesWithReadOptions(keys []disk.NodeKey, sortedInput bool, r
 	s.counters.pointReads.Add(int64(len(keys)))
 	s.counters.nodePointReads.Add(int64(len(keys)))
 
+	var firstErr error
 	for i := range keys {
 		errPtr := (*C.char)(unsafe.Pointer(errs[i]))
 		if errPtr != nil {
 			err := C.GoString(errPtr)
 			C.rocksdb_free(unsafe.Pointer(errPtr))
-			return nil, fmt.Errorf("rocksdb batched multiget SMT node: %s", err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("rocksdb batched multiget SMT node: %s", err)
+			}
 		}
 		value := (*C.rocksdb_pinnableslice_t)(unsafe.Pointer(values[i]))
 		if value == nil {
@@ -537,11 +545,23 @@ func (s *Store) getNodesWithReadOptions(keys []disk.NodeKey, sortedInput bool, r
 		}
 		var valueLen C.size_t
 		valuePtr := C.rocksdb_pinnableslice_value(value, &valueLen)
-		results[i] = storage.NodeReadResult{
-			Value: C.GoBytes(unsafe.Pointer(valuePtr), C.int(valueLen)),
-			Found: true,
+		if valueLen > C.size_t(maxCInt) {
+			C.rocksdb_pinnableslice_destroy(value)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("rocksdb SMT node value too large: %d bytes", uint64(valueLen))
+			}
+			continue
+		}
+		if firstErr == nil {
+			results[i] = storage.NodeReadResult{
+				Value: C.GoBytes(unsafe.Pointer(valuePtr), C.int(valueLen)),
+				Found: true,
+			}
 		}
 		C.rocksdb_pinnableslice_destroy(value)
+	}
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return results, nil
 }
@@ -699,6 +719,9 @@ func (s *Store) getCFWithReadOptions(cf *C.rocksdb_column_family_handle_t, key [
 		return nil, false, nil
 	}
 	defer C.rocksdb_free(unsafe.Pointer(value))
+	if valueLen > C.size_t(maxCInt) {
+		return nil, false, fmt.Errorf("rocksdb value for %q too large: %d bytes", string(key), uint64(valueLen))
+	}
 	return C.GoBytes(unsafe.Pointer(value), C.int(valueLen)), true, nil
 }
 
@@ -968,8 +991,14 @@ func writeBatchDeleteCF(batch *C.rocksdb_writebatch_t, cf *C.rocksdb_column_fami
 	C.rocksdb_writebatch_delete_cf(batch, cf, keyPtr, keyLen)
 }
 
-func writeBatchPutManyCF(batch *C.rocksdb_writebatch_t, cf *C.rocksdb_column_family_handle_t, nodes map[disk.NodeKey][]byte) {
-	keyPtrsMem, keyLensMem, keyBuf, valuePtrsMem, valueLensMem, valueBuf := encodeNodeMapForC(nodes)
+func writeBatchPutEntriesCF(batch *C.rocksdb_writebatch_t, cf *C.rocksdb_column_family_handle_t, nodes []storage.NodeWrite) error {
+	if len(nodes) > maxCInt {
+		return fmt.Errorf("too many RocksDB batch put entries: %d", len(nodes))
+	}
+	keyPtrsMem, keyLensMem, keyBuf, valuePtrsMem, valueLensMem, valueBuf, err := encodeNodeEntriesForC(nodes)
+	if err != nil {
+		return err
+	}
 	defer C.free(keyPtrsMem)
 	defer C.free(keyLensMem)
 	defer C.free(keyBuf)
@@ -986,30 +1015,17 @@ func writeBatchPutManyCF(batch *C.rocksdb_writebatch_t, cf *C.rocksdb_column_fam
 		(**C.char)(valuePtrsMem),
 		(*C.size_t)(valueLensMem),
 	)
+	return nil
 }
 
-func writeBatchPutEntriesCF(batch *C.rocksdb_writebatch_t, cf *C.rocksdb_column_family_handle_t, nodes []storage.NodeWrite) {
-	keyPtrsMem, keyLensMem, keyBuf, valuePtrsMem, valueLensMem, valueBuf := encodeNodeEntriesForC(nodes)
-	defer C.free(keyPtrsMem)
-	defer C.free(keyLensMem)
-	defer C.free(keyBuf)
-	defer C.free(valuePtrsMem)
-	defer C.free(valueLensMem)
-	defer C.free(valueBuf)
-
-	C.go_rocksdb_writebatch_put_many_cf(
-		batch,
-		cf,
-		C.int(len(nodes)),
-		(**C.char)(keyPtrsMem),
-		(*C.size_t)(keyLensMem),
-		(**C.char)(valuePtrsMem),
-		(*C.size_t)(valueLensMem),
-	)
-}
-
-func writeBatchDeleteManyCF(batch *C.rocksdb_writebatch_t, cf *C.rocksdb_column_family_handle_t, keys []disk.NodeKey) {
-	keyPtrsMem, keyLensMem, keyBuf := encodeNodeKeysForC(keys)
+func writeBatchDeleteManyCF(batch *C.rocksdb_writebatch_t, cf *C.rocksdb_column_family_handle_t, keys []disk.NodeKey) error {
+	if len(keys) > maxCInt {
+		return fmt.Errorf("too many RocksDB batch delete entries: %d", len(keys))
+	}
+	keyPtrsMem, keyLensMem, keyBuf, err := encodeNodeKeysForC(keys)
+	if err != nil {
+		return err
+	}
 	defer C.free(keyPtrsMem)
 	defer C.free(keyLensMem)
 	defer C.free(keyBuf)
@@ -1021,38 +1037,10 @@ func writeBatchDeleteManyCF(batch *C.rocksdb_writebatch_t, cf *C.rocksdb_column_
 		(**C.char)(keyPtrsMem),
 		(*C.size_t)(keyLensMem),
 	)
+	return nil
 }
 
-func encodeNodeMapForC(nodes map[disk.NodeKey][]byte) (unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {
-	keys := make([]disk.NodeKey, 0, len(nodes))
-	totalValueBytes := 0
-	for key, value := range nodes {
-		keys = append(keys, key)
-		totalValueBytes += len(value)
-	}
-
-	keyPtrsMem, keyLensMem, keyBuf := encodeNodeKeysForC(keys)
-	valuePtrsMem := C.malloc(C.size_t(len(keys)) * C.size_t(unsafe.Sizeof(uintptr(0))))
-	valueLensMem := C.malloc(C.size_t(len(keys)) * C.size_t(unsafe.Sizeof(C.size_t(0))))
-	valueBuf := C.malloc(C.size_t(totalValueBytes))
-	valuePtrs := unsafe.Slice((*uintptr)(valuePtrsMem), len(keys))
-	valueLens := unsafe.Slice((*C.size_t)(valueLensMem), len(keys))
-	valueBytes := unsafe.Slice((*byte)(valueBuf), totalValueBytes)
-
-	offset := 0
-	for i, key := range keys {
-		value := nodes[key]
-		if len(value) > 0 {
-			copy(valueBytes[offset:], value)
-			valuePtrs[i] = uintptr(unsafe.Add(valueBuf, offset))
-		}
-		valueLens[i] = C.size_t(len(value))
-		offset += len(value)
-	}
-	return keyPtrsMem, keyLensMem, keyBuf, valuePtrsMem, valueLensMem, valueBuf
-}
-
-func encodeNodeEntriesForC(nodes []storage.NodeWrite) (unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {
+func encodeNodeEntriesForC(nodes []storage.NodeWrite) (unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, error) {
 	totalValueBytes := 0
 	keys := make([]disk.NodeKey, len(nodes))
 	for i, node := range nodes {
@@ -1060,16 +1048,29 @@ func encodeNodeEntriesForC(nodes []storage.NodeWrite) (unsafe.Pointer, unsafe.Po
 		totalValueBytes += len(node.Value)
 	}
 
-	keyPtrsMem, keyLensMem, keyBuf := encodeNodeKeysForC(keys)
+	keyPtrsMem, keyLensMem, keyBuf, err := encodeNodeKeysForC(keys)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, err
+	}
 	valuePtrsMem := C.malloc(C.size_t(len(nodes)) * C.size_t(unsafe.Sizeof(uintptr(0))))
 	valueLensMem := C.malloc(C.size_t(len(nodes)) * C.size_t(unsafe.Sizeof(C.size_t(0))))
 	valueBuf := C.malloc(C.size_t(totalValueBytes))
+	if valuePtrsMem == nil || valueLensMem == nil || (totalValueBytes > 0 && valueBuf == nil) {
+		C.free(keyPtrsMem)
+		C.free(keyLensMem)
+		C.free(keyBuf)
+		C.free(valuePtrsMem)
+		C.free(valueLensMem)
+		C.free(valueBuf)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("allocate RocksDB write value buffers")
+	}
 	valuePtrs := unsafe.Slice((*uintptr)(valuePtrsMem), len(nodes))
 	valueLens := unsafe.Slice((*C.size_t)(valueLensMem), len(nodes))
 	valueBytes := unsafe.Slice((*byte)(valueBuf), totalValueBytes)
 
 	offset := 0
 	for i, node := range nodes {
+		valuePtrs[i] = 0
 		if len(node.Value) > 0 {
 			copy(valueBytes[offset:], node.Value)
 			valuePtrs[i] = uintptr(unsafe.Add(valueBuf, offset))
@@ -1077,10 +1078,10 @@ func encodeNodeEntriesForC(nodes []storage.NodeWrite) (unsafe.Pointer, unsafe.Po
 		valueLens[i] = C.size_t(len(node.Value))
 		offset += len(node.Value)
 	}
-	return keyPtrsMem, keyLensMem, keyBuf, valuePtrsMem, valueLensMem, valueBuf
+	return keyPtrsMem, keyLensMem, keyBuf, valuePtrsMem, valueLensMem, valueBuf, nil
 }
 
-func encodeNodeKeysForC(keys []disk.NodeKey) (unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {
+func encodeNodeKeysForC(keys []disk.NodeKey) (unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, error) {
 	totalKeyBytes := 0
 	encoded := make([][]byte, len(keys))
 	for i, key := range keys {
@@ -1091,6 +1092,12 @@ func encodeNodeKeysForC(keys []disk.NodeKey) (unsafe.Pointer, unsafe.Pointer, un
 	keyPtrsMem := C.malloc(C.size_t(len(keys)) * C.size_t(unsafe.Sizeof(uintptr(0))))
 	keyLensMem := C.malloc(C.size_t(len(keys)) * C.size_t(unsafe.Sizeof(C.size_t(0))))
 	keyBuf := C.malloc(C.size_t(totalKeyBytes))
+	if keyPtrsMem == nil || keyLensMem == nil || (totalKeyBytes > 0 && keyBuf == nil) {
+		C.free(keyPtrsMem)
+		C.free(keyLensMem)
+		C.free(keyBuf)
+		return nil, nil, nil, fmt.Errorf("allocate RocksDB write key buffers")
+	}
 	keyPtrs := unsafe.Slice((*uintptr)(keyPtrsMem), len(keys))
 	keyLens := unsafe.Slice((*C.size_t)(keyLensMem), len(keys))
 	keyBytes := unsafe.Slice((*byte)(keyBuf), totalKeyBytes)
@@ -1102,5 +1109,5 @@ func encodeNodeKeysForC(keys []disk.NodeKey) (unsafe.Pointer, unsafe.Pointer, un
 		keyLens[i] = C.size_t(len(key))
 		offset += len(key)
 	}
-	return keyPtrsMem, keyLensMem, keyBuf
+	return keyPtrsMem, keyLensMem, keyBuf, nil
 }

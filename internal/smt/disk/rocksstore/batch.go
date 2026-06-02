@@ -38,23 +38,6 @@ func (b *Batch) SetNode(key disk.NodeKey, value []byte) error {
 	return nil
 }
 
-func (b *Batch) SetNodes(nodes map[disk.NodeKey][]byte) error {
-	if b == nil || b.batch == nil {
-		return fmt.Errorf("nil RocksDB SMT store batch")
-	}
-	if b.closed {
-		return fmt.Errorf("RocksDB SMT store batch is closed")
-	}
-	if len(nodes) == 0 {
-		return nil
-	}
-	writeBatchPutManyCF(b.batch, b.store.nodesCF, nodes)
-	count := int64(len(nodes))
-	b.store.counters.batchSets.Add(count)
-	b.store.counters.nodeSets.Add(count)
-	return nil
-}
-
 func (b *Batch) SetNodeEntries(nodes []storage.NodeWrite) error {
 	if b == nil || b.batch == nil {
 		return fmt.Errorf("nil RocksDB SMT store batch")
@@ -65,7 +48,9 @@ func (b *Batch) SetNodeEntries(nodes []storage.NodeWrite) error {
 	if len(nodes) == 0 {
 		return nil
 	}
-	writeBatchPutEntriesCF(b.batch, b.store.nodesCF, nodes)
+	if err := writeBatchPutEntriesCF(b.batch, b.store.nodesCF, nodes); err != nil {
+		return err
+	}
 	count := int64(len(nodes))
 	b.store.counters.batchSets.Add(count)
 	b.store.counters.nodeSets.Add(count)
@@ -95,7 +80,9 @@ func (b *Batch) DeleteNodes(keys []disk.NodeKey) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	writeBatchDeleteManyCF(b.batch, b.store.nodesCF, keys)
+	if err := writeBatchDeleteManyCF(b.batch, b.store.nodesCF, keys); err != nil {
+		return err
+	}
 	count := int64(len(keys))
 	b.store.counters.batchSets.Add(count)
 	b.store.counters.nodeDeletes.Add(count)

@@ -556,13 +556,7 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 	// Start precollector on the first child-mode round so it begins collecting
 	// commitments into a chained snapshot while the current round processes.
 	if rm.config.Sharding.Mode.IsChild() && rm.precollector == nil && !rm.precollectorDisabled {
-		cp := newChildPrecollector(
-			rm.commitmentStream,
-			rm.commitmentQueue,
-			rm.logger,
-			rm.config.Processing.MaxCommitmentsPerRound,
-			rm.markProofsPending,
-		)
+		cp := rm.newActivePrecollector()
 		rm.precollector = cp
 		cp.Start(ctx, snapshot)
 	}
@@ -1141,6 +1135,14 @@ func (rm *RoundManager) startActivePrecollectorIfNeeded(ctx context.Context) {
 	}
 
 	snapshot := rm.currentRound.Snapshot
+	cp := rm.newActivePrecollector()
+	rm.precollector = cp
+	rm.roundMutex.Unlock()
+
+	cp.Start(ctx, snapshot)
+}
+
+func (rm *RoundManager) newActivePrecollector() *childPrecollector {
 	cp := newChildPrecollector(
 		rm.commitmentStream,
 		rm.commitmentQueue,
@@ -1148,10 +1150,11 @@ func (rm *RoundManager) startActivePrecollectorIfNeeded(ctx context.Context) {
 		rm.config.Processing.MaxCommitmentsPerRound,
 		rm.markProofsPending,
 	)
-	rm.precollector = cp
-	rm.roundMutex.Unlock()
+	return cp
+}
 
-	cp.Start(ctx, snapshot)
+func (rm *RoundManager) advancePrecollectorForHandoff(cp *childPrecollector) (*preCollectionResult, error) {
+	return cp.AdvanceRound()
 }
 
 // StartNextRoundFromPrecollector starts the next standalone/bft-shard round
@@ -1162,42 +1165,23 @@ func (rm *RoundManager) StartNextRoundFromPrecollector(ctx context.Context, roun
 		return rm.StartNewRound(ctx, roundNumber)
 	}
 
-	handoffStart := time.Now()
 	rm.roundMutex.RLock()
 	cpExists := rm.precollector != nil
 	precollectorDone := rm.precollectorDone
 	precollectorDisabled := rm.precollectorDisabled
 	rm.roundMutex.RUnlock()
-	rm.logger.WithContext(ctx).Info("PERF: Precollector handoff begin",
-		"roundNumber", roundNumber.String(),
-		"precollectorExists", cpExists,
-		"precollectorDisabled", precollectorDisabled,
-		"grace", rm.config.Processing.PrecollectorGracePeriod.String())
 
 	if precollectorDisabled {
-		rm.logger.WithContext(ctx).Info("PERF: Precollector handoff skipped",
-			"roundNumber", roundNumber.String(),
-			"reason", "disabled",
-			"duration", time.Since(handoffStart).String())
 		return nil
 	}
 
 	if cpExists {
-		waitStart := time.Now()
 		if err := rm.waitBeforePrecollectorHandoff(ctx, precollectorDone); err != nil {
 			if errors.Is(err, ErrDeactivated) {
-				rm.logger.WithContext(ctx).Info("PERF: Precollector handoff skipped",
-					"roundNumber", roundNumber.String(),
-					"reason", "deactivated",
-					"waitDuration", time.Since(waitStart).String(),
-					"duration", time.Since(handoffStart).String())
 				return nil
 			}
 			return err
 		}
-		rm.logger.WithContext(ctx).Info("PERF: Precollector handoff grace complete",
-			"roundNumber", roundNumber.String(),
-			"waitDuration", time.Since(waitStart).String())
 	}
 
 	rm.roundMutex.RLock()
@@ -1206,33 +1190,20 @@ func (rm *RoundManager) StartNextRoundFromPrecollector(ctx context.Context, roun
 	rm.roundMutex.RUnlock()
 
 	if precollectorDisabled {
-		rm.logger.WithContext(ctx).Info("PERF: Precollector handoff skipped",
-			"roundNumber", roundNumber.String(),
-			"reason", "disabled_after_grace",
-			"duration", time.Since(handoffStart).String())
 		return nil
 	}
 	if cp == nil {
-		rm.logger.WithContext(ctx).Info("PERF: Precollector handoff fallback",
-			"roundNumber", roundNumber.String(),
-			"reason", "missing_precollector",
-			"duration", time.Since(handoffStart).String())
 		return rm.StartNewRound(ctx, roundNumber)
 	}
 
 	advanceStart := time.Now()
-	preResult, err := cp.AdvanceRound()
+	preResult, err := rm.advancePrecollectorForHandoff(cp)
 	advanceDuration := time.Since(advanceStart)
 	if err != nil {
 		rm.roundMutex.RLock()
 		precollectorDisabled = rm.precollectorDisabled
 		rm.roundMutex.RUnlock()
 		if precollectorDisabled {
-			rm.logger.WithContext(ctx).Info("PERF: Precollector handoff skipped",
-				"roundNumber", roundNumber.String(),
-				"reason", "disabled_after_advance_error",
-				"advanceDuration", advanceDuration.String(),
-				"duration", time.Since(handoffStart).String())
 			return nil
 		}
 
@@ -1241,36 +1212,16 @@ func (rm *RoundManager) StartNextRoundFromPrecollector(ctx context.Context, roun
 			"advanceDuration", advanceDuration.String())
 		return rm.StartNewRound(ctx, roundNumber)
 	}
-	rm.logger.WithContext(ctx).Info("PERF: Precollector handoff advanced",
-		"roundNumber", roundNumber.String(),
-		"commitments", len(preResult.commitments),
-		"leaves", len(preResult.leaves),
-		"advanceDuration", advanceDuration.String(),
-		"duration", time.Since(handoffStart).String())
 
-	setTargetStart := time.Now()
 	if err := preResult.snapshot.SetCommitTarget(ctx, rm.smtBackend); err != nil {
 		return fmt.Errorf("failed to set precollector commit target: %w", err)
 	}
-	setTargetDuration := time.Since(setTargetStart)
 	if err := rm.StartNewRoundWithSnapshot(ctx, roundNumber, preResult.snapshot, preResult.commitments, preResult.leaves); err != nil {
 		if errors.Is(err, ErrDeactivated) {
-			rm.logger.WithContext(ctx).Info("PERF: Precollector handoff skipped",
-				"roundNumber", roundNumber.String(),
-				"reason", "deactivated_start_round",
-				"setTargetDuration", setTargetDuration.String(),
-				"duration", time.Since(handoffStart).String())
 			return nil
 		}
 		return err
 	}
-	rm.logger.WithContext(ctx).Info("PERF: Precollector handoff complete",
-		"roundNumber", roundNumber.String(),
-		"commitments", len(preResult.commitments),
-		"leaves", len(preResult.leaves),
-		"advanceDuration", advanceDuration.String(),
-		"setTargetDuration", setTargetDuration.String(),
-		"duration", time.Since(handoffStart).String())
 	return nil
 }
 

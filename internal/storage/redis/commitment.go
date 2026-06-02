@@ -523,14 +523,13 @@ func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interf
 		ackDuration := time.Since(ackStart)
 		metrics.RedisCommitmentQueueOperationDuration.WithLabelValues("xack").Observe(ackDuration.Seconds())
 		if ackDuration > 100*time.Millisecond && cs.logger != nil {
-			cs.logger.WithContext(ctx).Warn("PERF: Redis XACK slow",
+			cs.logger.WithContext(ctx).Warn("Redis XACK slow",
 				"stream", cs.streamName,
 				"count", len(batch),
 				"duration", ackDuration.String())
 		}
 	}
 
-	deleteBatches := 0
 	if cs.batchConfig.DeleteAfterAck {
 		for start := 0; start < len(streamIDs); start += ackBatchSize {
 			end := start + ackBatchSize
@@ -538,22 +537,11 @@ func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interf
 				end = len(streamIDs)
 			}
 			cs.enqueueDeleteAckedEntries(ctx, streamIDs[start:end])
-			deleteBatches++
 		}
 	}
 
 	duration := time.Since(startTime)
 	metrics.RedisCommitmentQueueOperationDuration.WithLabelValues("mark_processed").Observe(duration.Seconds())
-	if cs.logger != nil {
-		cs.logger.WithContext(ctx).Info("PERF: Redis MarkProcessed",
-			"stream", cs.streamName,
-			"entries", len(entries),
-			"ackBatchSize", ackBatchSize,
-			"deleteBatches", deleteBatches,
-			"deleteQueueDepth", len(cs.deleteQueue),
-			"deleteQueueCapacity", cap(cs.deleteQueue),
-			"duration", duration.String())
-	}
 
 	return nil
 }
@@ -598,7 +586,7 @@ func (cs *CommitmentStorage) deleteAckedEntries(ctx context.Context) {
 				continue
 			}
 			if deleteDuration > 100*time.Millisecond && cs.logger != nil {
-				cs.logger.WithContext(ctx).Warn("PERF: Redis XDEL slow",
+				cs.logger.WithContext(ctx).Warn("Redis XDEL slow",
 					"stream", cs.streamName,
 					"count", len(batch),
 					"deleteQueueDepth", len(cs.deleteQueue),
@@ -753,7 +741,7 @@ func (cs *CommitmentStorage) trimStream(ctx context.Context) {
 		duration := time.Since(trimStart)
 		metrics.RedisCommitmentQueueOperationDuration.WithLabelValues("xtrim_check").Observe(duration.Seconds())
 		if duration > 100*time.Millisecond && cs.logger != nil {
-			cs.logger.WithContext(ctx).Warn("PERF: Redis trim check slow",
+			cs.logger.WithContext(ctx).Warn("Redis trim check slow",
 				"stream", cs.streamName,
 				"duration", duration.String())
 		}
@@ -827,9 +815,6 @@ func (cs *CommitmentStorage) trimStream(ctx context.Context) {
 // StreamCertificationRequests continuously streams commitments using blocking Redis reads
 // This streams commitments directly to the provided channel as they arrive
 func (cs *CommitmentStorage) StreamCertificationRequests(ctx context.Context, commitmentChan chan<- *models.CertificationRequest) error {
-	windowStart := time.Now()
-	countThisWindow := 0
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -887,17 +872,6 @@ func (cs *CommitmentStorage) StreamCertificationRequests(ctx context.Context, co
 					// Stream commitment directly to channel
 					select {
 					case commitmentChan <- commitment:
-						countThisWindow++
-						elapsed := time.Since(windowStart)
-						if elapsed >= time.Second {
-							rate := float64(countThisWindow) / elapsed.Seconds()
-							cs.logger.Info("PERF: Redis stream throughput",
-								"serverID", cs.serverID,
-								"ratePerSec", fmt.Sprintf("%.0f", rate),
-								"windowMs", elapsed.Milliseconds())
-							windowStart = time.Now()
-							countThisWindow = 0
-						}
 					case <-ctx.Done():
 						return ctx.Err()
 					case <-cs.stopChan:

@@ -266,6 +266,18 @@ func (rm *RoundManager) replayDiskSMTBlock(ctx context.Context, blockNumber *api
 		return fmt.Errorf("finalized block %s not found for disk SMT replay", blockNumber.String())
 	}
 
+	state, err := rm.smtBackend.CommittedState(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to read disk SMT committed state before replay block %s: %w", blockNumber.String(), err)
+	}
+	if state.BlockNumber != nil && state.BlockNumber.Cmp(block.Index.Int) >= 0 {
+		if state.BlockNumber.Cmp(block.Index.Int) == 0 && bytes.Equal(state.RootHash, block.RootHash) {
+			return nil
+		}
+		return fmt.Errorf("disk SMT already at block %s root %s, cannot replay block %s root %s",
+			state.BlockNumber.String(), api.HexBytes(state.RootHash).String(), block.Index.String(), block.RootHash.String())
+	}
+
 	blockRecords, err := rm.storage.BlockRecordsStorage().GetByBlockNumber(ctx, blockNumber)
 	if err != nil {
 		return fmt.Errorf("failed to load block records for disk SMT replay block %s: %w", blockNumber.String(), err)

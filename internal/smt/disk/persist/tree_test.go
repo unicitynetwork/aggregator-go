@@ -1,3 +1,5 @@
+//go:build rocksdb
+
 package persist
 
 import (
@@ -7,7 +9,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk"
-	diskstore "github.com/unicitynetwork/aggregator-go/internal/smt/disk/store"
+	rocksstore "github.com/unicitynetwork/aggregator-go/internal/smt/disk/rocksstore"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -187,7 +189,7 @@ func TestSnapshotFrontierMaterializationMatchesMemory(t *testing.T) {
 	}
 }
 
-func TestNodeCacheServesRepeatedMaterializationWithoutPebbleRead(t *testing.T) {
+func TestNodeCacheServesRepeatedMaterializationWithoutStoreRead(t *testing.T) {
 	store := openTestStore(t, t.TempDir())
 	defer store.Close()
 	tree := openPersistTreeWithOptions(t, store, Options{EnableNodeCache: true, NodeCacheDepth: 0})
@@ -260,7 +262,7 @@ func TestNodeCacheUpdatesRootAfterCommit(t *testing.T) {
 	require.Equal(t, before.NodePointReads+1, after.NodePointReads)
 }
 
-func TestSnapshotDiscardDoesNotWritePebble(t *testing.T) {
+func TestSnapshotDiscardDoesNotWriteStore(t *testing.T) {
 	store := openTestStore(t, t.TempDir())
 	defer store.Close()
 	tree := openPersistTree(t, store)
@@ -653,6 +655,17 @@ func TestGetInclusionCertsBatchMatchesSingleAfterReopen(t *testing.T) {
 	}
 }
 
+func TestGetInclusionCertEmptyTreeReturnsError(t *testing.T) {
+	store := openTestStore(t, t.TempDir())
+	defer store.Close()
+	tree := openPersistTree(t, store)
+
+	key := keyWithFirstByte(0x01)
+	cert, err := tree.GetInclusionCert(key[:])
+	require.Error(t, err)
+	require.Nil(t, cert)
+}
+
 func TestGetInclusionCertMissingKey(t *testing.T) {
 	store := openTestStore(t, t.TempDir())
 	defer store.Close()
@@ -681,21 +694,21 @@ func TestGetInclusionCertRejectsWrongKeyLength(t *testing.T) {
 	require.Nil(t, cert)
 }
 
-func openTestStore(t *testing.T, dir string) *diskstore.Store {
+func openTestStore(t *testing.T, dir string) *rocksstore.Store {
 	t.Helper()
-	store, err := diskstore.Open(dir, diskstore.Options{})
+	store, err := rocksstore.Open(dir, rocksstore.Options{DisableWAL: true, NoSyncWrites: true})
 	require.NoError(t, err)
 	return store
 }
 
-func openPersistTree(t *testing.T, store *diskstore.Store) *Tree {
+func openPersistTree(t *testing.T, store *rocksstore.Store) *Tree {
 	t.Helper()
 	tree, err := Open(store)
 	require.NoError(t, err)
 	return tree
 }
 
-func openPersistTreeWithOptions(t *testing.T, store *diskstore.Store, opts Options) *Tree {
+func openPersistTreeWithOptions(t *testing.T, store *rocksstore.Store, opts Options) *Tree {
 	t.Helper()
 	tree, err := OpenWithOptions(store, opts)
 	require.NoError(t, err)
@@ -741,7 +754,7 @@ func keyWithFirstByte(firstByte byte) disk.Key {
 	return key
 }
 
-func requireNodeExists(t *testing.T, store *diskstore.Store, key disk.NodeKey) []byte {
+func requireNodeExists(t *testing.T, store *rocksstore.Store, key disk.NodeKey) []byte {
 	t.Helper()
 	value, ok, err := store.GetNode(key)
 	require.NoError(t, err)
@@ -749,14 +762,14 @@ func requireNodeExists(t *testing.T, store *diskstore.Store, key disk.NodeKey) [
 	return value
 }
 
-func requireNodeMissing(t *testing.T, store *diskstore.Store, key disk.NodeKey) {
+func requireNodeMissing(t *testing.T, store *rocksstore.Store, key disk.NodeKey) {
 	t.Helper()
 	_, ok, err := store.GetNode(key)
 	require.NoError(t, err)
 	require.False(t, ok)
 }
 
-func treeRootNode(t *testing.T, store *diskstore.Store) *disk.InternalNode {
+func treeRootNode(t *testing.T, store *rocksstore.Store) *disk.InternalNode {
 	t.Helper()
 	encoded := requireNodeExists(t, store, disk.RootNodeKey())
 	tag, err := disk.SerializedTag(encoded)

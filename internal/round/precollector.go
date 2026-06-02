@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -80,6 +79,11 @@ func (cp *childPrecollector) AdvanceRound() (*preCollectionResult, error) {
 	case resp := <-req.resultCh:
 		return resp.result, resp.err
 	case <-cp.doneCh:
+		select {
+		case resp := <-req.resultCh:
+			return resp.result, resp.err
+		default:
+		}
 		return nil, cp.stoppedError()
 	}
 }
@@ -112,18 +116,9 @@ func (cp *childPrecollector) run(ctx context.Context, baseSnapshot smtbackend.Sn
 		if len(pending) == 0 {
 			return nil
 		}
-		start := time.Now()
-		inputs := len(pending)
 		added, addedLeaves, err := cp.addBatch(ctx, snapshot, pending)
 		if err != nil {
 			return err
-		}
-		duration := time.Since(start)
-		if duration > 100*time.Millisecond || inputs >= miniBatchSize {
-			cp.logger.WithContext(ctx).Info("PERF: Precollector flush",
-				"inputs", inputs,
-				"accepted", len(added),
-				"duration", duration.String())
 		}
 		if cp.markProofPending != nil {
 			cp.markProofPending(added)
@@ -156,16 +151,11 @@ func (cp *childPrecollector) run(ctx context.Context, baseSnapshot smtbackend.Sn
 			}
 
 		case req := <-cp.advanceCh:
-			advanceStart := time.Now()
-			beforeDrainCount := count
-			beforeDrainPending := len(pending)
 			if err := drainBufferedCommitments(cp.commitmentStream, cp.maxPerRound, &count, &pending, flush); err != nil {
 				cp.setStopErr(err)
 				req.resultCh <- advanceResponse{err: err}
 				return
 			}
-			afterDrainCount := count
-			afterDrainPending := len(pending)
 			if err := flush(); err != nil {
 				cp.setStopErr(err)
 				req.resultCh <- advanceResponse{err: err}
@@ -176,12 +166,8 @@ func (cp *childPrecollector) run(ctx context.Context, baseSnapshot smtbackend.Sn
 				commitments: commitments,
 				leaves:      leaves,
 			}
-			resultCommitments := len(commitments)
-			resultLeaves := len(leaves)
 			// Chain new collection from current snapshot
-			forkStart := time.Now()
 			nextSnapshot, err := snapshot.Fork(ctx)
-			forkDuration := time.Since(forkStart)
 			if err != nil {
 				err = fmt.Errorf("failed to fork next precollector snapshot: %w", err)
 				cp.setStopErr(err)
@@ -192,15 +178,6 @@ func (cp *childPrecollector) run(ctx context.Context, baseSnapshot smtbackend.Sn
 			commitments = make([]*models.CertificationRequest, 0)
 			leaves = make([]smtbackend.LeafInput, 0)
 			count = 0
-			cp.logger.WithContext(ctx).Info("PERF: Precollector advance",
-				"beforeDrainCount", beforeDrainCount,
-				"beforeDrainPending", beforeDrainPending,
-				"afterDrainCount", afterDrainCount,
-				"afterDrainPending", afterDrainPending,
-				"resultCommitments", resultCommitments,
-				"resultLeaves", resultLeaves,
-				"forkDuration", forkDuration.String(),
-				"duration", time.Since(advanceStart).String())
 			req.resultCh <- advanceResponse{result: result}
 
 		case <-cp.stopCh:

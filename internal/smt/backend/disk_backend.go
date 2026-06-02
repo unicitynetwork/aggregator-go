@@ -21,7 +21,7 @@ type DiskBackend struct {
 	store storage.Store
 	tree  *persist.Tree
 
-	mu              sync.RWMutex
+	mu              sync.Mutex
 	lastCommitStats persist.CommitStats
 	snapshotWarning sync.Once
 }
@@ -45,8 +45,8 @@ func (b *DiskBackend) RootHashRaw(context.Context) ([]byte, error) {
 	if b == nil || b.tree == nil {
 		return nil, fmt.Errorf("disk SMT backend not initialized")
 	}
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return hashBytes(b.tree.RootHash()), nil
 }
 
@@ -54,8 +54,8 @@ func (b *DiskBackend) CommittedState(context.Context) (CommittedState, error) {
 	if b == nil || b.store == nil {
 		return CommittedState{}, fmt.Errorf("disk SMT backend not initialized")
 	}
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	state, err := b.store.CommittedState()
 	if err != nil {
 		return CommittedState{}, err
@@ -70,8 +70,8 @@ func (b *DiskBackend) CreateSnapshot(context.Context) (Snapshot, error) {
 	if b == nil || b.tree == nil {
 		return nil, fmt.Errorf("disk SMT backend not initialized")
 	}
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	snapshot, err := b.tree.CreateSnapshot()
 	if err != nil {
 		return nil, err
@@ -200,9 +200,9 @@ func (b *DiskBackend) Stats(ctx context.Context) BackendStats {
 	if b == nil {
 		return BackendStats{RootHash: root}
 	}
-	b.mu.RLock()
+	b.mu.Lock()
 	lastCommitStats := b.lastCommitStats
-	b.mu.RUnlock()
+	b.mu.Unlock()
 
 	raw := map[string]any{
 		"last_commit": lastCommitStats,
@@ -236,8 +236,8 @@ func (s *DiskSnapshot) AddLeavesClassified(_ context.Context, inputs []LeafInput
 	if s == nil || s.snapshot == nil || s.target == nil {
 		return BatchApplyResult{}, fmt.Errorf("disk SMT snapshot not initialized")
 	}
-	s.target.mu.RLock()
-	defer s.target.mu.RUnlock()
+	s.target.mu.Lock()
+	defer s.target.mu.Unlock()
 	result, err := s.snapshot.AddLeaves(toDiskLeafInputs(inputs))
 	return fromDiskApplyResult(result), err
 }
@@ -253,8 +253,8 @@ func (s *DiskSnapshot) Fork(context.Context) (Snapshot, error) {
 	if s == nil || s.snapshot == nil || s.target == nil {
 		return nil, fmt.Errorf("disk SMT snapshot not initialized")
 	}
-	s.target.mu.RLock()
-	defer s.target.mu.RUnlock()
+	s.target.mu.Lock()
+	defer s.target.mu.Unlock()
 	child, err := s.snapshot.Fork()
 	if err != nil {
 		return nil, err
@@ -276,8 +276,8 @@ func (s *DiskSnapshot) SetCommitTarget(_ context.Context, target Backend) error 
 	if diskTarget == nil || diskTarget.tree == nil {
 		return fmt.Errorf("disk snapshot commit target is not initialized")
 	}
-	diskTarget.mu.RLock()
-	defer diskTarget.mu.RUnlock()
+	diskTarget.mu.Lock()
+	defer diskTarget.mu.Unlock()
 	if err := s.snapshot.SetCommitTarget(diskTarget.tree); err != nil {
 		return err
 	}

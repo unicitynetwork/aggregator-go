@@ -41,12 +41,6 @@ type Batch interface {
 	Close() error
 }
 
-type BulkBatch interface {
-	Batch
-	SetNodes(map[disk.NodeKey][]byte) error
-	DeleteNodes([]disk.NodeKey) error
-}
-
 type Counters struct {
 	PointReads       int64
 	MetaPointReads   int64
@@ -72,7 +66,8 @@ type NodeWrite struct {
 }
 
 type BulkEntryBatch interface {
-	BulkBatch
+	Batch
+	DeleteNodes([]disk.NodeKey) error
 	SetNodeEntries([]NodeWrite) error
 }
 

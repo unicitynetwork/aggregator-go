@@ -1,3 +1,5 @@
+//go:build rocksdb
+
 package backend
 
 import (
@@ -9,7 +11,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk/persist"
-	diskstore "github.com/unicitynetwork/aggregator-go/internal/smt/disk/store"
+	rocksstore "github.com/unicitynetwork/aggregator-go/internal/smt/disk/rocksstore"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -23,7 +25,7 @@ func TestDiskBackendRootMatchesLegacySMTAfterReopen(t *testing.T) {
 	expectedRoot := legacyRoot(t, inputs)
 
 	dir := t.TempDir()
-	store, err := diskstore.Open(dir, diskstore.Options{})
+	store, err := rocksstore.Open(dir, rocksstore.Options{DisableWAL: true, NoSyncWrites: true})
 	require.NoError(t, err)
 	backend, err := NewDiskBackend(store, diskBackendTestOptions())
 	require.NoError(t, err)
@@ -49,7 +51,7 @@ func TestDiskBackendRootMatchesLegacySMTAfterReopen(t *testing.T) {
 	require.Equal(t, expectedRoot, state.RootHash)
 	require.NoError(t, backend.Close())
 
-	reopenedStore, err := diskstore.Open(dir, diskstore.Options{})
+	reopenedStore, err := rocksstore.Open(dir, rocksstore.Options{DisableWAL: true, NoSyncWrites: true})
 	require.NoError(t, err)
 	reopenedBackend, err := NewDiskBackend(reopenedStore, diskBackendTestOptions())
 	require.NoError(t, err)
@@ -300,7 +302,7 @@ func TestDiskBackendStatsExposeRootAndStoreSignals(t *testing.T) {
 
 func newTestDiskBackend(t *testing.T) *DiskBackend {
 	t.Helper()
-	store, err := diskstore.Open(t.TempDir(), diskstore.Options{})
+	store, err := rocksstore.Open(t.TempDir(), rocksstore.Options{DisableWAL: true, NoSyncWrites: true})
 	require.NoError(t, err)
 	backend, err := NewDiskBackend(store, diskBackendTestOptions())
 	require.NoError(t, err)

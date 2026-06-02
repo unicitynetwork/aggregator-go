@@ -33,7 +33,7 @@ const (
 	MaterializeFrontier = "frontier"
 	// MaterializeParallel uses the same frontier traversal as "frontier", but
 	// loads each wave with bounded concurrent point reads. This mirrors the
-	// rugregator baseline more closely than Pebble iterator/MultiGet reads.
+	// rugregator baseline more closely than storage-engine iterator/MultiGet reads.
 	MaterializeParallel = "parallel"
 
 	FrontierReadPoint    = "point"
@@ -52,8 +52,8 @@ type Options struct {
 	// "path" is the original per-key path walk; "frontier" loads the batch as
 	// wavefronts of NodeKeys.
 	MaterializeMode string
-	// FrontierReadMode selects how each frontier wave is read from Pebble.
-	// "point" uses sorted point gets; "iterator" uses one Pebble iterator per
+	// FrontierReadMode selects how each frontier wave is read from the disk store.
+	// "point" uses sorted point gets; "iterator" uses one storage iterator per
 	// wave and SeekGE for each requested key.
 	FrontierReadMode string
 	// MaterializeWorkers bounds concurrent branch materialization in
@@ -745,17 +745,6 @@ func (s *Snapshot) Commit(blockNumber *api.BigInt) error {
 		if err := bulk.SetNodeEntries(writes); err != nil {
 			return err
 		}
-	} else if bulk, ok := batch.(storage.BulkBatch); ok {
-		writeMap := make(map[disk.NodeKey][]byte, len(writes))
-		for _, write := range writes {
-			writeMap[write.Key] = write.Value
-		}
-		if err := bulk.DeleteNodes(deletes); err != nil {
-			return err
-		}
-		if err := bulk.SetNodes(writeMap); err != nil {
-			return err
-		}
 	} else {
 		for _, key := range deletes {
 			if err := batch.DeleteNode(key); err != nil {
@@ -787,7 +776,7 @@ func (s *Snapshot) Commit(blockNumber *api.BigInt) error {
 
 	cacheUpdateStart := time.Now()
 	// Keep committed state bounded in memory; snapshots rematerialize touched
-	// paths from Pebble instead of retaining the full committed tree.
+	// paths from the disk store instead of retaining the full committed tree.
 	s.parent.root = stubForRoot(s.rootHash)
 	s.parent.rootHash = s.rootHash
 	s.parent.applyNodeCacheUpdate(s.cacheDeletes, s.cacheWrites)
