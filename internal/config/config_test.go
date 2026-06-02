@@ -98,6 +98,15 @@ func TestConfigValidate_CollectPhaseDuration(t *testing.T) {
 	}
 }
 
+func TestConfigValidateTraceLogLevel(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Logging.Level = "trace"
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() returned error: %v", err)
+	}
+}
+
 func TestConfigValidateSMTBackend(t *testing.T) {
 	t.Run("memory is default", func(t *testing.T) {
 		cfg := validTestConfig()

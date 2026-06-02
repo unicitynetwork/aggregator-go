@@ -75,7 +75,7 @@ RUN if [ -n "$BUILD_TAGS" ]; then \
 FROM builder AS test
 
 RUN if [ -n "$BUILD_TAGS" ]; then \
-      go test -tags "$BUILD_TAGS" ./internal/smt/disk/rocksstore ./cmd/disk-smt-benchmark ./internal/smt/disk/...; \
+      go test -tags "$BUILD_TAGS" ./internal/smt/disk/rocksstore ./internal/smt/disk/...; \
     else \
       go test ./internal/smt/disk/...; \
     fi

@@ -559,7 +559,7 @@ func (c *Config) Validate() error {
 	}
 
 	// Validate log level
-	validLevels := []string{"debug", "info", "warn", "error", "fatal", "panic"}
+	validLevels := []string{"trace", "debug", "info", "warn", "error", "fatal", "panic"}
 	if !contains(validLevels, strings.ToLower(c.Logging.Level)) {
 		return fmt.Errorf("invalid log level: %s", c.Logging.Level)
 	}
