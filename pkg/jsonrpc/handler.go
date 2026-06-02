@@ -185,13 +185,13 @@ func RequestIDMiddleware() MiddlewareFunc {
 	}
 }
 
-// LoggingMiddleware logs JSON-RPC requests
+// LoggingMiddleware logs JSON-RPC requests.
 // Note: WithContext adds request_id and jsonrpc_id automatically
-func LoggingMiddleware(logger *logger.Logger) MiddlewareFunc {
+func LoggingMiddleware(log *logger.Logger) MiddlewareFunc {
 	return func(ctx context.Context, req *Request, next func(context.Context, *Request) *Response) *Response {
 		start := time.Now()
 
-		logger.WithContext(ctx).Info("Processing JSON-RPC request",
+		log.WithContext(ctx).Log(ctx, logger.LevelTrace, "Processing JSON-RPC request",
 			"method", req.Method)
 
 		response := next(ctx, req)
@@ -199,12 +199,12 @@ func LoggingMiddleware(logger *logger.Logger) MiddlewareFunc {
 		duration := time.Since(start)
 
 		if response.Error != nil {
-			logger.WithContext(ctx).Error("JSON-RPC request failed",
+			log.WithContext(ctx).Error("JSON-RPC request failed",
 				"method", req.Method,
 				"duration_ms", duration.Milliseconds(),
 				"error_code", response.Error.Code)
 		} else {
-			logger.WithContext(ctx).Debug("JSON-RPC request completed",
+			log.WithContext(ctx).Log(ctx, logger.LevelTrace, "JSON-RPC request completed",
 				"method", req.Method,
 				"duration_ms", duration.Milliseconds())
 		}

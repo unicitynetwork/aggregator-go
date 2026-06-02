@@ -227,6 +227,87 @@ func (t *Tree) GetInclusionCertWithReadSnapshot(key []byte, openReadSnapshot fun
 	return BuildInclusionCert(rootHash, reader, key)
 }
 
+func (t *Tree) GetInclusionCertsWithReadSnapshot(keys [][]byte, openReadSnapshot func() (storage.ReadStore, func(), error)) ([]*api.InclusionCert, error) {
+	for i, key := range keys {
+		if len(key) != api.StateTreeKeyLengthBytes {
+			return nil, fmt.Errorf("key %d: %w: got %d, want %d", i, api.ErrCertKeyLength, len(key), api.StateTreeKeyLengthBytes)
+		}
+	}
+	if t == nil {
+		return nil, fmt.Errorf("disk SMT persist: nil tree")
+	}
+	t.mu.RLock()
+	rootHash := t.rootHash
+	if rootHash == disk.EmptyRootHash() || openReadSnapshot == nil {
+		t.mu.RUnlock()
+		return buildInclusionCerts(rootHash, t.store, keys)
+	}
+	reader, closeSnapshot, err := openReadSnapshot()
+	t.mu.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	if closeSnapshot != nil {
+		defer closeSnapshot()
+	}
+	return buildInclusionCerts(rootHash, reader, keys)
+}
+
+func buildInclusionCerts(rootHash disk.Hash, reader storage.ReadStore, keys [][]byte) ([]*api.InclusionCert, error) {
+	return BuildInclusionCerts(rootHash, reader, keys)
+}
+
+// BuildInclusionCerts builds multiple proofs from a fixed root hash and read
+// store. It materializes the union of requested proof paths once, then derives
+// each certificate from that shared materialized root.
+func BuildInclusionCerts(rootHash disk.Hash, reader storage.ReadStore, keys [][]byte) ([]*api.InclusionCert, error) {
+	certs := make([]*api.InclusionCert, len(keys))
+	if len(keys) == 0 {
+		return certs, nil
+	}
+
+	diskKeys := make([]disk.Key, len(keys))
+	uniqueKeys := make([]disk.Key, 0, len(keys))
+	seen := make(map[disk.Key]struct{}, len(keys))
+	for i, key := range keys {
+		if len(key) != api.StateTreeKeyLengthBytes {
+			return nil, fmt.Errorf("key %d: %w: got %d, want %d", i, api.ErrCertKeyLength, len(key), api.StateTreeKeyLengthBytes)
+		}
+		diskKey, err := disk.KeyFromBytes(key)
+		if err != nil {
+			return nil, fmt.Errorf("key %d: %w", i, err)
+		}
+		diskKeys[i] = diskKey
+		if _, ok := seen[diskKey]; ok {
+			continue
+		}
+		seen[diskKey] = struct{}{}
+		uniqueKeys = append(uniqueKeys, diskKey)
+	}
+	sort.Slice(uniqueKeys, func(i, j int) bool {
+		return keyPathLess(uniqueKeys[i], uniqueKeys[j])
+	})
+
+	root := stubForRoot(rootHash)
+	if root != nil {
+		if reader == nil {
+			return nil, fmt.Errorf("disk SMT persist: nil read store")
+		}
+		if err := materializeProofKeys(&root, reader, uniqueKeys); err != nil {
+			return nil, err
+		}
+	}
+
+	for i, diskKey := range diskKeys {
+		var cert api.InclusionCert
+		if err := buildInclusionCert(root, diskKey, &cert); err != nil {
+			return nil, fmt.Errorf("build inclusion cert %d: %w", i, err)
+		}
+		certs[i] = &cert
+	}
+	return certs, nil
+}
+
 // BuildInclusionCert builds a proof from a fixed root hash and read store.
 // Snapshot-backed callers intentionally bypass Tree's decoded-node cache: cache
 // entries describe the latest committed RocksDB view, not the snapshot sequence.
@@ -259,6 +340,90 @@ func materializeProofKey(root **disk.Branch, reader storage.ReadStore, key disk.
 		return nil
 	}
 	return materializeProofSlot(root, reader, disk.RootNodeKey(), disk.PrefixBits{}, 0, key)
+}
+
+func materializeProofKeys(root **disk.Branch, reader storage.ReadStore, keys []disk.Key) error {
+	if root == nil || *root == nil || len(keys) == 0 {
+		return nil
+	}
+	reqs := []frontierReq{{
+		slot:     root,
+		nodeKey:  disk.RootNodeKey(),
+		prefix:   disk.PrefixBits{},
+		startBit: 0,
+		keys:     keys,
+	}}
+	for len(reqs) > 0 {
+		next, err := materializeProofFrontier(reader, reqs)
+		if err != nil {
+			return err
+		}
+		reqs = next
+	}
+	return nil
+}
+
+func materializeProofFrontier(reader storage.ReadStore, reqs []frontierReq) ([]frontierReq, error) {
+	loads := make([]frontierLoadReq, 0, len(reqs))
+	for _, req := range reqs {
+		if req.slot == nil || *req.slot == nil {
+			continue
+		}
+		branch := *req.slot
+		if branch.Kind != disk.BranchKindStub {
+			continue
+		}
+		loads = append(loads, frontierLoadReq{
+			req:  req,
+			hash: branch.StubHash,
+		})
+	}
+	if err := loadProofFrontier(reader, loads); err != nil {
+		return nil, err
+	}
+
+	next := make([]frontierReq, 0, len(reqs)*2)
+	for _, req := range reqs {
+		if req.slot == nil || *req.slot == nil {
+			continue
+		}
+		var err error
+		next, err = appendFrontierChildren(next, req, *req.slot)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return next, nil
+}
+
+func loadProofFrontier(reader storage.ReadStore, loads []frontierLoadReq) error {
+	if len(loads) == 0 {
+		return nil
+	}
+	sort.Slice(loads, func(i, j int) bool {
+		return nodeKeyLess(loads[i].req.nodeKey, loads[j].req.nodeKey)
+	})
+	keys := make([]disk.NodeKey, len(loads))
+	for i, load := range loads {
+		keys[i] = load.req.nodeKey
+	}
+
+	results, err := reader.GetNodes(keys, true)
+	if err != nil {
+		return err
+	}
+	for i, result := range results {
+		load := loads[i]
+		if !result.Found {
+			return fmt.Errorf("disk SMT persist: node %x missing from store", load.req.nodeKey.Bytes())
+		}
+		branch, err := decodeAndValidateProofBranch(load.req.nodeKey, result.Value, load.hash)
+		if err != nil {
+			return err
+		}
+		*load.req.slot = branch
+	}
+	return nil
 }
 
 func materializeProofSlot(slot **disk.Branch, reader storage.ReadStore, nodeKey disk.NodeKey, prefix disk.PrefixBits, startBit int, key disk.Key) error {
@@ -311,6 +476,21 @@ func loadProofBranch(reader storage.ReadStore, key disk.NodeKey, expectedHash di
 	if !ok {
 		return nil, fmt.Errorf("disk SMT persist: node %x missing from store", key.Bytes())
 	}
+	branch, err := decodeBranch(encoded)
+	if err != nil {
+		return nil, err
+	}
+	hash, err := branch.HashValue()
+	if err != nil {
+		return nil, err
+	}
+	if hash != expectedHash {
+		return nil, fmt.Errorf("disk SMT persist: node %x hash mismatch: got %x want %x", key.Bytes(), hash, expectedHash)
+	}
+	return branch, nil
+}
+
+func decodeAndValidateProofBranch(key disk.NodeKey, encoded []byte, expectedHash disk.Hash) (*disk.Branch, error) {
 	branch, err := decodeBranch(encoded)
 	if err != nil {
 		return nil, err
@@ -949,7 +1129,6 @@ func (s *Snapshot) loadBranchParallel(key disk.NodeKey, expectedHash disk.Hash) 
 		s.recordParallelMaterialized(key, entry.branch.Kind, entry.encodedBytes, true, entry.encodedBytes, 0, 0, 0)
 		return cloneBranch(entry.branch), nil
 	}
-
 	readStart := time.Now()
 	encoded, ok, err := s.parent.store.GetNode(key)
 	readDuration := time.Since(readStart)
@@ -1356,6 +1535,10 @@ func (s *Snapshot) decodeAndValidateLoadedBranch(key disk.NodeKey, encoded []byt
 }
 
 func (s *Snapshot) appendFrontierChildren(next []frontierReq, req frontierReq, branch *disk.Branch) ([]frontierReq, error) {
+	return appendFrontierChildren(next, req, branch)
+}
+
+func appendFrontierChildren(next []frontierReq, req frontierReq, branch *disk.Branch) ([]frontierReq, error) {
 	if branch.Kind != disk.BranchKindInternal {
 		return next, nil
 	}
@@ -1528,7 +1711,6 @@ func (s *Snapshot) loadBranch(key disk.NodeKey, expectedHash disk.Hash) (*disk.B
 		s.stats.MaterializeCacheBytes += entry.encodedBytes
 		return cloneBranch(entry.branch), nil
 	}
-
 	readStart := time.Now()
 	encoded, ok, err := s.parent.store.GetNode(key)
 	s.stats.MaterializeReadDuration += time.Since(readStart)

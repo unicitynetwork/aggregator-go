@@ -627,9 +627,148 @@ func TestCertificationRequestDoesNotTouchSMTBackend(t *testing.T) {
 	require.Equal(t, 0, backend.calls, "submit path must not read or write the SMT")
 }
 
+func TestGetInclusionProofReturnsNotReadyDuringFinalization(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	backend := &countingSMTBackend{}
+	block := &models.Block{
+		Index:    api.NewBigInt(big.NewInt(7)),
+		RootHash: api.HexBytes(make([]byte, api.StateTreeKeyLengthBytes)),
+	}
+	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+	service := &AggregatorService{
+		config: &config.Config{
+			Sharding: shardingCfg,
+		},
+		logger:                        log,
+		storage:                       &testStorage{blockStorage: &testBlockStorage{latest: block}},
+		roundManager:                  &stubRoundManager{backend: backend, finalizationInProgress: true},
+		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+	}
+
+	stateID := createTestCertificationRequests(t, 1)[0].StateID
+	resp, err := service.GetInclusionProofV2(ctx, &api.GetInclusionProofRequestV2{StateID: stateID})
+	require.NoError(t, err)
+	require.Equal(t, block.Index.Uint64(), resp.BlockNumber)
+	require.Nil(t, resp.InclusionProof.CertificationData)
+	require.Empty(t, resp.InclusionProof.CertificateBytes)
+	require.Equal(t, 0, backend.calls, "not-ready path must not read the SMT backend")
+}
+
+func TestGetInclusionProofUsesCachedProofMetadata(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	req := createTestCertificationRequests(t, 1)[0]
+	tree := smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
+	path, err := req.StateID.GetPath()
+	require.NoError(t, err)
+	require.NoError(t, tree.AddLeaf(path, req.CertificationData.TransactionHash.DataBytes()))
+
+	rootHash := api.HexBytes(tree.GetRootHashRaw())
+	uc := testChildProofUC(t, 9, rootHash)
+	block := models.NewBlock(
+		api.NewBigIntFromUint64(9),
+		"test-chain",
+		0,
+		"v",
+		"f",
+		rootHash,
+		nil,
+		uc,
+	)
+	block.Finalized = true
+	record := &models.AggregatorRecord{
+		Version: 2,
+		StateID: req.StateID,
+		CertificationData: models.CertificationData{
+			OwnerPredicate:  req.CertificationData.OwnerPredicate,
+			SourceStateHash: req.CertificationData.SourceStateHash,
+			TransactionHash: req.CertificationData.TransactionHash,
+			Witness:         req.CertificationData.Witness,
+		},
+		BlockNumber: api.NewBigIntFromUint64(9),
+		LeafIndex:   api.NewBigIntFromUint64(0),
+		CreatedAt:   api.Now(),
+		FinalizedAt: api.Now(),
+	}
+
+	blockStorage := &testBlockStorage{latestByRoot: map[string]*models.Block{rootHash.String(): block}}
+	recordStorage := &testAggregatorRecordStorage{
+		byStateID: map[string]*models.AggregatorRecord{req.StateID.String(): record},
+	}
+	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+	service := &AggregatorService{
+		config: &config.Config{
+			Sharding: shardingCfg,
+		},
+		logger:  log,
+		storage: &testStorage{blockStorage: blockStorage, recordStorage: recordStorage},
+		roundManager: &stubRoundManager{
+			smt:          smt.NewThreadSafeSMT(tree),
+			cachedRoot:   rootHash,
+			cachedBlock:  block,
+			cachedRecord: record,
+		},
+		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+	}
+
+	resp, err := service.GetInclusionProofV2(ctx, &api.GetInclusionProofRequestV2{StateID: req.StateID})
+	require.NoError(t, err)
+	require.Equal(t, uint64(9), resp.BlockNumber)
+	validateInclusionProof(t, resp.InclusionProof, req)
+	require.Equal(t, 0, blockStorage.latestByRootHashCalls, "cache hit should not look up block metadata in Mongo")
+	require.Equal(t, 0, recordStorage.getByStateIDCalls, "cache hit should not look up aggregator record in Mongo")
+}
+
+func TestGetInclusionProofUsesPrecomputedProofResponse(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	req := createTestCertificationRequests(t, 1)[0]
+	expected := &api.GetInclusionProofResponseV2{
+		BlockNumber: 42,
+		InclusionProof: &api.InclusionProofV2{
+			CertificationData:  &req.CertificationData,
+			CertificateBytes:   []byte{1, 2, 3},
+			UnicityCertificate: []byte{4, 5, 6},
+		},
+	}
+	backend := &precomputedProofBackend{
+		countingSMTBackend: countingSMTBackend{},
+		stateID:            req.StateID,
+		response:           expected,
+	}
+	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+	service := &AggregatorService{
+		config: &config.Config{
+			SMT:      config.SMTConfig{PrecomputeProofs: true},
+			Sharding: shardingCfg,
+		},
+		logger:                        log,
+		storage:                       &testStorage{},
+		roundManager:                  &stubRoundManager{backend: backend},
+		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+	}
+
+	resp, err := service.GetInclusionProofV2(ctx, &api.GetInclusionProofRequestV2{StateID: req.StateID})
+	require.NoError(t, err)
+	require.Equal(t, expected, resp)
+	require.Equal(t, 1, backend.precomputedCalls)
+	require.Equal(t, 1, backend.calls, "fast path should only check SMT key length")
+}
+
 type stubRoundManager struct {
-	smt     *smt.ThreadSafeSMT
-	backend smtbackend.Backend
+	smt                    *smt.ThreadSafeSMT
+	backend                smtbackend.Backend
+	finalizationInProgress bool
+	cachedRoot             api.HexBytes
+	cachedBlock            *models.Block
+	cachedRecord           *models.AggregatorRecord
 }
 
 func (s *stubRoundManager) Start(context.Context) error    { return nil }
@@ -650,8 +789,26 @@ func (s *stubRoundManager) GetSMTBackend() smtbackend.Backend {
 }
 func (s *stubRoundManager) CheckParentHealth(context.Context) error { return nil }
 func (s *stubRoundManager) FinalizationReadLock() func()            { return func() {} }
+func (s *stubRoundManager) TryFinalizationReadLock() (func(), bool) {
+	if s.finalizationInProgress {
+		return nil, false
+	}
+	return func() {}, true
+}
 func (s *stubRoundManager) GetKnownNotReadyBlock(api.StateID) (*models.Block, bool) {
 	return nil, false
+}
+func (s *stubRoundManager) GetCachedProofMetadata(stateID api.StateID, rootHash api.HexBytes) (*models.Block, *models.AggregatorRecord, bool) {
+	if s.cachedBlock == nil || s.cachedRecord == nil {
+		return nil, nil, false
+	}
+	if s.cachedRoot.String() != rootHash.String() || s.cachedRecord.StateID.String() != stateID.String() {
+		return nil, nil, false
+	}
+	return s.cachedBlock, s.cachedRecord, true
+}
+func (s *stubRoundManager) GetProofCacheStats() (pending int, records int, blocks int) {
+	return 0, 0, 0
 }
 
 type countingSMTBackend struct {
@@ -695,6 +852,21 @@ func (b *countingSMTBackend) Stats(context.Context) smtbackend.BackendStats {
 func (b *countingSMTBackend) Close() error {
 	b.touch()
 	return nil
+}
+
+type precomputedProofBackend struct {
+	countingSMTBackend
+	stateID          api.StateID
+	response         *api.GetInclusionProofResponseV2
+	precomputedCalls int
+}
+
+func (b *precomputedProofBackend) GetPrecomputedProofResponse(_ context.Context, stateID api.StateID) (*api.GetInclusionProofResponseV2, bool, error) {
+	b.precomputedCalls++
+	if b.stateID.String() != stateID.String() {
+		return nil, false, nil
+	}
+	return b.response, true, nil
 }
 
 type recordingCommitmentQueue struct {
@@ -793,14 +965,16 @@ func (s *testStorage) WithTransaction(ctx context.Context, fn func(context.Conte
 }
 
 type testBlockStorage struct {
-	latestByRoot map[string]*models.Block
+	latestByRoot          map[string]*models.Block
+	latest                *models.Block
+	latestByRootHashCalls int
 }
 
 func (s *testBlockStorage) Store(context.Context, *models.Block) error { return nil }
 func (s *testBlockStorage) GetByNumber(context.Context, *api.BigInt) (*models.Block, error) {
 	return nil, nil
 }
-func (s *testBlockStorage) GetLatest(context.Context) (*models.Block, error)     { return nil, nil }
+func (s *testBlockStorage) GetLatest(context.Context) (*models.Block, error)     { return s.latest, nil }
 func (s *testBlockStorage) GetLatestNumber(context.Context) (*api.BigInt, error) { return nil, nil }
 func (s *testBlockStorage) Count(context.Context) (int64, error)                 { return 0, nil }
 func (s *testBlockStorage) GetRange(context.Context, *api.BigInt, *api.BigInt) ([]*models.Block, error) {
@@ -814,11 +988,13 @@ func (s *testBlockStorage) GetLatestByRootHash(ctx context.Context, rootHash api
 	if s == nil {
 		return nil, nil
 	}
+	s.latestByRootHashCalls++
 	return s.latestByRoot[rootHash.String()], nil
 }
 
 type testAggregatorRecordStorage struct {
-	byStateID map[string]*models.AggregatorRecord
+	byStateID         map[string]*models.AggregatorRecord
+	getByStateIDCalls int
 }
 
 func (s *testAggregatorRecordStorage) Store(context.Context, *models.AggregatorRecord) error {
@@ -838,6 +1014,7 @@ func (s *testAggregatorRecordStorage) GetByStateID(ctx context.Context, stateID 
 	if s == nil {
 		return nil, nil
 	}
+	s.getByStateIDCalls++
 	return s.byStateID[stateID.String()], nil
 }
 

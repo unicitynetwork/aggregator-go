@@ -134,6 +134,61 @@ CollectLoop:
 	assert.Equal(suite.T(), int64(0), pending)
 }
 
+func (suite *RedisTestSuite) TestCommitmentPipeline_MarkProcessedDeletesAckedEntries() {
+	ctx := suite.ctx
+
+	commitments := make([]*models.CertificationRequest, 5)
+	for i := range commitments {
+		commitments[i] = createTestCommitment()
+	}
+	require.NoError(suite.T(), suite.storage.StoreBatch(ctx, commitments))
+	time.Sleep(150 * time.Millisecond)
+
+	commitmentChan := make(chan *models.CertificationRequest, 10)
+	streamCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = suite.storage.StreamCertificationRequests(streamCtx, commitmentChan)
+	}()
+
+	var streamed []*models.CertificationRequest
+	timeout := time.After(1 * time.Second)
+CollectLoop:
+	for {
+		select {
+		case c := <-commitmentChan:
+			streamed = append(streamed, c)
+			if len(streamed) == len(commitments) {
+				break CollectLoop
+			}
+		case <-timeout:
+			break CollectLoop
+		}
+	}
+	require.Len(suite.T(), streamed, len(commitments))
+
+	ackEntries := toAckEntries(streamed[:2])
+	require.NoError(suite.T(), suite.storage.MarkProcessed(ctx, ackEntries))
+
+	require.Eventually(suite.T(), func() bool {
+		count, err := suite.storage.Count(ctx)
+		return err == nil && count == 3
+	}, time.Second, 10*time.Millisecond)
+
+	for _, c := range streamed[:2] {
+		require.Eventually(suite.T(), func() bool {
+			entries, err := suite.client.XRange(ctx, suite.storage.streamName, c.StreamID, c.StreamID).Result()
+			return err == nil && len(entries) == 0
+		}, time.Second, 10*time.Millisecond, "acked entry should be deleted asynchronously")
+	}
+	for _, c := range streamed[2:] {
+		entries, err := suite.client.XRange(ctx, suite.storage.streamName, c.StreamID, c.StreamID).Result()
+		require.NoError(suite.T(), err)
+		assert.Len(suite.T(), entries, 1, "unacked entry should remain")
+	}
+}
+
 // Test 2: FIFO Ordering - Verify commitments streamed in exact order stored
 func (suite *RedisTestSuite) TestCommitmentPipeline_FIFOOrdering() {
 

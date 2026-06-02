@@ -104,6 +104,43 @@ func TestDiskBackendRocksDBEmptyRootDoesNotOpenSnapshot(t *testing.T) {
 	require.Zero(t, wrapped.snapshots.Load())
 }
 
+func TestDiskBackendRocksDBPrecomputedProofResponsesRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store, err := rocksstore.Open(t.TempDir(), rocksstore.Options{DisableWAL: true, NoSyncWrites: true})
+	require.NoError(t, err)
+	backend, err := NewDiskBackend(store, persist.DefaultOptions())
+	require.NoError(t, err)
+	defer func() { require.NoError(t, backend.Close()) }()
+
+	stateID := api.ImprintV2(bytesOf(32, 9))
+	expected := &api.GetInclusionProofResponseV2{
+		BlockNumber: 9,
+		InclusionProof: &api.InclusionProofV2{
+			Version: 1,
+			CertificationData: &api.CertificationData{
+				Version:         1,
+				TransactionHash: api.TransactionHash(bytesOf(32, 7)),
+			},
+			CertificateBytes:   []byte{1, 2, 3},
+			UnicityCertificate: []byte{0x43, 4, 5, 6},
+		},
+	}
+	require.NoError(t, backend.StorePrecomputedProofResponses(ctx, []PrecomputedProofResponse{{
+		StateID:  stateID,
+		Response: expected,
+	}}))
+
+	actual, found, err := backend.GetPrecomputedProofResponse(ctx, stateID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, expected, actual)
+
+	missing, found, err := backend.GetPrecomputedProofResponse(ctx, api.ImprintV2(bytesOf(32, 10)))
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Nil(t, missing)
+}
+
 func TestRocksDBSnapshotProofSurvivesMultipleCommits(t *testing.T) {
 	ctx := context.Background()
 	firstInputs := []LeafInput{
@@ -160,4 +197,12 @@ type countingSnapshotStore struct {
 func (s *countingSnapshotStore) NewReadSnapshot() (storage.ReadStore, func(), error) {
 	s.snapshots.Add(1)
 	return s.snapshotter.NewReadSnapshot()
+}
+
+func bytesOf(length int, value byte) []byte {
+	out := make([]byte, length)
+	for i := range out {
+		out[i] = value
+	}
+	return out
 }

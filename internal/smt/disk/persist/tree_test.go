@@ -602,6 +602,57 @@ func TestGetInclusionCertMatchesMemoryAfterReopen(t *testing.T) {
 	}
 }
 
+func TestGetInclusionCertsBatchMatchesSingleAfterReopen(t *testing.T) {
+	dir := t.TempDir()
+	store := openTestStore(t, dir)
+	tree := openPersistTree(t, store)
+
+	leaves := []memoryLeaf{
+		{key: keyWithFirstByte(0x01), value: []byte("value-one")},
+		{key: keyWithFirstByte(0x03), value: []byte("value-two")},
+		{key: keyWithFirstByte(0x08), value: []byte("value-three")},
+		{key: keyWithFirstByte(0x13), value: []byte("value-four")},
+		{key: keyWithFirstByte(0x21), value: []byte("value-five")},
+		{key: keyWithFirstByte(0x55), value: []byte("value-six")},
+		{key: keyWithFirstByte(0x89), value: []byte("value-seven")},
+		{key: keyWithFirstByte(0xe1), value: []byte("value-eight")},
+	}
+
+	inputs := make([]disk.LeafInput, 0, len(leaves))
+	for _, leaf := range leaves {
+		inputs = append(inputs, leafInput(leaf.key, leaf.value))
+	}
+	snapshot, err := tree.CreateSnapshot()
+	require.NoError(t, err)
+	result, err := snapshot.AddLeaves(inputs)
+	require.NoError(t, err)
+	require.NoError(t, snapshot.Commit(api.NewBigIntFromUint64(1)))
+	require.NoError(t, store.Close())
+
+	store = openTestStore(t, dir)
+	defer store.Close()
+	tree = openPersistTree(t, store)
+
+	requestOrder := []int{7, 0, 4, 2, 7, 5, 1, 3, 6}
+	keys := make([][]byte, 0, len(requestOrder))
+	for _, idx := range requestOrder {
+		key := leaves[idx].key
+		keys = append(keys, key[:])
+	}
+	batchCerts, err := tree.GetInclusionCertsWithReadSnapshot(keys, nil)
+	require.NoError(t, err)
+	require.Len(t, batchCerts, len(requestOrder))
+
+	for i, idx := range requestOrder {
+		leaf := leaves[idx]
+		singleCert, err := tree.GetInclusionCert(leaf.key[:])
+		require.NoError(t, err)
+		require.Equal(t, singleCert.Bitmap, batchCerts[i].Bitmap)
+		require.Equal(t, singleCert.Siblings, batchCerts[i].Siblings)
+		require.NoError(t, batchCerts[i].Verify(leaf.key[:], leaf.value, result.CandidateRoot[:], api.SHA256))
+	}
+}
+
 func TestGetInclusionCertMissingKey(t *testing.T) {
 	store := openTestStore(t, t.TempDir())
 	defer store.Close()

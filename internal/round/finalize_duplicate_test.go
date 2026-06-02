@@ -2,6 +2,7 @@ package round
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -24,6 +26,15 @@ type FinalizeDuplicateTestSuite struct {
 	suite.Suite
 	storage *mongodb.Storage
 	cfg     *config.Config
+}
+
+type failingMarkProcessedQueue struct {
+	interfaces.CommitmentQueue
+	err error
+}
+
+func (q *failingMarkProcessedQueue) MarkProcessed(context.Context, []interfaces.CertificationRequestAck) error {
+	return q.err
 }
 
 func TestFinalizeDuplicateSuite(t *testing.T) {
@@ -340,6 +351,66 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 	require.True(t, storedBlock.Finalized, "Block should be marked as finalized")
 
 	t.Log("✓ FinalizeBlock succeeded with duplicate block")
+}
+
+// Test4b_MarkProcessedFailureAfterFinalization tests that Redis ACK failure does
+// not fail a block that has already been committed and marked finalized.
+func (s *FinalizeDuplicateTestSuite) Test4b_MarkProcessedFailureAfterFinalization() {
+	t := s.T()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	testLogger, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+
+	queue := &failingMarkProcessedQueue{
+		CommitmentQueue: s.storage.CommitmentQueue(),
+		err:             errors.New("redis ack timeout"),
+	}
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, queue, s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
+	require.NoError(t, err)
+
+	commitments := testutil.CreateTestCertificationRequests(t, 3, "t4b_req")
+	rm.currentRound = &Round{
+		Number:      api.NewBigInt(big.NewInt(7)),
+		State:       RoundStateProcessing,
+		Commitments: commitments,
+		Snapshot:    testRMSnapshot(t, ctx, rm),
+	}
+
+	rm.roundMutex.Lock()
+	_, err = rm.processMiniBatch(ctx, commitments)
+	rm.roundMutex.Unlock()
+	require.NoError(t, err)
+
+	rootHash := testSnapshotRootHex(t, ctx, rm.currentRound.Snapshot)
+	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
+	require.NoError(t, err)
+
+	block := models.NewBlock(
+		api.NewBigInt(big.NewInt(7)),
+		"unicity",
+		0,
+		"1.0",
+		"mainnet",
+		rootHashBytes,
+		api.HexBytes{},
+		api.HexBytes{},
+	)
+
+	err = rm.FinalizeBlock(ctx, block)
+	require.NoError(t, err, "post-finalization ACK failure should not fail FinalizeBlock")
+
+	storedBlock, err := s.storage.BlockStorage().GetByNumber(ctx, block.Index)
+	require.NoError(t, err)
+	require.True(t, storedBlock.Finalized, "block should remain finalized")
+
+	recordCount, err := s.storage.AggregatorRecordStorage().Count(ctx)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, recordCount, int64(len(commitments)))
+
+	t.Log("✓ FinalizeBlock succeeded despite post-finalization MarkProcessed failure")
 }
 
 // Test5_DuplicateBlockAlreadyFinalized tests that FinalizeBlock succeeds when

@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	bfttypes "github.com/unicitynetwork/bft-go-base/types"
+
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk"
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk/persist"
@@ -43,6 +45,8 @@ func (b *DiskBackend) RootHashRaw(context.Context) ([]byte, error) {
 	if b == nil || b.tree == nil {
 		return nil, fmt.Errorf("disk SMT backend not initialized")
 	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	return hashBytes(b.tree.RootHash()), nil
 }
 
@@ -50,6 +54,8 @@ func (b *DiskBackend) CommittedState(context.Context) (CommittedState, error) {
 	if b == nil || b.store == nil {
 		return CommittedState{}, fmt.Errorf("disk SMT backend not initialized")
 	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	state, err := b.store.CommittedState()
 	if err != nil {
 		return CommittedState{}, err
@@ -64,6 +70,8 @@ func (b *DiskBackend) CreateSnapshot(context.Context) (Snapshot, error) {
 	if b == nil || b.tree == nil {
 		return nil, fmt.Errorf("disk SMT backend not initialized")
 	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	snapshot, err := b.tree.CreateSnapshot()
 	if err != nil {
 		return nil, err
@@ -106,6 +114,87 @@ func (b *DiskBackend) GetInclusionCert(_ context.Context, key []byte) (*api.Incl
 	return b.tree.GetInclusionCertWithReadSnapshot(key, openSnapshot)
 }
 
+func (b *DiskBackend) GetInclusionCerts(_ context.Context, keys [][]byte) ([]*api.InclusionCert, error) {
+	if b == nil || b.tree == nil {
+		return nil, fmt.Errorf("disk SMT backend not initialized")
+	}
+	snapshotter, ok := b.store.(storage.ReadSnapshotter)
+	if !ok {
+		b.snapshotWarning.Do(func() {
+			slog.Warn("Disk SMT backend store does not implement read snapshots; inclusion proofs use live store reads",
+				"component", "smt_backend",
+				"backend", "disk",
+			)
+		})
+		certs := make([]*api.InclusionCert, len(keys))
+		for i, key := range keys {
+			cert, err := b.tree.GetInclusionCert(key)
+			if err != nil {
+				return nil, err
+			}
+			certs[i] = cert
+		}
+		return certs, nil
+	}
+	openSnapshot := func() (storage.ReadStore, func(), error) {
+		reader, closeSnapshot, err := snapshotter.NewReadSnapshot()
+		if err != nil {
+			return nil, nil, err
+		}
+		metrics.SMTDiskProofSnapshotsActive.Inc()
+		start := time.Now()
+		return reader, func() {
+			if closeSnapshot != nil {
+				closeSnapshot()
+			}
+			metrics.SMTDiskProofSnapshotsActive.Dec()
+			metrics.SMTDiskProofSnapshotHoldDuration.Observe(time.Since(start).Seconds())
+		}, nil
+	}
+	return b.tree.GetInclusionCertsWithReadSnapshot(keys, openSnapshot)
+}
+
+func (b *DiskBackend) StorePrecomputedProofResponses(_ context.Context, responses []PrecomputedProofResponse) error {
+	if len(responses) == 0 {
+		return nil
+	}
+	proofStore, ok := b.store.(storage.ProofResponseStore)
+	if !ok {
+		return nil
+	}
+	writes := make([]storage.ProofResponseWrite, len(responses))
+	for i, response := range responses {
+		if response.Response == nil {
+			return fmt.Errorf("nil precomputed proof response at index %d", i)
+		}
+		wire, err := bfttypes.Cbor.Marshal(response.Response)
+		if err != nil {
+			return fmt.Errorf("marshal precomputed proof response %d: %w", i, err)
+		}
+		writes[i] = storage.ProofResponseWrite{
+			StateID:  response.StateID,
+			Response: wire,
+		}
+	}
+	return proofStore.StoreProofResponses(writes)
+}
+
+func (b *DiskBackend) GetPrecomputedProofResponse(_ context.Context, stateID api.StateID) (*api.GetInclusionProofResponseV2, bool, error) {
+	proofStore, ok := b.store.(storage.ProofResponseStore)
+	if !ok {
+		return nil, false, nil
+	}
+	wire, ok, err := proofStore.GetProofResponse(stateID)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	var response api.GetInclusionProofResponseV2
+	if err := bfttypes.Cbor.Unmarshal(wire, &response); err != nil {
+		return nil, false, fmt.Errorf("decode precomputed proof response: %w", err)
+	}
+	return &response, true, nil
+}
+
 func (b *DiskBackend) Stats(ctx context.Context) BackendStats {
 	root, _ := b.RootHashRaw(ctx)
 	if b == nil {
@@ -144,9 +233,11 @@ type DiskSnapshot struct {
 }
 
 func (s *DiskSnapshot) AddLeavesClassified(_ context.Context, inputs []LeafInput) (BatchApplyResult, error) {
-	if s == nil || s.snapshot == nil {
+	if s == nil || s.snapshot == nil || s.target == nil {
 		return BatchApplyResult{}, fmt.Errorf("disk SMT snapshot not initialized")
 	}
+	s.target.mu.RLock()
+	defer s.target.mu.RUnlock()
 	result, err := s.snapshot.AddLeaves(toDiskLeafInputs(inputs))
 	return fromDiskApplyResult(result), err
 }
@@ -159,9 +250,11 @@ func (s *DiskSnapshot) RootHashRaw(context.Context) ([]byte, error) {
 }
 
 func (s *DiskSnapshot) Fork(context.Context) (Snapshot, error) {
-	if s == nil || s.snapshot == nil {
+	if s == nil || s.snapshot == nil || s.target == nil {
 		return nil, fmt.Errorf("disk SMT snapshot not initialized")
 	}
+	s.target.mu.RLock()
+	defer s.target.mu.RUnlock()
 	child, err := s.snapshot.Fork()
 	if err != nil {
 		return nil, err
@@ -183,6 +276,8 @@ func (s *DiskSnapshot) SetCommitTarget(_ context.Context, target Backend) error 
 	if diskTarget == nil || diskTarget.tree == nil {
 		return fmt.Errorf("disk snapshot commit target is not initialized")
 	}
+	diskTarget.mu.RLock()
+	defer diskTarget.mu.RUnlock()
 	if err := s.snapshot.SetCommitTarget(diskTarget.tree); err != nil {
 		return err
 	}
@@ -194,6 +289,8 @@ func (s *DiskSnapshot) Commit(_ context.Context, meta CommitMetadata) error {
 	if s == nil || s.snapshot == nil || s.target == nil {
 		return fmt.Errorf("disk SMT snapshot not initialized")
 	}
+	s.target.mu.Lock()
+	defer s.target.mu.Unlock()
 	root := hashBytes(s.snapshot.RootHash())
 	if meta.RootHash != nil && !bytes.Equal(root, meta.RootHash) {
 		return fmt.Errorf("disk SMT snapshot root %x does not match expected root %x", root, meta.RootHash)
@@ -201,9 +298,7 @@ func (s *DiskSnapshot) Commit(_ context.Context, meta CommitMetadata) error {
 	if err := s.snapshot.Commit(meta.BlockNumber); err != nil {
 		return err
 	}
-	s.target.mu.Lock()
 	s.target.lastCommitStats = s.snapshot.LastCommitStats()
-	s.target.mu.Unlock()
 	return nil
 }
 

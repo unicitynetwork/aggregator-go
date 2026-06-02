@@ -20,6 +20,23 @@ type Backend interface {
 	Close() error
 }
 
+type PrecomputedProofResponse struct {
+	StateID  api.StateID
+	Response *api.GetInclusionProofResponseV2
+}
+
+type PrecomputedProofReader interface {
+	GetPrecomputedProofResponse(ctx context.Context, stateID api.StateID) (*api.GetInclusionProofResponseV2, bool, error)
+}
+
+type PrecomputedProofWriter interface {
+	StorePrecomputedProofResponses(ctx context.Context, responses []PrecomputedProofResponse) error
+}
+
+type BatchInclusionCertBackend interface {
+	GetInclusionCerts(ctx context.Context, keys [][]byte) ([]*api.InclusionCert, error)
+}
+
 type Snapshot interface {
 	AddLeavesClassified(ctx context.Context, leaves []LeafInput) (BatchApplyResult, error)
 	RootHashRaw(ctx context.Context) ([]byte, error)

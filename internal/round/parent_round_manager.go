@@ -412,8 +412,20 @@ func (prm *ParentRoundManager) FinalizationReadLock() func() {
 	return func() {}
 }
 
+func (prm *ParentRoundManager) TryFinalizationReadLock() (func(), bool) {
+	return func() {}, true
+}
+
 func (prm *ParentRoundManager) GetKnownNotReadyBlock(stateID api.StateID) (*models.Block, bool) {
 	return nil, false
+}
+
+func (prm *ParentRoundManager) GetCachedProofMetadata(stateID api.StateID, rootHash api.HexBytes) (*models.Block, *models.AggregatorRecord, bool) {
+	return nil, nil, false
+}
+
+func (prm *ParentRoundManager) GetProofCacheStats() (pending int, records int, blocks int) {
+	return 0, 0, 0
 }
 
 // Activate starts active round processing (called when node becomes leader in HA mode)

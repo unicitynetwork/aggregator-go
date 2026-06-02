@@ -113,6 +113,7 @@ type RoundManager struct {
 	proofCacheMu          sync.RWMutex
 	proofPending          map[string]struct{}
 	latestProofReadyBlock *models.Block
+	proofMetadataCache    *proofMetadataCache
 
 	// Round duration (configurable, default 1 second)
 	roundDuration time.Duration
@@ -217,6 +218,7 @@ func NewRoundManagerWithBackend(
 		roundDuration:       cfg.Processing.RoundDuration,                                                       // Configurable round duration (default 1s)
 		commitmentStream:    make(chan *models.CertificationRequest, cfg.Processing.CommitmentStreamBufferSize), // Buffer for queue streamer
 		proofPending:        make(map[string]struct{}),
+		proofMetadataCache:  newProofMetadataCache(cfg.SMT.ProofMetadataCacheEntries),
 		avgProcessingRate:   1.0,                    // Initial estimate: 1 commitment per ms
 		avgFinalizationTime: 200 * time.Millisecond, // Initial estimate (conservative)
 		avgSMTUpdateTime:    5 * time.Millisecond,   // Initial estimate per batch
@@ -392,6 +394,13 @@ func (rm *RoundManager) FinalizationReadLock() func() {
 	return func() { rm.finalizationMu.RUnlock() }
 }
 
+func (rm *RoundManager) TryFinalizationReadLock() (func(), bool) {
+	if !rm.finalizationMu.TryRLock() {
+		return nil, false
+	}
+	return func() { rm.finalizationMu.RUnlock() }, true
+}
+
 func (rm *RoundManager) GetKnownNotReadyBlock(stateID api.StateID) (*models.Block, bool) {
 	rm.proofCacheMu.RLock()
 	defer rm.proofCacheMu.RUnlock()
@@ -400,6 +409,24 @@ func (rm *RoundManager) GetKnownNotReadyBlock(stateID api.StateID) (*models.Bloc
 		return nil, false
 	}
 	return rm.latestProofReadyBlock, true
+}
+
+func (rm *RoundManager) GetCachedProofMetadata(stateID api.StateID, rootHash api.HexBytes) (*models.Block, *models.AggregatorRecord, bool) {
+	rm.proofCacheMu.RLock()
+	defer rm.proofCacheMu.RUnlock()
+
+	if rm.proofMetadataCache == nil {
+		return nil, nil, false
+	}
+	return rm.proofMetadataCache.get(stateID, rootHash)
+}
+
+func (rm *RoundManager) GetProofCacheStats() (pending int, records int, blocks int) {
+	rm.proofCacheMu.RLock()
+	defer rm.proofCacheMu.RUnlock()
+
+	records, blocks = rm.proofMetadataCache.stats()
+	return len(rm.proofPending), records, blocks
 }
 
 func (rm *RoundManager) markProofsPending(commitments []*models.CertificationRequest) {
@@ -416,11 +443,14 @@ func (rm *RoundManager) markProofsPending(commitments []*models.CertificationReq
 	}
 }
 
-func (rm *RoundManager) markProofsReady(block *models.Block, stateIDs []api.StateID) {
+func (rm *RoundManager) markProofsReady(block *models.Block, stateIDs []api.StateID, records []*models.AggregatorRecord) {
 	rm.proofCacheMu.Lock()
 	defer rm.proofCacheMu.Unlock()
 
 	rm.latestProofReadyBlock = block
+	if rm.proofMetadataCache != nil {
+		rm.proofMetadataCache.add(block, records)
+	}
 	for _, stateID := range stateIDs {
 		delete(rm.proofPending, stateID.String())
 	}
@@ -1132,23 +1162,42 @@ func (rm *RoundManager) StartNextRoundFromPrecollector(ctx context.Context, roun
 		return rm.StartNewRound(ctx, roundNumber)
 	}
 
+	handoffStart := time.Now()
 	rm.roundMutex.RLock()
 	cpExists := rm.precollector != nil
 	precollectorDone := rm.precollectorDone
 	precollectorDisabled := rm.precollectorDisabled
 	rm.roundMutex.RUnlock()
+	rm.logger.WithContext(ctx).Info("PERF: Precollector handoff begin",
+		"roundNumber", roundNumber.String(),
+		"precollectorExists", cpExists,
+		"precollectorDisabled", precollectorDisabled,
+		"grace", rm.config.Processing.PrecollectorGracePeriod.String())
 
 	if precollectorDisabled {
+		rm.logger.WithContext(ctx).Info("PERF: Precollector handoff skipped",
+			"roundNumber", roundNumber.String(),
+			"reason", "disabled",
+			"duration", time.Since(handoffStart).String())
 		return nil
 	}
 
 	if cpExists {
+		waitStart := time.Now()
 		if err := rm.waitBeforePrecollectorHandoff(ctx, precollectorDone); err != nil {
 			if errors.Is(err, ErrDeactivated) {
+				rm.logger.WithContext(ctx).Info("PERF: Precollector handoff skipped",
+					"roundNumber", roundNumber.String(),
+					"reason", "deactivated",
+					"waitDuration", time.Since(waitStart).String(),
+					"duration", time.Since(handoffStart).String())
 				return nil
 			}
 			return err
 		}
+		rm.logger.WithContext(ctx).Info("PERF: Precollector handoff grace complete",
+			"roundNumber", roundNumber.String(),
+			"waitDuration", time.Since(waitStart).String())
 	}
 
 	rm.roundMutex.RLock()
@@ -1157,35 +1206,71 @@ func (rm *RoundManager) StartNextRoundFromPrecollector(ctx context.Context, roun
 	rm.roundMutex.RUnlock()
 
 	if precollectorDisabled {
+		rm.logger.WithContext(ctx).Info("PERF: Precollector handoff skipped",
+			"roundNumber", roundNumber.String(),
+			"reason", "disabled_after_grace",
+			"duration", time.Since(handoffStart).String())
 		return nil
 	}
 	if cp == nil {
+		rm.logger.WithContext(ctx).Info("PERF: Precollector handoff fallback",
+			"roundNumber", roundNumber.String(),
+			"reason", "missing_precollector",
+			"duration", time.Since(handoffStart).String())
 		return rm.StartNewRound(ctx, roundNumber)
 	}
 
+	advanceStart := time.Now()
 	preResult, err := cp.AdvanceRound()
+	advanceDuration := time.Since(advanceStart)
 	if err != nil {
 		rm.roundMutex.RLock()
 		precollectorDisabled = rm.precollectorDisabled
 		rm.roundMutex.RUnlock()
 		if precollectorDisabled {
+			rm.logger.WithContext(ctx).Info("PERF: Precollector handoff skipped",
+				"roundNumber", roundNumber.String(),
+				"reason", "disabled_after_advance_error",
+				"advanceDuration", advanceDuration.String(),
+				"duration", time.Since(handoffStart).String())
 			return nil
 		}
 
 		rm.logger.WithContext(ctx).Warn("Failed to advance precollector, falling back to fixed collect round",
-			"error", err.Error())
+			"error", err.Error(),
+			"advanceDuration", advanceDuration.String())
 		return rm.StartNewRound(ctx, roundNumber)
 	}
+	rm.logger.WithContext(ctx).Info("PERF: Precollector handoff advanced",
+		"roundNumber", roundNumber.String(),
+		"commitments", len(preResult.commitments),
+		"leaves", len(preResult.leaves),
+		"advanceDuration", advanceDuration.String(),
+		"duration", time.Since(handoffStart).String())
 
+	setTargetStart := time.Now()
 	if err := preResult.snapshot.SetCommitTarget(ctx, rm.smtBackend); err != nil {
 		return fmt.Errorf("failed to set precollector commit target: %w", err)
 	}
+	setTargetDuration := time.Since(setTargetStart)
 	if err := rm.StartNewRoundWithSnapshot(ctx, roundNumber, preResult.snapshot, preResult.commitments, preResult.leaves); err != nil {
 		if errors.Is(err, ErrDeactivated) {
+			rm.logger.WithContext(ctx).Info("PERF: Precollector handoff skipped",
+				"roundNumber", roundNumber.String(),
+				"reason", "deactivated_start_round",
+				"setTargetDuration", setTargetDuration.String(),
+				"duration", time.Since(handoffStart).String())
 			return nil
 		}
 		return err
 	}
+	rm.logger.WithContext(ctx).Info("PERF: Precollector handoff complete",
+		"roundNumber", roundNumber.String(),
+		"commitments", len(preResult.commitments),
+		"leaves", len(preResult.leaves),
+		"advanceDuration", advanceDuration.String(),
+		"setTargetDuration", setTargetDuration.String(),
+		"duration", time.Since(handoffStart).String())
 	return nil
 }
 

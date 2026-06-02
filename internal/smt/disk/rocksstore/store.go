@@ -660,7 +660,10 @@ const (
 	readKindMeta readKind = iota
 	readKindNode
 	readKindOpen
+	readKindProof
 )
+
+var proofResponseKeyPrefix = []byte("proof:")
 
 func (s *Store) getCF(cf *C.rocksdb_column_family_handle_t, key []byte, kind readKind) ([]byte, bool, error) {
 	return s.getCFWithReadOptions(cf, key, kind, s.readOpts)
@@ -682,6 +685,7 @@ func (s *Store) getCFWithReadOptions(cf *C.rocksdb_column_family_handle_t, key [
 	case readKindOpen:
 		s.counters.metaPointReads.Add(1)
 		s.counters.openPointReads.Add(1)
+	case readKindProof:
 	}
 
 	keyPtr, keyLen := bytesPointer(key)
@@ -696,6 +700,45 @@ func (s *Store) getCFWithReadOptions(cf *C.rocksdb_column_family_handle_t, key [
 	}
 	defer C.rocksdb_free(unsafe.Pointer(value))
 	return C.GoBytes(unsafe.Pointer(value), C.int(valueLen)), true, nil
+}
+
+func (s *Store) StoreProofResponses(responses []storage.ProofResponseWrite) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("nil RocksDB SMT store")
+	}
+	if len(responses) == 0 {
+		return nil
+	}
+	batch := C.rocksdb_writebatch_create()
+	if batch == nil {
+		return fmt.Errorf("create RocksDB proof response batch")
+	}
+	defer C.rocksdb_writebatch_destroy(batch)
+
+	for i, response := range responses {
+		key, err := proofResponseKey(response.StateID)
+		if err != nil {
+			return fmt.Errorf("encode proof response key %d: %w", i, err)
+		}
+		writeBatchPutCF(batch, s.defaultCF, key, response.Response)
+	}
+
+	var errPtr *C.char
+	C.rocksdb_write(s.db, s.writeOpts, batch, &errPtr)
+	if err := takeError(errPtr); err != nil {
+		return fmt.Errorf("commit RocksDB proof responses: %w", err)
+	}
+	s.counters.batchSets.Add(int64(len(responses)))
+	s.counters.batchesCommitted.Add(1)
+	return nil
+}
+
+func (s *Store) GetProofResponse(stateID api.StateID) ([]byte, bool, error) {
+	key, err := proofResponseKey(stateID)
+	if err != nil {
+		return nil, false, err
+	}
+	return s.getCF(s.defaultCF, key, readKindProof)
 }
 
 func (s *Store) propertyUintCF(name string) uint64 {
@@ -842,6 +885,17 @@ func metaKey(name string) []byte {
 
 func nodeKey(key disk.NodeKey) []byte {
 	return key.Bytes()
+}
+
+func proofResponseKey(stateID api.StateID) ([]byte, error) {
+	key, err := stateID.GetTreeKey()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, len(proofResponseKeyPrefix)+len(key))
+	copy(out, proofResponseKeyPrefix)
+	copy(out[len(proofResponseKeyPrefix):], key)
+	return out, nil
 }
 
 func encodeBlockNumber(blockNumber *api.BigInt) []byte {

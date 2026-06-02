@@ -2,6 +2,7 @@ package round
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"sync"
@@ -436,18 +437,19 @@ func TestDrainBufferedCommitments_StopsAtRoundBoundary(t *testing.T) {
 	count := 0
 	maxPerRound := 5
 
-	flush := func() {
+	flush := func() error {
 		collected = append(collected, pending...)
 		count += len(pending)
 		pending = pending[:0]
+		return nil
 	}
 
 	for i := 0; i < maxPerRound+2; i++ {
 		stream <- testutil.CreateTestCertificationRequest(t, "drain_boundary")
 	}
 
-	drainBufferedCommitments(stream, maxPerRound, &count, &pending, flush)
-	flush()
+	require.NoError(t, drainBufferedCommitments(stream, maxPerRound, &count, &pending, flush))
+	require.NoError(t, flush())
 
 	require.Len(t, collected, maxPerRound)
 	require.Len(t, stream, 2)
@@ -697,6 +699,60 @@ func TestChildPrecollector_BatchWithBadLeafFallsBackToOneByOne(t *testing.T) {
 	assert.Len(t, r2.commitments, 1, "only valid commitment should be collected")
 	assert.Equal(t, c2, r2.commitments[0])
 }
+
+func TestChildPrecollector_AdvanceRoundFailsOnSnapshotAddError(t *testing.T) {
+	stream := make(chan *models.CertificationRequest, 1)
+	testLogger := newTestLogger(t)
+	addErr := errors.New("snapshot hash mismatch")
+	childSnapshot := &precollectorErrorSnapshot{addErr: addErr}
+	baseSnapshot := &precollectorErrorSnapshot{forked: childSnapshot}
+	cp := newChildPrecollector(stream, nil, testLogger, 10000, nil)
+	t.Cleanup(cp.Stop)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cp.Start(ctx, baseSnapshot)
+	stream <- testutil.CreateTestCertificationRequest(t, "snapshot_add_error")
+
+	result, err := cp.AdvanceRound()
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.ErrorContains(t, err, "snapshot hash mismatch")
+}
+
+type precollectorErrorSnapshot struct {
+	forked smtbackend.Snapshot
+	addErr error
+}
+
+func (s *precollectorErrorSnapshot) AddLeavesClassified(context.Context, []smtbackend.LeafInput) (smtbackend.BatchApplyResult, error) {
+	if s.addErr != nil {
+		return smtbackend.BatchApplyResult{}, s.addErr
+	}
+	return smtbackend.BatchApplyResult{}, nil
+}
+
+func (s *precollectorErrorSnapshot) RootHashRaw(context.Context) ([]byte, error) {
+	return make([]byte, api.StateTreeKeyLengthBytes), nil
+}
+
+func (s *precollectorErrorSnapshot) Fork(context.Context) (smtbackend.Snapshot, error) {
+	if s.forked != nil {
+		return s.forked, nil
+	}
+	return s, nil
+}
+
+func (s *precollectorErrorSnapshot) SetCommitTarget(context.Context, smtbackend.Backend) error {
+	return nil
+}
+
+func (s *precollectorErrorSnapshot) Commit(context.Context, smtbackend.CommitMetadata) error {
+	return nil
+}
+
+func (s *precollectorErrorSnapshot) Discard(context.Context) {}
 
 // --- Snapshot reparenting test (still valid with precollector) ---
 

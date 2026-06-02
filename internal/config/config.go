@@ -141,6 +141,8 @@ type StorageConfig struct {
 	RedisStreamName        string        `mapstructure:"redis_stream_name"`
 	RedisFlushInterval     time.Duration `mapstructure:"redis_flush_interval"`
 	RedisMaxBatchSize      int           `mapstructure:"redis_max_batch_size"`
+	RedisAckBatchSize      int           `mapstructure:"redis_ack_batch_size"`
+	RedisDeleteAfterAck    bool          `mapstructure:"redis_delete_after_ack"`
 	RedisCleanupInterval   time.Duration `mapstructure:"redis_cleanup_interval"`
 	RedisMaxStreamLength   int64         `mapstructure:"redis_max_stream_length"`
 }
@@ -169,15 +171,17 @@ func (b SMTBackend) IsValid() bool {
 }
 
 type SMTConfig struct {
-	Backend                  SMTBackend `mapstructure:"backend"`
-	DiskPath                 string     `mapstructure:"disk_path"`
-	RocksDBCacheMB           int        `mapstructure:"rocksdb_cache_mb"`
-	RocksDBBGJobs            int        `mapstructure:"rocksdb_bg_jobs"`
-	RocksDBSubcompactions    int        `mapstructure:"rocksdb_subcompactions"`
-	RocksDBBloomBits         float64    `mapstructure:"rocksdb_bloom_bits"`
-	RocksDBMemTableMB        int        `mapstructure:"rocksdb_memtable_mb"`
-	MaterializeWorkers       int        `mapstructure:"materialize_workers"`
-	StartupReplayLimitBlocks int        `mapstructure:"startup_replay_limit_blocks"`
+	Backend                   SMTBackend `mapstructure:"backend"`
+	DiskPath                  string     `mapstructure:"disk_path"`
+	RocksDBCacheMB            int        `mapstructure:"rocksdb_cache_mb"`
+	RocksDBBGJobs             int        `mapstructure:"rocksdb_bg_jobs"`
+	RocksDBSubcompactions     int        `mapstructure:"rocksdb_subcompactions"`
+	RocksDBBloomBits          float64    `mapstructure:"rocksdb_bloom_bits"`
+	RocksDBMemTableMB         int        `mapstructure:"rocksdb_memtable_mb"`
+	MaterializeWorkers        int        `mapstructure:"materialize_workers"`
+	StartupReplayLimitBlocks  int        `mapstructure:"startup_replay_limit_blocks"`
+	PrecomputeProofs          bool       `mapstructure:"precompute_proofs"`
+	ProofMetadataCacheEntries int        `mapstructure:"proof_metadata_cache_entries"`
 }
 
 // ShardingMode represents the aggregator operating mode
@@ -398,19 +402,23 @@ func Load() (*Config, error) {
 			RedisStreamName:        getEnvOrDefault("REDIS_STREAM_NAME", "commitments"),
 			RedisFlushInterval:     getEnvDurationOrDefault("REDIS_FLUSH_INTERVAL", "100ms"),
 			RedisMaxBatchSize:      getEnvIntOrDefault("REDIS_MAX_BATCH_SIZE", 5000),
+			RedisAckBatchSize:      getEnvIntOrDefault("REDIS_ACK_BATCH_SIZE", 1000),
+			RedisDeleteAfterAck:    getEnvBoolOrDefault("REDIS_DELETE_AFTER_ACK", true),
 			RedisCleanupInterval:   getEnvDurationOrDefault("REDIS_CLEANUP_INTERVAL", "5m"),
 			RedisMaxStreamLength:   int64(getEnvIntOrDefault("REDIS_MAX_STREAM_LENGTH", 1000000)),
 		},
 		SMT: SMTConfig{
-			Backend:                  SMTBackend(getEnvOrDefault("SMT_BACKEND", string(SMTBackendMemory))),
-			DiskPath:                 getEnvOrDefault("SMT_DISK_PATH", ""),
-			RocksDBCacheMB:           getEnvIntOrDefault("SMT_ROCKSDB_CACHE_MB", 1024),
-			RocksDBBGJobs:            getEnvIntOrDefault("SMT_ROCKSDB_BG_JOBS", 8),
-			RocksDBSubcompactions:    getEnvIntOrDefault("SMT_ROCKSDB_SUBCOMPACTIONS", 4),
-			RocksDBBloomBits:         getEnvFloatOrDefault("SMT_ROCKSDB_BLOOM_BITS", 10),
-			RocksDBMemTableMB:        getEnvIntOrDefault("SMT_ROCKSDB_MEMTABLE_MB", 64),
-			MaterializeWorkers:       getEnvIntOrDefault("SMT_MATERIALIZE_WORKERS", 64),
-			StartupReplayLimitBlocks: getEnvIntOrDefault("SMT_STARTUP_REPLAY_LIMIT_BLOCKS", 100),
+			Backend:                   SMTBackend(getEnvOrDefault("SMT_BACKEND", string(SMTBackendMemory))),
+			DiskPath:                  getEnvOrDefault("SMT_DISK_PATH", ""),
+			RocksDBCacheMB:            getEnvIntOrDefault("SMT_ROCKSDB_CACHE_MB", 1024),
+			RocksDBBGJobs:             getEnvIntOrDefault("SMT_ROCKSDB_BG_JOBS", 8),
+			RocksDBSubcompactions:     getEnvIntOrDefault("SMT_ROCKSDB_SUBCOMPACTIONS", 4),
+			RocksDBBloomBits:          getEnvFloatOrDefault("SMT_ROCKSDB_BLOOM_BITS", 10),
+			RocksDBMemTableMB:         getEnvIntOrDefault("SMT_ROCKSDB_MEMTABLE_MB", 64),
+			MaterializeWorkers:        getEnvIntOrDefault("SMT_MATERIALIZE_WORKERS", 64),
+			StartupReplayLimitBlocks:  getEnvIntOrDefault("SMT_STARTUP_REPLAY_LIMIT_BLOCKS", 100),
+			PrecomputeProofs:          getEnvBoolOrDefault("SMT_PRECOMPUTE_PROOFS", false),
+			ProofMetadataCacheEntries: getEnvIntOrDefault("SMT_PROOF_METADATA_CACHE_ENTRIES", 250000),
 		},
 		Sharding: ShardingConfig{
 			Mode:                       ShardingMode(getEnvOrDefault("SHARDING_MODE", "standalone")),

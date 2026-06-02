@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/internal/trustbase"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -73,6 +74,7 @@ type AggregatorService struct {
 	leaderSelector                LeaderSelector
 	certificationRequestValidator *signing.CertificationRequestValidator
 	trustBaseValidator            *trustbase.TrustBaseValidator
+	proofDiag                     proofDiagnostics
 }
 
 type LeaderSelector interface {
@@ -200,7 +202,7 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 		return nil, fmt.Errorf("failed to store certificationRequest: %w", err)
 	}
 
-	as.logger.WithContext(ctx).Info("CertificationData submitted successfully", "stateId", req.StateID)
+	as.logger.WithContext(ctx).Log(ctx, logger.LevelTrace, "CertificationData submitted successfully", "stateId", req.StateID)
 
 	return &api.CertificationResponse{Status: "SUCCESS"}, nil
 }
@@ -210,9 +212,6 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 // SMT root. In child mode, the local child cert is composed with the stored
 // parent fragment and bound to the parent UC.IR.h.
 func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.GetInclusionProofRequestV2) (*api.GetInclusionProofResponseV2, error) {
-	unlock := as.roundManager.FinalizationReadLock()
-	defer unlock()
-
 	if err := as.certificationRequestValidator.ValidateShardID(req.StateID); err != nil {
 		return nil, fmt.Errorf("state ID validation failed: %w", err)
 	}
@@ -227,6 +226,31 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		return nil, fmt.Errorf("invalid state ID: %w", err)
 	}
 
+	completed := false
+	as.recordProofPath(ctx, proofPathRequest)
+	defer func() {
+		if !completed {
+			as.recordProofPath(ctx, proofPathError)
+		}
+	}()
+
+	unlock, ok := as.roundManager.TryFinalizationReadLock()
+	if !ok {
+		as.recordProofPath(ctx, proofPathFinalizing)
+		block, err := as.storage.BlockStorage().GetLatest(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get latest finalized block: %w", err)
+		}
+		responseBlockNumber, err := proofBundleBlockNumber(as.config.Sharding.Mode, block)
+		if err != nil {
+			return nil, err
+		}
+		as.recordProofPath(ctx, proofPathEmpty)
+		completed = true
+		return emptyInclusionProofResponse(responseBlockNumber, block), nil
+	}
+	defer unlock()
+
 	smtBackend := as.roundManager.GetSMTBackend()
 	if smtBackend == nil {
 		return nil, fmt.Errorf("merkle tree not initialized")
@@ -239,11 +263,28 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 	// This is only a cheap "not ready" response; it does not identify the block
 	// where the pending state will eventually finalize.
 	if block, ok := as.roundManager.GetKnownNotReadyBlock(req.StateID); ok {
+		as.recordProofPath(ctx, proofPathKnownNotReady)
 		responseBlockNumber, err := proofBundleBlockNumber(as.config.Sharding.Mode, block)
 		if err != nil {
 			return nil, err
 		}
+		as.recordProofPath(ctx, proofPathEmpty)
+		completed = true
 		return emptyInclusionProofResponse(responseBlockNumber, block), nil
+	}
+
+	if as.config != nil && as.config.SMT.PrecomputeProofs {
+		if reader, ok := smtBackend.(smtbackend.PrecomputedProofReader); ok {
+			response, found, err := reader.GetPrecomputedProofResponse(ctx, req.StateID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get precomputed proof response: %w", err)
+			}
+			if found {
+				as.recordProofPath(ctx, proofPathPrecomputedHit)
+				completed = true
+				return response, nil
+			}
+		}
 	}
 
 	// Bind the UC via the block whose stored rootHash matches the current
@@ -253,25 +294,37 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		return nil, fmt.Errorf("failed to get SMT root hash: %w", err)
 	}
 	rootHashRaw := api.HexBytes(rootHash)
-	block, err := as.storage.BlockStorage().GetLatestByRootHash(ctx, rootHashRaw)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get latest block by root hash: %w", err)
-	}
-	if block == nil {
-		return nil, fmt.Errorf("no block found with root hash %s", rootHashRaw.String())
+	block, record, cacheHit := as.roundManager.GetCachedProofMetadata(req.StateID, rootHashRaw)
+	if !cacheHit {
+		as.recordProofPath(ctx, proofPathMetadataMiss)
+		as.recordProofPath(ctx, proofPathMongoBlock)
+		block, err = as.storage.BlockStorage().GetLatestByRootHash(ctx, rootHashRaw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get latest block by root hash: %w", err)
+		}
+		if block == nil {
+			return nil, fmt.Errorf("no block found with root hash %s", rootHashRaw.String())
+		}
+	} else {
+		as.recordProofPath(ctx, proofPathMetadataHit)
 	}
 	responseBlockNumber, err := proofBundleBlockNumber(as.config.Sharding.Mode, block)
 	if err != nil {
 		return nil, err
 	}
 
-	record, err := as.storage.AggregatorRecordStorage().GetByStateID(ctx, req.StateID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get aggregator record: %w", err)
+	if !cacheHit {
+		as.recordProofPath(ctx, proofPathMongoRecord)
+		record, err = as.storage.AggregatorRecordStorage().GetByStateID(ctx, req.StateID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get aggregator record: %w", err)
+		}
 	}
 	if record == nil || record.BlockNumber.Cmp(block.Index.Int) > 0 {
 		// Non-inclusion is not implemented yet. Return an empty v2 proof
 		// payload so verifiers short-circuit with ErrExclusionNotImpl.
+		as.recordProofPath(ctx, proofPathEmpty)
+		completed = true
 		return emptyInclusionProofResponse(responseBlockNumber, block), nil
 	}
 	if record.Version != 2 {
@@ -282,6 +335,7 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 	if err != nil {
 		return nil, fmt.Errorf("failed to build inclusion cert for state ID %s: %w", req.StateID, err)
 	}
+	as.recordProofPath(ctx, proofPathLiveCert)
 
 	cert := childCert
 	if as.config.Sharding.Mode == config.ShardingModeChild {
@@ -309,6 +363,7 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		UnicityCertificate: types.RawCBOR(block.UnicityCertificate),
 	}
 
+	completed = true
 	return &api.GetInclusionProofResponseV2{
 		BlockNumber:    responseBlockNumber,
 		InclusionProof: proof,

@@ -23,6 +23,16 @@ type ReadSnapshotter interface {
 	NewReadSnapshot() (ReadStore, func(), error)
 }
 
+type ProofResponseWrite struct {
+	StateID  api.StateID
+	Response []byte
+}
+
+type ProofResponseStore interface {
+	StoreProofResponses([]ProofResponseWrite) error
+	GetProofResponse(api.StateID) ([]byte, bool, error)
+}
+
 type Batch interface {
 	SetNode(disk.NodeKey, []byte) error
 	DeleteNode(disk.NodeKey) error

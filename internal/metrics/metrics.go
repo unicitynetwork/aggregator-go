@@ -236,6 +236,14 @@ var (
 		},
 	)
 
+	InclusionProofPathTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_inclusion_proof_path_total",
+			Help: "Inclusion proof requests and internal proof-path decisions.",
+		},
+		[]string{"path"},
+	)
+
 	ParentProofErrorsTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "aggregator_parent_proof_errors_total",
@@ -314,6 +322,15 @@ var (
 			Help:    "How long disk SMT proof-read RocksDB snapshots are held.",
 			Buckets: prometheus.DefBuckets,
 		},
+	)
+
+	RedisCommitmentQueueOperationDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "aggregator_redis_commitment_queue_operation_duration_seconds",
+			Help:    "Redis commitment queue operation latency.",
+			Buckets: []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
+		},
+		[]string{"operation"},
 	)
 
 	SMTNodesPersistedTotal = promauto.NewGaugeFunc(
