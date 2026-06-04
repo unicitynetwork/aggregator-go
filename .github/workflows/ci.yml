@@ -33,3 +33,34 @@ jobs:
       - name: test
         run: make test
 
+  # Builds and runs the RocksDB-backed disk-SMT code, which is gated behind the
+  # `rocksdb` build tag and is therefore excluded from the default jobs above.
+  # RocksDB is a cgo dependency linked at build time, so librocksdb and the
+  # compression libraries must be installed on the runner. GO_BUILD_TAGS is
+  # consumed by the Makefile (build/test) via `?=`.
+  test-rocksdb:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
+      GO_BUILD_TAGS: rocksdb
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install RocksDB and compression libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            librocksdb-dev \
+            libsnappy-dev \
+            liblz4-dev \
+            libzstd-dev \
+            libbz2-dev \
+            zlib1g-dev
+      - name: build (rocksdb)
+        run: make build
+      - name: test (rocksdb)
+        run: make test
+
