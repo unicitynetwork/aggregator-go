@@ -189,6 +189,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BUILD_TAGS: "${BUILD_TAGS:-rocksdb}"
+        ROCKSDB_VERSION: "${ROCKSDB_VERSION:-8.10.0}"
+        ROCKSDB_SHA256: "${ROCKSDB_SHA256:-2dc107551cc864dbcf7908fdee96f2318cbb680df2b3fe1f85b0d545c2b5673b}"
+        ROCKSDB_BUILD_JOBS: "${ROCKSDB_BUILD_JOBS:-4}"
+        ROCKSDB_PORTABLE: "${ROCKSDB_PORTABLE:-0}"
     container_name: aggregator-bft-shard0
     user: "${USER_UID:-1001}:${USER_GID:-1001}"
     restart: unless-stopped
@@ -197,6 +203,7 @@ services:
     volumes:
       - ./data/bft-sharding/genesis:/app/bft-config
       - ./logs/bft-shard0:/app/logs
+      - ./data/bft-sharding/smt-rocksdb-shard0:/app/data/smt-rocksdb
     depends_on:
       upload-configurations:
         condition: service_completed_successfully
@@ -248,6 +255,17 @@ services:
       COMMITMENT_STREAM_BUFFER_SIZE: "50000"
       SKIP_DUPLICATE_CHECK: "true"
 
+      # SMT Backend Configuration
+      SMT_BACKEND: "${SMT_BACKEND:-memory}"
+      SMT_DISK_PATH: "${SMT_DISK_PATH:-/app/data/smt-rocksdb}"
+      SMT_ROCKSDB_CACHE_MB: "${SMT_ROCKSDB_CACHE_MB:-1024}"
+      SMT_ROCKSDB_BG_JOBS: "${SMT_ROCKSDB_BG_JOBS:-8}"
+      SMT_ROCKSDB_SUBCOMPACTIONS: "${SMT_ROCKSDB_SUBCOMPACTIONS:-4}"
+      SMT_ROCKSDB_BLOOM_BITS: "${SMT_ROCKSDB_BLOOM_BITS:-10}"
+      SMT_ROCKSDB_MEMTABLE_MB: "${SMT_ROCKSDB_MEMTABLE_MB:-64}"
+      SMT_MATERIALIZE_WORKERS: "${SMT_MATERIALIZE_WORKERS:-64}"
+      SMT_STARTUP_REPLAY_LIMIT_BLOCKS: "${SMT_STARTUP_REPLAY_LIMIT_BLOCKS:-100}"
+
       SHARDING_MODE: "bft-shard"
 
       SIGNING_KEY_FILE: "/app/bft-config/shard_0/keys.json"
@@ -288,6 +306,7 @@ services:
     volumes:
       - ./data/bft-sharding/genesis:/app/bft-config
       - ./logs/bft-shard1:/app/logs
+      - ./data/bft-sharding/smt-rocksdb-shard1:/app/data/smt-rocksdb
     depends_on:
       upload-configurations:
         condition: service_completed_successfully

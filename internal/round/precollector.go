@@ -107,6 +107,11 @@ func (cp *childPrecollector) run(ctx context.Context, baseSnapshot smtbackend.Sn
 		cp.logger.WithContext(ctx).Error("Failed to fork precollector snapshot", "error", err.Error())
 		return
 	}
+	defer func() {
+		if snapshot != nil {
+			snapshot.Discard(ctx)
+		}
+	}()
 	commitments := make([]*models.CertificationRequest, 0)
 	leaves := make([]smtbackend.LeafInput, 0)
 	pending := make([]*models.CertificationRequest, 0, miniBatchSize)

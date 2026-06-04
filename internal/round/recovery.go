@@ -290,6 +290,7 @@ func LoadRecoveredNodesIntoBackend(
 		if err != nil {
 			return fmt.Errorf("failed to create SMT snapshot: %w", err)
 		}
+		defer snapshot.Discard(ctx)
 		rootHash := state.RootHash
 		if expectedRoot != nil {
 			if !bytes.Equal(state.RootHash, expectedRoot) {
@@ -345,6 +346,7 @@ func LoadRecoveredNodesIntoBackend(
 	if err != nil {
 		return fmt.Errorf("failed to create SMT snapshot: %w", err)
 	}
+	defer snapshot.Discard(ctx)
 	result, err := snapshot.AddLeavesClassified(ctx, leaves)
 	if err != nil {
 		return fmt.Errorf("failed to add recovered nodes to SMT: %w", err)

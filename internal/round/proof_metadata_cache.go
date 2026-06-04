@@ -11,12 +11,17 @@ type proofMetadataCache struct {
 	maxRecords int
 
 	records     map[string]*models.AggregatorRecord
-	recordOrder []string
+	recordOrder []recordRef
 	recordHead  int
 
 	blocks     map[string]*models.Block
 	blockOrder []string
 	blockHead  int
+}
+
+type recordRef struct {
+	key    string
+	record *models.AggregatorRecord
 }
 
 func newProofMetadataCache(maxRecords int) *proofMetadataCache {
@@ -47,9 +52,7 @@ func (c *proofMetadataCache) add(block *models.Block, records []*models.Aggregat
 			continue
 		}
 		stateKey := record.StateID.String()
-		if _, exists := c.records[stateKey]; !exists {
-			c.recordOrder = append(c.recordOrder, stateKey)
-		}
+		c.recordOrder = append(c.recordOrder, recordRef{key: stateKey, record: record})
 		c.records[stateKey] = record
 	}
 	c.evictRecords()
@@ -84,9 +87,11 @@ func (c *proofMetadataCache) stats() (records int, blocks int) {
 
 func (c *proofMetadataCache) evictRecords() {
 	for len(c.records) > c.maxRecords && c.recordHead < len(c.recordOrder) {
-		key := c.recordOrder[c.recordHead]
+		ref := c.recordOrder[c.recordHead]
 		c.recordHead++
-		delete(c.records, key)
+		if active, exists := c.records[ref.key]; exists && active == ref.record {
+			delete(c.records, ref.key)
+		}
 	}
 	c.compactRecordOrder()
 }

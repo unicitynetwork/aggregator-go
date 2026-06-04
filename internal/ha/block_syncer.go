@@ -193,6 +193,12 @@ func (bs *BlockSyncer) updateSMTForBlock(ctx context.Context, blockRecord *model
 	if err != nil {
 		return fmt.Errorf("failed to create SMT snapshot: %w", err)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			snapshot.Discard(ctx)
+		}
+	}()
 	result, err := snapshot.AddLeavesClassified(ctx, leaves)
 	if err != nil {
 		return fmt.Errorf("failed to apply SMT updates for block %s: %w", blockRecord.BlockNumber.String(), err)
@@ -213,6 +219,7 @@ func (bs *BlockSyncer) updateSMTForBlock(ctx context.Context, blockRecord *model
 	if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: blockRecord.BlockNumber, RootHash: smtRootHash}); err != nil {
 		return fmt.Errorf("failed to commit SMT snapshot: %w", err)
 	}
+	committed = true
 
 	return nil
 }

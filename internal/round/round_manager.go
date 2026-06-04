@@ -821,6 +821,7 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 	if err != nil {
 		return nil, fmt.Errorf("failed to create SMT restoration snapshot: %w", err)
 	}
+	defer snapshot.Discard(ctx)
 
 	const chunkSize = 10000
 	offset := 0

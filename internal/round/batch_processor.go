@@ -216,13 +216,17 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			preResult, advErr := rm.advancePrecollectorForHandoff(cp)
 			if advErr == nil {
 				if err := preResult.snapshot.SetCommitTarget(ctx, rm.smtBackend); err != nil {
+					preResult.snapshot.Discard(ctx)
 					rm.logger.WithContext(ctx).Error("Failed to set precollector commit target.", "error", err.Error())
 					return err
 				}
 				// StartNewRoundWithSnapshot atomically checks precollectorDisabled
 				// under roundMutex — no race with concurrent Deactivate.
-				if err := rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(nextRoundNumber), preResult.snapshot, preResult.commitments, preResult.leaves); err != nil && !errors.Is(err, ErrDeactivated) {
-					rm.logger.WithContext(ctx).Error("Failed to start new round with snapshot.", "error", err.Error())
+				if err := rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(nextRoundNumber), preResult.snapshot, preResult.commitments, preResult.leaves); err != nil {
+					preResult.snapshot.Discard(ctx)
+					if !errors.Is(err, ErrDeactivated) {
+						rm.logger.WithContext(ctx).Error("Failed to start new round with snapshot.", "error", err.Error())
+					}
 				}
 			} else {
 				rm.logger.WithContext(ctx).Warn("Failed to advance precollector", "error", advErr.Error())
