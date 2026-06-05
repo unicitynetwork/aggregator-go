@@ -401,6 +401,12 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 
 // FinalizeBlock creates and persists a new block with the given data
 func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) error {
+	if block == nil {
+		return fmt.Errorf("cannot finalize nil block")
+	}
+	if block.Index == nil || block.Index.Int == nil {
+		return fmt.Errorf("cannot finalize block: missing block index")
+	}
 	rm.logger.WithContext(ctx).Info("FinalizeBlock called",
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String(),
@@ -422,7 +428,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 			"rootHash", block.RootHash.String())
 		return fmt.Errorf("cannot finalize block %s: no active round", block.Index.String())
 	}
-	if round.Number == nil || round.Number.String() != block.Index.String() {
+	if round.Number == nil || round.Number.Cmp(block.Index.Int) != 0 {
 		current := "<nil>"
 		if round.Number != nil {
 			current = round.Number.String()
@@ -714,6 +720,9 @@ func (rm *RoundManager) validateDuplicateBlock(ctx context.Context, block *model
 }
 
 func (rm *RoundManager) getExistingBlockAnyFinalization(ctx context.Context, blockNumber *api.BigInt) (*models.Block, error) {
+	if blockNumber == nil || blockNumber.Int == nil {
+		return nil, fmt.Errorf("missing block number")
+	}
 	existingBlock, err := rm.storage.BlockStorage().GetByNumber(ctx, blockNumber)
 	if err != nil || existingBlock != nil {
 		return existingBlock, err
@@ -724,7 +733,7 @@ func (rm *RoundManager) getExistingBlockAnyFinalization(ctx context.Context, blo
 		return nil, err
 	}
 	for _, candidate := range unfinalizedBlocks {
-		if candidate.Index.String() == blockNumber.String() {
+		if candidate.Index != nil && candidate.Index.Int != nil && candidate.Index.Cmp(blockNumber.Int) == 0 {
 			return candidate, nil
 		}
 	}
