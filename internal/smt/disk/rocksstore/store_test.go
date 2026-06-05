@@ -4,6 +4,7 @@ package rocksstore
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -119,6 +120,34 @@ func TestReadSnapshotOpenReadCloseLoopDoesNotLeakSnapshots(t *testing.T) {
 		closeSnapshot()
 	}
 	require.Equal(t, baseline, store.NumSnapshots())
+}
+
+func TestCloseWaitsForOpenReadSnapshot(t *testing.T) {
+	store := openTestStore(t, t.TempDir(), Options{DisableWAL: true, NoSyncWrites: true})
+
+	_, closeSnapshot, err := store.NewReadSnapshot()
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- store.Close()
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+		t.Fatal("store closed while a read snapshot was still open")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	closeSnapshot()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("store close did not finish after read snapshot closed")
+	}
 }
 
 func writeSingleNode(store *Store, key disk.NodeKey, value []byte, block uint64) error {

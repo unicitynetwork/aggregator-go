@@ -125,6 +125,12 @@ type Store struct {
 	nodesCF   *C.rocksdb_column_family_handle_t
 	metaCF    *C.rocksdb_column_family_handle_t
 
+	// Guards RocksDB C handle lifetime. Read snapshots hold this for their
+	// whole lifetime so Close cannot free DB handles while RocksDB still uses
+	// a pinned snapshot.
+	closeMu sync.RWMutex
+	closed  bool
+
 	mu    sync.RWMutex
 	root  disk.Hash
 	block []byte
@@ -136,6 +142,8 @@ type ReadSnapshot struct {
 	store    *Store
 	snapshot *C.rocksdb_snapshot_t
 	readOpts *C.rocksdb_readoptions_t
+	release  func()
+	mu       sync.RWMutex
 	once     sync.Once
 }
 
@@ -332,6 +340,10 @@ func (s *Store) Close() error {
 	if s == nil {
 		return nil
 	}
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+
+	s.closed = true
 	if s.defaultCF != nil {
 		C.rocksdb_column_family_handle_destroy(s.defaultCF)
 		s.defaultCF = nil
@@ -386,7 +398,7 @@ func (s *Store) CommittedState() (storage.CommittedState, error) {
 }
 
 func (s *Store) GetNode(key disk.NodeKey) ([]byte, bool, error) {
-	value, ok, err := s.getCF(s.nodesCF, nodeKey(key), readKindNode)
+	value, ok, err := s.getCF(columnFamilyNodes, nodeKey(key), readKindNode)
 	if err != nil {
 		return nil, false, err
 	}
@@ -394,20 +406,27 @@ func (s *Store) GetNode(key disk.NodeKey) ([]byte, bool, error) {
 }
 
 func (s *Store) GetNodes(keys []disk.NodeKey, sortedInput bool) ([]storage.NodeReadResult, error) {
-	return s.getNodesWithReadOptions(keys, sortedInput, s.readOpts)
+	return s.getNodesWithReadOptions(keys, sortedInput)
 }
 
 func (s *Store) NewReadSnapshot() (storage.ReadStore, func(), error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, nil, fmt.Errorf("nil RocksDB SMT store")
+	}
+	s.closeMu.RLock()
+	if s.closed || s.db == nil {
+		s.closeMu.RUnlock()
+		return nil, nil, fmt.Errorf("closed RocksDB SMT store")
 	}
 	readOpts := C.rocksdb_readoptions_create()
 	if readOpts == nil {
+		s.closeMu.RUnlock()
 		return nil, nil, fmt.Errorf("create RocksDB snapshot read options")
 	}
 	snapshot := C.rocksdb_create_snapshot(s.db)
 	if snapshot == nil {
 		C.rocksdb_readoptions_destroy(readOpts)
+		s.closeMu.RUnlock()
 		return nil, nil, fmt.Errorf("create RocksDB snapshot")
 	}
 	C.rocksdb_readoptions_set_snapshot(readOpts, snapshot)
@@ -415,6 +434,7 @@ func (s *Store) NewReadSnapshot() (storage.ReadStore, func(), error) {
 		store:    s,
 		snapshot: snapshot,
 		readOpts: readOpts,
+		release:  s.closeMu.RUnlock,
 	}
 	return readSnapshot, readSnapshot.Close, nil
 }
@@ -428,6 +448,9 @@ func (r *ReadSnapshot) Close() {
 		return
 	}
 	r.once.Do(func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+
 		if r.readOpts != nil {
 			C.rocksdb_readoptions_destroy(r.readOpts)
 			r.readOpts = nil
@@ -436,14 +459,23 @@ func (r *ReadSnapshot) Close() {
 			C.rocksdb_release_snapshot(r.store.db, r.snapshot)
 			r.snapshot = nil
 		}
+		if r.release != nil {
+			r.release()
+			r.release = nil
+		}
 	})
 }
 
 func (r *ReadSnapshot) GetNode(key disk.NodeKey) ([]byte, bool, error) {
-	if r == nil || r.store == nil || r.readOpts == nil {
+	if r == nil || r.store == nil {
 		return nil, false, fmt.Errorf("closed RocksDB SMT read snapshot")
 	}
-	value, ok, err := r.store.getCFWithReadOptions(r.store.nodesCF, nodeKey(key), readKindNode, r.readOpts)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.readOpts == nil {
+		return nil, false, fmt.Errorf("closed RocksDB SMT read snapshot")
+	}
+	value, ok, err := r.store.getCFWithReadOptionsOpen(r.store.nodesCF, nodeKey(key), readKindNode, r.readOpts)
 	if err != nil {
 		return nil, false, err
 	}
@@ -451,22 +483,43 @@ func (r *ReadSnapshot) GetNode(key disk.NodeKey) ([]byte, bool, error) {
 }
 
 func (r *ReadSnapshot) GetNodes(keys []disk.NodeKey, sortedInput bool) ([]storage.NodeReadResult, error) {
-	if r == nil || r.store == nil || r.readOpts == nil {
+	if r == nil || r.store == nil {
 		return nil, fmt.Errorf("closed RocksDB SMT read snapshot")
 	}
-	return r.store.getNodesWithReadOptions(keys, sortedInput, r.readOpts)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.readOpts == nil {
+		return nil, fmt.Errorf("closed RocksDB SMT read snapshot")
+	}
+	return r.store.getNodesWithReadOptionsOpen(keys, sortedInput, r.readOpts)
 }
 
-func (s *Store) getNodesWithReadOptions(keys []disk.NodeKey, sortedInput bool, readOpts *C.rocksdb_readoptions_t) ([]storage.NodeReadResult, error) {
-	if s == nil || s.db == nil || readOpts == nil {
+func (s *Store) getNodesWithReadOptions(keys []disk.NodeKey, sortedInput bool) ([]storage.NodeReadResult, error) {
+	if s == nil {
 		return nil, fmt.Errorf("nil RocksDB SMT store")
+	}
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	return s.getNodesWithReadOptionsOpen(keys, sortedInput, s.readOpts)
+}
+
+// getNodesWithReadOptionsOpen assumes s.closeMu is already held for reading.
+func (s *Store) getNodesWithReadOptionsOpen(keys []disk.NodeKey, sortedInput bool, readOpts *C.rocksdb_readoptions_t) ([]storage.NodeReadResult, error) {
+	if s == nil {
+		return nil, fmt.Errorf("nil RocksDB SMT store")
+	}
+	if s.closed || s.db == nil || s.nodesCF == nil {
+		return nil, fmt.Errorf("closed RocksDB SMT store")
+	}
+	if readOpts == nil {
+		return nil, fmt.Errorf("nil RocksDB read options")
 	}
 	results := make([]storage.NodeReadResult, len(keys))
 	if len(keys) == 0 {
 		return results, nil
 	}
 	if len(keys) == 1 {
-		value, ok, err := s.getCFWithReadOptions(s.nodesCF, nodeKey(keys[0]), readKindNode, readOpts)
+		value, ok, err := s.getCFWithReadOptionsOpen(s.nodesCF, nodeKey(keys[0]), readKindNode, readOpts)
 		if err != nil {
 			return nil, err
 		}
@@ -500,18 +553,18 @@ func (s *Store) getNodesWithReadOptions(keys []disk.NodeKey, sortedInput bool, r
 	defer C.free(valuesMem)
 	defer C.free(errsMem)
 
-	keyPtrs := unsafe.Slice((*uintptr)(keyPtrsMem), len(keys))
+	keyPtrs := unsafe.Slice((**C.char)(keyPtrsMem), len(keys))
 	keyLens := unsafe.Slice((*C.size_t)(keyLensMem), len(keys))
-	values := unsafe.Slice((*uintptr)(valuesMem), len(keys))
-	errs := unsafe.Slice((*uintptr)(errsMem), len(keys))
+	values := unsafe.Slice((**C.rocksdb_pinnableslice_t)(valuesMem), len(keys))
+	errs := unsafe.Slice((**C.char)(errsMem), len(keys))
 	keyBytes := unsafe.Slice((*byte)(keyBuf), totalKeyBytes)
 	offset := 0
 	for i, key := range encodedKeys {
 		copy(keyBytes[offset:], key)
-		keyPtrs[i] = uintptr(unsafe.Add(keyBuf, offset))
+		keyPtrs[i] = (*C.char)(unsafe.Add(keyBuf, offset))
 		keyLens[i] = C.size_t(len(key))
-		values[i] = 0
-		errs[i] = 0
+		values[i] = nil
+		errs[i] = nil
 		offset += len(key)
 	}
 
@@ -531,7 +584,7 @@ func (s *Store) getNodesWithReadOptions(keys []disk.NodeKey, sortedInput bool, r
 
 	var firstErr error
 	for i := range keys {
-		errPtr := (*C.char)(unsafe.Pointer(errs[i]))
+		errPtr := errs[i]
 		if errPtr != nil {
 			err := C.GoString(errPtr)
 			C.rocksdb_free(unsafe.Pointer(errPtr))
@@ -539,7 +592,7 @@ func (s *Store) getNodesWithReadOptions(keys []disk.NodeKey, sortedInput bool, r
 				firstErr = fmt.Errorf("rocksdb batched multiget SMT node: %s", err)
 			}
 		}
-		value := (*C.rocksdb_pinnableslice_t)(unsafe.Pointer(values[i]))
+		value := values[i]
 		if value == nil {
 			continue
 		}
@@ -593,10 +646,15 @@ func (s *Store) Counters() storage.Counters {
 }
 
 func (s *Store) Metrics() storage.Metrics {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return storage.Metrics{}
 	}
 	var metrics storage.Metrics
+	s.closeMu.RLock()
+	if s.closed || s.db == nil {
+		s.closeMu.RUnlock()
+		return storage.Metrics{}
+	}
 	if s.cache != nil {
 		metrics.BlockCacheSize = int64(C.rocksdb_cache_get_usage(s.cache))
 	}
@@ -613,6 +671,7 @@ func (s *Store) Metrics() storage.Metrics {
 		metrics.BlockCacheBytesWrite = int64(C.rocksdb_options_statistics_get_ticker_count(s.opts, C.uint32_t(rocksDBTickerBlockCacheBytesWrite)))
 		metrics.BloomFilterUseful = int64(C.rocksdb_options_statistics_get_ticker_count(s.opts, C.uint32_t(rocksDBTickerBloomFilterUseful)))
 	}
+	s.closeMu.RUnlock()
 	metrics.CompactEstimatedDebt = s.propertyUintCF("rocksdb.estimate-pending-compaction-bytes")
 	metrics.CompactNumInProgress = int64(s.propertyUintCF("rocksdb.num-running-compactions"))
 	metrics.MemTableSize = s.propertyUintCF("rocksdb.cur-size-all-mem-tables")
@@ -621,21 +680,31 @@ func (s *Store) Metrics() storage.Metrics {
 }
 
 func (s *Store) CompactNodes() error {
-	if s == nil || s.db == nil || s.nodesCF == nil {
+	if s == nil {
 		return fmt.Errorf("nil RocksDB SMT store")
+	}
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed || s.db == nil || s.nodesCF == nil {
+		return fmt.Errorf("closed RocksDB SMT store")
 	}
 	C.rocksdb_compact_range_cf(s.db, s.nodesCF, nil, 0, nil, 0)
 	return nil
 }
 
 func (s *Store) Checkpoint(path string) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("nil RocksDB SMT store")
 	}
 	if path == "" {
 		return fmt.Errorf("RocksDB SMT checkpoint path is required")
 	}
 
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed || s.db == nil {
+		return fmt.Errorf("closed RocksDB SMT store")
+	}
 	var errPtr *C.char
 	checkpoint := C.rocksdb_checkpoint_object_create(s.db, &errPtr)
 	if err := takeError(errPtr); err != nil {
@@ -683,15 +752,45 @@ const (
 	readKindProof
 )
 
+type columnFamilyID int
+
+const (
+	columnFamilyDefault columnFamilyID = iota
+	columnFamilyNodes
+	columnFamilyMeta
+)
+
 var proofResponseKeyPrefix = []byte("proof:")
 
-func (s *Store) getCF(cf *C.rocksdb_column_family_handle_t, key []byte, kind readKind) ([]byte, bool, error) {
-	return s.getCFWithReadOptions(cf, key, kind, s.readOpts)
+func (s *Store) columnFamily(cf columnFamilyID) *C.rocksdb_column_family_handle_t {
+	switch cf {
+	case columnFamilyDefault:
+		return s.defaultCF
+	case columnFamilyNodes:
+		return s.nodesCF
+	case columnFamilyMeta:
+		return s.metaCF
+	default:
+		return nil
+	}
 }
 
-func (s *Store) getCFWithReadOptions(cf *C.rocksdb_column_family_handle_t, key []byte, kind readKind, readOpts *C.rocksdb_readoptions_t) ([]byte, bool, error) {
-	if s == nil || s.db == nil {
+func (s *Store) getCF(cf columnFamilyID, key []byte, kind readKind) ([]byte, bool, error) {
+	if s == nil {
 		return nil, false, fmt.Errorf("nil RocksDB SMT store")
+	}
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	return s.getCFWithReadOptionsOpen(s.columnFamily(cf), key, kind, s.readOpts)
+}
+
+// getCFWithReadOptionsOpen assumes s.closeMu is already held for reading.
+func (s *Store) getCFWithReadOptionsOpen(cf *C.rocksdb_column_family_handle_t, key []byte, kind readKind, readOpts *C.rocksdb_readoptions_t) ([]byte, bool, error) {
+	if s == nil {
+		return nil, false, fmt.Errorf("nil RocksDB SMT store")
+	}
+	if s.closed || s.db == nil || cf == nil {
+		return nil, false, fmt.Errorf("closed RocksDB SMT store")
 	}
 	if readOpts == nil {
 		return nil, false, fmt.Errorf("nil RocksDB read options")
@@ -726,11 +825,16 @@ func (s *Store) getCFWithReadOptions(cf *C.rocksdb_column_family_handle_t, key [
 }
 
 func (s *Store) StoreProofResponses(responses []storage.ProofResponseWrite) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("nil RocksDB SMT store")
 	}
 	if len(responses) == 0 {
 		return nil
+	}
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed || s.db == nil || s.defaultCF == nil {
+		return fmt.Errorf("closed RocksDB SMT store")
 	}
 	batch := C.rocksdb_writebatch_create()
 	if batch == nil {
@@ -761,11 +865,16 @@ func (s *Store) GetProofResponse(stateID api.StateID) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	return s.getCF(s.defaultCF, key, readKindProof)
+	return s.getCF(columnFamilyDefault, key, readKindProof)
 }
 
 func (s *Store) propertyUintCF(name string) uint64 {
-	if s == nil || s.db == nil || s.nodesCF == nil {
+	if s == nil {
+		return 0
+	}
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed || s.db == nil || s.nodesCF == nil {
 		return 0
 	}
 	cName := C.CString(name)
@@ -779,7 +888,12 @@ func (s *Store) propertyUintCF(name string) uint64 {
 }
 
 func (s *Store) propertyUint(name string) uint64 {
-	if s == nil || s.db == nil {
+	if s == nil {
+		return 0
+	}
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed || s.db == nil {
 		return 0
 	}
 	cName := C.CString(name)
@@ -793,7 +907,12 @@ func (s *Store) propertyUint(name string) uint64 {
 }
 
 func (s *Store) propertyValueCF(name string) (string, bool) {
-	if s == nil || s.db == nil || s.nodesCF == nil {
+	if s == nil {
+		return "", false
+	}
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed || s.db == nil || s.nodesCF == nil {
 		return "", false
 	}
 	cName := C.CString(name)
@@ -808,7 +927,7 @@ func (s *Store) propertyValueCF(name string) (string, bool) {
 }
 
 func (s *Store) loadOrInitMetadata(readOnly bool) error {
-	schema, ok, err := s.getCF(s.metaCF, metaKey(metaSchemaVersion), readKindOpen)
+	schema, ok, err := s.getCF(columnFamilyMeta, metaKey(metaSchemaVersion), readKindOpen)
 	if err != nil {
 		return err
 	}
@@ -822,7 +941,7 @@ func (s *Store) loadOrInitMetadata(readOnly bool) error {
 		return fmt.Errorf("unsupported disk SMT schema version %q, want %q", string(schema), SchemaVersion)
 	}
 
-	treeLayout, ok, err := s.getCF(s.metaCF, metaKey(metaTreeLayout), readKindOpen)
+	treeLayout, ok, err := s.getCF(columnFamilyMeta, metaKey(metaTreeLayout), readKindOpen)
 	if err != nil {
 		return err
 	}
@@ -830,7 +949,7 @@ func (s *Store) loadOrInitMetadata(readOnly bool) error {
 		return fmt.Errorf("unsupported disk SMT tree layout %q, want %q", string(treeLayout), TreeLayout)
 	}
 
-	keyBits, ok, err := s.getCF(s.metaCF, metaKey(metaKeyBits), readKindOpen)
+	keyBits, ok, err := s.getCF(columnFamilyMeta, metaKey(metaKeyBits), readKindOpen)
 	if err != nil {
 		return err
 	}
@@ -838,7 +957,7 @@ func (s *Store) loadOrInitMetadata(readOnly bool) error {
 		return fmt.Errorf("unsupported disk SMT key bits %q, want %q", string(keyBits), KeyBits)
 	}
 
-	rootBytes, ok, err := s.getCF(s.metaCF, metaKey(metaRoot), readKindOpen)
+	rootBytes, ok, err := s.getCF(columnFamilyMeta, metaKey(metaRoot), readKindOpen)
 	if err != nil {
 		return err
 	}
@@ -850,7 +969,7 @@ func (s *Store) loadOrInitMetadata(readOnly bool) error {
 		return fmt.Errorf("decode disk SMT root metadata: %w", err)
 	}
 
-	blockBytes, ok, err := s.getCF(s.metaCF, metaKey(metaRootBlock), readKindOpen)
+	blockBytes, ok, err := s.getCF(columnFamilyMeta, metaKey(metaRootBlock), readKindOpen)
 	if err != nil {
 		return err
 	}
@@ -870,6 +989,11 @@ func (s *Store) loadOrInitMetadata(readOnly bool) error {
 
 func (s *Store) initMetadata() error {
 	root := disk.EmptyRootHash()
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed || s.db == nil || s.metaCF == nil {
+		return fmt.Errorf("closed RocksDB SMT store")
+	}
 	batch := C.rocksdb_writebatch_create()
 	if batch == nil {
 		return fmt.Errorf("create RocksDB metadata batch")

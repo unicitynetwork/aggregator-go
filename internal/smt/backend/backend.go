@@ -37,6 +37,23 @@ type BatchInclusionCertBackend interface {
 	GetInclusionCerts(ctx context.Context, keys [][]byte) ([]*api.InclusionCert, error)
 }
 
+type PublishedProofReader interface {
+	GetPublishedInclusionCert(ctx context.Context, key []byte) (root []byte, cert *api.InclusionCert, err error)
+}
+
+type PreparedProofView interface {
+	Publish(ctx context.Context) error
+	Discard(ctx context.Context)
+}
+
+type ProofViewPreparingSnapshot interface {
+	CommitAndPrepareProofView(ctx context.Context, meta CommitMetadata) (PreparedProofView, error)
+}
+
+type ProofViewPublisher interface {
+	RefreshPublishedProofView(ctx context.Context) error
+}
+
 type Snapshot interface {
 	AddLeavesClassified(ctx context.Context, leaves []LeafInput) (BatchApplyResult, error)
 	RootHashRaw(ctx context.Context) ([]byte, error)

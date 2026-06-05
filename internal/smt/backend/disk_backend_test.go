@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	"github.com/unicitynetwork/aggregator-go/internal/smt/disk"
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk/persist"
 	rocksstore "github.com/unicitynetwork/aggregator-go/internal/smt/disk/rocksstore"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -204,6 +205,78 @@ func TestDiskBackendInclusionCertMatchesMemoryAfterCommit(t *testing.T) {
 	memoryCert := legacyCert(t, inputs, inputs[1].Key)
 	require.Equal(t, memoryCert.Bitmap, cert.Bitmap)
 	require.Equal(t, memoryCert.Siblings, cert.Siblings)
+}
+
+func TestDiskBackendPublishedProofViewStaysOnPreviousRootUntilPublished(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackend(t)
+	defer func() { require.NoError(t, backend.Close()) }()
+
+	firstLeaf := testLeafInput(1, 11)
+	first, err := backend.CreateSnapshot(ctx)
+	require.NoError(t, err)
+	firstResult, err := first.AddLeavesClassified(ctx, []LeafInput{firstLeaf})
+	require.NoError(t, err)
+	firstPrepared, err := first.(ProofViewPreparingSnapshot).CommitAndPrepareProofView(ctx, CommitMetadata{
+		BlockNumber: api.NewBigIntFromUint64(1),
+		RootHash:    firstResult.CandidateRoot,
+	})
+	require.NoError(t, err)
+	require.NoError(t, firstPrepared.Publish(ctx))
+
+	root, cert, err := backend.GetPublishedInclusionCert(ctx, firstLeaf.Key)
+	require.NoError(t, err)
+	require.Equal(t, firstResult.CandidateRoot, root)
+	require.NoError(t, cert.Verify(firstLeaf.Key, firstLeaf.Value, firstResult.CandidateRoot, api.InclusionProofV2HashAlgorithm))
+
+	secondLeaf := testLeafInput(2, 22)
+	second, err := backend.CreateSnapshot(ctx)
+	require.NoError(t, err)
+	secondResult, err := second.AddLeavesClassified(ctx, []LeafInput{secondLeaf})
+	require.NoError(t, err)
+	secondPrepared, err := second.(ProofViewPreparingSnapshot).CommitAndPrepareProofView(ctx, CommitMetadata{
+		BlockNumber: api.NewBigIntFromUint64(2),
+		RootHash:    secondResult.CandidateRoot,
+	})
+	require.NoError(t, err)
+	defer secondPrepared.Discard(ctx)
+
+	committedRoot, err := backend.RootHashRaw(ctx)
+	require.NoError(t, err)
+	require.Equal(t, secondResult.CandidateRoot, committedRoot)
+
+	root, cert, err = backend.GetPublishedInclusionCert(ctx, firstLeaf.Key)
+	require.NoError(t, err)
+	require.Equal(t, firstResult.CandidateRoot, root)
+	require.NoError(t, cert.Verify(firstLeaf.Key, firstLeaf.Value, firstResult.CandidateRoot, api.InclusionProofV2HashAlgorithm))
+
+	require.NoError(t, secondPrepared.Publish(ctx))
+	root, cert, err = backend.GetPublishedInclusionCert(ctx, secondLeaf.Key)
+	require.NoError(t, err)
+	require.Equal(t, secondResult.CandidateRoot, root)
+	require.NoError(t, cert.Verify(secondLeaf.Key, secondLeaf.Value, secondResult.CandidateRoot, api.InclusionProofV2HashAlgorithm))
+}
+
+func TestDiskBackendPublishedProofViewEmptyRootReturnsClearError(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackend(t)
+	defer func() { require.NoError(t, backend.Close()) }()
+
+	root, cert, err := backend.GetPublishedInclusionCert(ctx, testLeafInput(1, 11).Key)
+	require.ErrorContains(t, err, "published proof view is empty")
+	require.Equal(t, emptyRoot(t), root)
+	require.Nil(t, cert)
+}
+
+func TestFromDiskApplyResultRejectsNegativeRejectedIndex(t *testing.T) {
+	_, err := fromDiskApplyResult(disk.ApplyResult{
+		Rejected: []disk.RejectedLeaf{{
+			Index:  -1,
+			Reason: disk.RejectInternal,
+			Err:    disk.ErrStubOnPath,
+		}},
+	})
+	require.ErrorContains(t, err, "invalid rejected leaf index")
 }
 
 func TestDiskSnapshotForkCommitChain(t *testing.T) {

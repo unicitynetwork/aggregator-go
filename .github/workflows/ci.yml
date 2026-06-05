@@ -60,6 +60,8 @@ jobs:
             libzstd-dev \
             libbz2-dev \
             zlib1g-dev
+      - name: vet (rocksdb)
+        run: go vet -tags rocksdb ./...
       - name: build (rocksdb)
         run: make build
       - name: test (rocksdb-gated only)
@@ -80,4 +82,3 @@ jobs:
           echo "Gated packages:"; printf '  %s\n' $pkgs
           echo "Running $(printf '%s' "$names" | tr '|' '\n' | grep -c .) gated tests"
           go test -tags rocksdb -v -run "^(${names})$" $pkgs
-

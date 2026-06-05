@@ -24,6 +24,9 @@ type DiskBackend struct {
 	mu              sync.Mutex
 	lastCommitStats persist.CommitStats
 	snapshotWarning sync.Once
+
+	proofViewMu sync.RWMutex
+	proofView   *diskProofView
 }
 
 func NewDiskBackend(store storage.Store, opts persist.Options) (*DiskBackend, error) {
@@ -31,10 +34,14 @@ func NewDiskBackend(store storage.Store, opts persist.Options) (*DiskBackend, er
 	if err != nil {
 		return nil, err
 	}
-	return &DiskBackend{
+	backend := &DiskBackend{
 		store: store,
 		tree:  tree,
-	}, nil
+	}
+	if err := backend.RefreshPublishedProofView(context.Background()); err != nil {
+		return nil, err
+	}
+	return backend, nil
 }
 
 func (b *DiskBackend) KeyLength() int {
@@ -112,6 +119,26 @@ func (b *DiskBackend) GetInclusionCert(_ context.Context, key []byte) (*api.Incl
 		}, nil
 	}
 	return b.tree.GetInclusionCertWithReadSnapshot(key, openSnapshot)
+}
+
+func (b *DiskBackend) GetPublishedInclusionCert(_ context.Context, key []byte) ([]byte, *api.InclusionCert, error) {
+	if b == nil {
+		return nil, nil, fmt.Errorf("disk SMT backend not initialized")
+	}
+	b.proofViewMu.RLock()
+	defer b.proofViewMu.RUnlock()
+
+	if b.proofView == nil {
+		return nil, nil, fmt.Errorf("disk SMT proof view is not initialized")
+	}
+	if b.proofView.root == disk.EmptyRootHash() {
+		return hashBytes(b.proofView.root), nil, fmt.Errorf("disk SMT published proof view is empty")
+	}
+	cert, err := persist.BuildInclusionCert(b.proofView.root, b.proofView.reader, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	return hashBytes(b.proofView.root), cert, nil
 }
 
 func (b *DiskBackend) GetInclusionCerts(_ context.Context, keys [][]byte) ([]*api.InclusionCert, error) {
@@ -224,7 +251,100 @@ func (b *DiskBackend) Close() error {
 	if b == nil || b.store == nil {
 		return nil
 	}
+	b.proofViewMu.Lock()
+	if b.proofView != nil {
+		b.proofView.close()
+		b.proofView = nil
+	}
+	b.proofViewMu.Unlock()
 	return b.store.Close()
+}
+
+func (b *DiskBackend) RefreshPublishedProofView(context.Context) error {
+	if b == nil || b.tree == nil {
+		return fmt.Errorf("disk SMT backend not initialized")
+	}
+	b.mu.Lock()
+	root := b.tree.RootHash()
+	view, err := b.prepareProofViewLocked(root)
+	b.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	b.publishProofView(view)
+	return nil
+}
+
+func (b *DiskBackend) prepareProofViewLocked(root disk.Hash) (*diskProofView, error) {
+	view := &diskProofView{root: root}
+	if root == disk.EmptyRootHash() {
+		return view, nil
+	}
+	snapshotter, ok := b.store.(storage.ReadSnapshotter)
+	if !ok {
+		return nil, fmt.Errorf("disk SMT backend store does not implement read snapshots")
+	}
+	reader, closeSnapshot, err := snapshotter.NewReadSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	metrics.SMTDiskProofSnapshotsActive.Inc()
+	view.reader = reader
+	view.closeSnapshot = closeSnapshot
+	view.openedAt = time.Now()
+	return view, nil
+}
+
+func (b *DiskBackend) publishProofView(view *diskProofView) {
+	b.proofViewMu.Lock()
+	old := b.proofView
+	b.proofView = view
+	if old != nil {
+		old.close()
+	}
+	b.proofViewMu.Unlock()
+}
+
+type diskProofView struct {
+	root          disk.Hash
+	reader        storage.ReadStore
+	closeSnapshot func()
+	openedAt      time.Time
+	once          sync.Once
+}
+
+func (v *diskProofView) close() {
+	if v == nil {
+		return
+	}
+	v.once.Do(func() {
+		if v.closeSnapshot != nil {
+			v.closeSnapshot()
+			metrics.SMTDiskProofSnapshotsActive.Dec()
+			metrics.SMTDiskProofSnapshotHoldDuration.Observe(time.Since(v.openedAt).Seconds())
+		}
+	})
+}
+
+type preparedDiskProofView struct {
+	target *DiskBackend
+	view   *diskProofView
+}
+
+func (p *preparedDiskProofView) Publish(context.Context) error {
+	if p == nil || p.target == nil || p.view == nil {
+		return fmt.Errorf("disk SMT prepared proof view is not initialized")
+	}
+	p.target.publishProofView(p.view)
+	p.view = nil
+	return nil
+}
+
+func (p *preparedDiskProofView) Discard(context.Context) {
+	if p != nil && p.view != nil {
+		p.view.close()
+		p.view = nil
+	}
 }
 
 type DiskSnapshot struct {
@@ -239,7 +359,10 @@ func (s *DiskSnapshot) AddLeavesClassified(_ context.Context, inputs []LeafInput
 	s.target.mu.Lock()
 	defer s.target.mu.Unlock()
 	result, err := s.snapshot.AddLeaves(toDiskLeafInputs(inputs))
-	return fromDiskApplyResult(result), err
+	if err != nil {
+		return BatchApplyResult{}, err
+	}
+	return fromDiskApplyResult(result)
 }
 
 func (s *DiskSnapshot) RootHashRaw(context.Context) ([]byte, error) {
@@ -286,20 +409,36 @@ func (s *DiskSnapshot) SetCommitTarget(_ context.Context, target Backend) error 
 }
 
 func (s *DiskSnapshot) Commit(_ context.Context, meta CommitMetadata) error {
+	_, err := s.commit(meta, false)
+	return err
+}
+
+func (s *DiskSnapshot) CommitAndPrepareProofView(_ context.Context, meta CommitMetadata) (PreparedProofView, error) {
+	return s.commit(meta, true)
+}
+
+func (s *DiskSnapshot) commit(meta CommitMetadata, prepareProofView bool) (PreparedProofView, error) {
 	if s == nil || s.snapshot == nil || s.target == nil {
-		return fmt.Errorf("disk SMT snapshot not initialized")
+		return nil, fmt.Errorf("disk SMT snapshot not initialized")
 	}
 	s.target.mu.Lock()
 	defer s.target.mu.Unlock()
 	root := hashBytes(s.snapshot.RootHash())
 	if meta.RootHash != nil && !bytes.Equal(root, meta.RootHash) {
-		return fmt.Errorf("disk SMT snapshot root %x does not match expected root %x", root, meta.RootHash)
+		return nil, fmt.Errorf("disk SMT snapshot root %x does not match expected root %x", root, meta.RootHash)
 	}
 	if err := s.snapshot.Commit(meta.BlockNumber); err != nil {
-		return err
+		return nil, err
 	}
 	s.target.lastCommitStats = s.snapshot.LastCommitStats()
-	return nil
+	if !prepareProofView {
+		return nil, nil
+	}
+	view, err := s.target.prepareProofViewLocked(s.snapshot.RootHash())
+	if err != nil {
+		return nil, err
+	}
+	return &preparedDiskProofView{target: s.target, view: view}, nil
 }
 
 func (s *DiskSnapshot) Discard(context.Context) {
@@ -322,9 +461,12 @@ func toDiskLeafInputs(inputs []LeafInput) []disk.LeafInput {
 	return out
 }
 
-func fromDiskApplyResult(result disk.ApplyResult) BatchApplyResult {
+func fromDiskApplyResult(result disk.ApplyResult) (BatchApplyResult, error) {
 	rejected := make([]RejectedLeaf, len(result.Rejected))
 	for i, item := range result.Rejected {
+		if item.Index < 0 {
+			return BatchApplyResult{}, fmt.Errorf("disk SMT backend: invalid rejected leaf index %d: %w", item.Index, item.Err)
+		}
 		rejected[i] = RejectedLeaf{
 			Index:  item.Index,
 			Reason: fromDiskRejectReason(item.Reason),
@@ -343,7 +485,7 @@ func fromDiskApplyResult(result disk.ApplyResult) BatchApplyResult {
 			OverlayEntries:    result.Stats.OverlayEntries,
 			OverlayBytes:      result.Stats.OverlayBytes,
 		},
-	}
+	}, nil
 }
 
 func fromDiskRejectReason(reason disk.RejectReason) RejectReason {

@@ -32,6 +32,14 @@ func (b *Batch) SetNode(key disk.NodeKey, value []byte) error {
 	if b.closed {
 		return fmt.Errorf("RocksDB SMT store batch is closed")
 	}
+	if b.store == nil {
+		return fmt.Errorf("nil RocksDB SMT store")
+	}
+	b.store.closeMu.RLock()
+	defer b.store.closeMu.RUnlock()
+	if b.store.closed || b.store.nodesCF == nil {
+		return fmt.Errorf("closed RocksDB SMT store")
+	}
 	writeBatchPutCF(b.batch, b.store.nodesCF, nodeKey(key), value)
 	b.store.counters.batchSets.Add(1)
 	b.store.counters.nodeSets.Add(1)
@@ -47,6 +55,14 @@ func (b *Batch) SetNodeEntries(nodes []storage.NodeWrite) error {
 	}
 	if len(nodes) == 0 {
 		return nil
+	}
+	if b.store == nil {
+		return fmt.Errorf("nil RocksDB SMT store")
+	}
+	b.store.closeMu.RLock()
+	defer b.store.closeMu.RUnlock()
+	if b.store.closed || b.store.nodesCF == nil {
+		return fmt.Errorf("closed RocksDB SMT store")
 	}
 	if err := writeBatchPutEntriesCF(b.batch, b.store.nodesCF, nodes); err != nil {
 		return err
@@ -64,6 +80,14 @@ func (b *Batch) DeleteNode(key disk.NodeKey) error {
 	if b.closed {
 		return fmt.Errorf("RocksDB SMT store batch is closed")
 	}
+	if b.store == nil {
+		return fmt.Errorf("nil RocksDB SMT store")
+	}
+	b.store.closeMu.RLock()
+	defer b.store.closeMu.RUnlock()
+	if b.store.closed || b.store.nodesCF == nil {
+		return fmt.Errorf("closed RocksDB SMT store")
+	}
 	writeBatchDeleteCF(b.batch, b.store.nodesCF, nodeKey(key))
 	b.store.counters.batchSets.Add(1)
 	b.store.counters.nodeDeletes.Add(1)
@@ -80,6 +104,14 @@ func (b *Batch) DeleteNodes(keys []disk.NodeKey) error {
 	if len(keys) == 0 {
 		return nil
 	}
+	if b.store == nil {
+		return fmt.Errorf("nil RocksDB SMT store")
+	}
+	b.store.closeMu.RLock()
+	defer b.store.closeMu.RUnlock()
+	if b.store.closed || b.store.nodesCF == nil {
+		return fmt.Errorf("closed RocksDB SMT store")
+	}
 	if err := writeBatchDeleteManyCF(b.batch, b.store.nodesCF, keys); err != nil {
 		return err
 	}
@@ -95,6 +127,14 @@ func (b *Batch) SetCommittedState(root disk.Hash, blockNumber *api.BigInt) error
 	}
 	if b.closed {
 		return fmt.Errorf("RocksDB SMT store batch is closed")
+	}
+	if b.store == nil {
+		return fmt.Errorf("nil RocksDB SMT store")
+	}
+	b.store.closeMu.RLock()
+	defer b.store.closeMu.RUnlock()
+	if b.store.closed || b.store.metaCF == nil {
+		return fmt.Errorf("closed RocksDB SMT store")
 	}
 	blockBytes := encodeBlockNumber(blockNumber)
 	writeBatchPutCF(b.batch, b.store.metaCF, metaKey(metaRoot), root[:])
@@ -113,6 +153,14 @@ func (b *Batch) Commit() error {
 	}
 	if b.closed {
 		return fmt.Errorf("RocksDB SMT store batch is closed")
+	}
+	if b.store == nil {
+		return fmt.Errorf("nil RocksDB SMT store")
+	}
+	b.store.closeMu.RLock()
+	defer b.store.closeMu.RUnlock()
+	if b.store.closed || b.store.db == nil || b.store.writeOpts == nil {
+		return fmt.Errorf("closed RocksDB SMT store")
 	}
 	var errPtr *C.char
 	C.rocksdb_write(b.store.db, b.store.writeOpts, b.batch, &errPtr)

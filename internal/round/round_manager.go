@@ -285,6 +285,9 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 				return fmt.Errorf("failed to sync disk SMT after recovered block: %w", err)
 			}
 		}
+		if err := rm.refreshDiskProofView(ctx); err != nil {
+			return fmt.Errorf("failed to initialize disk SMT proof view: %w", err)
+		}
 	} else {
 		recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
 		if err != nil {
@@ -392,13 +395,6 @@ func (rm *RoundManager) GetSMTBackend() smtbackend.Backend {
 func (rm *RoundManager) FinalizationReadLock() func() {
 	rm.finalizationMu.RLock()
 	return func() { rm.finalizationMu.RUnlock() }
-}
-
-func (rm *RoundManager) TryFinalizationReadLock() (func(), bool) {
-	if !rm.finalizationMu.TryRLock() {
-		return nil, false
-	}
-	return func() { rm.finalizationMu.RUnlock() }, true
 }
 
 func (rm *RoundManager) GetKnownNotReadyBlock(stateID api.StateID) (*models.Block, bool) {

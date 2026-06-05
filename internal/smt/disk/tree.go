@@ -128,6 +128,7 @@ func (t *Tree) ApplyLeaves(inputs []LeafInput) (ApplyResult, error) {
 
 	seen := make(map[Key]struct{}, len(inputs))
 	items := make([]batchItem, 0, len(inputs))
+	acceptedIndexes := make([]int, 0, len(inputs))
 	for i, input := range inputs {
 		key, err := KeyFromBytes(input.Key)
 		if err != nil {
@@ -159,7 +160,7 @@ func (t *Tree) ApplyLeaves(inputs []LeafInput) (ApplyResult, error) {
 		}
 
 		items = append(items, batchItem{Key: key, Value: value, Index: i})
-		result.AcceptedIndexes = append(result.AcceptedIndexes, i)
+		acceptedIndexes = append(acceptedIndexes, i)
 	}
 
 	if len(items) > 0 {
@@ -173,14 +174,10 @@ func (t *Tree) ApplyLeaves(inputs []LeafInput) (ApplyResult, error) {
 		sem := make(chan struct{}, workers)
 		root, err := batchInsert(t.root, items, 0, len(items), 0, ctx, sem)
 		if err != nil {
-			result.Rejected = append(result.Rejected, RejectedLeaf{
-				Index:  -1,
-				Reason: RejectInternal,
-				Err:    err,
-			})
-		} else {
-			t.root = root
+			return ApplyResult{}, err
 		}
+		t.root = root
+		result.AcceptedIndexes = append(result.AcceptedIndexes, acceptedIndexes...)
 	}
 
 	result.CandidateRoot = t.RootHash()

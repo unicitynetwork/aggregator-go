@@ -489,10 +489,12 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	var storeDataTiming storeDataTiming
 	var smtCommitDuration time.Duration
 	var finalizationLockWaitDuration time.Duration
+	var preparedProofView smtbackend.PreparedProofView
 
-	if rm.usesDiskSMTBackend() && snapshot != nil {
+	diskFinalize := rm.usesDiskSMTBackend() && snapshot != nil
+	if diskFinalize {
 		var err error
-		storeDataTiming, smtCommitDuration, finalizationLockWaitDuration, err = rm.storeDataAndCommitDiskSnapshot(ctx, block, snapshot, smtNodes, records)
+		storeDataTiming, smtCommitDuration, finalizationLockWaitDuration, preparedProofView, err = rm.storeDataAndCommitDiskSnapshot(ctx, block, snapshot, smtNodes, records)
 		if err != nil {
 			return err
 		}
@@ -517,10 +519,18 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		smtCommitDuration = time.Since(smtCommitStart)
 	}
 	metrics.SMTCommitDuration.Observe(smtCommitDuration.Seconds())
+	proofViewPublished := false
+	defer func() {
+		if preparedProofView != nil && !proofViewPublished {
+			preparedProofView.Discard(ctx)
+		}
+	}()
 
 	setFinalizedStart := time.Now()
 	if err := rm.storage.BlockStorage().SetFinalized(ctx, block.Index, true); err != nil {
-		rm.finalizationMu.Unlock()
+		if !diskFinalize {
+			rm.finalizationMu.Unlock()
+		}
 		return fmt.Errorf("failed to set block as finalized: %w", err)
 	}
 	setFinalizedDuration := time.Since(setFinalizedStart)
@@ -540,7 +550,15 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		precomputeProofDuration = time.Since(precomputeProofStart)
 	}
 	rm.markProofsReady(block, stateIDs, records)
-	rm.finalizationMu.Unlock()
+	if preparedProofView != nil {
+		if err := preparedProofView.Publish(ctx); err != nil {
+			return fmt.Errorf("failed to publish disk SMT proof view: %w", err)
+		}
+		proofViewPublished = true
+	}
+	if !diskFinalize {
+		rm.finalizationMu.Unlock()
+	}
 
 	// Proofs are requestable only after the SMT snapshot is committed and the block is visible as finalized.
 	// Redis ACK is recovery bookkeeping.
@@ -942,45 +960,51 @@ type storeDataResult struct {
 // both operations succeed, so either side can be recovered from the existing
 // unfinalized-block startup path if the process crashes or one operation fails.
 //
-// On success this returns with rm.finalizationMu still locked. The caller must
-// set the block finalized, mark proofs ready, and unlock the mutex.
+// Disk proof reads do not use finalizationMu: they read from the last published
+// proof view. On success this returns a proof view captured at the RocksDB
+// commit point; the caller publishes it only after Mongo finalization and proof
+// metadata are ready.
 func (rm *RoundManager) storeDataAndCommitDiskSnapshot(
 	ctx context.Context,
 	block *models.Block,
 	snapshot smtbackend.Snapshot,
 	smtNodes []*models.SmtNode,
 	records []*models.AggregatorRecord,
-) (storeDataTiming, time.Duration, time.Duration, error) {
+) (storeDataTiming, time.Duration, time.Duration, smtbackend.PreparedProofView, error) {
 	storeCh := make(chan storeDataResult, 1)
 	go func() {
 		timing, err := rm.storeDataParallel(ctx, smtNodes, records)
 		storeCh <- storeDataResult{timing: timing, err: err}
 	}()
 
-	lockWaitStart := time.Now()
-	rm.finalizationMu.Lock()
-	finalizationLockWaitDuration := time.Since(lockWaitStart)
-
 	smtCommitStart := time.Now()
-	commitErr := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: block.Index, RootHash: block.RootHash})
+	var preparedProofView smtbackend.PreparedProofView
+	var commitErr error
+	if publishable, ok := snapshot.(smtbackend.ProofViewPreparingSnapshot); ok {
+		preparedProofView, commitErr = publishable.CommitAndPrepareProofView(ctx, smtbackend.CommitMetadata{BlockNumber: block.Index, RootHash: block.RootHash})
+	} else {
+		commitErr = snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: block.Index, RootHash: block.RootHash})
+	}
 	smtCommitDuration := time.Since(smtCommitStart)
 
 	storeResult := <-storeCh
 	if commitErr != nil || storeResult.err != nil {
-		rm.finalizationMu.Unlock()
+		if preparedProofView != nil {
+			preparedProofView.Discard(ctx)
+		}
 		if commitErr != nil && storeResult.err != nil {
-			return storeResult.timing, smtCommitDuration, finalizationLockWaitDuration,
+			return storeResult.timing, smtCommitDuration, 0, nil,
 				fmt.Errorf("failed to store finalization data and commit SMT snapshot: store=%v commit=%w", storeResult.err, commitErr)
 		}
 		if commitErr != nil {
-			return storeResult.timing, smtCommitDuration, finalizationLockWaitDuration,
+			return storeResult.timing, smtCommitDuration, 0, nil,
 				fmt.Errorf("failed to commit SMT snapshot: %w", commitErr)
 		}
-		return storeResult.timing, smtCommitDuration, finalizationLockWaitDuration,
+		return storeResult.timing, smtCommitDuration, 0, nil,
 			fmt.Errorf("failed to store SMT nodes and aggregator records: %w", storeResult.err)
 	}
 
-	return storeResult.timing, smtCommitDuration, finalizationLockWaitDuration, nil
+	return storeResult.timing, smtCommitDuration, 0, preparedProofView, nil
 }
 
 // storeDataParallel stores SMT nodes and aggregator records in parallel.

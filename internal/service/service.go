@@ -234,29 +234,18 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		}
 	}()
 
-	unlock, ok := as.roundManager.TryFinalizationReadLock()
-	if !ok {
-		as.recordProofPath(ctx, proofPathFinalizing)
-		block, err := as.storage.BlockStorage().GetLatest(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get latest finalized block: %w", err)
-		}
-		responseBlockNumber, err := proofBundleBlockNumber(as.config.Sharding.Mode, block)
-		if err != nil {
-			return nil, err
-		}
-		as.recordProofPath(ctx, proofPathEmpty)
-		completed = true
-		return emptyInclusionProofResponse(responseBlockNumber, block), nil
-	}
-	defer unlock()
-
 	smtBackend := as.roundManager.GetSMTBackend()
 	if smtBackend == nil {
 		return nil, fmt.Errorf("merkle tree not initialized")
 	}
 	if keyLen := smtBackend.KeyLength(); keyLen != api.StateTreeKeyLengthBits {
 		return nil, fmt.Errorf("unexpected SMT key length: got %d bits, want %d", keyLen, api.StateTreeKeyLengthBits)
+	}
+
+	publishedProofReader, usesPublishedProofView := smtBackend.(smtbackend.PublishedProofReader)
+	if !usesPublishedProofView {
+		unlock := as.roundManager.FinalizationReadLock()
+		defer unlock()
 	}
 
 	// Known-pending requests return the latest finalized UC with an empty proof.
@@ -289,9 +278,19 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 
 	// Bind the UC via the block whose stored rootHash matches the current
 	// raw 32-byte SMT root (which also lives in UC.IR.h).
-	rootHash, err := smtBackend.RootHashRaw(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get SMT root hash: %w", err)
+	var childCert *api.InclusionCert
+	var rootHash []byte
+	if usesPublishedProofView {
+		rootHash, childCert, err = publishedProofReader.GetPublishedInclusionCert(ctx, key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build inclusion cert for state ID %s: %w", req.StateID, err)
+		}
+		as.recordProofPath(ctx, proofPathLiveCert)
+	} else {
+		rootHash, err = smtBackend.RootHashRaw(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get SMT root hash: %w", err)
+		}
 	}
 	rootHashRaw := api.HexBytes(rootHash)
 	block, record, cacheHit := as.roundManager.GetCachedProofMetadata(req.StateID, rootHashRaw)
@@ -331,22 +330,20 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		return nil, fmt.Errorf("invalid aggregator record version got %d expected 2", record.Version)
 	}
 
-	childCert, err := smtBackend.GetInclusionCert(ctx, key)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build inclusion cert for state ID %s: %w", req.StateID, err)
+	if childCert == nil {
+		childCert, err = smtBackend.GetInclusionCert(ctx, key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build inclusion cert for state ID %s: %w", req.StateID, err)
+		}
+		as.recordProofPath(ctx, proofPathLiveCert)
 	}
-	as.recordProofPath(ctx, proofPathLiveCert)
 
 	cert := childCert
 	if as.config.Sharding.Mode == config.ShardingModeChild {
 		if block.ParentFragment == nil {
 			return nil, fmt.Errorf("current child block %s is missing parent fragment", block.Index.String())
 		}
-		childRoot, err := smtBackend.RootHashRaw(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get child SMT root hash: %w", err)
-		}
-		cert, err = api.ComposeInclusionCert(block.ParentFragment, childCert, childRoot)
+		cert, err = api.ComposeInclusionCert(block.ParentFragment, childCert, rootHash)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compose child and parent inclusion certs: %w", err)
 		}

@@ -25,6 +25,14 @@ func (rm *RoundManager) restoreOrVerifySMT(ctx context.Context) (*api.BigInt, er
 	return rm.restoreSmtFromStorage(ctx)
 }
 
+func (rm *RoundManager) refreshDiskProofView(ctx context.Context) error {
+	publisher, ok := rm.smtBackend.(smtbackend.ProofViewPublisher)
+	if !ok {
+		return nil
+	}
+	return publisher.RefreshPublishedProofView(ctx)
+}
+
 func (rm *RoundManager) verifyDiskSMTStartup(ctx context.Context) (*api.BigInt, error) {
 	rm.logger.Info("Starting disk SMT startup verification")
 

@@ -83,11 +83,14 @@ func TestDiskSMTBFTShardProofBeforeAndAfterFinalization(t *testing.T) {
 		return err == nil && record != nil
 	}, 5*time.Second, 25*time.Millisecond, "second request should eventually finalize")
 
-	readyProof, err := service.GetInclusionProofV2(ctx, &api.GetInclusionProofRequestV2{StateID: req2.StateID})
-	require.NoError(t, err)
-	require.NotNil(t, readyProof.InclusionProof)
-	require.NotNil(t, readyProof.InclusionProof.CertificationData)
-	require.NotEmpty(t, readyProof.InclusionProof.CertificateBytes)
+	require.Eventually(t, func() bool {
+		readyProof, err := service.GetInclusionProofV2(ctx, &api.GetInclusionProofRequestV2{StateID: req2.StateID})
+		return err == nil &&
+			readyProof != nil &&
+			readyProof.InclusionProof != nil &&
+			readyProof.InclusionProof.CertificationData != nil &&
+			len(readyProof.InclusionProof.CertificateBytes) > 0
+	}, 5*time.Second, 25*time.Millisecond, "second request should eventually have a ready proof")
 }
 
 func testDiskBFTShardServiceConfig(t *testing.T) config.Config {

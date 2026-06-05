@@ -2,6 +2,7 @@ package round
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
@@ -44,12 +45,18 @@ func addCommitmentLeaves(
 	addedCommitments := make([]*models.CertificationRequest, 0, len(result.AcceptedIndexes))
 	addedLeaves := make([]smtbackend.LeafInput, 0, len(result.AcceptedIndexes))
 	for _, idx := range result.AcceptedIndexes {
+		if idx < 0 || idx >= len(commitments) || idx >= len(leaves) {
+			return nil, nil, nil, fmt.Errorf("SMT backend returned invalid accepted leaf index %d", idx)
+		}
 		addedCommitments = append(addedCommitments, commitments[idx])
 		addedLeaves = append(addedLeaves, leaves[idx])
 	}
 
 	dropped := make([]interfaces.CertificationRequestAck, 0, len(result.DuplicateIndexes)+len(result.Rejected))
 	for _, idx := range result.DuplicateIndexes {
+		if idx < 0 || idx >= len(commitments) {
+			return nil, nil, nil, fmt.Errorf("SMT backend returned invalid duplicate leaf index %d", idx)
+		}
 		dropped = append(dropped, interfaces.CertificationRequestAck{
 			StateID:  commitments[idx].StateID,
 			StreamID: commitments[idx].StreamID,
@@ -59,6 +66,9 @@ func addCommitmentLeaves(
 		errText := "<nil>"
 		if rejected.Err != nil {
 			errText = rejected.Err.Error()
+		}
+		if rejected.Index < 0 || rejected.Index >= len(commitments) {
+			return nil, nil, nil, fmt.Errorf("SMT backend returned invalid rejected leaf index %d", rejected.Index)
 		}
 		log.WithContext(ctx).Warn("Rejected commitment leaf",
 			"stateID", commitments[rejected.Index].StateID.String(),

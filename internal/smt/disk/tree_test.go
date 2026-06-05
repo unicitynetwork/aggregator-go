@@ -2,6 +2,7 @@ package disk
 
 import (
 	"encoding/binary"
+	"errors"
 	"math/rand"
 	"testing"
 
@@ -49,6 +50,21 @@ func TestTreeApplyEmptyBatchIsNoOp(t *testing.T) {
 	require.Zero(t, result.Stats.OverlayEntries)
 	require.Zero(t, result.Stats.OverlayBytes)
 	require.Equal(t, emptyMemoryRoot(t), tree.RootHash())
+}
+
+func TestTreeApplyLeavesReturnsErrorOnInternalBatchInsertFailure(t *testing.T) {
+	key := keyWithFirstByte(0x01)
+	value := []byte("value-one")
+	stubRoot := HashLeaf(key, []byte("existing"))
+	tree := NewTreeWithRoot(NewStub(stubRoot))
+
+	result, err := tree.ApplyLeaves([]LeafInput{treeInput(key, value)})
+
+	require.True(t, errors.Is(err, ErrStubOnPath), "expected ErrStubOnPath, got %v", err)
+	require.Empty(t, result.AcceptedIndexes)
+	require.Empty(t, result.DuplicateIndexes)
+	require.Empty(t, result.Rejected)
+	require.Equal(t, stubRoot, tree.RootHash())
 }
 
 func TestTreeApplySecondLeafSplitsSingleLeaf(t *testing.T) {

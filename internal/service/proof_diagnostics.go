@@ -10,7 +10,6 @@ import (
 
 const (
 	proofPathRequest        = "request"
-	proofPathFinalizing     = "finalizing"
 	proofPathKnownNotReady  = "known_not_ready"
 	proofPathPrecomputedHit = "precomputed_hit"
 	proofPathMetadataHit    = "metadata_cache_hit"
@@ -26,7 +25,6 @@ type proofDiagnostics struct {
 	lastLogSecond atomic.Int64
 
 	requests       atomic.Int64
-	finalizing     atomic.Int64
 	knownNotReady  atomic.Int64
 	precomputedHit atomic.Int64
 	metadataHit    atomic.Int64
@@ -48,8 +46,6 @@ func (as *AggregatorService) recordProofPath(ctx context.Context, path string) {
 	switch path {
 	case proofPathRequest:
 		as.proofDiag.requests.Add(1)
-	case proofPathFinalizing:
-		as.proofDiag.finalizing.Add(1)
 	case proofPathKnownNotReady:
 		as.proofDiag.knownNotReady.Add(1)
 	case proofPathPrecomputedHit:
@@ -82,7 +78,6 @@ func (as *AggregatorService) recordProofPath(ctx context.Context, path string) {
 
 func (as *AggregatorService) logProofPathSnapshot(ctx context.Context) {
 	requests := as.proofDiag.requests.Swap(0)
-	finalizing := as.proofDiag.finalizing.Swap(0)
 	knownNotReady := as.proofDiag.knownNotReady.Swap(0)
 	precomputedHit := as.proofDiag.precomputedHit.Swap(0)
 	metadataHit := as.proofDiag.metadataHit.Swap(0)
@@ -93,7 +88,16 @@ func (as *AggregatorService) logProofPathSnapshot(ctx context.Context) {
 	liveCert := as.proofDiag.liveCert.Swap(0)
 	errors := as.proofDiag.errors.Swap(0)
 
-	if requests == 0 && finalizing == 0 && knownNotReady == 0 && metadataHit == 0 && metadataMiss == 0 && mongoBlock == 0 && mongoRecord == 0 && liveCert == 0 && errors == 0 {
+	if requests == 0 &&
+		knownNotReady == 0 &&
+		precomputedHit == 0 &&
+		metadataHit == 0 &&
+		metadataMiss == 0 &&
+		mongoBlock == 0 &&
+		mongoRecord == 0 &&
+		emptyResponses == 0 &&
+		liveCert == 0 &&
+		errors == 0 {
 		return
 	}
 	if as.logger == nil {
@@ -103,7 +107,6 @@ func (as *AggregatorService) logProofPathSnapshot(ctx context.Context) {
 
 	as.logger.WithContext(ctx).Info("PERF: Proof path",
 		"requests", requests,
-		"finalizing", finalizing,
 		"knownNotReady", knownNotReady,
 		"precomputedHit", precomputedHit,
 		"metadataCacheHit", metadataHit,

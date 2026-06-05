@@ -29,8 +29,6 @@ type Manager interface {
 	CheckParentHealth(ctx context.Context) error
 	// FinalizationReadLock blocks during the SMT commit+finalize window to keep root/block consistent.
 	FinalizationReadLock() func()
-	// TryFinalizationReadLock reports false when a proof request should return not-ready instead of waiting.
-	TryFinalizationReadLock() (func(), bool)
 	GetKnownNotReadyBlock(stateID api.StateID) (*models.Block, bool)
 	GetCachedProofMetadata(stateID api.StateID, rootHash api.HexBytes) (*models.Block, *models.AggregatorRecord, bool)
 	GetProofCacheStats() (pending int, records int, blocks int)

@@ -627,36 +627,6 @@ func TestCertificationRequestDoesNotTouchSMTBackend(t *testing.T) {
 	require.Equal(t, 0, backend.calls, "submit path must not read or write the SMT")
 }
 
-func TestGetInclusionProofReturnsNotReadyDuringFinalization(t *testing.T) {
-	ctx := context.Background()
-	log, err := logger.New("error", "text", "stdout", false)
-	require.NoError(t, err)
-
-	backend := &countingSMTBackend{}
-	block := &models.Block{
-		Index:    api.NewBigInt(big.NewInt(7)),
-		RootHash: api.HexBytes(make([]byte, api.StateTreeKeyLengthBytes)),
-	}
-	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
-	service := &AggregatorService{
-		config: &config.Config{
-			Sharding: shardingCfg,
-		},
-		logger:                        log,
-		storage:                       &testStorage{blockStorage: &testBlockStorage{latest: block}},
-		roundManager:                  &stubRoundManager{backend: backend, finalizationInProgress: true},
-		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
-	}
-
-	stateID := createTestCertificationRequests(t, 1)[0].StateID
-	resp, err := service.GetInclusionProofV2(ctx, &api.GetInclusionProofRequestV2{StateID: stateID})
-	require.NoError(t, err)
-	require.Equal(t, block.Index.Uint64(), resp.BlockNumber)
-	require.Nil(t, resp.InclusionProof.CertificationData)
-	require.Empty(t, resp.InclusionProof.CertificateBytes)
-	require.Equal(t, 0, backend.calls, "not-ready path must not read the SMT backend")
-}
-
 func TestGetInclusionProofUsesCachedProofMetadata(t *testing.T) {
 	ctx := context.Background()
 	log, err := logger.New("error", "text", "stdout", false)
@@ -763,12 +733,11 @@ func TestGetInclusionProofUsesPrecomputedProofResponse(t *testing.T) {
 }
 
 type stubRoundManager struct {
-	smt                    *smt.ThreadSafeSMT
-	backend                smtbackend.Backend
-	finalizationInProgress bool
-	cachedRoot             api.HexBytes
-	cachedBlock            *models.Block
-	cachedRecord           *models.AggregatorRecord
+	smt          *smt.ThreadSafeSMT
+	backend      smtbackend.Backend
+	cachedRoot   api.HexBytes
+	cachedBlock  *models.Block
+	cachedRecord *models.AggregatorRecord
 }
 
 func (s *stubRoundManager) Start(context.Context) error    { return nil }
@@ -789,12 +758,6 @@ func (s *stubRoundManager) GetSMTBackend() smtbackend.Backend {
 }
 func (s *stubRoundManager) CheckParentHealth(context.Context) error { return nil }
 func (s *stubRoundManager) FinalizationReadLock() func()            { return func() {} }
-func (s *stubRoundManager) TryFinalizationReadLock() (func(), bool) {
-	if s.finalizationInProgress {
-		return nil, false
-	}
-	return func() {}, true
-}
 func (s *stubRoundManager) GetKnownNotReadyBlock(api.StateID) (*models.Block, bool) {
 	return nil, false
 }

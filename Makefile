@@ -87,15 +87,15 @@ docker-run-clean:
 	@echo "Rebuilding services with clean state as current user..."
 	@docker compose down
 	@rm -rf ./data
-	@mkdir -p ./data/genesis/root ./data/genesis-root ./data/mongodb_data ./data/redis_data && chmod -R 777 ./data
+	@mkdir -p ./data/genesis/root ./data/genesis-root ./data/mongodb_data ./data/redis_data ./data/smt-rocksdb && chmod -R 777 ./data
 	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose up --force-recreate -d --build
 	@echo "Services rebuilt with user UID=$$(id -u):$$(id -g)"
 
 docker-run-clean-keep-tb:
 	@echo "Rebuilding services with clean state but preserving BFT config as current user..."
 	@docker compose down
-	@rm -rf ./data/mongodb_data ./data/redis_data
-	@mkdir -p ./data/genesis/root ./data/genesis-root ./data/mongodb_data ./data/redis_data && chmod -R 777 ./data
+	@rm -rf ./data/mongodb_data ./data/redis_data ./data/smt-rocksdb
+	@mkdir -p ./data/genesis/root ./data/genesis-root ./data/mongodb_data ./data/redis_data ./data/smt-rocksdb && chmod -R 777 ./data
 	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=debug docker compose up --force-recreate -d --build
 	@echo "Services rebuilt with user UID=$$(id -u):$$(id -g)"
 
@@ -170,7 +170,7 @@ docker-run-bft-sh-clean:
 	@echo "Rebuilding fixed 2-shard BFT services with clean state as current user..."
 	@docker compose -f bft-sharding-compose.yml down
 	@rm -rf ./data/bft-sharding ./logs/bft-shard0 ./logs/bft-shard1
-	@mkdir -p ./data/bft-sharding/genesis ./data/bft-sharding/genesis-root ./data/bft-sharding/mongodb_shard0_data ./data/bft-sharding/mongodb_shard1_data ./data/bft-sharding/redis_data
+	@mkdir -p ./data/bft-sharding/genesis ./data/bft-sharding/genesis-root ./data/bft-sharding/mongodb_shard0_data ./data/bft-sharding/mongodb_shard1_data ./data/bft-sharding/redis_data ./data/bft-sharding/smt-rocksdb-shard0 ./data/bft-sharding/smt-rocksdb-shard1
 	@rm -rf ./data/bft-sharding/genesis/root
 	@chmod -R 777 ./data/bft-sharding
 	@mkdir -p ./logs/bft-shard0 ./logs/bft-shard1 && chmod -R 777 ./logs/bft-shard0 ./logs/bft-shard1
@@ -181,8 +181,8 @@ docker-run-bft-sh-clean:
 docker-run-bft-sh-clean-keep-tb:
 	@echo "Rebuilding fixed 2-shard BFT services with clean DB/Redis state but preserving BFT genesis as current user..."
 	@docker compose -f bft-sharding-compose.yml down
-	@rm -rf ./data/bft-sharding/mongodb_data ./data/bft-sharding/mongodb_shard0_data ./data/bft-sharding/mongodb_shard1_data ./data/bft-sharding/redis_data
-	@mkdir -p ./data/bft-sharding/genesis ./data/bft-sharding/genesis-root ./data/bft-sharding/mongodb_shard0_data ./data/bft-sharding/mongodb_shard1_data ./data/bft-sharding/redis_data
+	@rm -rf ./data/bft-sharding/mongodb_data ./data/bft-sharding/mongodb_shard0_data ./data/bft-sharding/mongodb_shard1_data ./data/bft-sharding/redis_data ./data/bft-sharding/smt-rocksdb-shard0 ./data/bft-sharding/smt-rocksdb-shard1
+	@mkdir -p ./data/bft-sharding/genesis ./data/bft-sharding/genesis-root ./data/bft-sharding/mongodb_shard0_data ./data/bft-sharding/mongodb_shard1_data ./data/bft-sharding/redis_data ./data/bft-sharding/smt-rocksdb-shard0 ./data/bft-sharding/smt-rocksdb-shard1
 	@rm -rf ./data/bft-sharding/genesis/root
 	@chmod -R 777 ./data/bft-sharding
 	@mkdir -p ./logs/bft-shard0 ./logs/bft-shard1 && chmod -R 777 ./logs/bft-shard0 ./logs/bft-shard1

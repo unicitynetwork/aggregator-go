@@ -412,10 +412,6 @@ func (prm *ParentRoundManager) FinalizationReadLock() func() {
 	return func() {}
 }
 
-func (prm *ParentRoundManager) TryFinalizationReadLock() (func(), bool) {
-	return func() {}, true
-}
-
 func (prm *ParentRoundManager) GetKnownNotReadyBlock(stateID api.StateID) (*models.Block, bool) {
 	return nil, false
 }
