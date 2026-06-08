@@ -286,6 +286,31 @@ func TestDiskBackendPreparedProofViewRefusesPublishAfterRootAdvanced(t *testing.
 	require.ErrorContains(t, firstPrepared.Publish(ctx), "refusing to publish prepared proof view")
 }
 
+func TestDiskBackendRefreshPublishedProofViewRefusesWrongExpectedRoot(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackend(t)
+	defer func() { require.NoError(t, backend.Close()) }()
+
+	leaf := testLeafInput(1, 11)
+	snapshot, err := backend.CreateSnapshot(ctx)
+	require.NoError(t, err)
+	result, err := snapshot.AddLeavesClassified(ctx, []LeafInput{leaf})
+	require.NoError(t, err)
+	require.NoError(t, snapshot.Commit(ctx, CommitMetadata{
+		BlockNumber: api.NewBigIntFromUint64(1),
+		RootHash:    result.CandidateRoot,
+	}))
+
+	wrongRoot := append([]byte(nil), result.CandidateRoot...)
+	wrongRoot[0] ^= 0xff
+	require.ErrorContains(t, backend.RefreshPublishedProofView(ctx, wrongRoot), "refusing to publish proof view")
+
+	root, cert, err := backend.GetPublishedInclusionCert(ctx, leaf.Key)
+	require.ErrorContains(t, err, "published proof view is empty")
+	require.Equal(t, emptyRoot(t), root)
+	require.Nil(t, cert)
+}
+
 func TestDiskBackendPublishedProofViewEmptyRootReturnsClearError(t *testing.T) {
 	ctx := context.Background()
 	backend := newTestDiskBackend(t)

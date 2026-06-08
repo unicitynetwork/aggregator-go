@@ -183,7 +183,7 @@ go build -tags rocksdb ./cmd/aggregator
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SMT_BACKEND` | SMT backend: `memory` or `rocksdb` | `memory` |
-| `SMT_DISK_PATH` | RocksDB data directory when `SMT_BACKEND=rocksdb` | `data/smt-rocksdb` |
+| `SMT_DISK_PATH` | RocksDB data directory when `SMT_BACKEND=rocksdb` | required |
 | `SMT_ROCKSDB_CACHE_MB` | RocksDB block cache size in MB | `1024` |
 | `SMT_ROCKSDB_BG_JOBS` | RocksDB background jobs | `8` |
 | `SMT_ROCKSDB_SUBCOMPACTIONS` | RocksDB subcompactions | `4` |
