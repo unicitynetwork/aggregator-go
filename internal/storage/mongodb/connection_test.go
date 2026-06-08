@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	mongoContainer "github.com/testcontainers/testcontainers-go/modules/mongodb"
+	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -36,6 +37,47 @@ func TestIsPrimaryTransitionError(t *testing.T) {
 
 	require.False(t, isPrimaryTransitionError(mongo.CommandError{Code: 11000, Name: "DuplicateKey"}))
 	require.False(t, isPrimaryTransitionError(errors.New("plain error")))
+}
+
+func TestMongoWriteConcern(t *testing.T) {
+	t.Run("default majority journaled", func(t *testing.T) {
+		wc := mongoWriteConcern(config.DatabaseConfig{})
+
+		require.Equal(t, "majority", wc.W)
+		require.NotNil(t, wc.Journal)
+		require.True(t, *wc.Journal)
+	})
+
+	t.Run("primary acknowledged", func(t *testing.T) {
+		wc := mongoWriteConcern(config.DatabaseConfig{
+			WriteConcern: "1",
+		})
+
+		require.Equal(t, 1, wc.W)
+		require.Nil(t, wc.Journal)
+	})
+
+	t.Run("majority journaled", func(t *testing.T) {
+		wc := mongoWriteConcern(config.DatabaseConfig{
+			WriteConcern: "majority",
+			WriteJournal: true,
+		})
+
+		require.Equal(t, "majority", wc.W)
+		require.NotNil(t, wc.Journal)
+		require.True(t, *wc.Journal)
+	})
+
+	t.Run("primary acknowledged journaled", func(t *testing.T) {
+		wc := mongoWriteConcern(config.DatabaseConfig{
+			WriteConcern: "1",
+			WriteJournal: true,
+		})
+
+		require.Equal(t, 1, wc.W)
+		require.NotNil(t, wc.Journal)
+		require.True(t, *wc.Journal)
+	})
 }
 
 func setupTransactionTestDB(t *testing.T) (*mongo.Client, *mongo.Database, func()) {

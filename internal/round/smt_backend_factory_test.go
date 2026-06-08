@@ -18,7 +18,7 @@ func TestConfiguredSMTBackendDefaultsToMemory(t *testing.T) {
 	require.IsType(t, &smtbackend.MemoryBackend{}, backend)
 }
 
-func TestConfiguredSMTBackendRejectsRocksDBHA(t *testing.T) {
+func TestConfiguredSMTBackendRejectsRocksDBHAOutsideBFTShardMode(t *testing.T) {
 	backend, err := newConfiguredSMTBackend(&config.Config{
 		HA: config.HAConfig{Enabled: true},
 		SMT: config.SMTConfig{
@@ -27,5 +27,5 @@ func TestConfiguredSMTBackendRejectsRocksDBHA(t *testing.T) {
 		},
 	}, smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)))
 	require.Nil(t, backend)
-	require.ErrorContains(t, err, "HA enabled")
+	require.ErrorContains(t, err, "SHARDING_MODE=bft-shard")
 }

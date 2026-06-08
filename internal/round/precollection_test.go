@@ -822,9 +822,9 @@ func TestPreCollectionReparenting(t *testing.T) {
 }
 
 // TestChildPrecollector_DeactivateDuringInFlightRound deactivates while the
-// first child round is blocked waiting for the parent proof. The in-flight
-// round should still finish block 1 once the proof is released, but it must
-// not start round 2.
+// first child round is blocked waiting for the parent proof. Deactivate should
+// cancel the in-flight proof polling and wait for the round goroutine to exit,
+// so the stale round must not finish block 1 or start block 2.
 func TestChildPrecollector_DeactivateDuringInFlightRound(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -880,16 +880,13 @@ func TestChildPrecollector_DeactivateDuringInFlightRound(t *testing.T) {
 	// Deactivate while round 1 is still in-flight.
 	require.NoError(t, rm.Deactivate(ctx))
 
-	// Let the in-flight round finish block 1.
+	// Releasing the proof after deactivation must not let the stale round finish.
 	close(rootClient.releaseProof)
-
-	require.Eventually(t, func() bool {
-		block, err := store.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(1)))
-		return err == nil && block != nil
-	}, 3*time.Second, 25*time.Millisecond, "block 1 should be created after proof release")
-
-	// If the bug exists, round 2 would appear shortly after block 1 finalization.
 	time.Sleep(500 * time.Millisecond)
+
+	block1, err := store.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(1)))
+	require.NoError(t, err)
+	assert.Nil(t, block1, "block 1 should not be created after Deactivate")
 
 	block2, err := store.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(2)))
 	require.NoError(t, err)

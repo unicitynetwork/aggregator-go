@@ -36,3 +36,23 @@ func TestConfiguredSMTBackendOpensRocksDB(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, emptyStateRoot(), root)
 }
+
+func TestConfiguredSMTBackendOpensRocksDBHABFTShardMode(t *testing.T) {
+	backend, err := newConfiguredSMTBackend(&config.Config{
+		HA:       config.HAConfig{Enabled: true},
+		Sharding: config.ShardingConfig{Mode: config.ShardingModeBFTShard},
+		SMT: config.SMTConfig{
+			Backend:               config.SMTBackendRocksDB,
+			DiskPath:              t.TempDir(),
+			RocksDBCacheMB:        8,
+			RocksDBBGJobs:         2,
+			RocksDBSubcompactions: 1,
+			RocksDBBloomBits:      10,
+			RocksDBMemTableMB:     8,
+			MaterializeWorkers:    2,
+		},
+	}, smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, backend.Close()) }()
+	require.IsType(t, &smtbackend.DiskBackend{}, backend)
+}

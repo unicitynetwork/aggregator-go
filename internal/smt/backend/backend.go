@@ -51,7 +51,16 @@ type ProofViewPreparingSnapshot interface {
 }
 
 type ProofViewPublisher interface {
-	RefreshPublishedProofView(ctx context.Context) error
+	// RefreshPublishedProofView publishes the backend's current committed root as
+	// the served proof view. expectedRoot, when non-nil, must equal the backend's
+	// current root or publication is refused; this forces callers to prove the
+	// root they publish corresponds to finalized history. Pass nil only when the
+	// committed state is already known to be finalized (startup verify, open).
+	RefreshPublishedProofView(ctx context.Context, expectedRoot []byte) error
+}
+
+type DiskBacked interface {
+	IsDiskBackedSMT() bool
 }
 
 type Snapshot interface {

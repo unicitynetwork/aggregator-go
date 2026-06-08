@@ -109,6 +109,9 @@ type RoundManager struct {
 	// Guards the window where SMT root advances before block finalization is persisted.
 	finalizationMu sync.RWMutex
 	wg             sync.WaitGroup
+	roundWG        sync.WaitGroup
+	activeCtx      context.Context
+	activeCancel   context.CancelFunc
 
 	proofCacheMu          sync.RWMutex
 	proofPending          map[string]struct{}
@@ -273,20 +276,33 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 		if _, err := rm.restoreOrVerifySMT(ctx); err != nil {
 			return fmt.Errorf("failed to restore SMT from storage: %w", err)
 		}
-		recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+		// A stale disk follower (empty local RocksDB with existing finalized
+		// history) defers all catch-up to the live BlockSyncer. It must not run
+		// leader-only unfinalized-block recovery, which would try to apply a
+		// single block onto an empty tree and fail.
+		staleFollower, err := rm.diskAwaitingFollowerCatchup(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to recover unfinalized block: %w", err)
+			return fmt.Errorf("failed to determine disk follower catch-up state: %w", err)
 		}
-		if recoveryResult.Recovered {
-			rm.logger.Info("Recovered unfinalized block during startup",
-				"blockNumber", recoveryResult.BlockNumber.String(),
-				"stateCount", len(recoveryResult.StateIDs))
-			if err := rm.syncDiskSMTAfterRecoveredBlock(ctx, recoveryResult); err != nil {
-				return fmt.Errorf("failed to sync disk SMT after recovered block: %w", err)
+		if staleFollower {
+			// Nothing verified to publish yet; BlockSyncer refreshes the proof view per replayed block.
+			rm.logger.Info("Stale disk follower; skipping unfinalized-block recovery, BlockSyncer will catch up")
+		} else {
+			recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+			if err != nil {
+				return fmt.Errorf("failed to recover unfinalized block: %w", err)
 			}
-		}
-		if err := rm.refreshDiskProofView(ctx); err != nil {
-			return fmt.Errorf("failed to initialize disk SMT proof view: %w", err)
+			if recoveryResult.Recovered {
+				rm.logger.Info("Recovered unfinalized block during startup",
+					"blockNumber", recoveryResult.BlockNumber.String(),
+					"stateCount", len(recoveryResult.StateIDs))
+				if err := rm.syncDiskSMTAfterRecoveredBlock(ctx, recoveryResult); err != nil {
+					return fmt.Errorf("failed to sync disk SMT after recovered block: %w", err)
+				}
+			}
+			if err := rm.refreshDiskProofView(ctx); err != nil {
+				return fmt.Errorf("failed to initialize disk SMT proof view: %w", err)
+			}
 		}
 	} else {
 		recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
@@ -510,16 +526,42 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 
 	if rm.precollectorDisabled {
 		rm.roundMutex.Unlock()
+		if snapshot != nil {
+			snapshot.Discard(ctx)
+		}
 		rm.logger.WithContext(ctx).Info("Skipping round start - deactivated",
 			"roundNumber", roundNumber.String())
 		return ErrDeactivated
 	}
 
+	roundCtx := ctx
+	if rm.activeCtx != nil {
+		roundCtx = rm.activeCtx
+	}
+
 	if rm.currentRound != nil {
+		currentRoundNumber := rm.currentRound.Number
+		currentRoundState := rm.currentRound.State
+		currentRoundAge := time.Since(rm.currentRound.StartTime)
+		currentRoundNumberString := "<nil>"
+		if currentRoundNumber != nil {
+			currentRoundNumberString = currentRoundNumber.String()
+		}
 		rm.logger.WithContext(ctx).Info("Previous round state",
-			"previousRoundNumber", rm.currentRound.Number.String(),
-			"previousRoundState", rm.currentRound.State.String(),
-			"previousRoundAge", time.Since(rm.currentRound.StartTime).String())
+			"previousRoundNumber", currentRoundNumberString,
+			"previousRoundState", currentRoundState.String(),
+			"previousRoundAge", currentRoundAge.String())
+		if currentRoundNumber != nil && currentRoundNumber.Cmp(roundNumber.Int) >= 0 {
+			rm.roundMutex.Unlock()
+			if snapshot != nil {
+				snapshot.Discard(ctx)
+			}
+			rm.logger.WithContext(ctx).Info("Skipping stale round start",
+				"roundNumber", roundNumber.String(),
+				"currentRoundNumber", currentRoundNumberString,
+				"currentRoundState", currentRoundState.String())
+			return nil
+		}
 	}
 
 	preCollected := snapshot != nil
@@ -557,20 +599,14 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 		cp.Start(ctx, snapshot)
 	}
 
-	rm.roundMutex.Unlock()
-
-	rm.logger.WithContext(ctx).Info("Started new round",
-		"roundNumber", roundNumber.String(),
-		"commitments", len(commitments))
-
-	rm.wg.Go(func() {
-		if err := rm.processRound(ctx); err != nil {
+	rm.roundWG.Go(func() {
+		if err := rm.processRound(roundCtx); err != nil {
 			if errors.Is(err, context.Canceled) {
-				rm.logger.WithContext(ctx).Info("Round processing stopped due to shutdown",
+				rm.logger.WithContext(roundCtx).Info("Round processing stopped due to shutdown",
 					"roundNumber", roundNumber.String())
 				return
 			}
-			rm.logger.WithContext(ctx).Error("Round processing failed, requesting shutdown",
+			rm.logger.WithContext(roundCtx).Error("Round processing failed, requesting shutdown",
 				"roundNumber", roundNumber.String(),
 				"error", err.Error())
 			if rm.eventBus != nil {
@@ -581,6 +617,12 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 			}
 		}
 	})
+
+	rm.roundMutex.Unlock()
+
+	rm.logger.WithContext(ctx).Info("Started new round",
+		"roundNumber", roundNumber.String(),
+		"commitments", len(commitments))
 
 	return nil
 }
@@ -920,7 +962,27 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 func (rm *RoundManager) Activate(ctx context.Context) error {
 	rm.logger.WithContext(ctx).Info("Activating round manager")
 
+	activeCtx, activeCancel := context.WithCancel(ctx)
+	activated := false
+	defer func() {
+		if activated {
+			return
+		}
+		activeCancel()
+		rm.roundMutex.Lock()
+		if rm.activeCtx == activeCtx {
+			rm.activeCtx = nil
+			rm.activeCancel = nil
+		}
+		rm.roundMutex.Unlock()
+	}()
+
 	rm.roundMutex.Lock()
+	if rm.activeCancel != nil {
+		rm.activeCancel()
+	}
+	rm.activeCtx = activeCtx
+	rm.activeCancel = activeCancel
 	rm.precollectorDisabled = false
 	if rm.precollectorDone == nil {
 		rm.precollectorDone = make(chan struct{})
@@ -928,7 +990,7 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 	rm.roundMutex.Unlock()
 
 	if rm.config.HA.Enabled {
-		recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+		recoveryResult, err := RecoverUnfinalizedBlock(activeCtx, rm.logger, rm.storage, rm.commitmentQueue)
 		if err != nil {
 			return fmt.Errorf("failed to recover unfinalized block on activation: %w", err)
 		}
@@ -937,7 +999,7 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 				"blockNumber", recoveryResult.BlockNumber.String(),
 				"stateCount", len(recoveryResult.StateIDs))
 
-			if err := LoadRecoveredNodesIntoBackend(ctx, rm.logger, rm.storage, rm.smtBackend, recoveryResult.BlockNumber, recoveryResult.StateIDs); err != nil {
+			if err := LoadRecoveredNodesIntoBackend(activeCtx, rm.logger, rm.storage, rm.smtBackend, recoveryResult.BlockNumber, recoveryResult.StateIDs); err != nil {
 				return fmt.Errorf("failed to load recovered nodes into SMT: %w", err)
 			}
 		}
@@ -945,15 +1007,15 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 
 	switch rm.config.Sharding.Mode {
 	case config.ShardingModeStandalone, config.ShardingModeBFTShard:
-		if err := rm.bftClient.Start(ctx); err != nil {
+		if err := rm.bftClient.Start(activeCtx); err != nil {
 			return fmt.Errorf("failed to start BFT client: %w", err)
 		}
 	case config.ShardingModeChild:
-		if err := rm.restoreLastAcceptedParentUC(ctx); err != nil {
+		if err := rm.restoreLastAcceptedParentUC(activeCtx); err != nil {
 			return fmt.Errorf("failed to restore latest parent UC from child blocks: %w", err)
 		}
 
-		latestBlockNumber, err := rm.storage.BlockStorage().GetLatestNumber(ctx)
+		latestBlockNumber, err := rm.storage.BlockStorage().GetLatestNumber(activeCtx)
 		if err != nil {
 			return fmt.Errorf("failed to get latest block number: %w", err)
 		}
@@ -969,14 +1031,15 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 			"latestBlock", latestBlockNumber,
 			"nextRound", roundNumber.String())
 
-		if err := rm.StartNewRound(ctx, api.NewBigInt(roundNumber)); err != nil {
+		if err := rm.StartNewRound(activeCtx, api.NewBigInt(roundNumber)); err != nil {
 			return fmt.Errorf("failed to start new round: %w", err)
 		}
 	default:
 		return fmt.Errorf("invalid shard mode: %s", rm.config.Sharding.Mode)
 	}
 
-	rm.startCommitmentPrefetcher(ctx)
+	rm.startCommitmentPrefetcher(activeCtx)
+	activated = true
 	return nil
 }
 
@@ -1044,16 +1107,27 @@ func (rm *RoundManager) Deactivate(ctx context.Context) error {
 	}
 	cp = rm.precollector
 	rm.precollector = nil
+	activeCancel := rm.activeCancel
+	rm.activeCancel = nil
+	rm.activeCtx = nil
 	rm.roundMutex.Unlock()
 
+	if activeCancel != nil {
+		activeCancel()
+	}
 	if cp != nil {
 		cp.Stop()
 	}
-	rm.clearProofPending()
 	rm.stopCommitmentPrefetcher()
 	if rm.bftClient != nil {
 		rm.bftClient.Stop()
 	}
+	rm.roundWG.Wait()
+
+	rm.roundMutex.Lock()
+	rm.currentRound = nil
+	rm.roundMutex.Unlock()
+	rm.clearProofPending()
 
 	return nil
 }

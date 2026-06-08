@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -45,8 +46,7 @@ func NewStorage(ctx context.Context, config config.Config) (*Storage, error) {
 		SetMinPoolSize(cfg.MinPoolSize).
 		SetMaxConnIdleTime(cfg.MaxConnIdleTime)
 
-	// Use write concern W1 (primary acknowledged) for lower latency
-	clientOpts.SetWriteConcern(writeconcern.W1())
+	clientOpts.SetWriteConcern(mongoWriteConcern(cfg))
 
 	// Connect to MongoDB
 	connectCtx, cancel := context.WithTimeout(ctx, cfg.ConnectTimeout)
@@ -109,6 +109,22 @@ func NewStorage(ctx context.Context, config config.Config) (*Storage, error) {
 	}
 
 	return storage, nil
+}
+
+func mongoWriteConcern(cfg config.DatabaseConfig) *writeconcern.WriteConcern {
+	writeConcern := strings.TrimSpace(cfg.WriteConcern)
+	var w any = "majority"
+	if writeConcern == "1" {
+		w = 1
+	} else if strings.EqualFold(writeConcern, "majority") {
+		w = "majority"
+	}
+	journaled := cfg.WriteJournal || writeConcern == ""
+	if journaled {
+		journal := true
+		return &writeconcern.WriteConcern{W: w, Journal: &journal}
+	}
+	return &writeconcern.WriteConcern{W: w}
 }
 
 func (s *Storage) Initialize(ctx context.Context) error {

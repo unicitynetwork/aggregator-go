@@ -257,6 +257,35 @@ func TestDiskBackendPublishedProofViewStaysOnPreviousRootUntilPublished(t *testi
 	require.NoError(t, cert.Verify(secondLeaf.Key, secondLeaf.Value, secondResult.CandidateRoot, api.InclusionProofV2HashAlgorithm))
 }
 
+func TestDiskBackendPreparedProofViewRefusesPublishAfterRootAdvanced(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackend(t)
+	defer func() { require.NoError(t, backend.Close()) }()
+
+	first, err := backend.CreateSnapshot(ctx)
+	require.NoError(t, err)
+	firstResult, err := first.AddLeavesClassified(ctx, []LeafInput{testLeafInput(1, 11)})
+	require.NoError(t, err)
+	firstPrepared, err := first.(ProofViewPreparingSnapshot).CommitAndPrepareProofView(ctx, CommitMetadata{
+		BlockNumber: api.NewBigIntFromUint64(1),
+		RootHash:    firstResult.CandidateRoot,
+	})
+	require.NoError(t, err)
+	defer firstPrepared.Discard(ctx)
+
+	// Advance the disk past the prepared view without publishing it.
+	second, err := backend.CreateSnapshot(ctx)
+	require.NoError(t, err)
+	secondResult, err := second.AddLeavesClassified(ctx, []LeafInput{testLeafInput(2, 22)})
+	require.NoError(t, err)
+	require.NoError(t, second.Commit(ctx, CommitMetadata{
+		BlockNumber: api.NewBigIntFromUint64(2),
+		RootHash:    secondResult.CandidateRoot,
+	}))
+
+	require.ErrorContains(t, firstPrepared.Publish(ctx), "refusing to publish prepared proof view")
+}
+
 func TestDiskBackendPublishedProofViewEmptyRootReturnsClearError(t *testing.T) {
 	ctx := context.Background()
 	backend := newTestDiskBackend(t)

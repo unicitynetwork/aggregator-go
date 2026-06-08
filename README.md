@@ -174,7 +174,7 @@ The service is configured via environment variables:
 
 #### SMT Backend
 
-The default SMT backend is in-memory. A RocksDB-backed SMT can be enabled for non-HA `bft-shard` deployments by building with the `rocksdb` tag and setting `SMT_BACKEND=rocksdb`.
+The default SMT backend is in-memory. A RocksDB-backed SMT can be enabled for `bft-shard` deployments (standalone or HA) by building with the `rocksdb` tag and setting `SMT_BACKEND=rocksdb`.
 
 ```bash
 go build -tags rocksdb ./cmd/aggregator
@@ -192,7 +192,7 @@ go build -tags rocksdb ./cmd/aggregator
 | `SMT_MATERIALIZE_WORKERS` | Parallel workers for SMT materialization | `64` |
 | `SMT_STARTUP_REPLAY_LIMIT_BLOCKS` | Maximum finalized MongoDB blocks to replay into RocksDB on startup | `100` |
 
-RocksDB SMT is currently rejected for HA and application-level `parent`/`child` sharding modes. Use `SMT_BACKEND=memory` there until disk-mode HA support is added.
+RocksDB SMT with HA is supported only in `bft-shard` mode. It is rejected for application-level `parent`/`child` sharding modes; use `SMT_BACKEND=memory` there.
 
 #### Redis Sentinel (HA)
 
