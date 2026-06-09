@@ -1,6 +1,7 @@
 package persist
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"sort"
@@ -11,6 +12,8 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk/storage"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
+
+var ErrProofLeafNotFound = errors.New("disk SMT persist: proof leaf not found")
 
 type Tree struct {
 	store storage.Store
@@ -526,7 +529,7 @@ type Snapshot struct {
 
 func buildInclusionCert(branch *disk.Branch, key disk.Key, cert *api.InclusionCert) error {
 	if branch == nil {
-		return fmt.Errorf("disk SMT persist: inclusion cert traversal reached nil subtree")
+		return fmt.Errorf("%w: traversal reached nil subtree", ErrProofLeafNotFound)
 	}
 
 	switch branch.Kind {
@@ -535,7 +538,7 @@ func buildInclusionCert(branch *disk.Branch, key disk.Key, cert *api.InclusionCe
 			return fmt.Errorf("disk SMT persist: malformed leaf branch")
 		}
 		if branch.Leaf.Key != key {
-			return fmt.Errorf("disk SMT persist: leaf not found for key %x", key[:])
+			return fmt.Errorf("%w: key %x", ErrProofLeafNotFound, key[:])
 		}
 		return nil
 	case disk.BranchKindInternal:
@@ -569,7 +572,7 @@ func buildInclusionCert(branch *disk.Branch, key disk.Key, cert *api.InclusionCe
 
 		return buildInclusionCert(child, key, cert)
 	case disk.BranchKindStub:
-		return fmt.Errorf("disk SMT persist: inclusion cert traversal reached unmaterialized stub")
+		return fmt.Errorf("%w: traversal reached unmaterialized stub", ErrProofLeafNotFound)
 	default:
 		return fmt.Errorf("disk SMT persist: unknown branch kind %d", branch.Kind)
 	}

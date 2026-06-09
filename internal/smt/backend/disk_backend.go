@@ -3,6 +3,7 @@ package backend
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -125,24 +126,44 @@ func (b *DiskBackend) GetInclusionCert(_ context.Context, key []byte) (*api.Incl
 	return b.tree.GetInclusionCertWithReadSnapshot(key, openSnapshot)
 }
 
-func (b *DiskBackend) GetPublishedInclusionCert(_ context.Context, key []byte) ([]byte, *api.InclusionCert, error) {
+func (b *DiskBackend) PublishedRoot(context.Context) ([]byte, error) {
 	if b == nil {
-		return nil, nil, fmt.Errorf("disk SMT backend not initialized")
+		return nil, fmt.Errorf("disk SMT backend not initialized")
 	}
 	b.proofViewMu.RLock()
 	defer b.proofViewMu.RUnlock()
 
 	if b.proofView == nil {
-		return nil, nil, fmt.Errorf("disk SMT proof view is not initialized")
+		return nil, fmt.Errorf("disk SMT proof view is not initialized")
+	}
+	return hashBytes(b.proofView.root), nil
+}
+
+func (b *DiskBackend) GetPublishedInclusionCertAtRoot(_ context.Context, expectedRoot []byte, key []byte) (*api.InclusionCert, error) {
+	if b == nil {
+		return nil, fmt.Errorf("disk SMT backend not initialized")
+	}
+	b.proofViewMu.RLock()
+	defer b.proofViewMu.RUnlock()
+
+	if b.proofView == nil {
+		return nil, fmt.Errorf("disk SMT proof view is not initialized")
+	}
+	root := hashBytes(b.proofView.root)
+	if !bytes.Equal(root, expectedRoot) {
+		return nil, ErrPublishedProofRootChanged
 	}
 	if b.proofView.root == disk.EmptyRootHash() {
-		return hashBytes(b.proofView.root), nil, fmt.Errorf("disk SMT published proof view is empty")
+		return nil, ErrPublishedProofLeafNotFound
 	}
 	cert, err := persist.BuildInclusionCert(b.proofView.root, b.proofView.reader, key)
 	if err != nil {
-		return nil, nil, err
+		if errors.Is(err, persist.ErrProofLeafNotFound) {
+			return nil, ErrPublishedProofLeafNotFound
+		}
+		return nil, err
 	}
-	return hashBytes(b.proofView.root), cert, nil
+	return cert, nil
 }
 
 func (b *DiskBackend) GetInclusionCerts(_ context.Context, keys [][]byte) ([]*api.InclusionCert, error) {
@@ -471,9 +492,14 @@ func (s *DiskSnapshot) commit(meta CommitMetadata, prepareProofView bool) (Prepa
 }
 
 func (s *DiskSnapshot) Discard(context.Context) {
-	if s != nil && s.snapshot != nil {
-		s.snapshot.Discard()
+	if s == nil || s.snapshot == nil {
+		return
 	}
+	if s.target != nil {
+		s.target.mu.Lock()
+		defer s.target.mu.Unlock()
+	}
+	s.snapshot.Discard()
 }
 
 func toDiskLeafInputs(inputs []LeafInput) []disk.LeafInput {

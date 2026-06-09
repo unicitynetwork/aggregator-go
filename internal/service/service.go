@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -281,7 +282,33 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 	var childCert *api.InclusionCert
 	var rootHash []byte
 	if usesPublishedProofView {
-		rootHash, childCert, err = publishedProofReader.GetPublishedInclusionCert(ctx, key)
+		rootHash, err = publishedProofReader.PublishedRoot(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get published SMT root hash: %w", err)
+		}
+		childCert, err = publishedProofReader.GetPublishedInclusionCertAtRoot(ctx, rootHash, key)
+		if errors.Is(err, smtbackend.ErrPublishedProofRootChanged) || errors.Is(err, smtbackend.ErrPublishedProofLeafNotFound) {
+			rootHashRaw := api.HexBytes(rootHash)
+			block, ok := as.roundManager.GetProofReadyBlockByRoot(rootHashRaw)
+			if !ok {
+				as.recordProofPath(ctx, proofPathMetadataMiss)
+				as.recordProofPath(ctx, proofPathMongoBlock)
+				block, err = as.storage.BlockStorage().GetLatestByRootHash(ctx, rootHashRaw)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get latest block by root hash: %w", err)
+				}
+				if block == nil {
+					return nil, fmt.Errorf("no block found with root hash %s", rootHashRaw.String())
+				}
+			}
+			responseBlockNumber, err := proofBundleBlockNumber(as.config.Sharding.Mode, block)
+			if err != nil {
+				return nil, err
+			}
+			as.recordProofPath(ctx, proofPathEmpty)
+			completed = true
+			return emptyInclusionProofResponse(responseBlockNumber, block), nil
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to build inclusion cert for state ID %s: %w", req.StateID, err)
 		}

@@ -78,6 +78,14 @@ func (c *proofMetadataCache) get(stateID api.StateID, rootHash api.HexBytes) (*m
 	return block, record, true
 }
 
+func (c *proofMetadataCache) getBlock(rootHash api.HexBytes) (*models.Block, bool) {
+	if c == nil {
+		return nil, false
+	}
+	block := c.blocks[rootHash.String()]
+	return block, block != nil
+}
+
 func (c *proofMetadataCache) stats() (records int, blocks int) {
 	if c == nil {
 		return 0, 0

@@ -836,7 +836,8 @@ func (s *RecoveryTestSuite) readPendingToMakeThemClaimed() {
 		_ = s.commitmentQueue.StreamCertificationRequests(ctx, commitmentChan)
 	}()
 
-	// Wait for timeout to ensure all are claimed
+	// Wait for timeout to ensure all are claimed. Do not close commitmentChan:
+	// the streamer goroutine above may still be sending to it (closing here races
+	// that send). The streamer stops on ctx.Done(); the channel is GC'd.
 	<-ctx.Done()
-	close(commitmentChan)
 }

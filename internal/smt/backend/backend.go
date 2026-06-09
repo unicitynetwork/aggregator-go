@@ -37,8 +37,12 @@ type BatchInclusionCertBackend interface {
 	GetInclusionCerts(ctx context.Context, keys [][]byte) ([]*api.InclusionCert, error)
 }
 
+var ErrPublishedProofRootChanged = errors.New("published proof root changed")
+var ErrPublishedProofLeafNotFound = errors.New("published proof leaf not found")
+
 type PublishedProofReader interface {
-	GetPublishedInclusionCert(ctx context.Context, key []byte) (root []byte, cert *api.InclusionCert, err error)
+	PublishedRoot(ctx context.Context) ([]byte, error)
+	GetPublishedInclusionCertAtRoot(ctx context.Context, expectedRoot []byte, key []byte) (*api.InclusionCert, error)
 }
 
 type PreparedProofView interface {

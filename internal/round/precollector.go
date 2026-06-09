@@ -62,8 +62,11 @@ func newChildPrecollector(
 	}
 }
 
-func (cp *childPrecollector) Start(ctx context.Context, baseSnapshot smtbackend.Snapshot) {
-	go cp.run(ctx, baseSnapshot)
+// Start launches the precollector on a snapshot it owns and discards on exit.
+// The caller forks the base snapshot under roundMutex and passes the fork here,
+// so the base snapshot can never be discarded while it is being forked.
+func (cp *childPrecollector) Start(ctx context.Context, snapshot smtbackend.Snapshot) {
+	go cp.run(ctx, snapshot)
 }
 
 // AdvanceRound returns the current round's collected data and internally chains
@@ -98,15 +101,9 @@ func (cp *childPrecollector) Stop() {
 	<-cp.doneCh
 }
 
-func (cp *childPrecollector) run(ctx context.Context, baseSnapshot smtbackend.Snapshot) {
+func (cp *childPrecollector) run(ctx context.Context, snapshot smtbackend.Snapshot) {
 	defer close(cp.doneCh)
 
-	snapshot, err := baseSnapshot.Fork(ctx)
-	if err != nil {
-		cp.setStopErr(err)
-		cp.logger.WithContext(ctx).Error("Failed to fork precollector snapshot", "error", err.Error())
-		return
-	}
 	defer func() {
 		if snapshot != nil {
 			snapshot.Discard(ctx)

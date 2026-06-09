@@ -714,7 +714,9 @@ func TestChildPrecollector_AdvanceRoundFailsOnSnapshotAddError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cp.Start(ctx, baseSnapshot)
+	forked, err := baseSnapshot.Fork(ctx)
+	require.NoError(t, err)
+	cp.Start(ctx, forked)
 	stream <- testutil.CreateTestCertificationRequest(t, "snapshot_add_error")
 
 	result, err := cp.AdvanceRound()
@@ -781,7 +783,9 @@ func TestPreCollectionReparenting(t *testing.T) {
 		// Start precollector from Round N's snapshot
 		stream := make(chan *models.CertificationRequest, 100)
 		cp := newChildPrecollector(stream, nil, testLogger, 10000, nil)
-		cp.Start(ctx, roundNSnapshot)
+		forked, err := roundNSnapshot.Fork(ctx)
+		require.NoError(t, err)
+		cp.Start(ctx, forked)
 		defer cp.Stop()
 
 		// Send a pre-collected commitment

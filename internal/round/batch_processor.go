@@ -13,6 +13,7 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/aggregator-go/internal/bft"
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -27,6 +28,10 @@ import (
 // NOTE: The caller is expected to hold rm.roundMutex when calling this function
 // and ACK returned dropped entries after releasing it.
 func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.CertificationRequest) ([]interfaces.CertificationRequestAck, error) {
+	return rm.processMiniBatchForRound(ctx, rm.currentRound, commitments)
+}
+
+func (rm *RoundManager) processMiniBatchForRound(ctx context.Context, round *Round, commitments []*models.CertificationRequest) ([]interfaces.CertificationRequestAck, error) {
 	if len(commitments) == 0 {
 		return nil, nil
 	}
@@ -48,15 +53,15 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 	}
 
 	// Add leaves to the current round's SMT snapshot
-	if rm.currentRound != nil && rm.currentRound.Snapshot != nil {
+	if round != nil && round.Snapshot != nil {
 		smtStart := time.Now()
-		addedCommitments, addedLeaves, dropped, err := addCommitmentLeaves(ctx, rm.logger, rm.currentRound.Snapshot, leaves, validCommitments)
+		addedCommitments, addedLeaves, dropped, err := addCommitmentLeaves(ctx, rm.logger, round.Snapshot, leaves, validCommitments)
 		if err != nil {
 			return nil, err
 		}
 		metrics.SMTAddLeavesDuration.Observe(time.Since(smtStart).Seconds())
-		rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, addedLeaves...)
-		rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, addedCommitments...)
+		round.PendingLeaves = append(round.PendingLeaves, addedLeaves...)
+		round.PendingCommitments = append(round.PendingCommitments, addedCommitments...)
 		rm.markProofsPending(addedCommitments)
 		return dropped, nil
 	}
@@ -67,17 +72,21 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 // ProposeBlock creates and proposes a new block with the given data.
 // rootHash is the raw 32-byte SMT root (no algorithm-id prefix) — the
 // block, UC.IR.h and V2 proof wire all bind against this raw form.
-func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigInt, rootHash api.HexBytes) error {
+func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNumber *api.BigInt, rootHash api.HexBytes) error {
 	rm.logger.WithContext(ctx).Info("proposeBlock called",
 		"blockNumber", blockNumber.String(),
 		"rootHash", rootHash.String())
 
 	rm.roundMutex.Lock()
-	if rm.currentRound != nil {
+	if rm.currentRound != round {
+		rm.roundMutex.Unlock()
+		return bft.ErrStaleCertificationRound
+	}
+	if round != nil {
 		rm.logger.WithContext(ctx).Debug("Changing round state to finalizing",
-			"roundNumber", rm.currentRound.Number.String(),
-			"previousState", rm.currentRound.State.String())
-		rm.currentRound.State = RoundStateFinalizing
+			"roundNumber", round.Number.String(),
+			"previousState", round.State.String())
+		round.State = RoundStateFinalizing
 	}
 	rm.roundMutex.Unlock()
 
@@ -115,11 +124,17 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			parentHash,
 			nil,
 		)
-		rm.roundMutex.RLock()
-		if rm.currentRound != nil && !rm.currentRound.StartTime.IsZero() {
-			metrics.RoundPreparationDuration.Observe(time.Since(rm.currentRound.StartTime).Seconds())
+		if round != nil && !round.StartTime.IsZero() {
+			metrics.RoundPreparationDuration.Observe(time.Since(round.StartTime).Seconds())
 		}
+		// A repeat UC could have superseded this round during the storage work
+		// above; do not send a stale proposal to BFT.
+		rm.roundMutex.RLock()
+		superseded := rm.currentRound != round
 		rm.roundMutex.RUnlock()
+		if superseded {
+			return bft.ErrStaleCertificationRound
+		}
 		rm.logger.WithContext(ctx).Info("Sending certification request to BFT client",
 			"blockNumber", blockNumber.String(),
 			"bftClientType", fmt.Sprintf("%T", rm.bftClient))

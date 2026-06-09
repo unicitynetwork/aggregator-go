@@ -133,6 +133,8 @@ The service is configured via environment variables:
 | `MONGODB_MAX_POOL_SIZE` | Maximum connection pool size | `100` |
 | `MONGODB_MIN_POOL_SIZE` | Minimum connection pool size | `5` |
 | `MONGODB_MAX_CONN_IDLE_TIME` | Max connection idle time | `5m` |
+| `MONGODB_WRITE_CONCERN` | MongoDB write concern: `1` or `majority` | `majority` |
+| `MONGODB_WRITE_JOURNAL` | Require journaled MongoDB writes | `true` |
 
 ### High Availability Configuration
 | Variable | Description | Default |

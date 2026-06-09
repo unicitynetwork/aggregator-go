@@ -1,9 +1,11 @@
 package bft
 
 import (
+	"bytes"
 	"context"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -34,6 +36,33 @@ func (m *stubRoundManager) StartNewRound(ctx context.Context, roundNumber *api.B
 
 func (m *stubRoundManager) StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt) error {
 	return m.StartNewRound(ctx, roundNumber)
+}
+
+func TestBFTClientCertificationRequestDoesNotRewriteBlockNumber(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+
+	client := &BFTClientImpl{logger: log}
+	client.status.Store(normal)
+	client.nextExpectedRound.Store(55)
+
+	block := models.NewBlock(
+		api.NewBigIntFromUint64(52),
+		"unicity",
+		0,
+		"1.0",
+		"mainnet",
+		api.NewHexBytes(bytes.Repeat([]byte{0x11}, api.SiblingSize)),
+		nil,
+		nil,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	err = client.CertificationRequest(ctx, block)
+
+	require.ErrorIs(t, err, ErrStaleCertificationRound)
+	require.EqualValues(t, 52, block.Index.Uint64())
 }
 
 func TestBFTClientStub_CertificationRequest_PopulatesSyntheticUC(t *testing.T) {

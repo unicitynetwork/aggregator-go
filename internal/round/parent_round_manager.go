@@ -416,6 +416,10 @@ func (prm *ParentRoundManager) GetKnownNotReadyBlock(stateID api.StateID) (*mode
 	return nil, false
 }
 
+func (prm *ParentRoundManager) GetProofReadyBlockByRoot(rootHash api.HexBytes) (*models.Block, bool) {
+	return nil, false
+}
+
 func (prm *ParentRoundManager) GetCachedProofMetadata(stateID api.StateID, rootHash api.HexBytes) (*models.Block, *models.AggregatorRecord, bool) {
 	return nil, nil, false
 }

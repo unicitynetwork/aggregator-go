@@ -4,6 +4,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"testing"
 
@@ -224,7 +225,9 @@ func TestDiskBackendPublishedProofViewStaysOnPreviousRootUntilPublished(t *testi
 	require.NoError(t, err)
 	require.NoError(t, firstPrepared.Publish(ctx))
 
-	root, cert, err := backend.GetPublishedInclusionCert(ctx, firstLeaf.Key)
+	root, err := backend.PublishedRoot(ctx)
+	require.NoError(t, err)
+	cert, err := backend.GetPublishedInclusionCertAtRoot(ctx, root, firstLeaf.Key)
 	require.NoError(t, err)
 	require.Equal(t, firstResult.CandidateRoot, root)
 	require.NoError(t, cert.Verify(firstLeaf.Key, firstLeaf.Value, firstResult.CandidateRoot, api.InclusionProofV2HashAlgorithm))
@@ -245,16 +248,49 @@ func TestDiskBackendPublishedProofViewStaysOnPreviousRootUntilPublished(t *testi
 	require.NoError(t, err)
 	require.Equal(t, secondResult.CandidateRoot, committedRoot)
 
-	root, cert, err = backend.GetPublishedInclusionCert(ctx, firstLeaf.Key)
+	root, err = backend.PublishedRoot(ctx)
+	require.NoError(t, err)
+	cert, err = backend.GetPublishedInclusionCertAtRoot(ctx, root, firstLeaf.Key)
 	require.NoError(t, err)
 	require.Equal(t, firstResult.CandidateRoot, root)
 	require.NoError(t, cert.Verify(firstLeaf.Key, firstLeaf.Value, firstResult.CandidateRoot, api.InclusionProofV2HashAlgorithm))
 
 	require.NoError(t, secondPrepared.Publish(ctx))
-	root, cert, err = backend.GetPublishedInclusionCert(ctx, secondLeaf.Key)
+	root, err = backend.PublishedRoot(ctx)
+	require.NoError(t, err)
+	cert, err = backend.GetPublishedInclusionCertAtRoot(ctx, root, secondLeaf.Key)
 	require.NoError(t, err)
 	require.Equal(t, secondResult.CandidateRoot, root)
 	require.NoError(t, cert.Verify(secondLeaf.Key, secondLeaf.Value, secondResult.CandidateRoot, api.InclusionProofV2HashAlgorithm))
+}
+
+func TestDiskBackendPublishedProofViewMissingLeafReturnsTypedError(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackend(t)
+	defer func() { require.NoError(t, backend.Close()) }()
+
+	inputs := []LeafInput{
+		testLeafInput(1, 11),
+		testLeafInput(2, 22),
+		testLeafInput(3, 33),
+	}
+	snapshot, err := backend.CreateSnapshot(ctx)
+	require.NoError(t, err)
+	result, err := snapshot.AddLeavesClassified(ctx, inputs)
+	require.NoError(t, err)
+	prepared, err := snapshot.(ProofViewPreparingSnapshot).CommitAndPrepareProofView(ctx, CommitMetadata{
+		BlockNumber: api.NewBigIntFromUint64(1),
+		RootHash:    result.CandidateRoot,
+	})
+	require.NoError(t, err)
+	require.NoError(t, prepared.Publish(ctx))
+
+	root, err := backend.PublishedRoot(ctx)
+	require.NoError(t, err)
+	missing := testLeafInput(99, 99)
+	cert, err := backend.GetPublishedInclusionCertAtRoot(ctx, root, missing.Key)
+	require.True(t, errors.Is(err, ErrPublishedProofLeafNotFound), "got %v", err)
+	require.Nil(t, cert)
 }
 
 func TestDiskBackendPreparedProofViewRefusesPublishAfterRootAdvanced(t *testing.T) {
@@ -305,19 +341,23 @@ func TestDiskBackendRefreshPublishedProofViewRefusesWrongExpectedRoot(t *testing
 	wrongRoot[0] ^= 0xff
 	require.ErrorContains(t, backend.RefreshPublishedProofView(ctx, wrongRoot), "refusing to publish proof view")
 
-	root, cert, err := backend.GetPublishedInclusionCert(ctx, leaf.Key)
-	require.ErrorContains(t, err, "published proof view is empty")
+	root, err := backend.PublishedRoot(ctx)
+	require.NoError(t, err)
+	cert, err := backend.GetPublishedInclusionCertAtRoot(ctx, root, leaf.Key)
+	require.True(t, errors.Is(err, ErrPublishedProofLeafNotFound), "got %v", err)
 	require.Equal(t, emptyRoot(t), root)
 	require.Nil(t, cert)
 }
 
-func TestDiskBackendPublishedProofViewEmptyRootReturnsClearError(t *testing.T) {
+func TestDiskBackendPublishedProofViewEmptyRootReturnsNotReady(t *testing.T) {
 	ctx := context.Background()
 	backend := newTestDiskBackend(t)
 	defer func() { require.NoError(t, backend.Close()) }()
 
-	root, cert, err := backend.GetPublishedInclusionCert(ctx, testLeafInput(1, 11).Key)
-	require.ErrorContains(t, err, "published proof view is empty")
+	root, err := backend.PublishedRoot(ctx)
+	require.NoError(t, err)
+	cert, err := backend.GetPublishedInclusionCertAtRoot(ctx, root, testLeafInput(1, 11).Key)
+	require.True(t, errors.Is(err, ErrPublishedProofLeafNotFound), "got %v", err)
 	require.Equal(t, emptyRoot(t), root)
 	require.Nil(t, cert)
 }
