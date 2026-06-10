@@ -838,13 +838,34 @@ docker logs -f aggregator-bft-shard0   # serves on :3001 (shard "0")
 docker logs -f aggregator-bft-shard1   # serves on :3002 (shard "1")
 
 # Teardown:
-docker compose -f bft-sharding-compose.yml down
+docker compose -f bft-sharding-compose.yml down --remove-orphans
 ```
 
 Other make targets:
 
 - `make docker-run-bft-sh-clean-keep-tb` — preserves BFT genesis/trust-base across restarts; reinitializes MongoDB/Redis only.
 - `make docker-restart-bft-sh` — rebuilds and restarts only the aggregators, leaving BFT nodes running.
+
+#### Quickstart with local HA replicas
+
+Use the HA overlay for a local multi-replica `bft-shard` deployment with `SMT_BACKEND=rocksdb`:
+
+```bash
+make docker-run-bft-sh-ha-clean
+
+# Shard 0 replicas:
+docker logs -f aggregator-bft-shard0     # serves on :3001
+docker logs -f aggregator-bft-shard0-b   # serves on :3011
+
+# Shard 1 replicas:
+docker logs -f aggregator-bft-shard1     # serves on :3002
+docker logs -f aggregator-bft-shard1-b   # serves on :3012
+
+# Teardown:
+docker compose -f bft-sharding-compose.yml -f bft-sharding-ha-compose.yml down --remove-orphans
+```
+
+The base BFT-shard compose file remains the default single-replica topology. The HA overlay enables HA on the base replicas and adds one follower per shard, each with its own RocksDB directory.
 
 #### Driving test traffic
 
