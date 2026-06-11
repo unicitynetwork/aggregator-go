@@ -155,3 +155,53 @@ func TestLeaderElection_Failover(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, isLeader1, "server 1 should lose leadership after missing heartbeat")
 }
+
+func TestLeaderElection_ResignReleasesLeadership(t *testing.T) {
+	ctx := t.Context()
+	storage := testutil.SetupTestStorage(t, conf)
+	leadershipStorage := storage.LeadershipStorage()
+
+	log, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+
+	eventBus := events.NewEventBus(log)
+	leaderChangedCh := eventBus.Subscribe(events.TopicLeaderChanged)
+
+	leConfig := conf.HA
+	leConfig.ServerID = "server-1"
+	le := NewLeaderElection(log, leConfig, leadershipStorage, eventBus)
+
+	acquired, err := leadershipStorage.TryAcquireLock(ctx, leConfig.LockID, leConfig.ServerID)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	le.markLeader()
+
+	select {
+	case e := <-leaderChangedCh:
+		evt := e.(*events.LeaderChangedEvent)
+		require.True(t, evt.IsLeader)
+	case <-time.After(time.Second):
+		require.Fail(t, "LeaderChangedEvent not received for server becoming leader")
+	}
+
+	isLeader, err := le.VerifyLeadership(ctx)
+	require.NoError(t, err)
+	require.True(t, isLeader)
+
+	require.NoError(t, le.Resign(ctx))
+
+	select {
+	case e := <-leaderChangedCh:
+		evt := e.(*events.LeaderChangedEvent)
+		require.False(t, evt.IsLeader)
+	case <-time.After(time.Second):
+		require.Fail(t, "LeaderChangedEvent not received for server resigning leadership")
+	}
+
+	cachedLeader, err := le.IsLeader(ctx)
+	require.NoError(t, err)
+	require.False(t, cachedLeader)
+	isLeader, err = le.VerifyLeadership(ctx)
+	require.NoError(t, err)
+	require.False(t, isLeader)
+}

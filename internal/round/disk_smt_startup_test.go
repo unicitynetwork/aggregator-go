@@ -73,6 +73,47 @@ func TestDiskSMTStartupEmptyDiskWithHistoryFails(t *testing.T) {
 	require.ErrorContains(t, err, "disk SMT is empty")
 }
 
+func TestDiskSMTStartupEmptyDiskWithHistoryHAStartsAsStaleFollower(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackendForStartup(t)
+	storage := &diskStartupStorage{
+		blocks: newDiskStartupBlockStorage(diskStartupBlock(1, diskStartupLeaf(1, 11).Value)),
+	}
+	rm := newDiskStartupRoundManager(t, backend, storage)
+	rm.config.HA.Enabled = true
+
+	block, err := rm.verifyDiskSMTStartup(ctx)
+	require.NoError(t, err)
+	require.Nil(t, block)
+
+	state, err := backend.CommittedState(ctx)
+	require.NoError(t, err)
+	require.Nil(t, state.BlockNumber, "stale follower leaves disk empty for BlockSyncer to catch up")
+}
+
+func TestDiskSMTStartEmptyDiskHAFollowerSkipsRecovery(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackendForStartup(t)
+	// Finalized history exists, plus an in-flight unfinalized block, while the
+	// local RocksDB is empty. A stale follower must not try to recover the
+	// unfinalized block onto an empty tree; startup succeeds and defers to sync.
+	finalized := diskStartupBlock(1, diskStartupLeaf(1, 11).Value)
+	unfinalized := diskStartupBlock(2, diskStartupLeaf(2, 22).Value)
+	unfinalized.Finalized = false
+	storage := &diskStartupStorage{
+		blocks: newDiskStartupBlockStorage(finalized, unfinalized),
+	}
+	rm := newDiskStartupRoundManager(t, backend, storage)
+	rm.config.HA.Enabled = true
+	rm.commitmentQueue = &diskStartupCommitmentQueue{}
+
+	require.NoError(t, rm.Start(ctx))
+
+	state, err := backend.CommittedState(ctx)
+	require.NoError(t, err)
+	require.Nil(t, state.BlockNumber, "stale follower must leave disk empty after startup")
+}
+
 func TestDiskSMTStartupBoundedReplay(t *testing.T) {
 	ctx := context.Background()
 	backend := newTestDiskBackendForStartup(t)

@@ -16,11 +16,11 @@ func newConfiguredSMTBackend(cfg *config.Config, threadSafeSmt *smt.ThreadSafeSM
 	case config.SMTBackendMemory:
 		return smtbackend.NewMemoryBackend(threadSafeSmt), nil
 	case config.SMTBackendRocksDB:
-		if cfg.HA.Enabled {
-			return nil, fmt.Errorf("SMT_BACKEND=rocksdb is not supported with HA enabled yet; see docs/disk-backed-smt-ha-replication.md")
-		}
 		if cfg.Sharding.Mode == config.ShardingModeParent || cfg.Sharding.Mode == config.ShardingModeChild {
 			return nil, fmt.Errorf("SMT_BACKEND=rocksdb is not supported with SHARDING_MODE=%s in this phase", cfg.Sharding.Mode)
+		}
+		if cfg.HA.Enabled && cfg.Sharding.Mode != config.ShardingModeBFTShard {
+			return nil, fmt.Errorf("SMT_BACKEND=rocksdb with HA is supported only with SHARDING_MODE=bft-shard in this phase")
 		}
 		return newConfiguredRocksDBSMTBackend(cfg)
 	default:

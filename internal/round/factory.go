@@ -30,6 +30,7 @@ type Manager interface {
 	// FinalizationReadLock blocks during the SMT commit+finalize window to keep root/block consistent.
 	FinalizationReadLock() func()
 	GetKnownNotReadyBlock(stateID api.StateID) (*models.Block, bool)
+	GetProofReadyBlockByRoot(rootHash api.HexBytes) (*models.Block, bool)
 	GetCachedProofMetadata(stateID api.StateID, rootHash api.HexBytes) (*models.Block, *models.AggregatorRecord, bool)
 	GetProofCacheStats() (pending int, records int, blocks int)
 }

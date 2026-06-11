@@ -1,6 +1,7 @@
 package round
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/aggregator-go/internal/bft"
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -26,6 +28,10 @@ import (
 // NOTE: The caller is expected to hold rm.roundMutex when calling this function
 // and ACK returned dropped entries after releasing it.
 func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.CertificationRequest) ([]interfaces.CertificationRequestAck, error) {
+	return rm.processMiniBatchForRound(ctx, rm.currentRound, commitments)
+}
+
+func (rm *RoundManager) processMiniBatchForRound(ctx context.Context, round *Round, commitments []*models.CertificationRequest) ([]interfaces.CertificationRequestAck, error) {
 	if len(commitments) == 0 {
 		return nil, nil
 	}
@@ -47,15 +53,15 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 	}
 
 	// Add leaves to the current round's SMT snapshot
-	if rm.currentRound != nil && rm.currentRound.Snapshot != nil {
+	if round != nil && round.Snapshot != nil {
 		smtStart := time.Now()
-		addedCommitments, addedLeaves, dropped, err := addCommitmentLeaves(ctx, rm.logger, rm.currentRound.Snapshot, leaves, validCommitments)
+		addedCommitments, addedLeaves, dropped, err := addCommitmentLeaves(ctx, rm.logger, round.Snapshot, leaves, validCommitments)
 		if err != nil {
 			return nil, err
 		}
 		metrics.SMTAddLeavesDuration.Observe(time.Since(smtStart).Seconds())
-		rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, addedLeaves...)
-		rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, addedCommitments...)
+		round.PendingLeaves = append(round.PendingLeaves, addedLeaves...)
+		round.PendingCommitments = append(round.PendingCommitments, addedCommitments...)
 		rm.markProofsPending(addedCommitments)
 		return dropped, nil
 	}
@@ -66,17 +72,21 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 // ProposeBlock creates and proposes a new block with the given data.
 // rootHash is the raw 32-byte SMT root (no algorithm-id prefix) — the
 // block, UC.IR.h and V2 proof wire all bind against this raw form.
-func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigInt, rootHash api.HexBytes) error {
+func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNumber *api.BigInt, rootHash api.HexBytes) error {
 	rm.logger.WithContext(ctx).Info("proposeBlock called",
 		"blockNumber", blockNumber.String(),
 		"rootHash", rootHash.String())
 
 	rm.roundMutex.Lock()
-	if rm.currentRound != nil {
+	if rm.currentRound != round {
+		rm.roundMutex.Unlock()
+		return bft.ErrStaleCertificationRound
+	}
+	if round != nil {
 		rm.logger.WithContext(ctx).Debug("Changing round state to finalizing",
-			"roundNumber", rm.currentRound.Number.String(),
-			"previousState", rm.currentRound.State.String())
-		rm.currentRound.State = RoundStateFinalizing
+			"roundNumber", round.Number.String(),
+			"previousState", round.State.String())
+		round.State = RoundStateFinalizing
 	}
 	rm.roundMutex.Unlock()
 
@@ -114,11 +124,17 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			parentHash,
 			nil,
 		)
-		rm.roundMutex.RLock()
-		if rm.currentRound != nil && !rm.currentRound.StartTime.IsZero() {
-			metrics.RoundPreparationDuration.Observe(time.Since(rm.currentRound.StartTime).Seconds())
+		if round != nil && !round.StartTime.IsZero() {
+			metrics.RoundPreparationDuration.Observe(time.Since(round.StartTime).Seconds())
 		}
+		// A repeat UC could have superseded this round during the storage work
+		// above; do not send a stale proposal to BFT.
+		rm.roundMutex.RLock()
+		superseded := rm.currentRound != round
 		rm.roundMutex.RUnlock()
+		if superseded {
+			return bft.ErrStaleCertificationRound
+		}
 		rm.logger.WithContext(ctx).Info("Sending certification request to BFT client",
 			"blockNumber", blockNumber.String(),
 			"bftClientType", fmt.Sprintf("%T", rm.bftClient))
@@ -439,22 +455,42 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	commitmentCount := 0
 
 	rm.roundMutex.Lock()
-	if rm.currentRound != nil && rm.currentRound.Number.String() == block.Index.String() {
-		proposalTime = rm.currentRound.ProposalTime
-		processingTime = rm.currentRound.ProcessingTime
+	round := rm.currentRound
+	if round == nil || round.Number == nil {
+		rm.roundMutex.Unlock()
+		return fmt.Errorf("cannot finalize block %s: no active round", block.Index.String())
 	}
-	rm.roundMutex.Unlock()
+	if round.Number.Cmp(block.Index.Int) != 0 {
+		roundNumber := round.Number.String()
+		rm.roundMutex.Unlock()
+		return fmt.Errorf("cannot finalize block %s: block number does not match active round %s", block.Index.String(), roundNumber)
+	}
 
-	rm.roundMutex.Lock()
+	proposalTime = round.ProposalTime
+	processingTime = round.ProcessingTime
+
 	var pendingLeaves []smtbackend.LeafInput
 	var pendingCommitments []*models.CertificationRequest
 	var snapshot smtbackend.Snapshot
-	if rm.currentRound != nil {
-		pendingLeaves = rm.currentRound.PendingLeaves
-		pendingCommitments = rm.currentRound.PendingCommitments
-		snapshot = rm.currentRound.Snapshot
+	if len(round.PendingLeaves) > 0 {
+		pendingLeaves = append([]smtbackend.LeafInput(nil), round.PendingLeaves...)
 	}
+	if len(round.PendingCommitments) > 0 {
+		pendingCommitments = append([]*models.CertificationRequest(nil), round.PendingCommitments...)
+	}
+	snapshot = round.Snapshot
 	rm.roundMutex.Unlock()
+
+	if snapshot != nil {
+		snapshotRoot, err := snapshot.RootHashRaw(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get SMT snapshot root: %w", err)
+		}
+		if !bytes.Equal(snapshotRoot, block.RootHash) {
+			return fmt.Errorf("cannot finalize block %s: snapshot root %s does not match block root %s",
+				block.Index.String(), api.HexBytes(snapshotRoot).String(), block.RootHash.String())
+		}
+	}
 
 	commitmentCount = len(pendingCommitments)
 	stateIDs := make([]api.StateID, commitmentCount)
@@ -480,6 +516,32 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	if err := rm.storeBlockAndRecords(ctx, block, stateIDs); err != nil {
 		if !errors.Is(err, interfaces.ErrDuplicateKey) {
 			return fmt.Errorf("failed to store block and records: %w", err)
+		}
+		existingBlock, err := rm.validateDuplicateBlock(ctx, block, stateIDs)
+		if err != nil {
+			return err
+		}
+		if existingBlock.Finalized {
+			localRoot, err := rm.smtBackend.RootHashRaw(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to validate local SMT root for finalized duplicate block %s: %w", block.Index.String(), err)
+			}
+			if bytes.Equal(localRoot, block.RootHash) {
+				if publisher, ok := rm.smtBackend.(smtbackend.ProofViewPublisher); ok {
+					if err := publisher.RefreshPublishedProofView(ctx, block.RootHash); err != nil {
+						return fmt.Errorf("failed to refresh proof view for finalized duplicate block %s: %w", block.Index.String(), err)
+					}
+				}
+				block.Finalized = true
+				rm.markProofsReady(block, stateIDs, records)
+				if snapshot != nil {
+					snapshot.Discard(ctx)
+				}
+				rm.clearFinalizedRound(round, block)
+				rm.logger.WithContext(ctx).Info("Block already finalized with matching local SMT root, skipping duplicate finalization",
+					"blockNumber", block.Index.String())
+				return nil
+			}
 		}
 		rm.logger.WithContext(ctx).Info("Block already exists, continuing with remaining steps",
 			"blockNumber", block.Index.String())
@@ -577,15 +639,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		ackDuration = time.Since(ackStart)
 	}
 
-	rm.roundMutex.Lock()
-	if rm.currentRound != nil {
-		rm.currentRound.Block = block
-		rm.currentRound.PendingRootHash = nil
-		rm.currentRound.PendingLeaves = nil
-		rm.currentRound.PendingCommitments = nil
-		rm.currentRound.Snapshot = nil
-	}
-	rm.roundMutex.Unlock()
+	rm.clearFinalizedRound(round, block)
 
 	actualFinalizationTime := time.Since(finalizationStartTime)
 	proofTimes := make([]time.Duration, 0, len(pendingCommitments))
@@ -874,6 +928,77 @@ func (rm *RoundManager) storeBlockAndRecords(ctx context.Context, block *models.
 		}
 		return nil
 	})
+}
+
+func (rm *RoundManager) clearFinalizedRound(round *Round, block *models.Block) {
+	rm.roundMutex.Lock()
+	defer rm.roundMutex.Unlock()
+	if rm.currentRound == round {
+		rm.currentRound.Block = block
+		rm.currentRound.PendingRootHash = nil
+		rm.currentRound.PendingLeaves = nil
+		rm.currentRound.PendingCommitments = nil
+		rm.currentRound.Snapshot = nil
+	}
+}
+
+func (rm *RoundManager) validateDuplicateBlock(ctx context.Context, block *models.Block, stateIDs []api.StateID) (*models.Block, error) {
+	existingBlock, err := rm.getExistingBlockAnyFinalization(ctx, block.Index)
+	if err != nil {
+		return nil, fmt.Errorf("failed to validate duplicate block %s: %w", block.Index.String(), err)
+	}
+	if existingBlock == nil {
+		return nil, fmt.Errorf("duplicate block %s exists but could not be loaded", block.Index.String())
+	}
+	if !bytes.Equal(existingBlock.RootHash, block.RootHash) {
+		return nil, fmt.Errorf("duplicate block %s root mismatch: existing %s new %s",
+			block.Index.String(), existingBlock.RootHash.String(), block.RootHash.String())
+	}
+
+	existingRecords, err := rm.storage.BlockRecordsStorage().GetByBlockNumber(ctx, block.Index)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load duplicate block records %s: %w", block.Index.String(), err)
+	}
+	if existingRecords == nil {
+		return nil, fmt.Errorf("duplicate block %s has no block records", block.Index.String())
+	}
+	if !sameStateIDs(existingRecords.StateIDs, stateIDs) {
+		return nil, fmt.Errorf("duplicate block %s state IDs mismatch", block.Index.String())
+	}
+	return existingBlock, nil
+}
+
+func (rm *RoundManager) getExistingBlockAnyFinalization(ctx context.Context, blockNumber *api.BigInt) (*models.Block, error) {
+	block, err := rm.storage.BlockStorage().GetByNumber(ctx, blockNumber)
+	if err != nil {
+		return nil, err
+	}
+	if block != nil {
+		return block, nil
+	}
+
+	unfinalized, err := rm.storage.BlockStorage().GetUnfinalized(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range unfinalized {
+		if candidate != nil && candidate.Index.Cmp(blockNumber.Int) == 0 {
+			return candidate, nil
+		}
+	}
+	return nil, nil
+}
+
+func sameStateIDs(a, b []api.StateID) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !bytes.Equal(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 type storeDataTiming struct {

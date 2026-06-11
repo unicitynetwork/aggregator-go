@@ -16,6 +16,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
@@ -35,6 +36,16 @@ type failingMarkProcessedQueue struct {
 
 func (q *failingMarkProcessedQueue) MarkProcessed(context.Context, []interfaces.CertificationRequestAck) error {
 	return q.err
+}
+
+type discardCountingSnapshot struct {
+	smtbackend.Snapshot
+	discards int
+}
+
+func (s *discardCountingSnapshot) Discard(ctx context.Context) {
+	s.discards++
+	s.Snapshot.Discard(ctx)
 }
 
 func TestFinalizeDuplicateSuite(t *testing.T) {
@@ -479,12 +490,31 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	err = s.storage.AggregatorRecordStorage().StoreBatch(ctx, allRecords)
 	require.NoError(t, err)
 
+	require.NoError(t, rm.currentRound.Snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: block.Index, RootHash: block.RootHash}))
+	discardSpy := &discardCountingSnapshot{Snapshot: testRMSnapshot(t, ctx, rm)}
+	rm.currentRound.Snapshot = discardSpy
+
+	smtCountBefore, err := s.storage.SmtStorage().Count(ctx)
+	require.NoError(t, err)
+	recordCountBefore, err := s.storage.AggregatorRecordStorage().Count(ctx)
+	require.NoError(t, err)
+
 	// Reset block.Finalized to false for the FinalizeBlock call
 	block.Finalized = false
 
-	// FinalizeBlock should succeed - all steps are idempotent
+	// FinalizeBlock should succeed without re-storing already-finalized data.
 	err = rm.FinalizeBlock(ctx, block)
 	require.NoError(t, err, "FinalizeBlock should succeed when block is already finalized")
+	require.True(t, block.Finalized)
+	require.Equal(t, 1, discardSpy.discards, "already-finalized duplicate no-op should discard the unused round snapshot")
+
+	smtCountAfter, err := s.storage.SmtStorage().Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, smtCountBefore, smtCountAfter, "already-finalized duplicate should not re-store SMT nodes")
+
+	recordCountAfter, err := s.storage.AggregatorRecordStorage().Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, recordCountBefore, recordCountAfter, "already-finalized duplicate should not re-store aggregator records")
 
 	t.Log("✓ FinalizeBlock succeeded with already-finalized block")
 }
@@ -574,4 +604,109 @@ func (s *FinalizeDuplicateTestSuite) Test6_BlockRecordsMatchPendingCommitmentsOn
 	recordCountAfter, err := s.storage.AggregatorRecordStorage().Count(ctx)
 	require.NoError(t, err)
 	require.Equal(t, recordCountBefore+2, recordCountAfter, "should persist only filtered aggregator records")
+}
+
+func (s *FinalizeDuplicateTestSuite) Test7_FinalizeBlockRejectsRoundNumberMismatch() {
+	t := s.T()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	testLogger, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
+	require.NoError(t, err)
+
+	commitments := testutil.CreateTestCertificationRequests(t, 2, "t7_req")
+	rm.currentRound = &Round{
+		Number:      api.NewBigInt(big.NewInt(8)),
+		State:       RoundStateProcessing,
+		Commitments: commitments,
+		Snapshot:    testRMSnapshot(t, ctx, rm),
+	}
+	rm.roundMutex.Lock()
+	_, err = rm.processMiniBatch(ctx, commitments)
+	rm.roundMutex.Unlock()
+	require.NoError(t, err)
+
+	rootHash := testSnapshotRootHex(t, ctx, rm.currentRound.Snapshot)
+	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
+	require.NoError(t, err)
+
+	block := models.NewBlock(api.NewBigInt(big.NewInt(7)), "unicity", 0, "1.0", "mainnet", rootHashBytes, api.HexBytes{}, api.HexBytes{})
+	err = rm.FinalizeBlock(ctx, block)
+	require.ErrorContains(t, err, "does not match active round")
+}
+
+func (s *FinalizeDuplicateTestSuite) Test8_DuplicateBlockMustMatchRootAndStateIDs() {
+	t := s.T()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	testLogger, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
+	require.NoError(t, err)
+
+	commitments := testutil.CreateTestCertificationRequests(t, 2, "t8_req")
+	rm.currentRound = &Round{
+		Number:      api.NewBigInt(big.NewInt(8)),
+		State:       RoundStateProcessing,
+		Commitments: commitments,
+		Snapshot:    testRMSnapshot(t, ctx, rm),
+	}
+	rm.roundMutex.Lock()
+	_, err = rm.processMiniBatch(ctx, commitments)
+	rm.roundMutex.Unlock()
+	require.NoError(t, err)
+
+	rootHash := testSnapshotRootHex(t, ctx, rm.currentRound.Snapshot)
+	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
+	require.NoError(t, err)
+
+	existing := models.NewBlock(api.NewBigInt(big.NewInt(8)), "unicity", 0, "1.0", "mainnet", api.HexBytes(repeatByte(32, 7)), api.HexBytes{}, api.HexBytes{})
+	existing.Finalized = true
+	require.NoError(t, s.storage.BlockStorage().Store(ctx, existing))
+	require.NoError(t, s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(existing.Index, []api.StateID{commitments[0].StateID})))
+
+	block := models.NewBlock(api.NewBigInt(big.NewInt(8)), "unicity", 0, "1.0", "mainnet", rootHashBytes, api.HexBytes{}, api.HexBytes{})
+	err = rm.FinalizeBlock(ctx, block)
+	require.ErrorContains(t, err, "duplicate block")
+}
+
+func (s *FinalizeDuplicateTestSuite) Test9_EmptyRoundCannotFinalizeChangedRoot() {
+	t := s.T()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	testLogger, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
+	require.NoError(t, err)
+
+	rm.currentRound = &Round{
+		Number:             api.NewBigInt(big.NewInt(9)),
+		State:              RoundStateProcessing,
+		Commitments:        nil,
+		PendingCommitments: nil,
+		PendingLeaves:      nil,
+		Snapshot:           testRMSnapshot(t, ctx, rm),
+	}
+
+	block := models.NewBlock(api.NewBigInt(big.NewInt(9)), "unicity", 0, "1.0", "mainnet", api.HexBytes(repeatByte(32, 9)), api.HexBytes{}, api.HexBytes{})
+	err = rm.FinalizeBlock(ctx, block)
+	require.ErrorContains(t, err, "snapshot root")
+}
+
+func repeatByte(n int, value byte) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = value
+	}
+	return out
 }

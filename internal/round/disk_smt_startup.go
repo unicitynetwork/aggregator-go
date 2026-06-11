@@ -25,12 +25,36 @@ func (rm *RoundManager) restoreOrVerifySMT(ctx context.Context) (*api.BigInt, er
 	return rm.restoreSmtFromStorage(ctx)
 }
 
+// diskAwaitingFollowerCatchup reports whether the node is an HA follower with an
+// empty local RocksDB while replicated finalized history already exists. Such a
+// node starts stale and relies on the live BlockSyncer to replay the chain, so
+// startup must skip leader-only unfinalized-block recovery.
+func (rm *RoundManager) diskAwaitingFollowerCatchup(ctx context.Context) (bool, error) {
+	if !rm.config.HA.Enabled {
+		return false, nil
+	}
+	state, err := rm.smtBackend.CommittedState(ctx)
+	if err != nil {
+		return false, err
+	}
+	if state.BlockNumber != nil {
+		return false, nil
+	}
+	latest, err := rm.storage.BlockStorage().GetLatest(ctx)
+	if err != nil {
+		return false, err
+	}
+	return latest != nil, nil
+}
+
 func (rm *RoundManager) refreshDiskProofView(ctx context.Context) error {
 	publisher, ok := rm.smtBackend.(smtbackend.ProofViewPublisher)
 	if !ok {
 		return nil
 	}
-	return publisher.RefreshPublishedProofView(ctx)
+	// Startup verification already confirmed the committed root equals the latest
+	// finalized block root, so publishing the current committed state is safe.
+	return publisher.RefreshPublishedProofView(ctx, nil)
 }
 
 func (rm *RoundManager) verifyDiskSMTStartup(ctx context.Context) (*api.BigInt, error) {
@@ -75,7 +99,18 @@ func (rm *RoundManager) verifyDiskSMTStartup(ctx context.Context) (*api.BigInt, 
 	}
 
 	if state.BlockNumber == nil {
-		return nil, diskSMTStartupFailure("disk SMT is empty but finalized history exists at block %s; full bootstrap is out of scope for this phase", latestBlock.Index.String())
+		// Missing block number with a non-empty root is damaged metadata, not a fresh disk.
+		if !bytes.Equal(state.RootHash, emptyStateRoot()) {
+			return nil, diskSMTStartupFailure("disk SMT has no committed block number but a non-empty root %s; refusing to start on damaged metadata", api.HexBytes(state.RootHash).String())
+		}
+		if rm.config.HA.Enabled {
+			// Empty disk + finalized history: start stale, let BlockSyncer catch up. Activation stays gated on sync+root verification.
+			rm.logger.Info("Disk SMT is empty but finalized history exists; starting as stale follower, BlockSyncer will catch up",
+				"latestFinalizedBlock", latestBlock.Index.String())
+			metrics.SMTStartupRecoveryActions.WithLabelValues("stale_follower").Inc()
+			return nil, nil
+		}
+		return nil, diskSMTStartupFailure("disk SMT is empty but finalized history exists at block %s; a single-active RocksDB node must be seeded from a checkpoint or a synced peer before starting", latestBlock.Index.String())
 	}
 
 	switch state.BlockNumber.Cmp(latestBlock.Index.Int) {

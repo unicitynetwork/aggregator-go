@@ -74,6 +74,10 @@ type DatabaseConfig struct {
 	MaxPoolSize            uint64        `mapstructure:"max_pool_size"`
 	MinPoolSize            uint64        `mapstructure:"min_pool_size"`
 	MaxConnIdleTime        time.Duration `mapstructure:"max_conn_idle_time"`
+	// Production HA should use majority+journaled writes because Mongo is the
+	// replicated finalized-history source used by followers and recovery.
+	WriteConcern string `mapstructure:"write_concern"`
+	WriteJournal bool   `mapstructure:"write_journal"`
 	// Optional finalization insert chunking. A zero chunk size keeps the
 	// existing single InsertMany behavior.
 	FinalizationInsertChunkSize    int `mapstructure:"finalization_insert_chunk_size"`
@@ -345,6 +349,8 @@ func Load() (*Config, error) {
 			MaxPoolSize:            uint64(getEnvIntOrDefault("MONGODB_MAX_POOL_SIZE", 100)),
 			MinPoolSize:            uint64(getEnvIntOrDefault("MONGODB_MIN_POOL_SIZE", 5)),
 			MaxConnIdleTime:        getEnvDurationOrDefault("MONGODB_MAX_CONN_IDLE_TIME", "5m"),
+			WriteConcern:           getEnvOrDefault("MONGODB_WRITE_CONCERN", "majority"),
+			WriteJournal:           getEnvBoolOrDefault("MONGODB_WRITE_JOURNAL", true),
 			FinalizationInsertChunkSize: getEnvIntOrDefault(
 				"MONGODB_FINALIZATION_INSERT_CHUNK_SIZE", 0),
 			FinalizationInsertChunkWorkers: getEnvIntOrDefault(
@@ -522,6 +528,12 @@ func (c *Config) Validate() error {
 	if c.Database.FinalizationInsertChunkSize > 0 && c.Database.FinalizationInsertChunkWorkers <= 0 {
 		return fmt.Errorf("MONGODB_FINALIZATION_INSERT_CHUNK_WORKERS must be positive when chunking is enabled")
 	}
+	writeConcern := normalizeMongoWriteConcern(c.Database.WriteConcern)
+	switch writeConcern {
+	case "1", "majority":
+	default:
+		return fmt.Errorf("MONGODB_WRITE_CONCERN must be one of: 1, majority")
+	}
 	if !c.SMT.Backend.IsValid() {
 		return fmt.Errorf("invalid SMT_BACKEND: %s, must be one of: memory, rocksdb", c.SMT.Backend)
 	}
@@ -550,11 +562,11 @@ func (c *Config) Validate() error {
 		if c.SMT.DiskPath == "" {
 			return fmt.Errorf("SMT_DISK_PATH is required when SMT_BACKEND=rocksdb")
 		}
-		if c.HA.Enabled {
-			return fmt.Errorf("SMT_BACKEND=rocksdb is not supported with HA enabled yet; see docs/disk-backed-smt-ha-replication.md")
-		}
 		if c.Sharding.Mode == ShardingModeParent || c.Sharding.Mode == ShardingModeChild {
 			return fmt.Errorf("SMT_BACKEND=rocksdb is not supported with SHARDING_MODE=%s in this phase", c.Sharding.Mode)
+		}
+		if c.HA.Enabled && c.Sharding.Mode != ShardingModeBFTShard {
+			return fmt.Errorf("SMT_BACKEND=rocksdb with HA is supported only with SHARDING_MODE=bft-shard in this phase")
 		}
 	}
 
@@ -605,6 +617,14 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+func normalizeMongoWriteConcern(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "1"
+	}
+	return value
 }
 
 // Helper functions for environment variable parsing

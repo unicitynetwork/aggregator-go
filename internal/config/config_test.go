@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	bfttypes "github.com/unicitynetwork/bft-go-base/types"
 )
 
 func validTestConfig() *Config {
@@ -33,6 +35,28 @@ func validTestConfig() *Config {
 			Enabled: false,
 		},
 	}
+}
+
+func validBFTShardTestConfig(t *testing.T) *Config {
+	t.Helper()
+
+	cfg := validTestConfig()
+	cfg.Sharding.Mode = ShardingModeBFTShard
+	cfg.BFT.Enabled = true
+	cfg.BFT.BootstrapAddresses = []string{"/ip4/127.0.0.1/tcp/26662/p2p/16Uiu2HAm6eQMr2sQVbcWZsPPbpc2Su7AnnMVGHpC23PUzGTAATnp"}
+	cfg.BFT.ShardConf = &bfttypes.PartitionDescriptionRecord{
+		ShardID: shardIDFromHex(t, "0x40"),
+	}
+	return cfg
+}
+
+func shardIDFromHex(t *testing.T, h string) bfttypes.ShardID {
+	t.Helper()
+	var id bfttypes.ShardID
+	if err := id.UnmarshalText([]byte(h)); err != nil {
+		t.Fatalf("invalid test shard ID %q: %v", h, err)
+	}
+	return id
 }
 
 func TestConfigValidate_FinalizationInsertChunking(t *testing.T) {
@@ -68,6 +92,36 @@ func TestConfigValidate_FinalizationInsertChunking(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "MONGODB_FINALIZATION_INSERT_CHUNK_WORKERS") {
 			t.Fatalf("Validate() error = %q, want worker env name", err.Error())
+		}
+	})
+}
+
+func TestConfigValidateMongoWriteConcern(t *testing.T) {
+	t.Run("default is valid", func(t *testing.T) {
+		cfg := validTestConfig()
+
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() returned error: %v", err)
+		}
+	})
+
+	t.Run("majority journal is valid", func(t *testing.T) {
+		cfg := validTestConfig()
+		cfg.Database.WriteConcern = "majority"
+		cfg.Database.WriteJournal = true
+
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() returned error: %v", err)
+		}
+	})
+
+	t.Run("invalid write concern", func(t *testing.T) {
+		cfg := validTestConfig()
+		cfg.Database.WriteConcern = "2"
+
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "MONGODB_WRITE_CONCERN") {
+			t.Fatalf("Validate() error = %v, want MONGODB_WRITE_CONCERN error", err)
 		}
 	})
 }
@@ -136,7 +190,7 @@ func TestConfigValidateSMTBackend(t *testing.T) {
 		}
 	})
 
-	t.Run("rocksdb rejects HA", func(t *testing.T) {
+	t.Run("rocksdb rejects HA outside bft shard mode", func(t *testing.T) {
 		cfg := validTestConfig()
 		cfg.HA.Enabled = true
 		cfg.HA.ServerID = "server-1"
@@ -144,8 +198,8 @@ func TestConfigValidateSMTBackend(t *testing.T) {
 		cfg.SMT.DiskPath = t.TempDir()
 
 		err := cfg.Validate()
-		if err == nil || !strings.Contains(err.Error(), "HA enabled") {
-			t.Fatalf("Validate() error = %v, want HA rejection", err)
+		if err == nil || !strings.Contains(err.Error(), "SHARDING_MODE=bft-shard") {
+			t.Fatalf("Validate() error = %v, want bft-shard HA rejection", err)
 		}
 	})
 
@@ -177,7 +231,7 @@ func TestConfigValidateSMTBackend(t *testing.T) {
 		}
 	})
 
-	t.Run("rocksdb accepts single-active bft shard", func(t *testing.T) {
+	t.Run("rocksdb accepts standalone without HA", func(t *testing.T) {
 		cfg := validTestConfig()
 		cfg.SMT.Backend = SMTBackendRocksDB
 		cfg.SMT.DiskPath = t.TempDir()
@@ -187,6 +241,54 @@ func TestConfigValidateSMTBackend(t *testing.T) {
 			t.Fatalf("Validate() returned error: %v", err)
 		}
 	})
+
+	t.Run("rocksdb accepts HA bft shard", func(t *testing.T) {
+		cfg := validBFTShardTestConfig(t)
+		cfg.HA.Enabled = true
+		cfg.HA.ServerID = "server-1"
+		cfg.SMT.Backend = SMTBackendRocksDB
+		cfg.SMT.DiskPath = t.TempDir()
+
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() returned error: %v", err)
+		}
+	})
+}
+
+func TestMongoWriteConcernEnvDefaults(t *testing.T) {
+	t.Setenv("BFT_ENABLED", "false")
+	t.Setenv("DISABLE_HIGH_AVAILABILITY", "true")
+	t.Setenv("MONGODB_WRITE_CONCERN", "")
+	t.Setenv("MONGODB_WRITE_JOURNAL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Database.WriteConcern != "majority" {
+		t.Fatalf("Database.WriteConcern = %q, want majority", cfg.Database.WriteConcern)
+	}
+	if !cfg.Database.WriteJournal {
+		t.Fatal("Database.WriteJournal = false, want true")
+	}
+}
+
+func TestMongoWriteConcernEnvOverrides(t *testing.T) {
+	t.Setenv("BFT_ENABLED", "false")
+	t.Setenv("DISABLE_HIGH_AVAILABILITY", "true")
+	t.Setenv("MONGODB_WRITE_CONCERN", "1")
+	t.Setenv("MONGODB_WRITE_JOURNAL", "false")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Database.WriteConcern != "1" {
+		t.Fatalf("Database.WriteConcern = %q, want 1", cfg.Database.WriteConcern)
+	}
+	if cfg.Database.WriteJournal {
+		t.Fatal("Database.WriteJournal = true, want false")
+	}
 }
 
 func TestSMTEnvParsing(t *testing.T) {

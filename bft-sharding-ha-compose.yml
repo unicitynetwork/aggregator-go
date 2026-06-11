@@ -1,0 +1,188 @@
+# Optional HA overlay for the fixed two-shard BFT stack.
+#
+# Usage:
+#   docker compose -f bft-sharding-compose.yml -f bft-sharding-ha-compose.yml up -d --build
+#
+# The base file stays single-replica as the default local BFT-shard topology.
+# This overlay enables HA and adds one extra replica per shard.
+
+x-aggregator-bft-build: &aggregator-bft-build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    BUILD_TAGS: "${BUILD_TAGS:-rocksdb}"
+    ROCKSDB_VERSION: "${ROCKSDB_VERSION:-8.10.0}"
+    ROCKSDB_SHA256: "${ROCKSDB_SHA256:-2dc107551cc864dbcf7908fdee96f2318cbb680df2b3fe1f85b0d545c2b5673b}"
+    ROCKSDB_BUILD_JOBS: "${ROCKSDB_BUILD_JOBS:-4}"
+    ROCKSDB_PORTABLE: "${ROCKSDB_PORTABLE:-0}"
+
+x-aggregator-bft-common-env: &aggregator-bft-common-env
+  PORT: "3000"
+  HOST: "0.0.0.0"
+  CONCURRENCY_LIMIT: "10000"
+  ENABLE_DOCS: "true"
+  ENABLE_CORS: "true"
+
+  MONGODB_CONNECT_TIMEOUT: "10s"
+  MONGODB_SERVER_SELECTION_TIMEOUT: "5s"
+  MONGODB_MAX_POOL_SIZE: "100"
+  MONGODB_MIN_POOL_SIZE: "5"
+  MONGODB_FINALIZATION_INSERT_CHUNK_SIZE: "1000"
+  MONGODB_FINALIZATION_INSERT_CHUNK_WORKERS: "16"
+
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  REDIS_PASSWORD: ""
+  REDIS_DB: "0"
+  REDIS_POOL_SIZE: "100"
+  REDIS_MIN_IDLE_CONNS: "10"
+
+  USE_REDIS_FOR_COMMITMENTS: "true"
+  REDIS_FLUSH_INTERVAL: "50ms"
+  REDIS_MAX_BATCH_SIZE: "2000"
+  REDIS_READ_BATCH_SIZE: "2000"
+  REDIS_READ_BLOCK_TIMEOUT: "100ms"
+  REDIS_ACK_BATCH_SIZE: "10000"
+
+  DISABLE_HIGH_AVAILABILITY: "false"
+  LOCK_TTL_SECONDS: "${LOCK_TTL_SECONDS:-10}"
+  LEADER_HEARTBEAT_INTERVAL: "${LEADER_HEARTBEAT_INTERVAL:-1s}"
+  LEADER_ELECTION_POLLING_INTERVAL: "${LEADER_ELECTION_POLLING_INTERVAL:-1s}"
+
+  LOG_LEVEL: "${LOG_LEVEL:-info}"
+  LOG_FORMAT: "json"
+  LOG_ENABLE_JSON: "true"
+  LOG_FILE_PATH: "/app/logs/aggregator.log"
+
+  BATCH_LIMIT: "1000"
+  MAX_COMMITMENTS_PER_ROUND: "20000"
+  PRECOLLECTOR_GRACE_PERIOD: "${PRECOLLECTOR_GRACE_PERIOD:-150ms}"
+  COMMITMENT_STREAM_BUFFER_SIZE: "50000"
+  SKIP_DUPLICATE_CHECK: "true"
+
+  SMT_BACKEND: "rocksdb"
+  SMT_DISK_PATH: "/app/data/smt-rocksdb"
+  SMT_ROCKSDB_CACHE_MB: "${SMT_ROCKSDB_CACHE_MB:-1024}"
+  SMT_ROCKSDB_BG_JOBS: "${SMT_ROCKSDB_BG_JOBS:-8}"
+  SMT_ROCKSDB_SUBCOMPACTIONS: "${SMT_ROCKSDB_SUBCOMPACTIONS:-4}"
+  SMT_ROCKSDB_BLOOM_BITS: "${SMT_ROCKSDB_BLOOM_BITS:-10}"
+  SMT_ROCKSDB_MEMTABLE_MB: "${SMT_ROCKSDB_MEMTABLE_MB:-64}"
+  SMT_MATERIALIZE_WORKERS: "${SMT_MATERIALIZE_WORKERS:-64}"
+  SMT_STARTUP_REPLAY_LIMIT_BLOCKS: "${SMT_STARTUP_REPLAY_LIMIT_BLOCKS:-100}"
+
+  SHARDING_MODE: "bft-shard"
+  BFT_ENABLED: "true"
+  BFT_RPC_ADDRESS: "http://bft-root:8002"
+  BFT_TRUST_BASE_FILES: "/app/bft-config/trust-base.json"
+
+x-aggregator-bft-command: &aggregator-bft-command
+  - |
+    if [ -f /app/bft-config/trust-base.json ]; then
+      ROOT_NODE_ID=$$(grep -o '"nodeId": "[^"]*"' /app/bft-config/trust-base.json | head -1 | cut -d'"' -f4)
+      if [ -n "$$ROOT_NODE_ID" ]; then
+        export BFT_BOOTSTRAP_ADDRESSES="/dns4/bft-root/tcp/8000/p2p/$$ROOT_NODE_ID"
+        echo "Set BFT_BOOTSTRAP_ADDRESSES to: $$BFT_BOOTSTRAP_ADDRESSES"
+      else
+        echo "Warning: Could not extract nodeId from trust-base.json" >&2
+        exit 1
+      fi
+    else
+      echo "Error: trust-base.json not found at /app/bft-config/trust-base.json" >&2
+      exit 1
+    fi
+    exec /app/aggregator
+
+services:
+  aggregator-bft-shard0:
+    environment:
+      DISABLE_HIGH_AVAILABILITY: "false"
+      SERVER_ID: "aggregator-bft-shard0-a"
+      LOCK_ID: "aggregator_bft_shard_0_leader_lock"
+      LOCK_TTL_SECONDS: "${LOCK_TTL_SECONDS:-10}"
+      LEADER_HEARTBEAT_INTERVAL: "${LEADER_HEARTBEAT_INTERVAL:-1s}"
+      LEADER_ELECTION_POLLING_INTERVAL: "${LEADER_ELECTION_POLLING_INTERVAL:-1s}"
+      SMT_BACKEND: "rocksdb"
+
+  aggregator-bft-shard1:
+    environment:
+      DISABLE_HIGH_AVAILABILITY: "false"
+      SERVER_ID: "aggregator-bft-shard1-a"
+      LOCK_ID: "aggregator_bft_shard_1_leader_lock"
+      LOCK_TTL_SECONDS: "${LOCK_TTL_SECONDS:-10}"
+      LEADER_HEARTBEAT_INTERVAL: "${LEADER_HEARTBEAT_INTERVAL:-1s}"
+      LEADER_ELECTION_POLLING_INTERVAL: "${LEADER_ELECTION_POLLING_INTERVAL:-1s}"
+      SMT_BACKEND: "rocksdb"
+
+  aggregator-bft-shard0-b:
+    build: *aggregator-bft-build
+    container_name: aggregator-bft-shard0-b
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
+    restart: unless-stopped
+    ports:
+      - "3011:3000"
+    volumes:
+      - ./data/bft-sharding/genesis:/app/bft-config
+      - ./logs/bft-shard0-b:/app/logs
+      - ./data/bft-sharding/smt-rocksdb-shard0-b:/app/data/smt-rocksdb
+    depends_on:
+      upload-configurations:
+        condition: service_completed_successfully
+      mongodb-shard0:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *aggregator-bft-common-env
+      SERVER_ID: "aggregator-bft-shard0-b"
+      LOCK_ID: "aggregator_bft_shard_0_leader_lock"
+      MONGODB_URI: "mongodb://mongodb-shard0:27017/aggregator?replicaSet=rs0&directConnection=true"
+      MONGODB_DATABASE: "aggregator_bft_shard_0"
+      REDIS_STREAM_NAME: "commitments:bft-shard:0"
+      SIGNING_KEY_FILE: "/app/bft-config/shard_0/keys.json"
+      BFT_ADDRESS: "/ip4/0.0.0.0/tcp/9001"
+      BFT_ANNOUNCE_ADDRESSES: "/dns4/aggregator-bft-shard0-b/tcp/9001"
+      BFT_SHARD_CONF_FILE: "/app/bft-config/shard_0/shard-conf-7_0.json"
+    entrypoint: ["/bin/sh", "-c"]
+    command: *aggregator-bft-command
+    healthcheck:
+      test: ["CMD", "nc", "-zv", "localhost", "3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  aggregator-bft-shard1-b:
+    build: *aggregator-bft-build
+    container_name: aggregator-bft-shard1-b
+    user: "${USER_UID:-1001}:${USER_GID:-1001}"
+    restart: unless-stopped
+    ports:
+      - "3012:3000"
+    volumes:
+      - ./data/bft-sharding/genesis:/app/bft-config
+      - ./logs/bft-shard1-b:/app/logs
+      - ./data/bft-sharding/smt-rocksdb-shard1-b:/app/data/smt-rocksdb
+    depends_on:
+      upload-configurations:
+        condition: service_completed_successfully
+      mongodb-shard1:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *aggregator-bft-common-env
+      SERVER_ID: "aggregator-bft-shard1-b"
+      LOCK_ID: "aggregator_bft_shard_1_leader_lock"
+      MONGODB_URI: "mongodb://mongodb-shard1:27017/aggregator?replicaSet=rs0&directConnection=true"
+      MONGODB_DATABASE: "aggregator_bft_shard_1"
+      REDIS_STREAM_NAME: "commitments:bft-shard:1"
+      SIGNING_KEY_FILE: "/app/bft-config/shard_1/keys.json"
+      BFT_ADDRESS: "/ip4/0.0.0.0/tcp/9002"
+      BFT_ANNOUNCE_ADDRESSES: "/dns4/aggregator-bft-shard1-b/tcp/9002"
+      BFT_SHARD_CONF_FILE: "/app/bft-config/shard_1/shard-conf-7_0.json"
+    entrypoint: ["/bin/sh", "-c"]
+    command: *aggregator-bft-command
+    healthcheck:
+      test: ["CMD", "nc", "-zv", "localhost", "3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

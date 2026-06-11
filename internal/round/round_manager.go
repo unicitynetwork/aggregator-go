@@ -56,6 +56,7 @@ type Round struct {
 	StartTime   time.Time
 	State       RoundState
 	Commitments []*models.CertificationRequest
+	Cancel      context.CancelFunc
 	Block       *models.Block
 	// Track commitments that have been added to SMT but not yet finalized in a block.
 	// Raw 32-byte SMT root (no algorithm-id prefix), matching the V2 wire format.
@@ -109,6 +110,9 @@ type RoundManager struct {
 	// Guards the window where SMT root advances before block finalization is persisted.
 	finalizationMu sync.RWMutex
 	wg             sync.WaitGroup
+	roundWG        sync.WaitGroup
+	activeCtx      context.Context
+	activeCancel   context.CancelFunc
 
 	proofCacheMu          sync.RWMutex
 	proofPending          map[string]struct{}
@@ -273,20 +277,33 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 		if _, err := rm.restoreOrVerifySMT(ctx); err != nil {
 			return fmt.Errorf("failed to restore SMT from storage: %w", err)
 		}
-		recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+		// A stale disk follower (empty local RocksDB with existing finalized
+		// history) defers all catch-up to the live BlockSyncer. It must not run
+		// leader-only unfinalized-block recovery, which would try to apply a
+		// single block onto an empty tree and fail.
+		staleFollower, err := rm.diskAwaitingFollowerCatchup(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to recover unfinalized block: %w", err)
+			return fmt.Errorf("failed to determine disk follower catch-up state: %w", err)
 		}
-		if recoveryResult.Recovered {
-			rm.logger.Info("Recovered unfinalized block during startup",
-				"blockNumber", recoveryResult.BlockNumber.String(),
-				"stateCount", len(recoveryResult.StateIDs))
-			if err := rm.syncDiskSMTAfterRecoveredBlock(ctx, recoveryResult); err != nil {
-				return fmt.Errorf("failed to sync disk SMT after recovered block: %w", err)
+		if staleFollower {
+			// Nothing verified to publish yet; BlockSyncer refreshes the proof view per replayed block.
+			rm.logger.Info("Stale disk follower; skipping unfinalized-block recovery, BlockSyncer will catch up")
+		} else {
+			recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+			if err != nil {
+				return fmt.Errorf("failed to recover unfinalized block: %w", err)
 			}
-		}
-		if err := rm.refreshDiskProofView(ctx); err != nil {
-			return fmt.Errorf("failed to initialize disk SMT proof view: %w", err)
+			if recoveryResult.Recovered {
+				rm.logger.Info("Recovered unfinalized block during startup",
+					"blockNumber", recoveryResult.BlockNumber.String(),
+					"stateCount", len(recoveryResult.StateIDs))
+				if err := rm.syncDiskSMTAfterRecoveredBlock(ctx, recoveryResult); err != nil {
+					return fmt.Errorf("failed to sync disk SMT after recovered block: %w", err)
+				}
+			}
+			if err := rm.refreshDiskProofView(ctx); err != nil {
+				return fmt.Errorf("failed to initialize disk SMT proof view: %w", err)
+			}
 		}
 	} else {
 		recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
@@ -407,6 +424,16 @@ func (rm *RoundManager) GetKnownNotReadyBlock(stateID api.StateID) (*models.Bloc
 	return rm.latestProofReadyBlock, true
 }
 
+func (rm *RoundManager) GetProofReadyBlockByRoot(rootHash api.HexBytes) (*models.Block, bool) {
+	rm.proofCacheMu.RLock()
+	defer rm.proofCacheMu.RUnlock()
+
+	if rm.proofMetadataCache == nil {
+		return nil, false
+	}
+	return rm.proofMetadataCache.getBlock(rootHash)
+}
+
 func (rm *RoundManager) GetCachedProofMetadata(stateID api.StateID, rootHash api.HexBytes) (*models.Block, *models.AggregatorRecord, bool) {
 	rm.proofCacheMu.RLock()
 	defer rm.proofCacheMu.RUnlock()
@@ -484,8 +511,26 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 
 // StartNewRound starts a new round for processing commitments (delegates to unified function)
 func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
-	rm.discardActivePrecollector(ctx)
+	abandonPendingRound := rm.hasPendingRoundToAbandon(roundNumber)
+	resetDone := rm.discardActivePrecollector(ctx)
+	if abandonPendingRound && !resetDone {
+		rm.clearProofPending()
+		rm.resetRedisPendingSweep(ctx)
+	}
 	return rm.StartNewRoundWithSnapshot(ctx, roundNumber, nil, nil, nil)
+}
+
+func (rm *RoundManager) hasPendingRoundToAbandon(roundNumber *api.BigInt) bool {
+	if roundNumber == nil || roundNumber.Int == nil {
+		return false
+	}
+
+	rm.roundMutex.RLock()
+	defer rm.roundMutex.RUnlock()
+	return rm.currentRound != nil &&
+		rm.currentRound.Number != nil &&
+		rm.currentRound.Number.Cmp(roundNumber.Int) < 0 &&
+		rm.currentRound.Snapshot != nil
 }
 
 // StartNewRoundWithSnapshot starts a new round, optionally with pre-collected data.
@@ -510,16 +555,42 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 
 	if rm.precollectorDisabled {
 		rm.roundMutex.Unlock()
+		if snapshot != nil {
+			snapshot.Discard(ctx)
+		}
 		rm.logger.WithContext(ctx).Info("Skipping round start - deactivated",
 			"roundNumber", roundNumber.String())
 		return ErrDeactivated
 	}
 
+	roundCtx := ctx
+	if rm.activeCtx != nil {
+		roundCtx = rm.activeCtx
+	}
+
 	if rm.currentRound != nil {
+		currentRoundNumber := rm.currentRound.Number
+		currentRoundState := rm.currentRound.State
+		currentRoundAge := time.Since(rm.currentRound.StartTime)
+		currentRoundNumberString := "<nil>"
+		if currentRoundNumber != nil {
+			currentRoundNumberString = currentRoundNumber.String()
+		}
 		rm.logger.WithContext(ctx).Info("Previous round state",
-			"previousRoundNumber", rm.currentRound.Number.String(),
-			"previousRoundState", rm.currentRound.State.String(),
-			"previousRoundAge", time.Since(rm.currentRound.StartTime).String())
+			"previousRoundNumber", currentRoundNumberString,
+			"previousRoundState", currentRoundState.String(),
+			"previousRoundAge", currentRoundAge.String())
+		if currentRoundNumber != nil && currentRoundNumber.Cmp(roundNumber.Int) >= 0 {
+			rm.roundMutex.Unlock()
+			if snapshot != nil {
+				snapshot.Discard(ctx)
+			}
+			rm.logger.WithContext(ctx).Info("Skipping stale round start",
+				"roundNumber", roundNumber.String(),
+				"currentRoundNumber", currentRoundNumberString,
+				"currentRoundState", currentRoundState.String())
+			return nil
+		}
 	}
 
 	preCollected := snapshot != nil
@@ -538,39 +609,36 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 		leaves = make([]smtbackend.LeafInput, 0)
 	}
 
-	rm.currentRound = &Round{
+	supersededSnapshot := rm.abandonSupersededRoundLocked(roundNumber)
+	processCtx, processCancel := context.WithCancel(roundCtx)
+
+	round := &Round{
 		Number:             roundNumber,
 		StartTime:          time.Now(),
 		State:              RoundStateProcessing,
 		Commitments:        commitments,
+		Cancel:             processCancel,
 		Snapshot:           snapshot,
 		PendingLeaves:      leaves,
 		PendingCommitments: commitments, // In child mode, commitments are already filtered by pre-collection
 		PreCollected:       preCollected,
 	}
+	rm.currentRound = round
 
 	// Start precollector on the first child-mode round so it begins collecting
 	// commitments into a chained snapshot while the current round processes.
 	if rm.config.Sharding.Mode.IsChild() && rm.precollector == nil && !rm.precollectorDisabled {
-		cp := rm.newActivePrecollector()
-		rm.precollector = cp
-		cp.Start(ctx, snapshot)
+		rm.startPrecollectorLocked(roundCtx, snapshot)
 	}
 
-	rm.roundMutex.Unlock()
-
-	rm.logger.WithContext(ctx).Info("Started new round",
-		"roundNumber", roundNumber.String(),
-		"commitments", len(commitments))
-
-	rm.wg.Go(func() {
-		if err := rm.processRound(ctx); err != nil {
+	rm.roundWG.Go(func() {
+		if err := rm.processRound(processCtx, round); err != nil {
 			if errors.Is(err, context.Canceled) {
-				rm.logger.WithContext(ctx).Info("Round processing stopped due to shutdown",
+				rm.logger.WithContext(roundCtx).Info("Round processing stopped due to shutdown",
 					"roundNumber", roundNumber.String())
 				return
 			}
-			rm.logger.WithContext(ctx).Error("Round processing failed, requesting shutdown",
+			rm.logger.WithContext(roundCtx).Error("Round processing failed, requesting shutdown",
 				"roundNumber", roundNumber.String(),
 				"error", err.Error())
 			if rm.eventBus != nil {
@@ -582,17 +650,73 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 		}
 	})
 
+	rm.roundMutex.Unlock()
+
+	if supersededSnapshot != nil {
+		supersededSnapshot.Discard(ctx)
+	}
+
+	rm.logger.WithContext(ctx).Info("Started new round",
+		"roundNumber", roundNumber.String(),
+		"commitments", len(commitments))
+
 	return nil
 }
 
-func (rm *RoundManager) processRound(ctx context.Context) error {
-	rm.roundMutex.Lock()
+// abandonSupersededRoundLocked cancels the current round when it is being
+// superseded by a newer one and returns its unproposed snapshot (or nil) for the
+// caller to discard after releasing roundMutex. Proof-pending markers are cleared
+// separately via clearProofPending() at the abandon/deactivate/reset points.
+func (rm *RoundManager) abandonSupersededRoundLocked(roundNumber *api.BigInt) smtbackend.Snapshot {
 	if rm.currentRound == nil {
-		rm.roundMutex.Unlock()
-		return fmt.Errorf("no current round to process")
+		return nil
 	}
-	roundNumber := rm.currentRound.Number
-	preCollected := rm.currentRound.PreCollected
+	if roundNumber == nil ||
+		roundNumber.Int == nil ||
+		rm.currentRound.Number == nil ||
+		rm.currentRound.Number.Cmp(roundNumber.Int) >= 0 {
+		return nil
+	}
+	if rm.currentRound.Cancel != nil {
+		rm.currentRound.Cancel()
+		rm.currentRound.Cancel = nil
+	}
+
+	superseded := rm.currentRound.Snapshot
+	rm.currentRound.Snapshot = nil
+	rm.currentRound.PendingRootHash = nil
+	rm.currentRound.PendingLeaves = nil
+	rm.currentRound.PendingCommitments = nil
+	return superseded
+}
+
+func (rm *RoundManager) processRound(ctx context.Context, round *Round) error {
+	if round == nil || round.Number == nil {
+		return fmt.Errorf("no round to process")
+	}
+	roundNumber := round.Number
+	preCollected := round.PreCollected
+	proposed := false
+	defer func() {
+		if proposed {
+			return
+		}
+		// Claim the snapshot under the lock so this and abandonSupersededRoundLocked
+		// cannot both discard it; whichever nils it first owns the discard.
+		rm.roundMutex.Lock()
+		snapshot := round.Snapshot
+		round.Snapshot = nil
+		rm.roundMutex.Unlock()
+		if snapshot != nil {
+			snapshot.Discard(context.Background())
+		}
+	}()
+
+	rm.roundMutex.Lock()
+	if rm.currentRound != round {
+		rm.roundMutex.Unlock()
+		return nil
+	}
 	rm.roundMutex.Unlock()
 
 	if !preCollected && !rm.config.Sharding.Mode.IsChild() {
@@ -606,12 +730,16 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 			select {
 			case commitment := <-rm.commitmentStream:
 				rm.roundMutex.Lock()
-				rm.currentRound.Commitments = append(rm.currentRound.Commitments, commitment)
+				if rm.currentRound != round {
+					rm.roundMutex.Unlock()
+					return nil
+				}
+				round.Commitments = append(round.Commitments, commitment)
 				var dropped []interfaces.CertificationRequestAck
-				if len(rm.currentRound.Commitments)%100 == 0 {
-					batch := rm.currentRound.Commitments[len(rm.currentRound.Commitments)-100:]
+				if len(round.Commitments)%100 == 0 {
+					batch := round.Commitments[len(round.Commitments)-100:]
 					var err error
-					dropped, err = rm.processMiniBatch(ctx, batch)
+					dropped, err = rm.processMiniBatchForRound(ctx, round, batch)
 					if err != nil {
 						rm.roundMutex.Unlock()
 						return err
@@ -627,12 +755,16 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 		}
 
 		rm.roundMutex.Lock()
-		remaining := len(rm.currentRound.Commitments) % 100
+		if rm.currentRound != round {
+			rm.roundMutex.Unlock()
+			return nil
+		}
+		remaining := len(round.Commitments) % 100
 		var dropped []interfaces.CertificationRequestAck
 		if remaining > 0 {
-			batch := rm.currentRound.Commitments[len(rm.currentRound.Commitments)-remaining:]
+			batch := round.Commitments[len(round.Commitments)-remaining:]
 			var err error
-			dropped, err = rm.processMiniBatch(ctx, batch)
+			dropped, err = rm.processMiniBatchForRound(ctx, round, batch)
 			if err != nil {
 				rm.roundMutex.Unlock()
 				return err
@@ -642,21 +774,25 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 		ackDroppedCommitments(ctx, rm.logger, rm.commitmentQueue, dropped)
 	}
 
-	rm.startActivePrecollectorIfNeeded(ctx)
+	rm.startActivePrecollectorIfNeeded(ctx, round)
 
 	rm.roundMutex.Lock()
-	commitmentCount := len(rm.currentRound.Commitments)
+	if rm.currentRound != round {
+		rm.roundMutex.Unlock()
+		return nil
+	}
+	commitmentCount := len(round.Commitments)
 	var rootHash api.HexBytes
-	if rm.currentRound.Snapshot != nil {
-		rootHashRaw, err := rm.currentRound.Snapshot.RootHashRaw(ctx)
+	if round.Snapshot != nil {
+		rootHashRaw, err := round.Snapshot.RootHashRaw(ctx)
 		if err != nil {
 			rm.roundMutex.Unlock()
 			return fmt.Errorf("failed to get SMT snapshot root: %w", err)
 		}
 		rootHash = rootHashRaw
 	}
-	rm.currentRound.PendingRootHash = rootHash
-	rm.currentRound.ProposalTime = time.Now()
+	round.PendingRootHash = rootHash
+	round.ProposalTime = time.Now()
 	rm.roundMutex.Unlock()
 
 	rm.logger.WithContext(ctx).Info("processRound called",
@@ -664,9 +800,16 @@ func (rm *RoundManager) processRound(ctx context.Context) error {
 		"commitments", commitmentCount,
 		"rootHash", rootHash.String())
 
-	if err := rm.proposeBlock(ctx, roundNumber, rootHash); err != nil {
+	if err := rm.proposeBlock(ctx, round, roundNumber, rootHash); err != nil {
+		if errors.Is(err, bft.ErrStaleCertificationRound) {
+			rm.logger.WithContext(ctx).Info("Dropping stale round proposal",
+				"roundNumber", roundNumber.String(),
+				"error", err.Error())
+			return nil
+		}
 		return fmt.Errorf("failed to propose block: %w", err)
 	}
+	proposed = true
 
 	rm.totalRounds++
 	rm.totalCommitments += int64(commitmentCount)
@@ -920,7 +1063,27 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 func (rm *RoundManager) Activate(ctx context.Context) error {
 	rm.logger.WithContext(ctx).Info("Activating round manager")
 
+	activeCtx, activeCancel := context.WithCancel(ctx)
+	activated := false
+	defer func() {
+		if activated {
+			return
+		}
+		activeCancel()
+		rm.roundMutex.Lock()
+		if rm.activeCtx == activeCtx {
+			rm.activeCtx = nil
+			rm.activeCancel = nil
+		}
+		rm.roundMutex.Unlock()
+	}()
+
 	rm.roundMutex.Lock()
+	if rm.activeCancel != nil {
+		rm.activeCancel()
+	}
+	rm.activeCtx = activeCtx
+	rm.activeCancel = activeCancel
 	rm.precollectorDisabled = false
 	if rm.precollectorDone == nil {
 		rm.precollectorDone = make(chan struct{})
@@ -928,7 +1091,7 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 	rm.roundMutex.Unlock()
 
 	if rm.config.HA.Enabled {
-		recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+		recoveryResult, err := RecoverUnfinalizedBlock(activeCtx, rm.logger, rm.storage, rm.commitmentQueue)
 		if err != nil {
 			return fmt.Errorf("failed to recover unfinalized block on activation: %w", err)
 		}
@@ -937,7 +1100,7 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 				"blockNumber", recoveryResult.BlockNumber.String(),
 				"stateCount", len(recoveryResult.StateIDs))
 
-			if err := LoadRecoveredNodesIntoBackend(ctx, rm.logger, rm.storage, rm.smtBackend, recoveryResult.BlockNumber, recoveryResult.StateIDs); err != nil {
+			if err := LoadRecoveredNodesIntoBackend(activeCtx, rm.logger, rm.storage, rm.smtBackend, recoveryResult.BlockNumber, recoveryResult.StateIDs); err != nil {
 				return fmt.Errorf("failed to load recovered nodes into SMT: %w", err)
 			}
 		}
@@ -945,15 +1108,15 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 
 	switch rm.config.Sharding.Mode {
 	case config.ShardingModeStandalone, config.ShardingModeBFTShard:
-		if err := rm.bftClient.Start(ctx); err != nil {
+		if err := rm.bftClient.Start(activeCtx); err != nil {
 			return fmt.Errorf("failed to start BFT client: %w", err)
 		}
 	case config.ShardingModeChild:
-		if err := rm.restoreLastAcceptedParentUC(ctx); err != nil {
+		if err := rm.restoreLastAcceptedParentUC(activeCtx); err != nil {
 			return fmt.Errorf("failed to restore latest parent UC from child blocks: %w", err)
 		}
 
-		latestBlockNumber, err := rm.storage.BlockStorage().GetLatestNumber(ctx)
+		latestBlockNumber, err := rm.storage.BlockStorage().GetLatestNumber(activeCtx)
 		if err != nil {
 			return fmt.Errorf("failed to get latest block number: %w", err)
 		}
@@ -969,14 +1132,15 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 			"latestBlock", latestBlockNumber,
 			"nextRound", roundNumber.String())
 
-		if err := rm.StartNewRound(ctx, api.NewBigInt(roundNumber)); err != nil {
+		if err := rm.StartNewRound(activeCtx, api.NewBigInt(roundNumber)); err != nil {
 			return fmt.Errorf("failed to start new round: %w", err)
 		}
 	default:
 		return fmt.Errorf("invalid shard mode: %s", rm.config.Sharding.Mode)
 	}
 
-	rm.startCommitmentPrefetcher(ctx)
+	rm.startCommitmentPrefetcher(activeCtx)
+	activated = true
 	return nil
 }
 
@@ -1044,16 +1208,27 @@ func (rm *RoundManager) Deactivate(ctx context.Context) error {
 	}
 	cp = rm.precollector
 	rm.precollector = nil
+	activeCancel := rm.activeCancel
+	rm.activeCancel = nil
+	rm.activeCtx = nil
 	rm.roundMutex.Unlock()
 
+	if activeCancel != nil {
+		activeCancel()
+	}
 	if cp != nil {
 		cp.Stop()
 	}
-	rm.clearProofPending()
 	rm.stopCommitmentPrefetcher()
 	if rm.bftClient != nil {
 		rm.bftClient.Stop()
 	}
+	rm.roundWG.Wait()
+
+	rm.roundMutex.Lock()
+	rm.currentRound = nil
+	rm.roundMutex.Unlock()
+	rm.clearProofPending()
 
 	return nil
 }
@@ -1074,9 +1249,9 @@ func (rm *RoundManager) usesActivePrecollector() bool {
 	}
 }
 
-func (rm *RoundManager) discardActivePrecollector(ctx context.Context) {
+func (rm *RoundManager) discardActivePrecollector(ctx context.Context) bool {
 	if !rm.usesActivePrecollector() {
-		return
+		return false
 	}
 
 	var cp *childPrecollector
@@ -1088,14 +1263,23 @@ func (rm *RoundManager) discardActivePrecollector(ctx context.Context) {
 	if cp != nil {
 		cp.Stop()
 		rm.clearProofPending()
-		if cs, ok := rm.commitmentQueue.(*redis.CommitmentStorage); ok {
-			restartPrefetcher := rm.stopCommitmentPrefetcherAndWait()
-			rm.drainCommitmentStream()
-			cs.ResetPendingSweep()
-			if restartPrefetcher {
-				rm.startCommitmentPrefetcher(ctx)
-			}
-		}
+		rm.resetRedisPendingSweep(ctx)
+		return true
+	}
+	return false
+}
+
+func (rm *RoundManager) resetRedisPendingSweep(ctx context.Context) {
+	cs, ok := rm.commitmentQueue.(*redis.CommitmentStorage)
+	if !ok {
+		return
+	}
+
+	restartPrefetcher := rm.stopCommitmentPrefetcherAndWait()
+	rm.drainCommitmentStream()
+	cs.ResetPendingSweep()
+	if restartPrefetcher {
+		rm.startCommitmentPrefetcher(ctx)
 	}
 }
 
@@ -1117,7 +1301,7 @@ func (rm *RoundManager) drainCommitmentStream() int {
 // startActivePrecollectorIfNeeded starts the next-round precollector for
 // standalone/bft-shard only after processRound has finished the fixed collect
 // window, so it is the sole reader of commitmentStream while BFT is pending.
-func (rm *RoundManager) startActivePrecollectorIfNeeded(ctx context.Context) {
+func (rm *RoundManager) startActivePrecollectorIfNeeded(ctx context.Context, round *Round) {
 	if !rm.usesActivePrecollector() {
 		return
 	}
@@ -1125,18 +1309,34 @@ func (rm *RoundManager) startActivePrecollectorIfNeeded(ctx context.Context) {
 	rm.roundMutex.Lock()
 	if rm.precollector != nil ||
 		rm.precollectorDisabled ||
-		rm.currentRound == nil ||
-		rm.currentRound.Snapshot == nil {
+		rm.currentRound != round ||
+		round == nil ||
+		round.Snapshot == nil {
 		rm.roundMutex.Unlock()
 		return
 	}
 
-	snapshot := rm.currentRound.Snapshot
+	precollectorCtx := ctx
+	if rm.activeCtx != nil {
+		precollectorCtx = rm.activeCtx
+	}
+	rm.startPrecollectorLocked(precollectorCtx, round.Snapshot)
+	rm.roundMutex.Unlock()
+}
+
+// startPrecollectorLocked forks the base snapshot and starts the precollector on
+// the owned fork. The fork is taken under roundMutex so the base snapshot cannot
+// be discarded while the precollector forks it. Caller must hold roundMutex; on
+// fork failure the precollector is not started.
+func (rm *RoundManager) startPrecollectorLocked(ctx context.Context, base smtbackend.Snapshot) {
+	forked, err := base.Fork(ctx)
+	if err != nil {
+		rm.logger.WithContext(ctx).Error("Failed to fork precollector snapshot", "error", err.Error())
+		return
+	}
 	cp := rm.newActivePrecollector()
 	rm.precollector = cp
-	rm.roundMutex.Unlock()
-
-	cp.Start(ctx, snapshot)
+	cp.Start(ctx, forked)
 }
 
 func (rm *RoundManager) newActivePrecollector() *childPrecollector {

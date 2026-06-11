@@ -3,6 +3,7 @@ package backend
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -38,7 +39,7 @@ func NewDiskBackend(store storage.Store, opts persist.Options) (*DiskBackend, er
 		store: store,
 		tree:  tree,
 	}
-	if err := backend.RefreshPublishedProofView(context.Background()); err != nil {
+	if err := backend.RefreshPublishedProofView(context.Background(), nil); err != nil {
 		return nil, err
 	}
 	return backend, nil
@@ -46,6 +47,10 @@ func NewDiskBackend(store storage.Store, opts persist.Options) (*DiskBackend, er
 
 func (b *DiskBackend) KeyLength() int {
 	return api.StateTreeKeyLengthBits
+}
+
+func (b *DiskBackend) IsDiskBackedSMT() bool {
+	return true
 }
 
 func (b *DiskBackend) RootHashRaw(context.Context) ([]byte, error) {
@@ -121,24 +126,44 @@ func (b *DiskBackend) GetInclusionCert(_ context.Context, key []byte) (*api.Incl
 	return b.tree.GetInclusionCertWithReadSnapshot(key, openSnapshot)
 }
 
-func (b *DiskBackend) GetPublishedInclusionCert(_ context.Context, key []byte) ([]byte, *api.InclusionCert, error) {
+func (b *DiskBackend) PublishedRoot(context.Context) ([]byte, error) {
 	if b == nil {
-		return nil, nil, fmt.Errorf("disk SMT backend not initialized")
+		return nil, fmt.Errorf("disk SMT backend not initialized")
 	}
 	b.proofViewMu.RLock()
 	defer b.proofViewMu.RUnlock()
 
 	if b.proofView == nil {
-		return nil, nil, fmt.Errorf("disk SMT proof view is not initialized")
+		return nil, fmt.Errorf("disk SMT proof view is not initialized")
+	}
+	return hashBytes(b.proofView.root), nil
+}
+
+func (b *DiskBackend) GetPublishedInclusionCertAtRoot(_ context.Context, expectedRoot []byte, key []byte) (*api.InclusionCert, error) {
+	if b == nil {
+		return nil, fmt.Errorf("disk SMT backend not initialized")
+	}
+	b.proofViewMu.RLock()
+	defer b.proofViewMu.RUnlock()
+
+	if b.proofView == nil {
+		return nil, fmt.Errorf("disk SMT proof view is not initialized")
+	}
+	root := hashBytes(b.proofView.root)
+	if !bytes.Equal(root, expectedRoot) {
+		return nil, ErrPublishedProofRootChanged
 	}
 	if b.proofView.root == disk.EmptyRootHash() {
-		return hashBytes(b.proofView.root), nil, fmt.Errorf("disk SMT published proof view is empty")
+		return nil, ErrPublishedProofLeafNotFound
 	}
 	cert, err := persist.BuildInclusionCert(b.proofView.root, b.proofView.reader, key)
 	if err != nil {
-		return nil, nil, err
+		if errors.Is(err, persist.ErrProofLeafNotFound) {
+			return nil, ErrPublishedProofLeafNotFound
+		}
+		return nil, err
 	}
-	return hashBytes(b.proofView.root), cert, nil
+	return cert, nil
 }
 
 func (b *DiskBackend) GetInclusionCerts(_ context.Context, keys [][]byte) ([]*api.InclusionCert, error) {
@@ -260,18 +285,27 @@ func (b *DiskBackend) Close() error {
 	return b.store.Close()
 }
 
-func (b *DiskBackend) RefreshPublishedProofView(context.Context) error {
+func (b *DiskBackend) RefreshPublishedProofView(_ context.Context, expectedRoot []byte) error {
 	if b == nil || b.tree == nil {
 		return fmt.Errorf("disk SMT backend not initialized")
 	}
 	b.mu.Lock()
 	root := b.tree.RootHash()
+	if expectedRoot != nil && !bytes.Equal(hashBytes(root), expectedRoot) {
+		b.mu.Unlock()
+		return fmt.Errorf("refusing to publish proof view: disk SMT root %s does not match expected finalized root %s",
+			api.HexBytes(hashBytes(root)).String(), api.HexBytes(expectedRoot).String())
+	}
 	view, err := b.prepareProofViewLocked(root)
-	b.mu.Unlock()
 	if err != nil {
+		b.mu.Unlock()
 		return err
 	}
-	b.publishProofView(view)
+	old := b.swapProofView(view)
+	b.mu.Unlock()
+	if old != nil {
+		old.close()
+	}
 	return nil
 }
 
@@ -296,13 +330,18 @@ func (b *DiskBackend) prepareProofViewLocked(root disk.Hash) (*diskProofView, er
 }
 
 func (b *DiskBackend) publishProofView(view *diskProofView) {
-	b.proofViewMu.Lock()
-	old := b.proofView
-	b.proofView = view
+	old := b.swapProofView(view)
 	if old != nil {
 		old.close()
 	}
+}
+
+func (b *DiskBackend) swapProofView(view *diskProofView) *diskProofView {
+	b.proofViewMu.Lock()
+	old := b.proofView
+	b.proofView = view
 	b.proofViewMu.Unlock()
+	return old
 }
 
 type diskProofView struct {
@@ -335,8 +374,19 @@ func (p *preparedDiskProofView) Publish(context.Context) error {
 	if p == nil || p.target == nil || p.view == nil {
 		return fmt.Errorf("disk SMT prepared proof view is not initialized")
 	}
-	p.target.publishProofView(p.view)
+	// Refuse to publish if the disk advanced since prepare; that would roll the served view backward.
+	p.target.mu.Lock()
+	current := p.target.tree.RootHash()
+	if current != p.view.root {
+		p.target.mu.Unlock()
+		return fmt.Errorf("refusing to publish prepared proof view: disk SMT root advanced to %x since the view was prepared at %x", current, p.view.root)
+	}
+	old := p.target.swapProofView(p.view)
 	p.view = nil
+	p.target.mu.Unlock()
+	if old != nil {
+		old.close()
+	}
 	return nil
 }
 
@@ -442,9 +492,14 @@ func (s *DiskSnapshot) commit(meta CommitMetadata, prepareProofView bool) (Prepa
 }
 
 func (s *DiskSnapshot) Discard(context.Context) {
-	if s != nil && s.snapshot != nil {
-		s.snapshot.Discard()
+	if s == nil || s.snapshot == nil {
+		return
 	}
+	if s.target != nil {
+		s.target.mu.Lock()
+		defer s.target.mu.Unlock()
+	}
+	s.snapshot.Discard()
 }
 
 func toDiskLeafInputs(inputs []LeafInput) []disk.LeafInput {
