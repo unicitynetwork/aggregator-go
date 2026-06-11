@@ -32,7 +32,10 @@ const (
 	normal
 )
 
-var ErrStaleCertificationRound = errors.New("stale certification round")
+var (
+	ErrStaleCertificationRound = errors.New("stale certification round")
+	ErrCertifiedStateMismatch  = errors.New("certified state mismatch")
+)
 
 // BFTClientImpl handles communication with the BFT root chain via P2P network
 type (
@@ -465,6 +468,32 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 	c.logger.WithContext(ctx).Info("Finalizing block with unicity certificate",
 		"blockNumber", blockNum,
 		"ucRound", expectedRound)
+
+	if c.proposedBlock == nil || uc.InputRecord == nil || !bytes.Equal(c.proposedBlock.RootHash, uc.InputRecord.Hash) {
+		proposedRoot := "<nil>"
+		if c.proposedBlock != nil {
+			proposedRoot = c.proposedBlock.RootHash.String()
+		}
+		certifiedRoot := "<nil>"
+		if uc.InputRecord != nil {
+			certifiedRoot = api.HexBytes(uc.InputRecord.Hash).String()
+		}
+		err := fmt.Errorf("%w: block %s proposed root %s, UC root %s",
+			ErrCertifiedStateMismatch, blockNum, proposedRoot, certifiedRoot)
+		c.logger.WithContext(ctx).Error("UC root does not match proposed block root",
+			"blockNumber", blockNum,
+			"proposedRoot", proposedRoot,
+			"certifiedRoot", certifiedRoot)
+		metrics.BFTErrorsTotal.Inc()
+		c.proposedBlock = nil
+		if c.eventBus != nil {
+			c.eventBus.Publish(events.TopicFatalError, events.FatalErrorEvent{
+				Source: "bft",
+				Error:  err.Error(),
+			})
+		}
+		return err
+	}
 
 	if certStart := c.certRequestTime.Swap(0); certStart > 0 {
 		metrics.BFTCertificationDuration.Observe(float64(time.Now().UnixNano()-certStart) / 1e9)

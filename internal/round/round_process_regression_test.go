@@ -210,3 +210,76 @@ func TestStartNewRoundAbandonsSupersededPendingRound(t *testing.T) {
 	_, pending := rm.proofPending[commitment.StateID.String()]
 	require.False(t, pending)
 }
+
+func TestStartNewRoundRetriesEqualFinalizingRoundProposal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{
+			Database: "test_start_new_round_retries_equal_finalizing_round",
+		},
+		Processing: config.ProcessingConfig{
+			CollectPhaseDuration:       time.Hour,
+			CommitmentStreamBufferSize: 16,
+			MaxCommitmentsPerRound:     1000,
+		},
+		Sharding: config.ShardingConfig{Mode: config.ShardingModeBFTShard},
+	}
+	storage := testutil.SetupTestStorage(t, cfg)
+	testLogger := newTestLogger(t)
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		storage.CommitmentQueue(),
+		storage,
+		nil,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		threadSafeSMT,
+		nil,
+	)
+	require.NoError(t, err)
+	recorder := newRecordingBFTClient()
+	rm.bftClient = recorder
+	defer func() {
+		cancel()
+		rm.roundWG.Wait()
+	}()
+
+	commitment := testutil.CreateTestCertificationRequest(t, "repeat_uc_equal_round_retry")
+	leaf, err := commitmentLeafInput(commitment)
+	require.NoError(t, err)
+	snapshot := testRMSnapshot(t, ctx, rm)
+	result, err := snapshot.AddLeavesClassified(ctx, []smtbackend.LeafInput{leaf})
+	require.NoError(t, err)
+	require.NoError(t, result.ValidateAllAccepted(1))
+	rootHash, err := snapshot.RootHashRaw(ctx)
+	require.NoError(t, err)
+
+	rm.currentRound = &Round{
+		Number:             api.NewBigInt(big.NewInt(7)),
+		StartTime:          time.Now(),
+		State:              RoundStateFinalizing,
+		Commitments:        []*models.CertificationRequest{commitment},
+		Snapshot:           snapshot,
+		PendingRootHash:    append(api.HexBytes(nil), rootHash...),
+		PendingLeaves:      []smtbackend.LeafInput{leaf},
+		PendingCommitments: []*models.CertificationRequest{commitment},
+		ProposalTime:       time.Now(),
+	}
+
+	require.NoError(t, rm.StartNewRound(ctx, api.NewBigInt(big.NewInt(7))))
+
+	require.Eventually(t, func() bool {
+		return len(recorder.snapshot()) == 1
+	}, time.Second, 10*time.Millisecond)
+
+	proposals := recorder.snapshot()
+	require.Len(t, proposals, 1)
+	require.EqualValues(t, 7, proposals[0].blockNumber)
+	require.True(t, bytes.Equal(rootHash, proposals[0].rootHash))
+	require.Same(t, snapshot, rm.currentRound.Snapshot)
+}

@@ -1435,8 +1435,6 @@ func TestChildMode_RequiresFreshParentProof(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		block, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(2)))
-		return err == nil && block != nil
+		return err == nil && block != nil && rm.lastAcceptedParentUCRound.Load() == 2
 	}, 3*time.Second, 25*time.Millisecond, "block 2 should be created once a fresh parent proof is available")
-
-	assert.EqualValues(t, 2, rm.lastAcceptedParentUCRound.Load())
 }
