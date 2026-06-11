@@ -848,24 +848,26 @@ Other make targets:
 
 #### Quickstart with local HA replicas
 
-Use the HA overlay for a local multi-replica `bft-shard` deployment with `SMT_BACKEND=rocksdb`:
+Use the standalone HA compose file for a local multi-replica `bft-shard` deployment with RocksDB SMT:
 
 ```bash
 make docker-run-bft-sh-ha-clean
 
-# Shard 0 replicas:
-docker logs -f aggregator-bft-shard0     # serves on :3001
-docker logs -f aggregator-bft-shard0-b   # serves on :3011
+# Stable shard endpoints for SDK/perf tests:
+#   shard "0": http://localhost:3001  (HAProxy -> active shard 0 replica)
+#   shard "1": http://localhost:3002  (HAProxy -> active shard 1 replica)
 
-# Shard 1 replicas:
-docker logs -f aggregator-bft-shard1     # serves on :3002
-docker logs -f aggregator-bft-shard1-b   # serves on :3012
+# Tail replica logs:
+docker logs -f aggregator-bft-shard0
+docker logs -f aggregator-bft-shard0-b
+docker logs -f aggregator-bft-shard1
+docker logs -f aggregator-bft-shard1-b
 
 # Teardown:
-docker compose -f bft-sharding-compose.yml -f bft-sharding-ha-compose.yml down --remove-orphans
+docker compose -f bft-sharding-ha-compose.yml down --remove-orphans
 ```
 
-The base BFT-shard compose file remains the default single-replica topology. The HA overlay enables HA on the base replicas and adds one follower per shard, each with its own RocksDB directory.
+The base BFT-shard compose file remains the default single-replica topology. The HA compose file is standalone: it runs two replicas per shard, each with its own RocksDB directory, behind per-shard HAProxy instances that route to the current leader via `/health/leader`.
 
 #### Driving test traffic
 
