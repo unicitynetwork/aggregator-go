@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/unicitynetwork/bft-go-base/types"
-
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
@@ -43,8 +41,8 @@ func (s *Server) parseCertificationRequest(params json.RawMessage) (*api.Certifi
 	if err := json.Unmarshal(params, &cborBytes); err != nil {
 		return nil, fmt.Errorf("failed to parse params: %w", err)
 	}
-	var req *api.CertificationRequest
-	if err := types.Cbor.Unmarshal(cborBytes, &req); err != nil {
+	req := &api.CertificationRequest{}
+	if err := api.UnmarshalCertificationRequestCBOR(cborBytes, req); err != nil {
 		return nil, fmt.Errorf("failed to parse request: %w", err)
 	}
 	return req, nil

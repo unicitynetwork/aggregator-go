@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 func TestStateID_CreateAndSerialize(t *testing.T) {
@@ -59,5 +60,36 @@ func TestStateID_CreateAndSerialize(t *testing.T) {
 		// Convert back to hex and verify
 		hexStr := hex.EncodeToString(bytes)
 		assert.Equal(t, stateIDStr, hexStr)
+	})
+
+	t.Run("state ID hash preserves canonical CBOR input bytes", func(t *testing.T) {
+		publicKey := []byte{0x01, 0x02, 0x03}
+		ownerPredicate := NewPayToPublicKeyPredicate(publicKey)
+		sourceStateHash := make([]byte, 32)
+		sourceStateHash[0] = 0xcd
+
+		predicateBytes, err := types.Cbor.Marshal(ownerPredicate)
+		require.NoError(t, err)
+
+		expectedBytes := append([]byte{0x82}, predicateBytes...)
+		expectedBytes = append(expectedBytes, []byte{0x58, 0x20}...)
+		expectedBytes = append(expectedBytes, sourceStateHash...)
+		expectedHash := NewDataHasher(SHA256).AddData(expectedBytes).GetHash()
+
+		type stateIDInput struct {
+			_               struct{} `cbor:",toarray"`
+			OwnerPredicate  Predicate
+			SourceStateHash []byte
+		}
+		canonicalBytes, err := types.Cbor.Marshal(stateIDInput{
+			OwnerPredicate:  ownerPredicate,
+			SourceStateHash: sourceStateHash,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, expectedBytes, canonicalBytes)
+
+		gotHash, err := StateIDDataHash(ownerPredicate, sourceStateHash)
+		require.NoError(t, err)
+		assert.Equal(t, expectedHash.RawHash, gotHash.RawHash)
 	})
 }
