@@ -21,8 +21,9 @@ import (
 )
 
 type recordedBFTProposal struct {
-	blockNumber uint64
-	rootHash    []byte
+	blockNumber    uint64
+	rootHash       []byte
+	parentRootHash []byte
 }
 
 type recordingBFTClient struct {
@@ -44,8 +45,9 @@ func (c *recordingBFTClient) WaitForInitialized(context.Context) error {
 func (c *recordingBFTClient) CertificationRequest(_ context.Context, block *models.Block) error {
 	c.mu.Lock()
 	c.proposals = append(c.proposals, recordedBFTProposal{
-		blockNumber: block.Index.Uint64(),
-		rootHash:    append([]byte(nil), block.RootHash...),
+		blockNumber:    block.Index.Uint64(),
+		rootHash:       append([]byte(nil), block.RootHash...),
+		parentRootHash: append([]byte(nil), block.PreviousBlockHash...),
 	})
 	c.mu.Unlock()
 	select {
@@ -282,4 +284,57 @@ func TestStartNewRoundRetriesEqualFinalizingRoundProposal(t *testing.T) {
 	require.EqualValues(t, 7, proposals[0].blockNumber)
 	require.True(t, bytes.Equal(rootHash, proposals[0].rootHash))
 	require.Same(t, snapshot, rm.currentRound.Snapshot)
+}
+
+func TestProposeBlockLinksToLatestFinalizedBlockAcrossRoundGap(t *testing.T) {
+	ctx := context.Background()
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{
+			Database: "test_propose_block_links_to_latest_finalized_gap",
+		},
+		Sharding: config.ShardingConfig{Mode: config.ShardingModeBFTShard},
+	}
+	storage := testutil.SetupTestStorage(t, cfg)
+	testLogger := newTestLogger(t)
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		storage.CommitmentQueue(),
+		storage,
+		nil,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		threadSafeSMT,
+		nil,
+	)
+	require.NoError(t, err)
+	recorder := newRecordingBFTClient()
+	rm.bftClient = recorder
+
+	parentRoot := api.HexBytes(bytes.Repeat([]byte{0x11}, 32))
+	block1 := models.NewBlock(
+		api.NewBigInt(big.NewInt(1)),
+		cfg.Chain.ID,
+		0,
+		cfg.Chain.Version,
+		cfg.Chain.ForkID,
+		parentRoot,
+		nil,
+		nil,
+	)
+	block1.Finalized = true
+	require.NoError(t, storage.BlockStorage().Store(ctx, block1))
+
+	rootHash := api.HexBytes(bytes.Repeat([]byte{0x33}, 32))
+	require.NoError(t, rm.proposeBlock(ctx, nil, api.NewBigInt(big.NewInt(3)), rootHash))
+
+	proposals := recorder.snapshot()
+	require.Len(t, proposals, 1)
+	require.EqualValues(t, 3, proposals[0].blockNumber)
+	require.True(t, bytes.Equal(rootHash, proposals[0].rootHash))
+	require.True(t, bytes.Equal(parentRoot, proposals[0].parentRootHash))
 }

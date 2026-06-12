@@ -147,6 +147,48 @@ func TestDiskSMTStartupBoundedReplay(t *testing.T) {
 	require.Equal(t, root2, state.RootHash)
 }
 
+func TestDiskSMTStartupBoundedReplayToleratesMissingEmptyRounds(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackendForStartup(t)
+	leaf1 := diskStartupLeaf(1, 11)
+	root1 := commitDiskStartupLeaves(t, ctx, backend, 1, []smtbackend.LeafInput{leaf1})
+
+	storage := &diskStartupStorage{
+		blocks:  newDiskStartupBlockStorage(diskStartupBlock(1, root1), diskStartupBlock(3, root1)),
+		records: newDiskStartupBlockRecordsStorage(models.NewBlockRecords(api.NewBigIntFromUint64(3), nil)),
+	}
+	rm := newDiskStartupRoundManager(t, backend, storage)
+	rm.config.SMT.StartupReplayLimitBlocks = 2
+
+	block, err := rm.verifyDiskSMTStartup(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), block.Uint64())
+
+	state, err := backend.CommittedState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), state.BlockNumber.Uint64())
+	require.Equal(t, root1, state.RootHash)
+}
+
+func TestDiskSMTStartupBoundedReplayGapStillFailsOnRootMismatch(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackendForStartup(t)
+	leaf1 := diskStartupLeaf(1, 11)
+	root1 := commitDiskStartupLeaves(t, ctx, backend, 1, []smtbackend.LeafInput{leaf1})
+	wrongRoot := append([]byte(nil), root1...)
+	wrongRoot[0] ^= 0xff
+
+	storage := &diskStartupStorage{
+		blocks:  newDiskStartupBlockStorage(diskStartupBlock(1, root1), diskStartupBlock(3, wrongRoot)),
+		records: newDiskStartupBlockRecordsStorage(models.NewBlockRecords(api.NewBigIntFromUint64(3), nil)),
+	}
+	rm := newDiskStartupRoundManager(t, backend, storage)
+	rm.config.SMT.StartupReplayLimitBlocks = 2
+
+	_, err := rm.verifyDiskSMTStartup(ctx)
+	require.ErrorContains(t, err, "disk SMT replay root mismatch at block 3")
+}
+
 func TestDiskSMTStartupReplayLimitExceeded(t *testing.T) {
 	ctx := context.Background()
 	backend := newTestDiskBackendForStartup(t)
@@ -625,8 +667,17 @@ func (s *diskStartupBlockRecordsStorage) GetByBlockNumber(_ context.Context, blo
 func (s *diskStartupBlockRecordsStorage) Count(context.Context) (int64, error) {
 	return int64(len(s.records)), nil
 }
-func (s *diskStartupBlockRecordsStorage) GetNextBlock(context.Context, *api.BigInt) (*models.BlockRecords, error) {
-	return nil, nil
+func (s *diskStartupBlockRecordsStorage) GetNextBlock(_ context.Context, blockNumber *api.BigInt) (*models.BlockRecords, error) {
+	var next *models.BlockRecords
+	for _, record := range s.records {
+		if blockNumber != nil && record.BlockNumber.Cmp(blockNumber.Int) <= 0 {
+			continue
+		}
+		if next == nil || record.BlockNumber.Cmp(next.BlockNumber.Int) < 0 {
+			next = record
+		}
+	}
+	return next, nil
 }
 func (s *diskStartupBlockRecordsStorage) GetLatestBlockNumber(context.Context) (*api.BigInt, error) {
 	return nil, nil

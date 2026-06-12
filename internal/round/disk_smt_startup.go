@@ -268,11 +268,22 @@ func (rm *RoundManager) replayDiskSMTGap(ctx context.Context, fromBlock, latestB
 		"latestBlock", latestBlock.String(),
 		"blocksBehind", diff.String())
 
-	for n := new(big.Int).Add(fromBlock.Int, big.NewInt(1)); n.Cmp(latestBlock.Int) <= 0; n.Add(n, big.NewInt(1)) {
-		blockNumber := api.NewBigInt(new(big.Int).Set(n))
-		if err := rm.replayDiskSMTBlock(ctx, blockNumber); err != nil {
+	current := new(big.Int).Set(fromBlock.Int)
+	for current.Cmp(latestBlock.Int) < 0 {
+		blockRecords, err := rm.storage.BlockRecordsStorage().GetNextBlock(ctx, api.NewBigInt(new(big.Int).Set(current)))
+		if err != nil {
+			return nil, recordDiskSMTStartupFailure(fmt.Errorf("failed to fetch next disk SMT replay block after %s: %w", current.String(), err))
+		}
+		if blockRecords == nil {
+			return nil, recordDiskSMTStartupFailure(fmt.Errorf("next finalized block record not found after %s before latest block %s", current.String(), latestBlock.String()))
+		}
+		if blockRecords.BlockNumber.Int.Cmp(latestBlock.Int) > 0 {
+			return nil, recordDiskSMTStartupFailure(fmt.Errorf("next block record %s is after latest finalized block %s", blockRecords.BlockNumber.String(), latestBlock.String()))
+		}
+		if err := rm.replayDiskSMTBlock(ctx, blockRecords.BlockNumber); err != nil {
 			return nil, recordDiskSMTStartupFailure(err)
 		}
+		current = new(big.Int).Set(blockRecords.BlockNumber.Int)
 	}
 
 	state, err := rm.smtBackend.CommittedState(ctx)
