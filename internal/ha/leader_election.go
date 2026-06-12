@@ -14,6 +14,8 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
+const reacquireCooldownPolls = 3
+
 // LeaderElection manages the HA leader election process.
 // It polls the db for leadership lock and publishes leadership
 // transition events on the provided EventBus.
@@ -31,6 +33,7 @@ type LeaderElection struct {
 
 	leaderMu        sync.Mutex
 	heartbeatCancel context.CancelFunc
+	cooldownUntil   time.Time
 	isLeader        atomic.Bool // cached leader flag
 }
 
@@ -67,7 +70,17 @@ func (le *LeaderElection) Resign(ctx context.Context) error {
 		le.log.WithComponent("leader-election").Warn("Leadership lock was not released during resign", "serverID", le.serverID)
 	}
 	le.markFollower("Resigned leadership")
+	le.cooldownReacquire()
 	return nil
+}
+
+func (le *LeaderElection) cooldownReacquire() {
+	if le.electionPollingInterval <= 0 {
+		return
+	}
+	le.leaderMu.Lock()
+	le.cooldownUntil = time.Now().Add(reacquireCooldownPolls * le.electionPollingInterval)
+	le.leaderMu.Unlock()
 }
 
 // Start starts the election polling.
@@ -132,6 +145,9 @@ func (le *LeaderElection) startElectionPolling(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if le.inReacquireCooldown() {
+				continue
+			}
 			acquired, err := le.storage.TryAcquireLock(ctx, le.lockID, le.serverID)
 			if err != nil {
 				le.log.WithComponent("leader-election").Error("Error during leadership acquisition attempt", "error", err)
@@ -152,6 +168,19 @@ func (le *LeaderElection) startElectionPolling(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (le *LeaderElection) inReacquireCooldown() bool {
+	le.leaderMu.Lock()
+	defer le.leaderMu.Unlock()
+	if le.cooldownUntil.IsZero() {
+		return false
+	}
+	if time.Now().Before(le.cooldownUntil) {
+		return true
+	}
+	le.cooldownUntil = time.Time{}
+	return false
 }
 
 func (le *LeaderElection) setHeartbeatCancel(cancel context.CancelFunc) {

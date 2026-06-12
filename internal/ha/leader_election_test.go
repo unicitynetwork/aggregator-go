@@ -1,6 +1,9 @@
 package ha
 
 import (
+	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -204,4 +207,61 @@ func TestLeaderElection_ResignReleasesLeadership(t *testing.T) {
 	isLeader, err = le.VerifyLeadership(ctx)
 	require.NoError(t, err)
 	require.False(t, isLeader)
+}
+
+func TestLeaderElection_ResignCooldownSkipsReacquirePolling(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	log, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+
+	leConfig := conf.HA
+	leConfig.ServerID = "server-1"
+	leConfig.LeaderElectionPollingInterval = 20 * time.Millisecond
+	leConfig.LeaderHeartbeatInterval = time.Second
+
+	storage := &cooldownLeadershipStorage{firstAcquire: make(chan struct{})}
+	le := NewLeaderElection(log, leConfig, storage, events.NewEventBus(log))
+
+	require.NoError(t, le.Resign(ctx))
+	le.Start(ctx)
+	defer le.Stop(t.Context())
+
+	select {
+	case <-storage.firstAcquire:
+		require.Fail(t, "leader reacquired during cooldown")
+	case <-time.After((reacquireCooldownPolls - 1) * leConfig.LeaderElectionPollingInterval):
+	}
+
+	select {
+	case <-storage.firstAcquire:
+	case <-time.After(2 * leConfig.LeaderElectionPollingInterval):
+		require.Fail(t, "leader did not retry after cooldown")
+	}
+	require.GreaterOrEqual(t, storage.acquireCalls.Load(), int64(1))
+}
+
+type cooldownLeadershipStorage struct {
+	acquireCalls atomic.Int64
+	firstAcquire chan struct{}
+	closeOnce    sync.Once
+}
+
+func (s *cooldownLeadershipStorage) TryAcquireLock(context.Context, string, string) (bool, error) {
+	s.acquireCalls.Add(1)
+	s.closeOnce.Do(func() { close(s.firstAcquire) })
+	return false, nil
+}
+
+func (s *cooldownLeadershipStorage) ReleaseLock(context.Context, string, string) (bool, error) {
+	return true, nil
+}
+
+func (s *cooldownLeadershipStorage) UpdateHeartbeat(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
+func (s *cooldownLeadershipStorage) IsLeader(context.Context, string, string) (bool, error) {
+	return false, nil
 }
