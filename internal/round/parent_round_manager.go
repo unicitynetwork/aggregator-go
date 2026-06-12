@@ -194,10 +194,11 @@ func (prm *ParentRoundManager) startNewRound(ctx context.Context, roundNumber *a
 
 	// Check if this round or a later one is already in progress
 	if prm.currentRound != nil && prm.currentRound.Number.Cmp(roundNumber.Int) >= 0 {
+		currentRound := prm.currentRound.Number.String()
 		prm.roundMutex.Unlock()
 		prm.logger.WithContext(ctx).Debug("Skipping duplicate round start",
 			"requestedRound", roundNumber.String(),
-			"currentRound", prm.currentRound.Number.String())
+			"currentRound", currentRound)
 		return nil
 	}
 
