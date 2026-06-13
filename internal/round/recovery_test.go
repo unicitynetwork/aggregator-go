@@ -16,6 +16,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
 	redisStorage "github.com/unicitynetwork/aggregator-go/internal/storage/redis"
@@ -626,9 +627,9 @@ func (s *RecoveryTestSuite) Test10_PartialSmtNodes_CorrectDetection() {
 }
 
 // ============================================================================
-// Test 11: LoadRecoveredNodesIntoSMT
+// Test 11: LoadRecoveredNodesIntoBackend
 // ============================================================================
-func (s *RecoveryTestSuite) Test11_LoadRecoveredNodesIntoSMT() {
+func (s *RecoveryTestSuite) Test11_LoadRecoveredNodesIntoBackend() {
 	t := s.T()
 
 	// Create test commitments and store their SMT nodes
@@ -657,17 +658,22 @@ func (s *RecoveryTestSuite) Test11_LoadRecoveredNodesIntoSMT() {
 
 	// Create empty SMT to load into
 	targetSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	backend := smtbackend.NewMemoryBackend(targetSMT)
+	blockNumber := api.NewBigIntFromUint64(9)
 	require.NotEqual(t, expectedRootHash, targetSMT.GetRootHash(), "SMT should be empty initially")
 
 	// Load recovered nodes into SMT
-	err = LoadRecoveredNodesIntoSMT(s.ctx, s.testLogger, s.storage, targetSMT, stateIDs)
+	err = LoadRecoveredNodesIntoBackend(s.ctx, s.testLogger, s.storage, backend, blockNumber, stateIDs)
 	require.NoError(t, err)
 
 	// Verify SMT has correct root hash (ThreadSafeSMT.GetRootHash() returns hex string)
 	actualRootHash := targetSMT.GetRootHash()
 	require.Equal(t, expectedRootHash, actualRootHash, "SMT root hash should match after loading recovered nodes")
+	state, err := backend.CommittedState(s.ctx)
+	require.NoError(t, err)
+	require.Equal(t, blockNumber.String(), state.BlockNumber.String(), "SMT backend block metadata should advance during recovery")
 
-	t.Log("✓ Test11_LoadRecoveredNodesIntoSMT passed")
+	t.Log("✓ Test11_LoadRecoveredNodesIntoBackend passed")
 }
 
 // ============================================================================
@@ -830,7 +836,8 @@ func (s *RecoveryTestSuite) readPendingToMakeThemClaimed() {
 		_ = s.commitmentQueue.StreamCertificationRequests(ctx, commitmentChan)
 	}()
 
-	// Wait for timeout to ensure all are claimed
+	// Wait for timeout to ensure all are claimed. Do not close commitmentChan:
+	// the streamer goroutine above may still be sending to it (closing here races
+	// that send). The streamer stops on ctx.Done(); the channel is GC'd.
 	<-ctx.Done()
-	close(commitmentChan)
 }

@@ -14,6 +14,8 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
+const reacquireCooldownPolls = 3
+
 // LeaderElection manages the HA leader election process.
 // It polls the db for leadership lock and publishes leadership
 // transition events on the provided EventBus.
@@ -29,7 +31,10 @@ type LeaderElection struct {
 	wg     sync.WaitGroup     // election polling thread wg
 	cancel context.CancelFunc // election polling thread cancel signal
 
-	isLeader atomic.Bool // cached leader flag
+	leaderMu        sync.Mutex
+	heartbeatCancel context.CancelFunc
+	cooldownUntil   time.Time
+	isLeader        atomic.Bool // cached leader flag
 }
 
 func NewLeaderElection(log *logger.Logger, cfg config.HAConfig, storage interfaces.LeadershipStorage, eventBus *events.EventBus) *LeaderElection {
@@ -46,6 +51,36 @@ func NewLeaderElection(log *logger.Logger, cfg config.HAConfig, storage interfac
 
 func (le *LeaderElection) IsLeader(_ context.Context) (bool, error) {
 	return le.isLeader.Load(), nil
+}
+
+func (le *LeaderElection) VerifyLeadership(ctx context.Context) (bool, error) {
+	return le.storage.IsLeader(ctx, le.lockID, le.serverID)
+}
+
+func (le *LeaderElection) Resign(ctx context.Context) error {
+	if le.isLeader.Load() {
+		le.cancelHeartbeat()
+	}
+	released, err := le.storage.ReleaseLock(ctx, le.lockID, le.serverID)
+	if err != nil {
+		le.markFollower("Failed to release leadership lock during resign")
+		return fmt.Errorf("failed to release leadership lock: %w", err)
+	}
+	if !released {
+		le.log.WithComponent("leader-election").Warn("Leadership lock was not released during resign", "serverID", le.serverID)
+	}
+	le.markFollower("Resigned leadership")
+	le.cooldownReacquire()
+	return nil
+}
+
+func (le *LeaderElection) cooldownReacquire() {
+	if le.electionPollingInterval <= 0 {
+		return
+	}
+	le.leaderMu.Lock()
+	le.cooldownUntil = time.Now().Add(reacquireCooldownPolls * le.electionPollingInterval)
+	le.leaderMu.Unlock()
 }
 
 // Start starts the election polling.
@@ -65,12 +100,14 @@ func (le *LeaderElection) Stop(ctx context.Context) {
 	if le.cancel != nil {
 		le.cancel()
 	}
+	le.cancelHeartbeat()
 	// wait for election polling thread to exit
 	le.wg.Wait()
 
 	if _, err := le.storage.ReleaseLock(ctx, le.lockID, le.serverID); err != nil {
 		le.log.WithComponent("leader-election").Error("Error releasing leadership lock", "error", err.Error())
 	}
+	le.markFollower("Stopped leadership election")
 
 	le.log.WithComponent("leader-election").Info("Shutdown completed", "serverID", le.serverID)
 }
@@ -108,6 +145,9 @@ func (le *LeaderElection) startElectionPolling(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if le.inReacquireCooldown() {
+				continue
+			}
 			acquired, err := le.storage.TryAcquireLock(ctx, le.lockID, le.serverID)
 			if err != nil {
 				le.log.WithComponent("leader-election").Error("Error during leadership acquisition attempt", "error", err)
@@ -115,21 +155,70 @@ func (le *LeaderElection) startElectionPolling(ctx context.Context) {
 			}
 			if acquired {
 				le.log.WithComponent("leader-election").Info("Acquired leadership, publishing LeaderChangedEvent and starting heartbeat", "serverID", le.serverID)
-				le.isLeader.Store(true)
-				metrics.IsLeader.Set(1)
-				metrics.LeaderTransitionsTotal.Inc()
-				le.eventBus.Publish(events.TopicLeaderChanged, &events.LeaderChangedEvent{IsLeader: true})
+				le.markLeader()
 
-				if err := le.startHeartbeat(ctx); err != nil {
+				heartbeatCtx, heartbeatCancel := context.WithCancel(ctx)
+				le.setHeartbeatCancel(heartbeatCancel)
+				if err := le.startHeartbeat(heartbeatCtx); err != nil {
 					le.log.WithComponent("leader-election").Error("Error during heartbeat attempt", "error", err)
 				}
+				le.clearHeartbeatCancel()
 
-				le.log.WithComponent("leader-election").Info("Lost leadership, publishing LeaderChangedEvent and returning to polling", "serverID", le.serverID)
-				le.isLeader.Store(false)
-				metrics.IsLeader.Set(0)
-				metrics.LeaderTransitionsTotal.Inc()
-				le.eventBus.Publish(events.TopicLeaderChanged, &events.LeaderChangedEvent{IsLeader: false})
+				le.markFollower("Lost leadership, publishing LeaderChangedEvent and returning to polling")
 			}
 		}
 	}
+}
+
+func (le *LeaderElection) inReacquireCooldown() bool {
+	le.leaderMu.Lock()
+	defer le.leaderMu.Unlock()
+	if le.cooldownUntil.IsZero() {
+		return false
+	}
+	if time.Now().Before(le.cooldownUntil) {
+		return true
+	}
+	le.cooldownUntil = time.Time{}
+	return false
+}
+
+func (le *LeaderElection) setHeartbeatCancel(cancel context.CancelFunc) {
+	le.leaderMu.Lock()
+	defer le.leaderMu.Unlock()
+	le.heartbeatCancel = cancel
+}
+
+func (le *LeaderElection) clearHeartbeatCancel() {
+	le.leaderMu.Lock()
+	defer le.leaderMu.Unlock()
+	le.heartbeatCancel = nil
+}
+
+func (le *LeaderElection) cancelHeartbeat() {
+	le.leaderMu.Lock()
+	cancel := le.heartbeatCancel
+	le.leaderMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (le *LeaderElection) markLeader() {
+	if le.isLeader.Swap(true) {
+		return
+	}
+	metrics.IsLeader.Set(1)
+	metrics.LeaderTransitionsTotal.Inc()
+	le.eventBus.Publish(events.TopicLeaderChanged, &events.LeaderChangedEvent{IsLeader: true})
+}
+
+func (le *LeaderElection) markFollower(message string) {
+	if !le.isLeader.Swap(false) {
+		return
+	}
+	le.log.WithComponent("leader-election").Info(message, "serverID", le.serverID)
+	metrics.IsLeader.Set(0)
+	metrics.LeaderTransitionsTotal.Inc()
+	le.eventBus.Publish(events.TopicLeaderChanged, &events.LeaderChangedEvent{IsLeader: false})
 }

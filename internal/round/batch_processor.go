@@ -1,20 +1,25 @@
 package round
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"math/big"
+	"runtime"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/aggregator-go/internal/bft"
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
-	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
+	diskpersist "github.com/unicitynetwork/aggregator-go/internal/smt/disk/persist"
+	diskstorage "github.com/unicitynetwork/aggregator-go/internal/smt/disk/storage"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -23,43 +28,40 @@ import (
 // NOTE: The caller is expected to hold rm.roundMutex when calling this function
 // and ACK returned dropped entries after releasing it.
 func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*models.CertificationRequest) ([]interfaces.CertificationRequestAck, error) {
+	return rm.processMiniBatchForRound(ctx, rm.currentRound, commitments)
+}
+
+func (rm *RoundManager) processMiniBatchForRound(ctx context.Context, round *Round, commitments []*models.CertificationRequest) ([]interfaces.CertificationRequestAck, error) {
 	if len(commitments) == 0 {
 		return nil, nil
 	}
 
-	// Convert commitments to SMT leaves, tracking valid commitments
-	leaves := make([]*smt.Leaf, 0, len(commitments))
+	// Convert commitments to backend leaf inputs, tracking valid commitments.
+	leaves := make([]smtbackend.LeafInput, 0, len(commitments))
 	validCommitments := make([]*models.CertificationRequest, 0, len(commitments))
 	for _, commitment := range commitments {
-		// Generate leaf path from stateID
-		path, err := commitment.StateID.GetPath()
+		leaf, err := commitmentLeafInput(commitment)
 		if err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to get path for commitment",
+			rm.logger.WithContext(ctx).Error("Failed to create leaf input",
 				"stateID", commitment.StateID.String(),
 				"error", err.Error())
 			continue
 		}
 
-		// Create leaf value (hash of certification request data)
-		leafValue, err := commitment.LeafValue()
-		if err != nil {
-			rm.logger.WithContext(ctx).Error("Failed to create leaf value",
-				"stateID", commitment.StateID.String(),
-				"error", err.Error())
-			continue
-		}
-
-		leaves = append(leaves, smt.NewLeaf(path, leafValue))
+		leaves = append(leaves, leaf)
 		validCommitments = append(validCommitments, commitment)
 	}
 
 	// Add leaves to the current round's SMT snapshot
-	if rm.currentRound != nil && rm.currentRound.Snapshot != nil {
+	if round != nil && round.Snapshot != nil {
 		smtStart := time.Now()
-		addedCommitments, addedLeaves, dropped := addCommitmentLeaves(ctx, rm.logger, rm.currentRound.Snapshot, leaves, validCommitments)
+		addedCommitments, addedLeaves, dropped, err := addCommitmentLeaves(ctx, rm.logger, round.Snapshot, leaves, validCommitments)
+		if err != nil {
+			return nil, err
+		}
 		metrics.SMTAddLeavesDuration.Observe(time.Since(smtStart).Seconds())
-		rm.currentRound.PendingLeaves = append(rm.currentRound.PendingLeaves, addedLeaves...)
-		rm.currentRound.PendingCommitments = append(rm.currentRound.PendingCommitments, addedCommitments...)
+		round.PendingLeaves = append(round.PendingLeaves, addedLeaves...)
+		round.PendingCommitments = append(round.PendingCommitments, addedCommitments...)
 		rm.markProofsPending(addedCommitments)
 		return dropped, nil
 	}
@@ -70,17 +72,21 @@ func (rm *RoundManager) processMiniBatch(ctx context.Context, commitments []*mod
 // ProposeBlock creates and proposes a new block with the given data.
 // rootHash is the raw 32-byte SMT root (no algorithm-id prefix) — the
 // block, UC.IR.h and V2 proof wire all bind against this raw form.
-func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigInt, rootHash api.HexBytes) error {
+func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNumber *api.BigInt, rootHash api.HexBytes) error {
 	rm.logger.WithContext(ctx).Info("proposeBlock called",
 		"blockNumber", blockNumber.String(),
 		"rootHash", rootHash.String())
 
 	rm.roundMutex.Lock()
-	if rm.currentRound != nil {
+	if rm.currentRound != round {
+		rm.roundMutex.Unlock()
+		return bft.ErrStaleCertificationRound
+	}
+	if round != nil {
 		rm.logger.WithContext(ctx).Debug("Changing round state to finalizing",
-			"roundNumber", rm.currentRound.Number.String(),
-			"previousState", rm.currentRound.State.String())
-		rm.currentRound.State = RoundStateFinalizing
+			"roundNumber", round.Number.String(),
+			"previousState", round.State.String())
+		round.State = RoundStateFinalizing
 	}
 	rm.roundMutex.Unlock()
 
@@ -100,6 +106,15 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		if err != nil {
 			return fmt.Errorf("failed to get previous block %s: %w", prevBlockNumber.String(), err)
 		}
+		if prevBlock == nil {
+			latestBlock, err := rm.storage.BlockStorage().GetLatest(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to get latest block: %w", err)
+			}
+			if latestBlock != nil && latestBlock.Index.Cmp(blockNumber.Int) < 0 {
+				prevBlock = latestBlock
+			}
+		}
 		if prevBlock != nil {
 			// Use the block's root hash as the "hash" for now
 			parentHash = prevBlock.RootHash
@@ -118,11 +133,17 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 			parentHash,
 			nil,
 		)
-		rm.roundMutex.RLock()
-		if rm.currentRound != nil && !rm.currentRound.StartTime.IsZero() {
-			metrics.RoundPreparationDuration.Observe(time.Since(rm.currentRound.StartTime).Seconds())
+		if round != nil && !round.StartTime.IsZero() {
+			metrics.RoundPreparationDuration.Observe(time.Since(round.StartTime).Seconds())
 		}
+		// A repeat UC could have superseded this round during the storage work
+		// above; do not send a stale proposal to BFT.
+		rm.roundMutex.RLock()
+		superseded := rm.currentRound != round
 		rm.roundMutex.RUnlock()
+		if superseded {
+			return bft.ErrStaleCertificationRound
+		}
 		rm.logger.WithContext(ctx).Info("Sending certification request to BFT client",
 			"blockNumber", blockNumber.String(),
 			"bftClientType", fmt.Sprintf("%T", rm.bftClient))
@@ -217,13 +238,20 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, blockNumber *api.BigIn
 		rm.roundMutex.RUnlock()
 
 		if cp != nil {
-			preResult, advErr := cp.AdvanceRound()
+			preResult, advErr := rm.advancePrecollectorForHandoff(cp)
 			if advErr == nil {
-				preResult.snapshot.SetCommitTarget(rm.smt)
+				if err := preResult.snapshot.SetCommitTarget(ctx, rm.smtBackend); err != nil {
+					preResult.snapshot.Discard(ctx)
+					rm.logger.WithContext(ctx).Error("Failed to set precollector commit target.", "error", err.Error())
+					return err
+				}
 				// StartNewRoundWithSnapshot atomically checks precollectorDisabled
 				// under roundMutex — no race with concurrent Deactivate.
-				if err := rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(nextRoundNumber), preResult.snapshot, preResult.commitments, preResult.leaves); err != nil && !errors.Is(err, ErrDeactivated) {
-					rm.logger.WithContext(ctx).Error("Failed to start new round with snapshot.", "error", err.Error())
+				if err := rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(nextRoundNumber), preResult.snapshot, preResult.commitments, preResult.leaves); err != nil {
+					preResult.snapshot.Discard(ctx)
+					if !errors.Is(err, ErrDeactivated) {
+						rm.logger.WithContext(ctx).Error("Failed to start new round with snapshot.", "error", err.Error())
+					}
 				}
 			} else {
 				rm.logger.WithContext(ctx).Warn("Failed to advance precollector", "error", advErr.Error())
@@ -365,7 +393,9 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 				return fmt.Errorf("recovery failed: %w", recoverErr)
 			}
 			if recoveryResult != nil && recoveryResult.Recovered {
-				rm.reconcileRecoveredFinalization(recoveryResult.BlockNumber)
+				if err := rm.reconcileRecoveredFinalization(ctx, recoveryResult); err != nil {
+					return fmt.Errorf("failed to reconcile recovered finalization: %w", err)
+				}
 			}
 			rm.logger.Info("Recovery completed successfully")
 			return nil
@@ -379,8 +409,12 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 	return fmt.Errorf("FinalizeBlock failed after %d attempts", maxFinalizeRetries)
 }
 
-func (rm *RoundManager) reconcileRecoveredFinalization(blockNumber *api.BigInt) {
-	var snapshot *smt.ThreadSafeSmtSnapshot
+func (rm *RoundManager) reconcileRecoveredFinalization(ctx context.Context, recoveryResult *RecoveryResult) error {
+	if recoveryResult == nil || !recoveryResult.Recovered {
+		return nil
+	}
+	blockNumber := recoveryResult.BlockNumber
+	var snapshot smtbackend.Snapshot
 
 	rm.roundMutex.RLock()
 	if blockNumber != nil &&
@@ -393,11 +427,24 @@ func (rm *RoundManager) reconcileRecoveredFinalization(blockNumber *api.BigInt) 
 	rm.roundMutex.RUnlock()
 
 	rm.finalizationMu.Lock()
-	if snapshot != nil {
-		snapshot.Commit(rm.smt)
+	defer rm.finalizationMu.Unlock()
+
+	if rm.usesDiskSMTBackend() {
+		if err := rm.syncDiskSMTAfterRecoveredBlock(ctx, recoveryResult); err != nil {
+			return err
+		}
+		rm.clearProofPending()
+		return nil
 	}
+
+	if snapshot != nil {
+		if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: blockNumber}); err != nil {
+			return fmt.Errorf("failed to commit recovered SMT snapshot: %w", err)
+		}
+	}
+
 	rm.clearProofPending()
-	rm.finalizationMu.Unlock()
+	return nil
 }
 
 // FinalizeBlock creates and persists a new block with the given data
@@ -417,22 +464,42 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	commitmentCount := 0
 
 	rm.roundMutex.Lock()
-	if rm.currentRound != nil && rm.currentRound.Number.String() == block.Index.String() {
-		proposalTime = rm.currentRound.ProposalTime
-		processingTime = rm.currentRound.ProcessingTime
+	round := rm.currentRound
+	if round == nil || round.Number == nil {
+		rm.roundMutex.Unlock()
+		return fmt.Errorf("cannot finalize block %s: no active round", block.Index.String())
 	}
+	if round.Number.Cmp(block.Index.Int) != 0 {
+		roundNumber := round.Number.String()
+		rm.roundMutex.Unlock()
+		return fmt.Errorf("cannot finalize block %s: block number does not match active round %s", block.Index.String(), roundNumber)
+	}
+
+	proposalTime = round.ProposalTime
+	processingTime = round.ProcessingTime
+
+	var pendingLeaves []smtbackend.LeafInput
+	var pendingCommitments []*models.CertificationRequest
+	var snapshot smtbackend.Snapshot
+	if len(round.PendingLeaves) > 0 {
+		pendingLeaves = append([]smtbackend.LeafInput(nil), round.PendingLeaves...)
+	}
+	if len(round.PendingCommitments) > 0 {
+		pendingCommitments = append([]*models.CertificationRequest(nil), round.PendingCommitments...)
+	}
+	snapshot = round.Snapshot
 	rm.roundMutex.Unlock()
 
-	rm.roundMutex.Lock()
-	var pendingLeaves []*smt.Leaf
-	var pendingCommitments []*models.CertificationRequest
-	var snapshot *smt.ThreadSafeSmtSnapshot
-	if rm.currentRound != nil {
-		pendingLeaves = rm.currentRound.PendingLeaves
-		pendingCommitments = rm.currentRound.PendingCommitments
-		snapshot = rm.currentRound.Snapshot
+	if snapshot != nil {
+		snapshotRoot, err := snapshot.RootHashRaw(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get SMT snapshot root: %w", err)
+		}
+		if !bytes.Equal(snapshotRoot, block.RootHash) {
+			return fmt.Errorf("cannot finalize block %s: snapshot root %s does not match block root %s",
+				block.Index.String(), api.HexBytes(snapshotRoot).String(), block.RootHash.String())
+		}
 	}
-	rm.roundMutex.Unlock()
 
 	commitmentCount = len(pendingCommitments)
 	stateIDs := make([]api.StateID, commitmentCount)
@@ -459,35 +526,110 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		if !errors.Is(err, interfaces.ErrDuplicateKey) {
 			return fmt.Errorf("failed to store block and records: %w", err)
 		}
+		existingBlock, err := rm.validateDuplicateBlock(ctx, block, stateIDs)
+		if err != nil {
+			return err
+		}
+		if existingBlock.Finalized {
+			localRoot, err := rm.smtBackend.RootHashRaw(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to validate local SMT root for finalized duplicate block %s: %w", block.Index.String(), err)
+			}
+			if bytes.Equal(localRoot, block.RootHash) {
+				if publisher, ok := rm.smtBackend.(smtbackend.ProofViewPublisher); ok {
+					if err := publisher.RefreshPublishedProofView(ctx, block.RootHash); err != nil {
+						return fmt.Errorf("failed to refresh proof view for finalized duplicate block %s: %w", block.Index.String(), err)
+					}
+				}
+				block.Finalized = true
+				rm.markProofsReady(block, stateIDs, records)
+				if snapshot != nil {
+					snapshot.Discard(ctx)
+				}
+				rm.clearFinalizedRound(round, block)
+				rm.logger.WithContext(ctx).Info("Block already finalized with matching local SMT root, skipping duplicate finalization",
+					"blockNumber", block.Index.String())
+				return nil
+			}
+		}
 		rm.logger.WithContext(ctx).Info("Block already exists, continuing with remaining steps",
 			"blockNumber", block.Index.String())
 	}
 	storeBlockDuration := time.Since(storeBlockStart)
 
-	storeDataTiming, err := rm.storeDataParallel(ctx, block.Index, smtNodes, records)
-	if err != nil {
-		return fmt.Errorf("failed to store SMT nodes and aggregator records: %w", err)
-	}
+	var storeDataTiming storeDataTiming
+	var smtCommitDuration time.Duration
+	var finalizationLockWaitDuration time.Duration
+	var preparedProofView smtbackend.PreparedProofView
 
-	lockWaitStart := time.Now()
-	rm.finalizationMu.Lock()
-	finalizationLockWaitDuration := time.Since(lockWaitStart)
+	diskFinalize := rm.usesDiskSMTBackend() && snapshot != nil
+	if diskFinalize {
+		var err error
+		storeDataTiming, smtCommitDuration, finalizationLockWaitDuration, preparedProofView, err = rm.storeDataAndCommitDiskSnapshot(ctx, block, snapshot, smtNodes, records)
+		if err != nil {
+			return err
+		}
+	} else {
+		var err error
+		storeDataTiming, err = rm.storeDataParallel(ctx, smtNodes, records)
+		if err != nil {
+			return fmt.Errorf("failed to store SMT nodes and aggregator records: %w", err)
+		}
 
-	smtCommitStart := time.Now()
-	if snapshot != nil {
-		snapshot.Commit(rm.smt)
+		lockWaitStart := time.Now()
+		rm.finalizationMu.Lock()
+		finalizationLockWaitDuration = time.Since(lockWaitStart)
+
+		smtCommitStart := time.Now()
+		if snapshot != nil {
+			if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: block.Index, RootHash: block.RootHash}); err != nil {
+				rm.finalizationMu.Unlock()
+				return fmt.Errorf("failed to commit SMT snapshot: %w", err)
+			}
+		}
+		smtCommitDuration = time.Since(smtCommitStart)
 	}
-	smtCommitDuration := time.Since(smtCommitStart)
+	metrics.SMTCommitDuration.Observe(smtCommitDuration.Seconds())
+	proofViewPublished := false
+	defer func() {
+		if preparedProofView != nil && !proofViewPublished {
+			preparedProofView.Discard(ctx)
+		}
+	}()
 
 	setFinalizedStart := time.Now()
 	if err := rm.storage.BlockStorage().SetFinalized(ctx, block.Index, true); err != nil {
-		rm.finalizationMu.Unlock()
+		if !diskFinalize {
+			rm.finalizationMu.Unlock()
+		}
 		return fmt.Errorf("failed to set block as finalized: %w", err)
 	}
 	setFinalizedDuration := time.Since(setFinalizedStart)
 	block.Finalized = true
-	rm.markProofsReady(block, stateIDs)
-	rm.finalizationMu.Unlock()
+	precomputeProofDuration := time.Duration(0)
+	precomputeProofTiming := precomputeProofTiming{}
+	if rm.config.SMT.PrecomputeProofs {
+		precomputeProofStart := time.Now()
+		timing, err := rm.storePrecomputedProofResponses(ctx, block, records)
+		precomputeProofTiming = timing
+		if err != nil {
+			rm.logger.WithContext(ctx).Warn("Failed to store precomputed proof responses; falling back to live proof generation",
+				"blockNumber", block.Index.String(),
+				"records", len(records),
+				"error", err.Error())
+		}
+		precomputeProofDuration = time.Since(precomputeProofStart)
+	}
+	rm.markProofsReady(block, stateIDs, records)
+	if preparedProofView != nil {
+		if err := preparedProofView.Publish(ctx); err != nil {
+			return fmt.Errorf("failed to publish disk SMT proof view: %w", err)
+		}
+		proofViewPublished = true
+	}
+	if !diskFinalize {
+		rm.finalizationMu.Unlock()
+	}
 
 	// Proofs are requestable only after the SMT snapshot is committed and the block is visible as finalized.
 	// Redis ACK is recovery bookkeeping.
@@ -498,20 +640,15 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	if len(ackEntries) > 0 {
 		ackStart := time.Now()
 		if err := rm.commitmentQueue.MarkProcessed(ctx, ackEntries); err != nil {
-			return fmt.Errorf("failed to mark commitments as processed: %w", err)
+			rm.logger.WithContext(ctx).Warn("Failed to mark finalized commitments as processed; recovery will retry cleanup",
+				"blockNumber", block.Index.String(),
+				"commitments", len(ackEntries),
+				"error", err.Error())
 		}
 		ackDuration = time.Since(ackStart)
 	}
 
-	rm.roundMutex.Lock()
-	if rm.currentRound != nil {
-		rm.currentRound.Block = block
-		rm.currentRound.PendingRootHash = nil
-		rm.currentRound.PendingLeaves = nil
-		rm.currentRound.PendingCommitments = nil
-		rm.currentRound.Snapshot = nil
-	}
-	rm.roundMutex.Unlock()
+	rm.clearFinalizedRound(round, block)
 
 	actualFinalizationTime := time.Since(finalizationStartTime)
 	proofTimes := make([]time.Duration, 0, len(pendingCommitments))
@@ -570,6 +707,11 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		"finalizeLockWait", shortDur(finalizationLockWaitDuration),
 		"finalizeSmtCommit", shortDur(smtCommitDuration),
 		"finalizeSetFinalized", shortDur(setFinalizedDuration),
+		"finalizePrecomputeProofs", shortDur(precomputeProofDuration),
+		"finalizePrecomputeKeys", shortDur(precomputeProofTiming.keys),
+		"finalizePrecomputeCerts", shortDur(precomputeProofTiming.certs),
+		"finalizePrecomputeResponses", shortDur(precomputeProofTiming.responses),
+		"finalizePrecomputeStore", shortDur(precomputeProofTiming.store),
 		"finalizeAck", shortDur(ackDuration),
 	}
 
@@ -602,6 +744,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		"streamChannelSize", len(rm.commitmentStream),
 		"streamChannelCapacity", cap(rm.commitmentStream),
 	)
+	logFields = rm.appendMemoryDiagnosticFields(ctx, logFields)
 	if proofWaitDuration > 0 {
 		logFields = append(logFields,
 			"proofWait", shortDur(proofWaitDuration),
@@ -649,20 +792,18 @@ func (rm *RoundManager) validateBlockForMode(block *models.Block) error {
 	return nil
 }
 
-// convertLeavesToNodes converts SMT leaves to storage models
-func (rm *RoundManager) convertLeavesToNodes(leaves []*smt.Leaf) ([]*models.SmtNode, error) {
+// convertLeavesToNodes converts backend leaf inputs to storage models.
+func (rm *RoundManager) convertLeavesToNodes(leaves []smtbackend.LeafInput) ([]*models.SmtNode, error) {
 	if len(leaves) == 0 {
 		return nil, nil
 	}
 
-	keyLength := rm.smt.GetKeyLength()
 	smtNodes := make([]*models.SmtNode, 0, len(leaves))
 	for _, leaf := range leaves {
-		keyBytes, err := api.PathToFixedBytes(leaf.Path, keyLength)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert leaf path %s to SMT storage key: %w", leaf.Path.String(), err)
+		if len(leaf.Key) != api.StateTreeKeyLengthBytes {
+			return nil, fmt.Errorf("invalid SMT leaf key length: got %d, want %d", len(leaf.Key), api.StateTreeKeyLengthBytes)
 		}
-		key := api.NewHexBytes(keyBytes)
+		key := api.NewHexBytes(leaf.Key)
 		value := api.NewHexBytes(leaf.Value)
 		smtNodes = append(smtNodes, models.NewSmtNode(key, value))
 	}
@@ -683,6 +824,106 @@ func (rm *RoundManager) convertCommitmentsToRecords(commitments []*models.Certif
 	return records
 }
 
+func (rm *RoundManager) storePrecomputedProofResponses(ctx context.Context, block *models.Block, records []*models.AggregatorRecord) (precomputeProofTiming, error) {
+	var timing precomputeProofTiming
+	if len(records) == 0 {
+		return timing, nil
+	}
+	if block == nil {
+		return timing, fmt.Errorf("missing finalized block")
+	}
+	writer, ok := rm.smtBackend.(smtbackend.PrecomputedProofWriter)
+	if !ok {
+		return timing, nil
+	}
+
+	keysStart := time.Now()
+	keys := make([][]byte, len(records))
+	for i, record := range records {
+		key, err := record.StateID.GetTreeKey()
+		if err != nil {
+			return timing, fmt.Errorf("record %d has invalid state ID: %w", i, err)
+		}
+		keys[i] = key
+	}
+	timing.keys = time.Since(keysStart)
+
+	certsStart := time.Now()
+	certs := make([]*api.InclusionCert, len(keys))
+	if batchBackend, ok := rm.smtBackend.(smtbackend.BatchInclusionCertBackend); ok {
+		batchCerts, err := batchBackend.GetInclusionCerts(ctx, keys)
+		if err != nil {
+			return timing, err
+		}
+		certs = batchCerts
+	} else {
+		for i, key := range keys {
+			cert, err := rm.smtBackend.GetInclusionCert(ctx, key)
+			if err != nil {
+				return timing, fmt.Errorf("build inclusion cert %d: %w", i, err)
+			}
+			certs[i] = cert
+		}
+	}
+	timing.certs = time.Since(certsStart)
+
+	responsesStart := time.Now()
+	responseBlockNumber, err := precomputedProofBlockNumber(rm.config.Sharding.Mode, block)
+	if err != nil {
+		return timing, err
+	}
+	proofs := make([]smtbackend.PrecomputedProofResponse, len(records))
+	for i, record := range records {
+		cert := certs[i]
+		if cert == nil {
+			return timing, fmt.Errorf("nil inclusion cert %d", i)
+		}
+		if rm.config.Sharding.Mode == config.ShardingModeChild {
+			if block.ParentFragment == nil {
+				return timing, fmt.Errorf("child block %s is missing parent fragment", block.Index.String())
+			}
+			cert, err = api.ComposeInclusionCert(block.ParentFragment, cert, block.RootHash)
+			if err != nil {
+				return timing, fmt.Errorf("compose inclusion cert %d: %w", i, err)
+			}
+		}
+		certBytes, err := cert.MarshalBinary()
+		if err != nil {
+			return timing, fmt.Errorf("marshal inclusion cert %d: %w", i, err)
+		}
+		proofs[i] = smtbackend.PrecomputedProofResponse{
+			StateID: record.StateID,
+			Response: &api.GetInclusionProofResponseV2{
+				BlockNumber: responseBlockNumber,
+				InclusionProof: &api.InclusionProofV2{
+					CertificationData:  record.CertificationData.ToAPI(),
+					CertificateBytes:   certBytes,
+					UnicityCertificate: types.RawCBOR(block.UnicityCertificate),
+				},
+			},
+		}
+	}
+	timing.responses = time.Since(responsesStart)
+
+	storeStart := time.Now()
+	err = writer.StorePrecomputedProofResponses(ctx, proofs)
+	timing.store = time.Since(storeStart)
+	return timing, err
+}
+
+func precomputedProofBlockNumber(mode config.ShardingMode, block *models.Block) (uint64, error) {
+	if block == nil {
+		return 0, fmt.Errorf("missing block for precomputed proof")
+	}
+	if mode != config.ShardingModeChild {
+		return block.Index.Uint64(), nil
+	}
+	if block.ParentBlockNumber == 0 {
+		return 0, fmt.Errorf("child block %s is missing parent block number", block.Index.String())
+	}
+	return block.ParentBlockNumber, nil
+}
+
 // executeBlockTransaction executes the block finalization transaction.
 // storeBlockAndRecords stores the block and block records in a mini-transaction.
 // The block is stored with finalized=false.
@@ -698,17 +939,212 @@ func (rm *RoundManager) storeBlockAndRecords(ctx context.Context, block *models.
 	})
 }
 
+func (rm *RoundManager) clearFinalizedRound(round *Round, block *models.Block) {
+	rm.roundMutex.Lock()
+	defer rm.roundMutex.Unlock()
+	if rm.currentRound == round {
+		rm.currentRound.Block = block
+		rm.currentRound.PendingRootHash = nil
+		rm.currentRound.PendingLeaves = nil
+		rm.currentRound.PendingCommitments = nil
+		rm.currentRound.Snapshot = nil
+	}
+}
+
+func (rm *RoundManager) validateDuplicateBlock(ctx context.Context, block *models.Block, stateIDs []api.StateID) (*models.Block, error) {
+	existingBlock, err := rm.getExistingBlockAnyFinalization(ctx, block.Index)
+	if err != nil {
+		return nil, fmt.Errorf("failed to validate duplicate block %s: %w", block.Index.String(), err)
+	}
+	if existingBlock == nil {
+		return nil, fmt.Errorf("duplicate block %s exists but could not be loaded", block.Index.String())
+	}
+	if !bytes.Equal(existingBlock.RootHash, block.RootHash) {
+		return nil, fmt.Errorf("duplicate block %s root mismatch: existing %s new %s",
+			block.Index.String(), existingBlock.RootHash.String(), block.RootHash.String())
+	}
+
+	existingRecords, err := rm.storage.BlockRecordsStorage().GetByBlockNumber(ctx, block.Index)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load duplicate block records %s: %w", block.Index.String(), err)
+	}
+	if existingRecords == nil {
+		return nil, fmt.Errorf("duplicate block %s has no block records", block.Index.String())
+	}
+	if !sameStateIDs(existingRecords.StateIDs, stateIDs) {
+		return nil, fmt.Errorf("duplicate block %s state IDs mismatch", block.Index.String())
+	}
+	return existingBlock, nil
+}
+
+func (rm *RoundManager) getExistingBlockAnyFinalization(ctx context.Context, blockNumber *api.BigInt) (*models.Block, error) {
+	block, err := rm.storage.BlockStorage().GetByNumber(ctx, blockNumber)
+	if err != nil {
+		return nil, err
+	}
+	if block != nil {
+		return block, nil
+	}
+
+	unfinalized, err := rm.storage.BlockStorage().GetUnfinalized(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range unfinalized {
+		if candidate != nil && candidate.Index.Cmp(blockNumber.Int) == 0 {
+			return candidate, nil
+		}
+	}
+	return nil, nil
+}
+
+func sameStateIDs(a, b []api.StateID) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !bytes.Equal(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 type storeDataTiming struct {
 	total   time.Duration
 	smt     time.Duration
 	records time.Duration
 }
 
+type precomputeProofTiming struct {
+	keys      time.Duration
+	certs     time.Duration
+	responses time.Duration
+	store     time.Duration
+}
+
+func (rm *RoundManager) appendMemoryDiagnosticFields(ctx context.Context, fields []interface{}) []interface{} {
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+
+	proofPending, proofRecords, proofBlocks := rm.GetProofCacheStats()
+	fields = append(fields,
+		"memGoHeapAllocMB", bytesToMB(mem.HeapAlloc),
+		"memGoHeapInuseMB", bytesToMB(mem.HeapInuse),
+		"memGoHeapSysMB", bytesToMB(mem.HeapSys),
+		"memGoStackInuseMB", bytesToMB(mem.StackInuse),
+		"memGoSysMB", bytesToMB(mem.Sys),
+		"memGoNextGCMB", bytesToMB(mem.NextGC),
+		"memGoHeapObjects", mem.HeapObjects,
+		"memGoNumGC", mem.NumGC,
+		"memGoGoroutines", runtime.NumGoroutine(),
+		"proofPending", proofPending,
+		"proofCacheRecords", proofRecords,
+		"proofCacheBlocks", proofBlocks,
+		"proofCacheRecordCapacity", rm.config.SMT.ProofMetadataCacheEntries,
+	)
+
+	if rm.smtBackend == nil {
+		return fields
+	}
+
+	stats := rm.smtBackend.Stats(ctx)
+	storeMetrics, ok := stats.Raw["store_metrics"].(diskstorage.Metrics)
+	if ok {
+		fields = append(fields,
+			"memRocksDBConfiguredCacheMB", rm.config.SMT.RocksDBCacheMB,
+			"memRocksDBBlockCacheMB", signedBytesToMB(storeMetrics.BlockCacheSize),
+			"memRocksDBMemTableMB", bytesToMB(storeMetrics.MemTableSize),
+			"rocksDBPendingCompactionMB", bytesToMB(storeMetrics.CompactEstimatedDebt),
+			"rocksDBL0Files", storeMetrics.L0NumFiles,
+			"rocksDBBlockCacheHits", storeMetrics.BlockCacheHits,
+			"rocksDBBlockCacheMisses", storeMetrics.BlockCacheMisses,
+			"rocksDBBlockCacheDataHits", storeMetrics.BlockCacheDataHits,
+			"rocksDBBlockCacheDataMisses", storeMetrics.BlockCacheDataMisses,
+		)
+	}
+
+	nodeCache, ok := stats.Raw["node_cache"].(diskpersist.NodeCacheStats)
+	if ok {
+		fields = append(fields,
+			"memDiskNodeCacheEnabled", nodeCache.Enabled,
+			"memDiskNodeCacheEntries", nodeCache.Entries,
+			"memDiskNodeCacheMB", signedBytesToMB(nodeCache.Bytes),
+		)
+	}
+
+	return fields
+}
+
+func bytesToMB(bytes uint64) uint64 {
+	return bytes / (1024 * 1024)
+}
+
+func signedBytesToMB(bytes int64) int64 {
+	return bytes / (1024 * 1024)
+}
+
+type storeDataResult struct {
+	timing storeDataTiming
+	err    error
+}
+
+// storeDataAndCommitDiskSnapshot overlaps Mongo finalization data writes with
+// the RocksDB snapshot commit. The block is still marked finalized only after
+// both operations succeed, so either side can be recovered from the existing
+// unfinalized-block startup path if the process crashes or one operation fails.
+//
+// Disk proof reads do not use finalizationMu: they read from the last published
+// proof view. On success this returns a proof view captured at the RocksDB
+// commit point; the caller publishes it only after Mongo finalization and proof
+// metadata are ready.
+func (rm *RoundManager) storeDataAndCommitDiskSnapshot(
+	ctx context.Context,
+	block *models.Block,
+	snapshot smtbackend.Snapshot,
+	smtNodes []*models.SmtNode,
+	records []*models.AggregatorRecord,
+) (storeDataTiming, time.Duration, time.Duration, smtbackend.PreparedProofView, error) {
+	storeCh := make(chan storeDataResult, 1)
+	go func() {
+		timing, err := rm.storeDataParallel(ctx, smtNodes, records)
+		storeCh <- storeDataResult{timing: timing, err: err}
+	}()
+
+	smtCommitStart := time.Now()
+	var preparedProofView smtbackend.PreparedProofView
+	var commitErr error
+	if publishable, ok := snapshot.(smtbackend.ProofViewPreparingSnapshot); ok {
+		preparedProofView, commitErr = publishable.CommitAndPrepareProofView(ctx, smtbackend.CommitMetadata{BlockNumber: block.Index, RootHash: block.RootHash})
+	} else {
+		commitErr = snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: block.Index, RootHash: block.RootHash})
+	}
+	smtCommitDuration := time.Since(smtCommitStart)
+
+	storeResult := <-storeCh
+	if commitErr != nil || storeResult.err != nil {
+		if preparedProofView != nil {
+			preparedProofView.Discard(ctx)
+		}
+		if commitErr != nil && storeResult.err != nil {
+			return storeResult.timing, smtCommitDuration, 0, nil,
+				fmt.Errorf("failed to store finalization data and commit SMT snapshot: store=%v commit=%w", storeResult.err, commitErr)
+		}
+		if commitErr != nil {
+			return storeResult.timing, smtCommitDuration, 0, nil,
+				fmt.Errorf("failed to commit SMT snapshot: %w", commitErr)
+		}
+		return storeResult.timing, smtCommitDuration, 0, nil,
+			fmt.Errorf("failed to store SMT nodes and aggregator records: %w", storeResult.err)
+	}
+
+	return storeResult.timing, smtCommitDuration, 0, preparedProofView, nil
+}
+
 // storeDataParallel stores SMT nodes and aggregator records in parallel.
 // StoreBatch handles duplicates internally (ignores duplicate key errors).
 func (rm *RoundManager) storeDataParallel(
 	ctx context.Context,
-	blockNumber *api.BigInt,
 	smtNodes []*models.SmtNode,
 	records []*models.AggregatorRecord,
 ) (storeDataTiming, error) {
@@ -743,14 +1179,6 @@ func (rm *RoundManager) storeDataParallel(
 		smt:     smtTime,
 		records: recordsTime,
 	}
-
-	rm.logger.WithContext(ctx).Debug("PARALLEL_TIMING",
-		"block", blockNumber.String(),
-		"storeSmtNodes", smtTime.Milliseconds(),
-		"storeAggRecords", recordsTime.Milliseconds(),
-		"smtCount", len(smtNodes),
-		"recordCount", len(records),
-		"totalMs", timing.total.Milliseconds())
 
 	if smtErr != nil {
 		return timing, fmt.Errorf("failed to store SMT nodes: %w", smtErr)

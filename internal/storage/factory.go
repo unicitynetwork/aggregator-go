@@ -91,6 +91,8 @@ func createRedisCommitmentQueue(ctx context.Context, cfg *config.Config, log *lo
 	batchConfig := &redis.BatchConfig{
 		FlushInterval:   cfg.Storage.RedisFlushInterval,
 		MaxBatchSize:    cfg.Storage.RedisMaxBatchSize,
+		AckBatchSize:    cfg.Storage.RedisAckBatchSize,
+		DeleteAfterAck:  cfg.Storage.RedisDeleteAfterAck,
 		CleanupInterval: cfg.Storage.RedisCleanupInterval,
 		MaxStreamLength: cfg.Storage.RedisMaxStreamLength,
 	}

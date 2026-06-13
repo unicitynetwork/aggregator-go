@@ -13,6 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -25,12 +26,16 @@ const (
 	maxStreamLength      = 1000000                // Keep last 1M messages
 	defaultFlushInterval = 100 * time.Millisecond // How often to flush pending items to Redis
 	defaultBatchSize     = 5000                   // Max batch size before forcing flush
+	defaultAckBatchSize  = 1000                   // Max stream IDs per XACK/XDEL
+	defaultDeleteQueue   = 1024                   // Max queued XDEL batches
 )
 
 // BatchConfig configures the asynchronous batching behavior
 type BatchConfig struct {
 	FlushInterval   time.Duration // How often to flush pending items
 	MaxBatchSize    int           // Max items before forcing flush
+	AckBatchSize    int           // Max items per XACK/XDEL call
+	DeleteAfterAck  bool          // Delete stream entries after successful ACK
 	CleanupInterval time.Duration // How often to trim the stream
 	MaxStreamLength int64         // Maximum stream length before trimming
 }
@@ -40,6 +45,8 @@ func DefaultBatchConfig() *BatchConfig {
 	return &BatchConfig{
 		FlushInterval:   defaultFlushInterval,
 		MaxBatchSize:    defaultBatchSize,
+		AckBatchSize:    defaultAckBatchSize,
+		DeleteAfterAck:  true,
 		CleanupInterval: cleanupInterval,
 		MaxStreamLength: maxStreamLength,
 	}
@@ -62,6 +69,7 @@ type CommitmentStorage struct {
 	batchConfig *BatchConfig
 	logger      *logger.Logger
 	wg          sync.WaitGroup // Tracks background goroutines for graceful shutdown
+	deleteQueue chan []string
 
 	// Restart recovery: on startup, exhaust all pending messages before reading new ones
 	// This ensures messages stuck in "pending" state (from crashed consumer) are recovered
@@ -88,6 +96,7 @@ func NewCommitmentStorage(client *redis.Client, streamName string, serverID stri
 		batchConfig: batchConfig,
 		logger:      log,
 		pendingChan: make(chan *pendingCommitment, batchConfig.MaxBatchSize*2), // Buffer for 2x max batch
+		deleteQueue: make(chan []string, defaultDeleteQueue),
 		flushTicker: time.NewTicker(batchConfig.FlushInterval),
 	}
 
@@ -113,6 +122,11 @@ func (cs *CommitmentStorage) Initialize(ctx context.Context) error {
 	if cs.batchConfig.CleanupInterval > 0 {
 		cs.wg.Go(func() {
 			cs.periodicCleanup(ctx)
+		})
+	}
+	if cs.batchConfig.DeleteAfterAck {
+		cs.wg.Go(func() {
+			cs.deleteAckedEntries(ctx)
 		})
 	}
 
@@ -480,6 +494,7 @@ func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interf
 	if len(entries) == 0 {
 		return nil
 	}
+	startTime := time.Now()
 
 	streamIDs := make([]string, len(entries))
 	for i, entry := range entries {
@@ -489,19 +504,96 @@ func (cs *CommitmentStorage) MarkProcessed(ctx context.Context, entries []interf
 		streamIDs[i] = entry.StreamID
 	}
 
-	const maxAckBatch = 1000
-	for start := 0; start < len(streamIDs); start += maxAckBatch {
-		end := start + maxAckBatch
+	ackBatchSize := cs.batchConfig.AckBatchSize
+	if ackBatchSize <= 0 {
+		ackBatchSize = defaultAckBatchSize
+	}
+
+	for start := 0; start < len(streamIDs); start += ackBatchSize {
+		end := start + ackBatchSize
 		if end > len(streamIDs) {
 			end = len(streamIDs)
 		}
 
-		if err := cs.client.XAck(ctx, cs.streamName, consumerGroup, streamIDs[start:end]...).Err(); err != nil {
+		batch := streamIDs[start:end]
+		ackStart := time.Now()
+		if err := cs.client.XAck(ctx, cs.streamName, consumerGroup, batch...).Err(); err != nil {
 			return fmt.Errorf("failed to acknowledge entries by stream ID: %w", err)
+		}
+		ackDuration := time.Since(ackStart)
+		metrics.RedisCommitmentQueueOperationDuration.WithLabelValues("xack").Observe(ackDuration.Seconds())
+		if ackDuration > 100*time.Millisecond && cs.logger != nil {
+			cs.logger.WithContext(ctx).Warn("Redis XACK slow",
+				"stream", cs.streamName,
+				"count", len(batch),
+				"duration", ackDuration.String())
 		}
 	}
 
+	if cs.batchConfig.DeleteAfterAck {
+		for start := 0; start < len(streamIDs); start += ackBatchSize {
+			end := start + ackBatchSize
+			if end > len(streamIDs) {
+				end = len(streamIDs)
+			}
+			cs.enqueueDeleteAckedEntries(ctx, streamIDs[start:end])
+		}
+	}
+
+	duration := time.Since(startTime)
+	metrics.RedisCommitmentQueueOperationDuration.WithLabelValues("mark_processed").Observe(duration.Seconds())
+
 	return nil
+}
+
+func (cs *CommitmentStorage) enqueueDeleteAckedEntries(ctx context.Context, streamIDs []string) {
+	batch := append([]string(nil), streamIDs...)
+	select {
+	case cs.deleteQueue <- batch:
+	case <-cs.stopChan:
+		if cs.logger != nil {
+			cs.logger.WithContext(ctx).Warn("Skipping acknowledged Redis stream entry deletion because storage is closing",
+				"stream", cs.streamName,
+				"count", len(batch))
+		}
+	default:
+		if cs.logger != nil {
+			cs.logger.WithContext(ctx).Warn("Skipping acknowledged Redis stream entry deletion because delete queue is full",
+				"stream", cs.streamName,
+				"count", len(batch),
+				"queueCapacity", cap(cs.deleteQueue))
+		}
+	}
+}
+
+func (cs *CommitmentStorage) deleteAckedEntries(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-cs.stopChan:
+			return
+		case batch := <-cs.deleteQueue:
+			deleteStart := time.Now()
+			err := cs.client.XDel(ctx, cs.streamName, batch...).Err()
+			deleteDuration := time.Since(deleteStart)
+			metrics.RedisCommitmentQueueOperationDuration.WithLabelValues("xdel").Observe(deleteDuration.Seconds())
+			if err != nil && cs.logger != nil {
+				cs.logger.WithContext(ctx).Warn("Failed to delete acknowledged Redis stream entries",
+					"stream", cs.streamName,
+					"count", len(batch),
+					"error", err.Error())
+				continue
+			}
+			if deleteDuration > 100*time.Millisecond && cs.logger != nil {
+				cs.logger.WithContext(ctx).Warn("Redis XDEL slow",
+					"stream", cs.streamName,
+					"count", len(batch),
+					"deleteQueueDepth", len(cs.deleteQueue),
+					"duration", deleteDuration.String())
+			}
+		}
+	}
 }
 
 // Delete removes processed commitments (not typically needed with streams)
@@ -644,6 +736,17 @@ func (cs *CommitmentStorage) periodicCleanup(ctx context.Context) {
 // trimStream removes only acknowledged entries by trimming up to the oldest pending ID
 // (or last-delivered ID if no pending), so unprocessed messages are preserved.
 func (cs *CommitmentStorage) trimStream(ctx context.Context) {
+	trimStart := time.Now()
+	defer func() {
+		duration := time.Since(trimStart)
+		metrics.RedisCommitmentQueueOperationDuration.WithLabelValues("xtrim_check").Observe(duration.Seconds())
+		if duration > 100*time.Millisecond && cs.logger != nil {
+			cs.logger.WithContext(ctx).Warn("Redis trim check slow",
+				"stream", cs.streamName,
+				"duration", duration.String())
+		}
+	}()
+
 	// Get current count before trimming
 	countBefore, _ := cs.Count(ctx)
 
@@ -691,6 +794,7 @@ func (cs *CommitmentStorage) trimStream(ctx context.Context) {
 	}
 
 	trimmed, err := cs.client.XTrimMinID(ctx, cs.streamName, minID).Result()
+	metrics.RedisCommitmentQueueOperationDuration.WithLabelValues("xtrim").Observe(time.Since(trimStart).Seconds())
 	if err != nil {
 		cs.logger.WithContext(ctx).Warn("Failed to trim stream by min ID", "error", err.Error())
 		return
@@ -711,9 +815,6 @@ func (cs *CommitmentStorage) trimStream(ctx context.Context) {
 // StreamCertificationRequests continuously streams commitments using blocking Redis reads
 // This streams commitments directly to the provided channel as they arrive
 func (cs *CommitmentStorage) StreamCertificationRequests(ctx context.Context, commitmentChan chan<- *models.CertificationRequest) error {
-	windowStart := time.Now()
-	countThisWindow := 0
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -771,17 +872,6 @@ func (cs *CommitmentStorage) StreamCertificationRequests(ctx context.Context, co
 					// Stream commitment directly to channel
 					select {
 					case commitmentChan <- commitment:
-						countThisWindow++
-						elapsed := time.Since(windowStart)
-						if elapsed >= time.Second {
-							rate := float64(countThisWindow) / elapsed.Seconds()
-							cs.logger.Info("PERF: Redis stream throughput",
-								"serverID", cs.serverID,
-								"ratePerSec", fmt.Sprintf("%.0f", rate),
-								"windowMs", elapsed.Milliseconds())
-							windowStart = time.Now()
-							countThisWindow = 0
-						}
 					case <-ctx.Done():
 						return ctx.Err()
 					case <-cs.stopChan:

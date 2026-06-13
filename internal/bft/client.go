@@ -32,6 +32,11 @@ const (
 	normal
 )
 
+var (
+	ErrStaleCertificationRound = errors.New("stale certification round")
+	ErrCertifiedStateMismatch  = errors.New("certified state mismatch")
+)
+
 // BFTClientImpl handles communication with the BFT root chain via P2P network
 type (
 	BFTClientImpl struct {
@@ -172,9 +177,10 @@ func (c *BFTClientImpl) Start(ctx context.Context) error {
 
 	msgLoopCtx, cancelFn := context.WithCancel(ctx)
 	c.msgLoopCancelFn = cancelFn
+	nodeID := self.ID().String()
 	go func() {
 		c.logger.WithContext(ctx).Info("BFT client event loop started")
-		if err := c.loop(msgLoopCtx); err != nil {
+		if err := c.loop(msgLoopCtx, networkP2P, nodeID); err != nil {
 			c.logger.Error("BFT event loop thread exited with error", "error", err.Error())
 		} else {
 			c.logger.Info("BFT event loop thread finished")
@@ -210,8 +216,11 @@ func (c *BFTClientImpl) Stop() {
 	}
 }
 
-func (c *BFTClientImpl) sendHandshake(ctx context.Context) error {
+func (c *BFTClientImpl) sendHandshake(ctx context.Context, bftNetwork *BftNetwork, nodeID string) error {
 	c.logger.WithContext(ctx).Debug("sending handshake to root chain")
+	if bftNetwork == nil {
+		return errors.New("BFT network is not initialized")
+	}
 
 	// load trust base
 	rootEpoch := c.luc.Load().GetRootEpoch()
@@ -224,11 +233,11 @@ func (c *BFTClientImpl) sendHandshake(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to select root nodes for handshake: %w", err)
 	}
-	if err = c.network.Send(ctx,
+	if err = bftNetwork.Send(ctx,
 		handshake.Handshake{
 			PartitionID: c.PartitionID(),
 			ShardID:     c.ShardID(),
-			NodeID:      c.peer.ID().String(),
+			NodeID:      nodeID,
 		},
 		rootIDs...); err != nil {
 		return fmt.Errorf("failed to send handshake: %w", err)
@@ -236,8 +245,13 @@ func (c *BFTClientImpl) sendHandshake(ctx context.Context) error {
 	return nil
 }
 
-func (c *BFTClientImpl) loop(ctx context.Context) error {
-	if err := c.sendHandshake(ctx); err != nil {
+func (c *BFTClientImpl) loop(ctx context.Context, bftNetwork *BftNetwork, nodeID string) error {
+	if bftNetwork == nil {
+		return errors.New("BFT network is not initialized")
+	}
+	received := bftNetwork.ReceivedChannel()
+
+	if err := c.sendHandshake(ctx, bftNetwork, nodeID); err != nil {
 		return fmt.Errorf("failed to send initial handshake: %w", err)
 	}
 
@@ -248,7 +262,7 @@ func (c *BFTClientImpl) loop(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case m, ok := <-c.network.ReceivedChannel():
+		case m, ok := <-received:
 			if !ok {
 				return errors.New("network received channel is closed")
 			}
@@ -259,7 +273,7 @@ func (c *BFTClientImpl) loop(ctx context.Context) error {
 			lastCertTime := time.UnixMilli(lastCertMillis)
 			if time.Since(lastCertTime) > c.conf.InactivityTimeout {
 				c.logger.Warn("BFT client inactivity timeout exceeded, sending new handshake")
-				if err := c.sendHandshake(ctx); err != nil {
+				if err := c.sendHandshake(ctx, bftNetwork, nodeID); err != nil {
 					c.logger.Error("failed to send handshake on inactivity timeout", "error", err.Error())
 				}
 			}
@@ -305,31 +319,6 @@ func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *cer
 	return c.handleUnicityCertificate(ctx, &cr.UC, &cr.Technical)
 }
 
-// isRepeatUC checks if the new UC is a repeat of the previous UC
-// A repeat UC has the same InputRecord but higher root round number
-func (c *BFTClientImpl) isRepeatUC(prevUC, newUC *types.UnicityCertificate) bool {
-	if prevUC == nil || newUC == nil {
-		return false
-	}
-
-	// Check if InputRecords are equal (same partition round, state hash, etc.)
-	if prevUC.InputRecord.RoundNumber != newUC.InputRecord.RoundNumber {
-		return false
-	}
-	if !bytes.Equal(prevUC.InputRecord.Hash, newUC.InputRecord.Hash) {
-		return false
-	}
-	if !bytes.Equal(prevUC.InputRecord.PreviousHash, newUC.InputRecord.PreviousHash) {
-		return false
-	}
-	if !bytes.Equal(prevUC.InputRecord.BlockHash, newUC.InputRecord.BlockHash) {
-		return false
-	}
-
-	// If InputRecords match but root round is higher, it's a repeat UC
-	return prevUC.UnicitySeal.RootChainRoundNumber < newUC.UnicitySeal.RootChainRoundNumber
-}
-
 func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
 	// Ensure sequential processing of UCs to prevent race conditions
 	c.ucProcessingMutex.Lock()
@@ -346,8 +335,11 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		return nil
 	}
 
-	// Check for repeat UC (same InputRecord but higher root round)
-	if c.isRepeatUC(prevLUC, uc) {
+	isRepeat, err := uc.IsRepeat(prevLUC)
+	if err != nil {
+		return fmt.Errorf("failed to check repeat UC: %w", err)
+	}
+	if isRepeat {
 		c.logger.WithContext(ctx).Warn("Received repeat UC - root chain timed out waiting for certification",
 			"partitionRound", uc.GetRoundNumber(),
 			"prevRootRound", prevLUC.GetRootRoundNumber(),
@@ -477,6 +469,32 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		"blockNumber", blockNum,
 		"ucRound", expectedRound)
 
+	if c.proposedBlock == nil || uc.InputRecord == nil || !bytes.Equal(c.proposedBlock.RootHash, uc.InputRecord.Hash) {
+		proposedRoot := "<nil>"
+		if c.proposedBlock != nil {
+			proposedRoot = c.proposedBlock.RootHash.String()
+		}
+		certifiedRoot := "<nil>"
+		if uc.InputRecord != nil {
+			certifiedRoot = api.HexBytes(uc.InputRecord.Hash).String()
+		}
+		err := fmt.Errorf("%w: block %s proposed root %s, UC root %s",
+			ErrCertifiedStateMismatch, blockNum, proposedRoot, certifiedRoot)
+		c.logger.WithContext(ctx).Error("UC root does not match proposed block root",
+			"blockNumber", blockNum,
+			"proposedRoot", proposedRoot,
+			"certifiedRoot", certifiedRoot)
+		metrics.BFTErrorsTotal.Inc()
+		c.proposedBlock = nil
+		if c.eventBus != nil {
+			c.eventBus.Publish(events.TopicFatalError, events.FatalErrorEvent{
+				Source: "bft",
+				Error:  err.Error(),
+			})
+		}
+		return err
+	}
+
 	if certStart := c.certRequestTime.Swap(0); certStart > 0 {
 		metrics.BFTCertificationDuration.Observe(float64(time.Now().UnixNano()-certStart) / 1e9)
 	}
@@ -580,47 +598,54 @@ func (c *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.
 		return err
 	}
 
-	// Always prefer the expected round number from root chain if available
-	expectedRound := c.nextExpectedRound.Load()
-	if expectedRound > 0 {
-		originalBlockNumber := block.Index.Uint64()
-		if expectedRound != originalBlockNumber {
-			c.logger.WithContext(ctx).Warn("Adjusting block number to match root chain expectations",
-				"originalBlockNumber", originalBlockNumber,
-				"adjustedBlockNumber", expectedRound,
-				"difference", int64(expectedRound)-int64(originalBlockNumber))
-		} else {
+	if err := func() error {
+		c.ucProcessingMutex.Lock()
+		defer c.ucProcessingMutex.Unlock()
+
+		// The block root is computed for its original block number. If BFT has
+		// already moved to another round, this proposal is stale and must be dropped.
+		expectedRound := c.nextExpectedRound.Load()
+		if expectedRound > 0 {
+			blockNumber := block.Index.Uint64()
+			if expectedRound != blockNumber {
+				c.logger.WithContext(ctx).Warn("Rejecting stale certification request",
+					"blockNumber", blockNumber,
+					"expectedRound", expectedRound,
+					"difference", int64(expectedRound)-int64(blockNumber))
+				return fmt.Errorf("%w: expected round %d, got %d", ErrStaleCertificationRound, expectedRound, blockNumber)
+			}
 			c.logger.WithContext(ctx).Debug("Block number matches root chain expectations",
 				"blockNumber", expectedRound)
-		}
-		// Always use the expected round number when available
-		block.Index = api.NewBigInt(new(big.Int).SetUint64(expectedRound))
-	} else {
-		// No expected round yet - this might be the very first request
-		c.logger.WithContext(ctx).Debug("No expected round number from root chain yet, using proposed block number",
-			"blockNumber", block.Index.String())
-		// If we have a last UC, we can infer the expected round
-		if luc := c.luc.Load(); luc != nil {
-			// The next round should be the UC round + 1
-			inferredRound := luc.GetRoundNumber() + 1
-			if inferredRound != block.Index.Uint64() {
-				c.logger.WithContext(ctx).Warn("Inferring expected round from last UC",
-					"lastUCRound", luc.GetRoundNumber(),
-					"inferredRound", inferredRound,
-					"proposedRound", block.Index.Uint64())
-				block.Index = api.NewBigInt(new(big.Int).SetUint64(inferredRound))
+		} else {
+			// No expected round yet - this might be the very first request
+			c.logger.WithContext(ctx).Debug("No expected round number from root chain yet, using proposed block number",
+				"blockNumber", block.Index.String())
+			// If we have a last UC, we can infer the expected round
+			if luc := c.luc.Load(); luc != nil {
+				// The next round should be the UC round + 1
+				inferredRound := luc.GetRoundNumber() + 1
+				if inferredRound != block.Index.Uint64() {
+					c.logger.WithContext(ctx).Warn("Rejecting stale certification request inferred from last UC",
+						"lastUCRound", luc.GetRoundNumber(),
+						"inferredRound", inferredRound,
+						"proposedRound", block.Index.Uint64())
+					return fmt.Errorf("%w: expected round %d, got %d", ErrStaleCertificationRound, inferredRound, block.Index.Uint64())
+				}
 			}
 		}
+
+		c.proposedBlock = block
+		c.certRequestTime.Store(time.Now().UnixNano())
+		return nil
+	}(); err != nil {
+		return err
 	}
 
-	c.proposedBlock = block
-	c.certRequestTime.Store(time.Now().UnixNano())
-
 	c.logger.WithContext(ctx).Debug("Sending certification request",
-		"blockNumber", c.proposedBlock.Index.String(),
-		"roundNumber", c.proposedBlock.Index.Uint64())
+		"blockNumber", block.Index.String(),
+		"roundNumber", block.Index.Uint64())
 
-	if err := c.sendCertificationRequest(ctx, c.proposedBlock.RootHash.String(), c.proposedBlock.Index.Uint64()); err != nil {
+	if err := c.sendCertificationRequest(ctx, block.RootHash.String(), block.Index.Uint64()); err != nil {
 		c.logger.WithContext(ctx).Error("Failed to send certification request",
 			"blockNumber", block.Index.String(),
 			"error", err.Error())

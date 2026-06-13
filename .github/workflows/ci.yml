@@ -33,3 +33,52 @@ jobs:
       - name: test
         run: make test
 
+  # Builds and runs ONLY the RocksDB-backed disk-SMT tests, which are gated
+  # behind the `rocksdb` build tag and therefore excluded from the default jobs
+  # above. The `test` job already runs everything else without the tag, so this
+  # job must not re-run the whole suite. RocksDB is a cgo dependency linked at
+  # build time, so librocksdb and the compression libraries are installed on the
+  # runner. GO_BUILD_TAGS is consumed by `make build` via `?=`.
+  test-rocksdb:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
+      GO_BUILD_TAGS: rocksdb
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install RocksDB and compression libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            librocksdb-dev \
+            libsnappy-dev \
+            liblz4-dev \
+            libzstd-dev \
+            libbz2-dev \
+            zlib1g-dev
+      - name: vet (rocksdb)
+        run: go vet -tags rocksdb ./...
+      - name: build (rocksdb)
+        run: make build
+      - name: test (rocksdb-gated only)
+        run: |
+          # Discover the packages and test functions gated behind
+          # `//go:build rocksdb`, then run ONLY those tests. This skips the
+          # non-gated tests that share the round/service/backend packages (the
+          # default `test` job already covers them) and stays self-maintaining
+          # as gated tests are added.
+          set -euo pipefail
+          files=$(grep -rl --include='*_test.go' -- '//go:build rocksdb' .)
+          if [ -z "$files" ]; then
+            echo "::error::no //go:build rocksdb test files found"; exit 1
+          fi
+          pkgs=$(printf '%s\n' "$files" | xargs -n1 dirname | sort -u)
+          names=$(printf '%s\n' "$files" | xargs grep -hoE '^func Test[A-Za-z0-9_]+' \
+            | sed 's/^func //' | sort -u | paste -sd'|' -)
+          echo "Gated packages:"; printf '  %s\n' $pkgs
+          echo "Running $(printf '%s' "$names" | tr '|' '\n' | grep -c .) gated tests"
+          go test -tags rocksdb -v -run "^(${names})$" $pkgs

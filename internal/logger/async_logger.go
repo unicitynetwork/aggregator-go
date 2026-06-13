@@ -164,6 +164,8 @@ func (acl *AsyncContextLogger) log(level slog.Level, msg string, args ...any) {
 		// Fallback to synchronous logging if async logger is stopped
 		cl := acl.AsyncLogger.logger.WithContext(acl.ctx)
 		switch level {
+		case LevelTrace:
+			cl.Log(acl.ctx, LevelTrace, msg, args...)
 		case slog.LevelDebug:
 			cl.Debug(msg, args...)
 		case slog.LevelInfo:
@@ -190,6 +192,11 @@ func (acl *AsyncContextLogger) log(level slog.Level, msg string, args ...any) {
 		// Report periodically (every 1000 drops)
 		acl.checkAndReportDropped()
 	}
+}
+
+// Trace logs at trace level asynchronously.
+func (acl *AsyncContextLogger) Trace(msg string, args ...any) {
+	acl.log(LevelTrace, msg, args...)
 }
 
 // Debug logs at debug level asynchronously

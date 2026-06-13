@@ -42,6 +42,7 @@ const (
 	defaultProofInitialDelay = 2500 * time.Millisecond
 	defaultStartupProbeWait  = 60 * time.Second
 	startupProbeInterval     = 250 * time.Millisecond
+	defaultBufferSeconds     = 10
 )
 
 // Sharding modes for routing generated state IDs to shard endpoints.
@@ -62,6 +63,8 @@ var (
 	proofRetryDelay    = getEnvDuration("PROOF_RETRY_DELAY", defaultProofRetryDelay)
 	proofInitialDelay  = getEnvDuration("PROOF_INITIAL_DELAY", defaultProofInitialDelay)
 	startupProbeWait   = getEnvDuration("STARTUP_PROBE_WAIT", defaultStartupProbeWait)
+	commitmentBuffer   = getCommitmentBufferSize()
+	verifyProofs       = getEnvBool("VERIFY_PROOFS", true)
 	shardingMode       = getShardingMode()
 	shardTargets       = getEnvShardTargets()
 	enableH2C          = os.Getenv("ENABLE_H2C") != "false"
@@ -89,6 +92,14 @@ func getEnvInt(key string, defaultVal int) int {
 	return defaultVal
 }
 
+func getCommitmentBufferSize() int {
+	defaultVal := requestsPerSec * defaultBufferSeconds
+	if defaultVal < 1000 {
+		defaultVal = 1000
+	}
+	return getEnvInt("COMMITMENT_BUFFER_SIZE", defaultVal)
+}
+
 func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
 	if val := os.Getenv(key); val != "" {
 		if d, err := time.ParseDuration(val); err == nil {
@@ -97,6 +108,15 @@ func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
 		// Also try parsing as seconds (integer)
 		if secs, err := strconv.Atoi(val); err == nil {
 			return time.Duration(secs) * time.Second
+		}
+	}
+	return defaultVal
+}
+
+func getEnvBool(key string, defaultVal bool) bool {
+	if val := strings.TrimSpace(os.Getenv(key)); val != "" {
+		if b, err := strconv.ParseBool(val); err == nil {
+			return b
 		}
 	}
 	return defaultVal
@@ -492,8 +512,58 @@ func generateCommitmentRequest() *api.CertificationRequest {
 	}
 }
 
+func startCommitmentGenerator(ctx context.Context, total, bufferSize, workers, progressEvery int, label string) <-chan *api.CertificationRequest {
+	if bufferSize < 1 {
+		bufferSize = 1
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	out := make(chan *api.CertificationRequest, bufferSize)
+	jobs := make(chan struct{}, workers*2)
+	var generated atomic.Int64
+	var wg sync.WaitGroup
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range jobs {
+				req := generateCommitmentRequest()
+				select {
+				case out <- req:
+					count := generated.Add(1)
+					if progressEvery > 0 && count%int64(progressEvery) == 0 {
+						fmt.Printf("  Generated %d/%d %s commitments...\n", count, total, label)
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(jobs)
+		for i := 0; i < total; i++ {
+			select {
+			case jobs <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+
+	return out
+}
+
 // Worker function that continuously submits commitments
-func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics *Metrics, proofQueue chan proofJob, commitmentPool []*api.CertificationRequest, poolIndex *atomic.Int64, counters *RequestRateCounters, submissionWg *sync.WaitGroup) {
+func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics *Metrics, proofQueue chan proofJob, commitmentRequests <-chan *api.CertificationRequest, counters *RequestRateCounters, submissionWg *sync.WaitGroup) {
 	requestsPerWorker := float64(requestsPerSec) / float64(workerCount)
 	if requestsPerWorker <= 0 {
 		requestsPerWorker = 1
@@ -510,13 +580,25 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Get pre-generated commitment from pool (round-robin)
-			submissionWg.Add(1)
-			go func() {
-				defer submissionWg.Done()
+			var req *api.CertificationRequest
+			var ok bool
+			select {
+			case <-ctx.Done():
+				return
+			case req, ok = <-commitmentRequests:
+				if !ok {
+					metrics.recordError("commitment generator exhausted")
+					return
+				}
+				if req == nil {
+					metrics.recordError("commitment generator returned nil request")
+					return
+				}
+			}
 
-				idx := poolIndex.Add(1) % int64(len(commitmentPool))
-				req := commitmentPool[idx]
+			submissionWg.Add(1)
+			go func(req *api.CertificationRequest) {
+				defer submissionWg.Done()
 
 				shardIdx := selectShardIndex(req.StateID, shardClients)
 				client := shardClients[shardIdx].client
@@ -560,8 +642,6 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 						if sm := metrics.shard(shardIdx); sm != nil {
 							sm.stateIdExistsErr.Add(1)
 						}
-						stateIDStr := normalizeStateID(req.StateID.String())
-						metrics.submittedStateIDs.Store(stateIDStr, true)
 					}
 					return
 				}
@@ -595,14 +675,14 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 						sm.successfulRequests.Add(1)
 					}
 					stateIDStr := normalizeStateID(req.StateID.String())
-					metrics.submittedStateIDs.Store(stateIDStr, true)
 
 					if proofQueue != nil {
 						submittedAt := time.Now()
 						firstProofAt := submittedAt.Add(proofInitialDelay)
-						metrics.recordSubmissionTimestamp(stateIDStr, submittedAt)
+						job := proofJob{shardIdx: shardIdx, request: req, submittedAt: submittedAt, firstProofAt: firstProofAt}
 						select {
-						case proofQueue <- proofJob{shardIdx: shardIdx, request: req, submittedAt: submittedAt, firstProofAt: firstProofAt}:
+						case proofQueue <- job:
+							metrics.recordSubmissionTimestamp(stateIDStr, submittedAt)
 						default:
 							// Queue full, skip proof verification for this one
 						}
@@ -616,7 +696,7 @@ func commitmentWorker(ctx context.Context, shardClients []*ShardClient, metrics 
 						fmt.Printf("Unexpected status '%s' for request %s\n", submitResp.Status, req.StateID)
 					}
 				}
-			}()
+			}(req)
 		}
 	}
 }
@@ -648,6 +728,7 @@ func verifyProofJob(ctx context.Context, shardClients []*ShardClient, metrics *M
 	}
 
 	stateID := normalizeStateID(job.request.StateID.String())
+	defer metrics.clearSubmissionTimestamp(stateID)
 	shardIdx := job.shardIdx
 	startTime := time.Now()
 	client := shardClients[shardIdx].proofClient // Use separate proof client pool
@@ -765,10 +846,8 @@ func verifyProofJob(ctx context.Context, shardClients []*ShardClient, metrics *M
 		var totalLatency time.Duration
 		if !job.submittedAt.IsZero() {
 			totalLatency = time.Since(job.submittedAt)
-			metrics.clearSubmissionTimestamp(stateID)
 		} else if hasSubmission {
 			totalLatency = time.Since(submittedAt)
-			metrics.clearSubmissionTimestamp(stateID)
 		} else {
 			totalLatency = time.Since(startTime) + proofInitialDelay
 		}
@@ -1490,9 +1569,13 @@ func main() {
 	}
 	fmt.Printf("Duration: %v\n", testDuration)
 	fmt.Printf("Submission workers: %d\n", workerCount)
-	fmt.Printf("Proof scheduling: exact per-submission timer (PROOF_WORKERS ignored, value=%d)\n", proofWorkerCount)
-	fmt.Printf("Proof initial delay: %v\n", proofInitialDelay)
-	fmt.Printf("Proof retry delay: %v\n", proofRetryDelay)
+	if verifyProofs {
+		fmt.Printf("Proof scheduling: exact per-submission timer (PROOF_WORKERS ignored, value=%d)\n", proofWorkerCount)
+		fmt.Printf("Proof initial delay: %v\n", proofInitialDelay)
+		fmt.Printf("Proof retry delay: %v\n", proofRetryDelay)
+	} else {
+		fmt.Printf("Proof verification: disabled\n")
+	}
 	fmt.Printf("HTTP client pool size: %d\n", httpClientPoolSize)
 	if enableH2C {
 		fmt.Printf("H2C: enabled (HTTP/2 cleartext for plain HTTP)\n")
@@ -1529,13 +1612,14 @@ func main() {
 	// proofQueue receives successful submissions. Each proof job owns its
 	// submittedAt+PROOF_INITIAL_DELAY timer so first-attempt latency matches an
 	// external client polling at that exact delay.
-	proofQueue := make(chan proofJob, 10000)
+	var proofQueue chan proofJob
+	if verifyProofs {
+		proofQueue = make(chan proofJob, 10000)
+	}
 
-	// Pre-generate commitment pool to eliminate client-side crypto overhead
-	// Calculate pool size: total requests needed + 10% buffer
+	// Start a bounded commitment generator so client-side crypto stays ahead
+	// of submission without retaining the full test duration in memory.
 	poolSize := int(float64(requestsPerSec) * testDuration.Seconds() * 1.1)
-	fmt.Printf("\nPre-generating %d commitments (%d RPS × %v + 10%% buffer)...\n", poolSize, requestsPerSec, testDuration)
-	commitmentPool := make([]*api.CertificationRequest, poolSize)
 	workerCountPreGen := runtime.NumCPU()
 	if workerCountPreGen < 1 {
 		workerCountPreGen = 1
@@ -1543,26 +1627,11 @@ func main() {
 	if workerCountPreGen > 32 {
 		workerCountPreGen = 32
 	}
-	jobs := make(chan int, workerCountPreGen*2)
-	var preGenWG sync.WaitGroup
-	for w := 0; w < workerCountPreGen; w++ {
-		preGenWG.Add(1)
-		go func() {
-			defer preGenWG.Done()
-			for idx := range jobs {
-				commitmentPool[idx] = generateCommitmentRequest()
-			}
-		}()
-	}
-	for i := 0; i < poolSize; i++ {
-		jobs <- i
-		if (i+1)%10000 == 0 {
-			fmt.Printf("  Generated %d/%d commitments...\n", i+1, poolSize)
-		}
-	}
-	close(jobs)
-	preGenWG.Wait()
-	fmt.Printf("✓ Pre-generated %d commitments\n\n", poolSize)
+	fmt.Printf("\nStarting bounded commitment generator: total=%d buffer=%d workers=%d\n\n",
+		poolSize, commitmentBuffer, workerCountPreGen)
+	generatorCtx, generatorCancel := context.WithCancel(context.Background())
+	defer generatorCancel()
+	commitmentRequests := startCommitmentGenerator(generatorCtx, poolSize, commitmentBuffer, workerCountPreGen, 100000, "test")
 
 	// === WARMUP PHASE ===
 	fmt.Printf("========================================\n")
@@ -1570,36 +1639,18 @@ func main() {
 	fmt.Printf("========================================\n")
 	warmupDuration := 3 * time.Second
 	warmupPoolSize := int(float64(requestsPerSec) * warmupDuration.Seconds() * 1.1)
-	fmt.Printf("Generating %d warmup commitments (%d RPS × %v + 10%% buffer)...\n", warmupPoolSize, requestsPerSec, warmupDuration)
-
-	// Generate separate warmup pool
-	warmupPool := make([]*api.CertificationRequest, warmupPoolSize)
-	warmupJobs := make(chan int, workerCountPreGen*2)
-	var warmupPreGenWG sync.WaitGroup
-	for w := 0; w < workerCountPreGen; w++ {
-		warmupPreGenWG.Add(1)
-		go func() {
-			defer warmupPreGenWG.Done()
-			for idx := range warmupJobs {
-				warmupPool[idx] = generateCommitmentRequest()
-			}
-		}()
-	}
-	for i := 0; i < warmupPoolSize; i++ {
-		warmupJobs <- i
-	}
-	close(warmupJobs)
-	warmupPreGenWG.Wait()
-	fmt.Printf("✓ Generated %d warmup commitments\n", warmupPoolSize)
+	fmt.Printf("Starting warmup commitment generator: total=%d buffer=%d workers=%d\n",
+		warmupPoolSize, warmupPoolSize, workerCountPreGen)
+	warmupGeneratorCtx, warmupGeneratorCancel := context.WithCancel(context.Background())
+	warmupRequests := startCommitmentGenerator(warmupGeneratorCtx, warmupPoolSize, warmupPoolSize, workerCountPreGen, 0, "warmup")
+	defer warmupGeneratorCancel()
 	fmt.Printf("Warming up servers...\n")
 
 	warmupCtx, warmupCancel := context.WithTimeout(context.Background(), warmupDuration)
 
 	var warmupWg sync.WaitGroup
 	var warmupSubmissionWg sync.WaitGroup
-	var warmupPoolIndex atomic.Int64
 	var warmupMetrics Metrics
-	warmupMetrics.submittedStateIDs.Store("init", true) // Initialize map
 	warmupMetrics.submissionStartTime = time.Now()
 
 	// Start warmup workers with separate warmup pool
@@ -1607,13 +1658,14 @@ func main() {
 		warmupWg.Add(1)
 		go func() {
 			defer warmupWg.Done()
-			commitmentWorker(warmupCtx, shardClients, &warmupMetrics, nil, warmupPool, &warmupPoolIndex, nil, &warmupSubmissionWg)
+			commitmentWorker(warmupCtx, shardClients, &warmupMetrics, nil, warmupRequests, nil, &warmupSubmissionWg)
 		}()
 	}
 
 	// Wait for warmup to complete
 	<-warmupCtx.Done()
 	warmupCancel()
+	warmupGeneratorCancel()
 
 	// Wait for outstanding warmup requests
 	warmupSubmissionWg.Wait()
@@ -1649,7 +1701,6 @@ func main() {
 	proofCtx, proofCancel := context.WithTimeout(context.Background(), proofTimeout)
 	defer proofCancel()
 
-	var poolIndex atomic.Int64
 	var wg sync.WaitGroup
 	var submissionWg sync.WaitGroup // Track outstanding submission requests
 
@@ -1662,7 +1713,7 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			commitmentWorker(submitCtx, shardClients, metrics, proofQueue, commitmentPool, &poolIndex, rateCounters, &submissionWg)
+			commitmentWorker(submitCtx, shardClients, metrics, proofQueue, commitmentRequests, rateCounters, &submissionWg)
 		}()
 	}
 
@@ -1670,11 +1721,13 @@ func main() {
 	// each successful submission its own absolute first-proof timestamp.
 	var proofDispatchWg sync.WaitGroup
 	var proofJobsWg sync.WaitGroup
-	proofDispatchWg.Add(1)
-	go func() {
-		defer proofDispatchWg.Done()
-		scheduleProofJobs(proofCtx, proofQueue, shardClients, metrics, rateCounters, &proofJobsWg)
-	}()
+	if verifyProofs {
+		proofDispatchWg.Add(1)
+		go func() {
+			defer proofDispatchWg.Done()
+			scheduleProofJobs(proofCtx, proofQueue, shardClients, metrics, rateCounters, &proofJobsWg)
+		}()
+	}
 
 	perfLogCtx := proofCtx
 	plannedRequests := int64(float64(requestsPerSec) * testDuration.Seconds())
@@ -1686,7 +1739,11 @@ func main() {
 	// Wait for all workers to complete (both submission and proof verification).
 	// Proof jobs continue running for up to proofTimeout after submissions stop.
 	fmt.Printf("\n----------------------------------------\n")
-	fmt.Printf("Commitment submissions in progress; will verify proofs after...\n")
+	if verifyProofs {
+		fmt.Printf("Commitment submissions in progress; will verify proofs after...\n")
+	} else {
+		fmt.Printf("Commitment submissions in progress; proof verification disabled...\n")
+	}
 
 	wg.Wait() // Wait for submission workers to stop accepting new work
 
@@ -1694,11 +1751,15 @@ func main() {
 	fmt.Printf("Submission window closed; waiting for outstanding requests to complete...\n")
 	submissionWg.Wait()
 	metrics.submissionEndTime = time.Now()
-	close(proofQueue)
+	if verifyProofs {
+		close(proofQueue)
+	}
 	fmt.Printf("All submissions completed.\n")
 
-	proofDispatchWg.Wait() // Wait for scheduler to drain proofQueue
-	proofJobsWg.Wait()     // Wait for delayed proof jobs to finish request/retry/verification
+	if verifyProofs {
+		proofDispatchWg.Wait() // Wait for scheduler to drain proofQueue
+		proofJobsWg.Wait()     // Wait for delayed proof jobs to finish request/retry/verification
+	}
 	proofCancel()
 
 	// Stop submission phase and get counts
@@ -1706,7 +1767,9 @@ func main() {
 	successful := atomic.LoadInt64(&metrics.successfulRequests)
 	verified := atomic.LoadInt64(&metrics.proofVerified)
 	proofFailedCount := atomic.LoadInt64(&metrics.proofFailed)
-	if verified+proofFailedCount < successful {
+	if !verifyProofs {
+		fmt.Printf("Proof verification skipped.\n")
+	} else if verified+proofFailedCount < successful {
 		fmt.Printf("Warning: proof verification ended early (%d verified, %d failed, %d expected)\n",
 			verified, proofFailedCount, successful)
 	} else if verified == successful {
@@ -1747,63 +1810,65 @@ func main() {
 	proofVerified := atomic.LoadInt64(&metrics.proofVerified)
 	proofVerifyFailed := atomic.LoadInt64(&metrics.proofVerifyFailed)
 
-	fmt.Printf("\nINCLUSION PROOF VERIFICATION:\n")
-	fmt.Printf("Total proof attempts: %d\n", proofAttempts)
-	fmt.Printf("Proofs retrieved: %d\n", proofSuccess)
-	fmt.Printf("Proofs failed to retrieve: %d\n", proofFailed)
-	fmt.Printf("Proofs verified successfully: %d\n", proofVerified)
-	fmt.Printf("Proofs failed verification: %d\n", proofVerifyFailed)
-	if proofSuccess > 0 {
-		fmt.Printf("Proof retrieval attempt distribution:\n")
-		for attempt, count := range metrics.proofSuccessAttemptBuckets() {
-			fmt.Printf("  Attempt %d: %d\n", attempt+1, count)
-		}
-	}
-
-	if proofSuccess > 0 {
-		medianLatency, p95Latency, p99Latency := metrics.getProofLatencyStats()
-		fmt.Printf("Proof retrieval latency (submission to proof): median %v, p95 %v, p99 %v\n",
-			medianLatency.Truncate(time.Millisecond),
-			p95Latency.Truncate(time.Millisecond),
-			p99Latency.Truncate(time.Millisecond))
-
-		firstStartMedian, firstStartP95, firstStartP99, schedulerMedian, schedulerP95, schedulerP99 := metrics.getProofStartTimingStats()
-		if firstStartMedian > 0 || firstStartP95 > 0 || firstStartP99 > 0 {
-			fmt.Printf("First proof request start lag: median %v, p95 %v, p99 %v\n",
-				firstStartMedian.Truncate(time.Millisecond),
-				firstStartP95.Truncate(time.Millisecond),
-				firstStartP99.Truncate(time.Millisecond))
-			fmt.Printf("Proof scheduler lag after target: median %v, p95 %v, p99 %v\n",
-				schedulerMedian.Truncate(time.Millisecond),
-				schedulerP95.Truncate(time.Millisecond),
-				schedulerP99.Truncate(time.Millisecond))
+	if verifyProofs {
+		fmt.Printf("\nINCLUSION PROOF VERIFICATION:\n")
+		fmt.Printf("Total proof attempts: %d\n", proofAttempts)
+		fmt.Printf("Proofs retrieved: %d\n", proofSuccess)
+		fmt.Printf("Proofs failed to retrieve: %d\n", proofFailed)
+		fmt.Printf("Proofs verified successfully: %d\n", proofVerified)
+		fmt.Printf("Proofs failed verification: %d\n", proofVerifyFailed)
+		if proofSuccess > 0 {
+			fmt.Printf("Proof retrieval attempt distribution:\n")
+			for attempt, count := range metrics.proofSuccessAttemptBuckets() {
+				fmt.Printf("  Attempt %d: %d\n", attempt+1, count)
+			}
 		}
 
-		// Display proof request duration statistics
-		avg, min, max, p50, p95, p99 := metrics.getProofRequestStats()
-		if avg > 0 {
-			fmt.Printf("\nProof Request Duration Statistics:\n")
-			fmt.Printf("  Average: %v\n", avg.Truncate(time.Microsecond))
-			fmt.Printf("  Median (p50): %v\n", p50.Truncate(time.Microsecond))
-			fmt.Printf("  p95: %v\n", p95.Truncate(time.Microsecond))
-			fmt.Printf("  p99: %v\n", p99.Truncate(time.Microsecond))
-			fmt.Printf("  Min: %v\n", min.Truncate(time.Microsecond))
-			fmt.Printf("  Max: %v\n\n", max.Truncate(time.Microsecond))
+		if proofSuccess > 0 {
+			medianLatency, p95Latency, p99Latency := metrics.getProofLatencyStats()
+			fmt.Printf("Proof retrieval latency (submission to proof): median %v, p95 %v, p99 %v\n",
+				medianLatency.Truncate(time.Millisecond),
+				p95Latency.Truncate(time.Millisecond),
+				p99Latency.Truncate(time.Millisecond))
+
+			firstStartMedian, firstStartP95, firstStartP99, schedulerMedian, schedulerP95, schedulerP99 := metrics.getProofStartTimingStats()
+			if firstStartMedian > 0 || firstStartP95 > 0 || firstStartP99 > 0 {
+				fmt.Printf("First proof request start lag: median %v, p95 %v, p99 %v\n",
+					firstStartMedian.Truncate(time.Millisecond),
+					firstStartP95.Truncate(time.Millisecond),
+					firstStartP99.Truncate(time.Millisecond))
+				fmt.Printf("Proof scheduler lag after target: median %v, p95 %v, p99 %v\n",
+					schedulerMedian.Truncate(time.Millisecond),
+					schedulerP95.Truncate(time.Millisecond),
+					schedulerP99.Truncate(time.Millisecond))
+			}
+
+			// Display proof request duration statistics
+			avg, min, max, p50, p95, p99 := metrics.getProofRequestStats()
+			if avg > 0 {
+				fmt.Printf("\nProof Request Duration Statistics:\n")
+				fmt.Printf("  Average: %v\n", avg.Truncate(time.Microsecond))
+				fmt.Printf("  Median (p50): %v\n", p50.Truncate(time.Microsecond))
+				fmt.Printf("  p95: %v\n", p95.Truncate(time.Microsecond))
+				fmt.Printf("  p99: %v\n", p99.Truncate(time.Microsecond))
+				fmt.Printf("  Min: %v\n", min.Truncate(time.Microsecond))
+				fmt.Printf("  Max: %v\n\n", max.Truncate(time.Microsecond))
+			}
 		}
-	}
 
-	// Calculate verification rate based on successful submissions, not retrieved proofs
-	// (proofs may be retrieved multiple times due to retries)
-	successful = atomic.LoadInt64(&metrics.successfulRequests)
-	if successful > 0 {
-		verificationRate := float64(proofVerified) / float64(successful) * 100
-		fmt.Printf("Proof verification rate: %.2f%% (%d/%d submissions)\n", verificationRate, proofVerified, successful)
-	}
+		// Calculate verification rate based on successful submissions, not retrieved proofs
+		// (proofs may be retrieved multiple times due to retries)
+		successful = atomic.LoadInt64(&metrics.successfulRequests)
+		if successful > 0 {
+			verificationRate := float64(proofVerified) / float64(successful) * 100
+			fmt.Printf("Proof verification rate: %.2f%% (%d/%d submissions)\n", verificationRate, proofVerified, successful)
+		}
 
-	if proofVerified == successful {
-		fmt.Printf("\n✅ SUCCESS: All %d commitments have verified inclusion proofs!\n", proofVerified)
-	} else if proofVerified > 0 {
-		fmt.Printf("\n⚠️  Verified %d/%d proofs (%.1f%%)\n", proofVerified, successful, float64(proofVerified)/float64(successful)*100)
+		if proofVerified == successful {
+			fmt.Printf("\n✅ SUCCESS: All %d commitments have verified inclusion proofs!\n", proofVerified)
+		} else if proofVerified > 0 {
+			fmt.Printf("\n⚠️  Verified %d/%d proofs (%.1f%%)\n", proofVerified, successful, float64(proofVerified)/float64(successful)*100)
+		}
 	}
 
 	fmt.Printf("========================================\n")

@@ -14,6 +14,9 @@ import (
 type ContextKey string
 
 const (
+	// LevelTrace is for very high-volume diagnostics, such as per-request logs.
+	LevelTrace = slog.LevelDebug - 4
+
 	// StateIDKey is the context key for state ID
 	StateIDKey ContextKey = "state_id"
 	// JSONRPCIDKey is the context key for client-provided JSON-RPC id
@@ -56,6 +59,8 @@ func NewWithConfig(cfg LogConfig) (*Logger, error) {
 	// Parse log level
 	var logLevel slog.Level
 	switch strings.ToLower(cfg.Level) {
+	case "trace":
+		logLevel = LevelTrace
 	case "debug":
 		logLevel = slog.LevelDebug
 	case "info":
@@ -115,6 +120,14 @@ func NewWithConfig(cfg LogConfig) (*Logger, error) {
 	// Create handler options
 	opts := &slog.HandlerOptions{
 		Level: logLevel,
+		ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
+			if attr.Key == slog.LevelKey {
+				if level, ok := attr.Value.Any().(slog.Level); ok && level == LevelTrace {
+					attr.Value = slog.StringValue("TRACE")
+				}
+			}
+			return attr
+		},
 	}
 
 	// Create handler based on format
@@ -194,6 +207,10 @@ func (l *Logger) WithError(err error) *slog.Logger {
 // Context-aware logging methods
 func (l *Logger) DebugContext(ctx context.Context, msg string, args ...any) {
 	l.WithContext(ctx).Debug(msg, args...)
+}
+
+func (l *Logger) TraceContext(ctx context.Context, msg string, args ...any) {
+	l.WithContext(ctx).Log(ctx, LevelTrace, msg, args...)
 }
 
 func (l *Logger) InfoContext(ctx context.Context, msg string, args ...any) {

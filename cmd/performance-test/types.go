@@ -69,7 +69,6 @@ type Metrics struct {
 	startTime           time.Time
 	submissionStartTime time.Time
 	submissionEndTime   time.Time
-	submittedStateIDs   sync.Map
 	submissionTimes     sync.Map
 	errorCounts         sync.Map
 	activeConnections   atomic.Int64
@@ -334,14 +333,9 @@ func (m *Metrics) getProofRequestStats() (avg, min, max, p50, p95, p99 time.Dura
 
 	sorted := make([]time.Duration, len(m.proofRequestDurations))
 	copy(sorted, m.proofRequestDurations)
-
-	for i := 0; i < len(sorted); i++ {
-		for j := i + 1; j < len(sorted); j++ {
-			if sorted[i] > sorted[j] {
-				sorted[i], sorted[j] = sorted[j], sorted[i]
-			}
-		}
-	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i] < sorted[j]
+	})
 
 	var total time.Duration
 	for _, d := range sorted {

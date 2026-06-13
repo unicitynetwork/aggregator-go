@@ -2,47 +2,85 @@ package round
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
-	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
+
+func commitmentLeafInput(commitment *models.CertificationRequest) (smtbackend.LeafInput, error) {
+	key, err := commitment.StateID.GetTreeKey()
+	if err != nil {
+		return smtbackend.LeafInput{}, err
+	}
+	leafValue, err := commitment.LeafValue()
+	if err != nil {
+		return smtbackend.LeafInput{}, err
+	}
+	return smtbackend.LeafInput{
+		Key:   append([]byte(nil), key...),
+		Value: append([]byte(nil), leafValue...),
+	}, nil
+}
 
 func addCommitmentLeaves(
 	ctx context.Context,
 	log *logger.Logger,
-	snapshot *smt.ThreadSafeSmtSnapshot,
-	leaves []*smt.Leaf,
+	snapshot smtbackend.Snapshot,
+	leaves []smtbackend.LeafInput,
 	commitments []*models.CertificationRequest,
-) ([]*models.CertificationRequest, []*smt.Leaf, []interfaces.CertificationRequestAck) {
-	result := snapshot.AddLeavesClassified(leaves)
+) ([]*models.CertificationRequest, []smtbackend.LeafInput, []interfaces.CertificationRequestAck, error) {
+	result, err := snapshot.AddLeavesClassified(ctx, leaves)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	metrics.SMTBatchMaterializedNodes.Observe(float64(result.Stats.MaterializedNodes))
+	metrics.SMTBatchNodeReads.Observe(float64(result.Stats.NodeReads))
+	metrics.SMTBatchOverlayEntries.Observe(float64(result.Stats.OverlayEntries))
+	metrics.SMTBatchOverlayBytes.Observe(float64(result.Stats.OverlayBytes))
 
-	addedCommitments := make([]*models.CertificationRequest, 0, len(result.AddedIndexes))
-	addedLeaves := make([]*smt.Leaf, 0, len(result.AddedIndexes))
-	for _, idx := range result.AddedIndexes {
+	addedCommitments := make([]*models.CertificationRequest, 0, len(result.AcceptedIndexes))
+	addedLeaves := make([]smtbackend.LeafInput, 0, len(result.AcceptedIndexes))
+	for _, idx := range result.AcceptedIndexes {
+		if idx < 0 || idx >= len(commitments) || idx >= len(leaves) {
+			return nil, nil, nil, fmt.Errorf("SMT backend returned invalid accepted leaf index %d", idx)
+		}
 		addedCommitments = append(addedCommitments, commitments[idx])
 		addedLeaves = append(addedLeaves, leaves[idx])
 	}
 
 	dropped := make([]interfaces.CertificationRequestAck, 0, len(result.DuplicateIndexes)+len(result.Rejected))
 	for _, idx := range result.DuplicateIndexes {
+		if idx < 0 || idx >= len(commitments) {
+			return nil, nil, nil, fmt.Errorf("SMT backend returned invalid duplicate leaf index %d", idx)
+		}
 		dropped = append(dropped, interfaces.CertificationRequestAck{
 			StateID:  commitments[idx].StateID,
 			StreamID: commitments[idx].StreamID,
 		})
 	}
 	for _, rejected := range result.Rejected {
+		errText := "<nil>"
+		if rejected.Err != nil {
+			errText = rejected.Err.Error()
+		}
+		if rejected.Index < 0 || rejected.Index >= len(commitments) {
+			return nil, nil, nil, fmt.Errorf("SMT backend returned invalid rejected leaf index %d", rejected.Index)
+		}
 		log.WithContext(ctx).Warn("Rejected commitment leaf",
-			"path", leaves[rejected.Index].Path.String(),
-			"error", rejected.Err.Error())
+			"stateID", commitments[rejected.Index].StateID.String(),
+			"reason", string(rejected.Reason),
+			"error", errText)
 		dropped = append(dropped, interfaces.CertificationRequestAck{
 			StateID:  commitments[rejected.Index].StateID,
 			StreamID: commitments[rejected.Index].StreamID,
 		})
 	}
 
-	return addedCommitments, addedLeaves, dropped
+	return addedCommitments, addedLeaves, dropped, nil
 }
 
 func ackDroppedCommitments(ctx context.Context, log *logger.Logger, queue interfaces.CommitmentQueue, dropped []interfaces.CertificationRequestAck) {

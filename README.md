@@ -133,6 +133,8 @@ The service is configured via environment variables:
 | `MONGODB_MAX_POOL_SIZE` | Maximum connection pool size | `100` |
 | `MONGODB_MIN_POOL_SIZE` | Minimum connection pool size | `5` |
 | `MONGODB_MAX_CONN_IDLE_TIME` | Max connection idle time | `5m` |
+| `MONGODB_WRITE_CONCERN` | MongoDB write concern: `1` or `majority` | `majority` |
+| `MONGODB_WRITE_JOURNAL` | Require journaled MongoDB writes | `true` |
 
 ### High Availability Configuration
 | Variable | Description | Default |
@@ -171,6 +173,28 @@ The service is configured via environment variables:
 | `REDIS_STREAM_NAME` | Redis stream name for commitments (allows multiple shards to share a Redis instance) | `commitments` |
 | `REDIS_FLUSH_INTERVAL` | Interval for flushing pending commitments to Redis | `100ms` |
 | `REDIS_MAX_BATCH_SIZE` | Maximum batch size before forcing flush | `5000` |
+
+#### SMT Backend
+
+The default SMT backend is in-memory. A RocksDB-backed SMT can be enabled for `bft-shard` deployments (standalone or HA) by building with the `rocksdb` tag and setting `SMT_BACKEND=rocksdb`.
+
+```bash
+go build -tags rocksdb ./cmd/aggregator
+```
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SMT_BACKEND` | SMT backend: `memory` or `rocksdb` | `memory` |
+| `SMT_DISK_PATH` | RocksDB data directory when `SMT_BACKEND=rocksdb` | required |
+| `SMT_ROCKSDB_CACHE_MB` | RocksDB block cache size in MB | `1024` |
+| `SMT_ROCKSDB_BG_JOBS` | RocksDB background jobs | `8` |
+| `SMT_ROCKSDB_SUBCOMPACTIONS` | RocksDB subcompactions | `4` |
+| `SMT_ROCKSDB_BLOOM_BITS` | Bloom filter bits per key | `10` |
+| `SMT_ROCKSDB_MEMTABLE_MB` | RocksDB write buffer size in MB | `64` |
+| `SMT_MATERIALIZE_WORKERS` | Parallel workers for SMT materialization | `64` |
+| `SMT_STARTUP_REPLAY_LIMIT_BLOCKS` | Maximum finalized MongoDB blocks to replay into RocksDB on startup | `100` |
+
+RocksDB SMT with HA is supported only in `bft-shard` mode. It is rejected for application-level `parent`/`child` sharding modes; use `SMT_BACKEND=memory` there.
 
 #### Redis Sentinel (HA)
 
@@ -814,13 +838,36 @@ docker logs -f aggregator-bft-shard0   # serves on :3001 (shard "0")
 docker logs -f aggregator-bft-shard1   # serves on :3002 (shard "1")
 
 # Teardown:
-docker compose -f bft-sharding-compose.yml down
+docker compose -f bft-sharding-compose.yml down --remove-orphans
 ```
 
 Other make targets:
 
 - `make docker-run-bft-sh-clean-keep-tb` — preserves BFT genesis/trust-base across restarts; reinitializes MongoDB/Redis only.
 - `make docker-restart-bft-sh` — rebuilds and restarts only the aggregators, leaving BFT nodes running.
+
+#### Quickstart with local HA replicas
+
+Use the standalone HA compose file for a local multi-replica `bft-shard` deployment with RocksDB SMT:
+
+```bash
+make docker-run-bft-sh-ha-clean
+
+# Stable shard endpoints for SDK/perf tests:
+#   shard "0": http://localhost:3001  (HAProxy -> active shard 0 replica)
+#   shard "1": http://localhost:3002  (HAProxy -> active shard 1 replica)
+
+# Tail replica logs:
+docker logs -f aggregator-bft-shard0
+docker logs -f aggregator-bft-shard0-b
+docker logs -f aggregator-bft-shard1
+docker logs -f aggregator-bft-shard1-b
+
+# Teardown:
+docker compose -f bft-sharding-ha-compose.yml down --remove-orphans
+```
+
+The base BFT-shard compose file remains the default single-replica topology. The HA compose file is standalone: it runs two replicas per shard, each with its own RocksDB directory, behind per-shard HAProxy instances that route to the current leader via `/health/leader`.
 
 #### Driving test traffic
 

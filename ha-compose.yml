@@ -245,6 +245,9 @@ services:
       REDIS_FLUSH_INTERVAL: "50ms"
       REDIS_MAX_BATCH_SIZE: "2000"
 
+      # SMT Backend Configuration
+      SMT_BACKEND: "memory"
+
       # High Availability Configuration
       DISABLE_HIGH_AVAILABILITY: "false"
       LOCK_TTL_SECONDS: "30"

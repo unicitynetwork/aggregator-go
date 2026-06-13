@@ -77,7 +77,7 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 	require.NoError(t, err, "Should create RoundManager")
 
 	// Test persistence
-	smtNodes, err := rm.convertLeavesToNodes(testLeaves)
+	smtNodes, err := rm.convertLeavesToNodes(testLeafInputsFromLegacyLeaves(t, testLeaves))
 	require.NoError(t, err)
 	err = storage.SmtStorage().StoreBatch(ctx, smtNodes)
 	require.NoError(t, err, "Should persist SMT nodes")
@@ -149,7 +149,7 @@ func TestLargeSmtRestoration(t *testing.T) {
 	freshHash := freshSmt.GetRootHashRaw()
 
 	// Persist leaves to storage
-	smtNodes, err := rm.convertLeavesToNodes(testLeaves)
+	smtNodes, err := rm.convertLeavesToNodes(testLeafInputsFromLegacyLeaves(t, testLeaves))
 	require.NoError(t, err)
 	err = storage.SmtStorage().StoreBatch(ctx, smtNodes)
 	require.NoError(t, err, "Should persist large number of SMT nodes")
@@ -200,7 +200,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 		Number:      api.NewBigInt(big.NewInt(1)),
 		State:       RoundStateProcessing,
 		Commitments: testCommitments,
-		Snapshot:    rm.smt.CreateSnapshot(),
+		Snapshot:    testRMSnapshot(t, ctx, rm),
 	}
 
 	blockNumber := api.NewBigInt(big.NewInt(1))
@@ -215,7 +215,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	require.NoError(t, err, "processMiniBatch should succeed")
 
 	// Get the raw 32-byte root hash from the snapshot (matches UC.IR.h / V2 wire format)
-	rootHashBytes := api.HexBytes(rm.currentRound.Snapshot.GetRootHashRaw())
+	rootHashBytes := api.HexBytes(testSnapshotRootRaw(t, ctx, rm.currentRound.Snapshot))
 	require.NotEmpty(t, rootHashBytes, "Root hash should not be empty")
 
 	// After processBatch, SMT nodes are not yet persisted - they're stored in round state
@@ -320,7 +320,7 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 	require.NoError(t, err, "Should create RoundManager")
 
 	// Persist SMT nodes to storage
-	smtNodes, err := rm.convertLeavesToNodes(testLeaves)
+	smtNodes, err := rm.convertLeavesToNodes(testLeafInputsFromLegacyLeaves(t, testLeaves))
 	require.NoError(t, err)
 	err = storage.SmtStorage().StoreBatch(ctx, smtNodes)
 	require.NoError(t, err, "Should persist SMT nodes")

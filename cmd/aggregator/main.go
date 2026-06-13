@@ -18,6 +18,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/ha"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/service"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
@@ -202,7 +203,7 @@ func main() {
 
 	// Initialize leader selector and block syncer if enabled
 	var ls leaderSelector
-	var bs *ha.BlockSyncer
+	var bs blockSyncer
 	if cfg.HA.Enabled {
 		log.WithComponent("main").Info("High availability mode enabled")
 		ls = ha.NewLeaderElection(log, cfg.HA, storageInstance.LeadershipStorage(), eventBus)
@@ -214,13 +215,13 @@ func main() {
 			log.WithComponent("main").Info("Block syncing disabled for parent aggregator mode - SMT will be reconstructed on leadership transition")
 		} else {
 			log.WithComponent("main").Info("Starting block syncer")
-			bs = ha.NewBlockSyncer(log, ls, storageInstance, threadSafeSmt, cfg.Sharding.Child.ShardID, cfg.Processing.RoundDuration, stateTracker)
+			bs = ha.NewBlockSyncer(log, ls, storageInstance, roundManager.GetSMTBackend(), cfg.Sharding.Child.ShardID, cfg.Processing.RoundDuration, stateTracker)
 			bs.Start(ctx)
 		}
 
 		// In HA mode, listen for leadership changes to activate/deactivate the round manager
 		go func() {
-			if err := startLeaderChangedEventListener(ctx, log, cfg, roundManager, bs, eventBus); err != nil {
+			if err := startLeaderChangedEventListener(ctx, log, cfg, roundManager, bs, ls, eventBus); err != nil {
 				log.WithComponent("ha-listener").Error("Fatal error on leader changed event listener", "error", err.Error())
 			}
 		}()
@@ -336,7 +337,7 @@ func startFatalErrorListener(ctx context.Context, log *logger.Logger, eventBus *
 	}()
 }
 
-func startLeaderChangedEventListener(ctx context.Context, log *logger.Logger, cfg *config.Config, roundManager round.Manager, bs *ha.BlockSyncer, eventBus *events.EventBus) error {
+func startLeaderChangedEventListener(ctx context.Context, log *logger.Logger, cfg *config.Config, roundManager round.Manager, bs blockSyncer, leader leaderSelector, eventBus *events.EventBus) error {
 	log.WithComponent("ha-listener").Info("Subscribing to TopicLeaderChanged")
 	leaderChangedCh := eventBus.Subscribe(events.TopicLeaderChanged)
 	defer func() {
@@ -356,16 +357,37 @@ func startLeaderChangedEventListener(ctx context.Context, log *logger.Logger, cf
 				// In child and standalone mode, we must sync SMT state before starting to produce blocks
 				// In parent mode, the Activate call handles SMT reconstruction, no block sync needed.
 				if cfg.Sharding.Mode != config.ShardingModeParent {
-					log.WithComponent("ha-listener").Info("Becoming leader, syncing to latest block...")
-					if err := bs.SyncToLatestBlock(ctx); err != nil {
-						log.WithComponent("ha-listener").Error("failed to sync to latest block on leadership change", "error", err)
+					if bs == nil {
+						log.WithComponent("ha-listener").Error("Cannot activate leader without block syncer")
+						resignLeadership(ctx, log, leader)
 						continue
-					} else {
-						log.WithComponent("ha-listener").Info("Sync complete.")
 					}
+					if err := syncBeforeActivation(ctx, log, bs, leader, eventBus); err != nil {
+						log.WithComponent("ha-listener").Error("failed to sync to latest block on leadership change", "error", err)
+						if errors.Is(err, ha.ErrDiskSMTDiverged) {
+							resignLeadership(ctx, log, leader)
+							publishFatalPromotionError(eventBus, err)
+							continue
+						}
+						if ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, errLeadershipLost) {
+							resignLeadership(ctx, log, leader)
+						}
+						continue
+					}
+				}
+				isStillLeader, err := leader.VerifyLeadership(ctx)
+				if err != nil {
+					log.WithComponent("ha-listener").Error("Failed to verify leadership before activation", "error", err)
+					resignLeadership(ctx, log, leader)
+					continue
+				}
+				if !isStillLeader {
+					log.WithComponent("ha-listener").Warn("Leadership was lost before activation")
+					continue
 				}
 				if err := roundManager.Activate(ctx); err != nil {
 					log.WithComponent("ha-listener").Error("Failed to activate round manager", "error", err)
+					resignLeadership(ctx, log, leader)
 				}
 			} else {
 				if err := roundManager.Deactivate(ctx); err != nil {
@@ -376,8 +398,88 @@ func startLeaderChangedEventListener(ctx context.Context, log *logger.Logger, cf
 	}
 }
 
+var errLeadershipLost = errors.New("leadership lost")
+
+func syncBeforeActivation(ctx context.Context, log *logger.Logger, bs blockSyncer, leader leaderSelector, eventBus *events.EventBus) error {
+	syncCtx, cancel := leadershipLossContext(ctx, log, eventBus)
+	defer cancel()
+
+	isStillLeader, err := leader.VerifyLeadership(syncCtx)
+	if err != nil {
+		return fmt.Errorf("failed to verify leadership before sync: %w", err)
+	}
+	if !isStillLeader {
+		return errLeadershipLost
+	}
+
+	log.WithComponent("ha-listener").Info("Becoming leader, syncing to latest finalized block...")
+	target, err := bs.SyncToLatestFinalizedBlock(syncCtx)
+	if err != nil {
+		return err
+	}
+	if err := syncCtx.Err(); err != nil {
+		return err
+	}
+	if target == nil {
+		log.WithComponent("ha-listener").Info("Sync complete, no finalized blocks found")
+		return nil
+	}
+	log.WithComponent("ha-listener").Info("Sync complete",
+		"targetBlock", target.Index.String(),
+		"targetRoot", target.RootHash.String())
+	return nil
+}
+
+func leadershipLossContext(ctx context.Context, log *logger.Logger, eventBus *events.EventBus) (context.Context, context.CancelFunc) {
+	syncCtx, cancel := context.WithCancel(ctx)
+	leaderChangedCh := eventBus.Subscribe(events.TopicLeaderChanged)
+	go func() {
+		defer func() {
+			if err := eventBus.Unsubscribe(events.TopicLeaderChanged, leaderChangedCh); err != nil {
+				log.WithComponent("ha-listener").Error("Failed to unsubscribe from promotion leadership watcher", "error", err)
+			}
+		}()
+		for {
+			select {
+			case <-syncCtx.Done():
+				return
+			case e := <-leaderChangedCh:
+				evt, ok := e.(*events.LeaderChangedEvent)
+				if ok && !evt.IsLeader {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return syncCtx, cancel
+}
+
+func resignLeadership(ctx context.Context, log *logger.Logger, leader leaderSelector) {
+	resignCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := leader.Resign(resignCtx); err != nil {
+		log.WithComponent("ha-listener").Error("Failed to resign leadership", "error", err)
+	}
+}
+
+func publishFatalPromotionError(eventBus *events.EventBus, err error) {
+	eventBus.Publish(events.TopicFatalError, events.FatalErrorEvent{
+		Source: "ha-promotion",
+		Error:  err.Error(),
+	})
+}
+
+type blockSyncer interface {
+	Start(ctx context.Context)
+	Stop()
+	SyncToLatestFinalizedBlock(ctx context.Context) (*models.Block, error)
+}
+
 type leaderSelector interface {
 	IsLeader(ctx context.Context) (bool, error)
+	VerifyLeadership(ctx context.Context) (bool, error)
+	Resign(ctx context.Context) error
 	Start(ctx context.Context)
 	Stop(ctx context.Context)
 }

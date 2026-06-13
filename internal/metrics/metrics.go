@@ -236,6 +236,14 @@ var (
 		},
 	)
 
+	InclusionProofPathTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_inclusion_proof_path_total",
+			Help: "Inclusion proof requests and internal proof-path decisions.",
+		},
+		[]string{"path"},
+	)
+
 	ParentProofErrorsTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "aggregator_parent_proof_errors_total",
@@ -249,6 +257,80 @@ var (
 			Help:    "SMT batch update latency.",
 			Buckets: prometheus.DefBuckets,
 		},
+	)
+
+	SMTCommitDuration = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "aggregator_smt_commit_duration_seconds",
+			Help:    "SMT snapshot commit latency during block finalization.",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+
+	SMTBatchMaterializedNodes = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "aggregator_smt_batch_materialized_nodes",
+			Help:    "Logical SMT nodes materialized while applying a batch.",
+			Buckets: []float64{0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000},
+		},
+	)
+
+	SMTBatchNodeReads = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "aggregator_smt_batch_node_reads",
+			Help:    "Physical SMT node reads while applying a batch.",
+			Buckets: []float64{0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000},
+		},
+	)
+
+	SMTBatchOverlayEntries = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "aggregator_smt_batch_overlay_entries",
+			Help:    "SMT overlay entries produced by a batch.",
+			Buckets: []float64{0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000},
+		},
+	)
+
+	SMTBatchOverlayBytes = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "aggregator_smt_batch_overlay_bytes",
+			Help:    "Estimated SMT overlay bytes produced by a batch.",
+			Buckets: prometheus.ExponentialBuckets(128, 2, 18),
+		},
+	)
+
+	// Counts recovery actions, not startup attempts. A single startup may emit
+	// multiple actions, for example await_finalize followed by finalize_stuck.
+	SMTStartupRecoveryActions = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_smt_startup_recovery_actions_total",
+			Help: "SMT startup recovery actions by outcome.",
+		},
+		[]string{"action"},
+	)
+
+	SMTDiskProofSnapshotsActive = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "aggregator_smt_disk_proof_snapshots_active",
+			Help: "Currently active disk SMT proof-read RocksDB snapshots.",
+		},
+	)
+
+	SMTDiskProofSnapshotHoldDuration = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "aggregator_smt_disk_proof_snapshot_hold_duration_seconds",
+			Help:    "How long disk SMT proof-read RocksDB snapshots are held.",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+
+	RedisCommitmentQueueOperationDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "aggregator_redis_commitment_queue_operation_duration_seconds",
+			Help:    "Redis commitment queue operation latency.",
+			Buckets: []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
+		},
+		[]string{"operation"},
 	)
 
 	SMTNodesPersistedTotal = promauto.NewGaugeFunc(

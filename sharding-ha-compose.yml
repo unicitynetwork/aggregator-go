@@ -335,6 +335,9 @@ services:
       REDIS_FLUSH_INTERVAL: "50ms"
       REDIS_MAX_BATCH_SIZE: "2000"
 
+      # SMT Backend Configuration
+      SMT_BACKEND: "memory"
+
       # Sharding configuration
       SHARDING_MODE: "child"
       SHARD_ID_LENGTH: 1

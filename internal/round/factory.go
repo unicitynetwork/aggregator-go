@@ -13,6 +13,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -24,10 +25,14 @@ type Manager interface {
 	Activate(ctx context.Context) error
 	Deactivate(ctx context.Context) error
 	GetSMT() *smt.ThreadSafeSMT
+	GetSMTBackend() smtbackend.Backend
 	CheckParentHealth(ctx context.Context) error
 	// FinalizationReadLock blocks during the SMT commit+finalize window to keep root/block consistent.
 	FinalizationReadLock() func()
 	GetKnownNotReadyBlock(stateID api.StateID) (*models.Block, bool)
+	GetProofReadyBlockByRoot(rootHash api.HexBytes) (*models.Block, bool)
+	GetCachedProofMetadata(stateID api.StateID, rootHash api.HexBytes) (*models.Block, *models.AggregatorRecord, bool)
+	GetProofCacheStats() (pending int, records int, blocks int)
 }
 
 // NewManager creates the appropriate round manager based on sharding mode

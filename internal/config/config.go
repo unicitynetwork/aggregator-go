@@ -24,6 +24,7 @@ type Config struct {
 	Database   DatabaseConfig   `mapstructure:"database"`
 	Redis      RedisConfig      `mapstructure:"redis"`
 	Storage    StorageConfig    `mapstructure:"storage"`
+	SMT        SMTConfig        `mapstructure:"smt"`
 	HA         HAConfig         `mapstructure:"ha"`
 	Logging    LoggingConfig    `mapstructure:"logging"`
 	BFT        BFTConfig        `mapstructure:"bft"`
@@ -73,6 +74,10 @@ type DatabaseConfig struct {
 	MaxPoolSize            uint64        `mapstructure:"max_pool_size"`
 	MinPoolSize            uint64        `mapstructure:"min_pool_size"`
 	MaxConnIdleTime        time.Duration `mapstructure:"max_conn_idle_time"`
+	// Production HA should use majority+journaled writes because Mongo is the
+	// replicated finalized-history source used by followers and recovery.
+	WriteConcern string `mapstructure:"write_concern"`
+	WriteJournal bool   `mapstructure:"write_journal"`
 	// Optional finalization insert chunking. A zero chunk size keeps the
 	// existing single InsertMany behavior.
 	FinalizationInsertChunkSize    int `mapstructure:"finalization_insert_chunk_size"`
@@ -140,8 +145,47 @@ type StorageConfig struct {
 	RedisStreamName        string        `mapstructure:"redis_stream_name"`
 	RedisFlushInterval     time.Duration `mapstructure:"redis_flush_interval"`
 	RedisMaxBatchSize      int           `mapstructure:"redis_max_batch_size"`
+	RedisAckBatchSize      int           `mapstructure:"redis_ack_batch_size"`
+	RedisDeleteAfterAck    bool          `mapstructure:"redis_delete_after_ack"`
 	RedisCleanupInterval   time.Duration `mapstructure:"redis_cleanup_interval"`
 	RedisMaxStreamLength   int64         `mapstructure:"redis_max_stream_length"`
+}
+
+type SMTBackend string
+
+const (
+	SMTBackendMemory  SMTBackend = "memory"
+	SMTBackendRocksDB SMTBackend = "rocksdb"
+)
+
+func (b SMTBackend) OrDefault() SMTBackend {
+	if b == "" {
+		return SMTBackendMemory
+	}
+	return b
+}
+
+func (b SMTBackend) IsValid() bool {
+	switch b.OrDefault() {
+	case SMTBackendMemory, SMTBackendRocksDB:
+		return true
+	default:
+		return false
+	}
+}
+
+type SMTConfig struct {
+	Backend                   SMTBackend `mapstructure:"backend"`
+	DiskPath                  string     `mapstructure:"disk_path"`
+	RocksDBCacheMB            int        `mapstructure:"rocksdb_cache_mb"`
+	RocksDBBGJobs             int        `mapstructure:"rocksdb_bg_jobs"`
+	RocksDBSubcompactions     int        `mapstructure:"rocksdb_subcompactions"`
+	RocksDBBloomBits          float64    `mapstructure:"rocksdb_bloom_bits"`
+	RocksDBMemTableMB         int        `mapstructure:"rocksdb_memtable_mb"`
+	MaterializeWorkers        int        `mapstructure:"materialize_workers"`
+	StartupReplayLimitBlocks  int        `mapstructure:"startup_replay_limit_blocks"`
+	PrecomputeProofs          bool       `mapstructure:"precompute_proofs"`
+	ProofMetadataCacheEntries int        `mapstructure:"proof_metadata_cache_entries"`
 }
 
 // ShardingMode represents the aggregator operating mode
@@ -305,6 +349,8 @@ func Load() (*Config, error) {
 			MaxPoolSize:            uint64(getEnvIntOrDefault("MONGODB_MAX_POOL_SIZE", 100)),
 			MinPoolSize:            uint64(getEnvIntOrDefault("MONGODB_MIN_POOL_SIZE", 5)),
 			MaxConnIdleTime:        getEnvDurationOrDefault("MONGODB_MAX_CONN_IDLE_TIME", "5m"),
+			WriteConcern:           getEnvOrDefault("MONGODB_WRITE_CONCERN", "majority"),
+			WriteJournal:           getEnvBoolOrDefault("MONGODB_WRITE_JOURNAL", true),
 			FinalizationInsertChunkSize: getEnvIntOrDefault(
 				"MONGODB_FINALIZATION_INSERT_CHUNK_SIZE", 0),
 			FinalizationInsertChunkWorkers: getEnvIntOrDefault(
@@ -362,8 +408,23 @@ func Load() (*Config, error) {
 			RedisStreamName:        getEnvOrDefault("REDIS_STREAM_NAME", "commitments"),
 			RedisFlushInterval:     getEnvDurationOrDefault("REDIS_FLUSH_INTERVAL", "100ms"),
 			RedisMaxBatchSize:      getEnvIntOrDefault("REDIS_MAX_BATCH_SIZE", 5000),
+			RedisAckBatchSize:      getEnvIntOrDefault("REDIS_ACK_BATCH_SIZE", 1000),
+			RedisDeleteAfterAck:    getEnvBoolOrDefault("REDIS_DELETE_AFTER_ACK", true),
 			RedisCleanupInterval:   getEnvDurationOrDefault("REDIS_CLEANUP_INTERVAL", "5m"),
 			RedisMaxStreamLength:   int64(getEnvIntOrDefault("REDIS_MAX_STREAM_LENGTH", 1000000)),
+		},
+		SMT: SMTConfig{
+			Backend:                   SMTBackend(getEnvOrDefault("SMT_BACKEND", string(SMTBackendMemory))),
+			DiskPath:                  getEnvOrDefault("SMT_DISK_PATH", ""),
+			RocksDBCacheMB:            getEnvIntOrDefault("SMT_ROCKSDB_CACHE_MB", 1024),
+			RocksDBBGJobs:             getEnvIntOrDefault("SMT_ROCKSDB_BG_JOBS", 8),
+			RocksDBSubcompactions:     getEnvIntOrDefault("SMT_ROCKSDB_SUBCOMPACTIONS", 4),
+			RocksDBBloomBits:          getEnvFloatOrDefault("SMT_ROCKSDB_BLOOM_BITS", 10),
+			RocksDBMemTableMB:         getEnvIntOrDefault("SMT_ROCKSDB_MEMTABLE_MB", 64),
+			MaterializeWorkers:        getEnvIntOrDefault("SMT_MATERIALIZE_WORKERS", 64),
+			StartupReplayLimitBlocks:  getEnvIntOrDefault("SMT_STARTUP_REPLAY_LIMIT_BLOCKS", 100),
+			PrecomputeProofs:          getEnvBoolOrDefault("SMT_PRECOMPUTE_PROOFS", false),
+			ProofMetadataCacheEntries: getEnvIntOrDefault("SMT_PROOF_METADATA_CACHE_ENTRIES", 250000),
 		},
 		Sharding: ShardingConfig{
 			Mode:                       ShardingMode(getEnvOrDefault("SHARDING_MODE", "standalone")),
@@ -467,9 +528,50 @@ func (c *Config) Validate() error {
 	if c.Database.FinalizationInsertChunkSize > 0 && c.Database.FinalizationInsertChunkWorkers <= 0 {
 		return fmt.Errorf("MONGODB_FINALIZATION_INSERT_CHUNK_WORKERS must be positive when chunking is enabled")
 	}
+	writeConcern := normalizeMongoWriteConcern(c.Database.WriteConcern)
+	switch writeConcern {
+	case "1", "majority":
+	default:
+		return fmt.Errorf("MONGODB_WRITE_CONCERN must be one of: 1, majority")
+	}
+	if !c.SMT.Backend.IsValid() {
+		return fmt.Errorf("invalid SMT_BACKEND: %s, must be one of: memory, rocksdb", c.SMT.Backend)
+	}
+	if c.SMT.RocksDBCacheMB < 0 {
+		return fmt.Errorf("SMT_ROCKSDB_CACHE_MB must be non-negative")
+	}
+	if c.SMT.RocksDBBGJobs < 0 {
+		return fmt.Errorf("SMT_ROCKSDB_BG_JOBS must be non-negative")
+	}
+	if c.SMT.RocksDBSubcompactions < 0 {
+		return fmt.Errorf("SMT_ROCKSDB_SUBCOMPACTIONS must be non-negative")
+	}
+	if c.SMT.RocksDBBloomBits < 0 {
+		return fmt.Errorf("SMT_ROCKSDB_BLOOM_BITS must be non-negative")
+	}
+	if c.SMT.RocksDBMemTableMB < 0 {
+		return fmt.Errorf("SMT_ROCKSDB_MEMTABLE_MB must be non-negative")
+	}
+	if c.SMT.MaterializeWorkers < 0 {
+		return fmt.Errorf("SMT_MATERIALIZE_WORKERS must be non-negative")
+	}
+	if c.SMT.StartupReplayLimitBlocks < 0 {
+		return fmt.Errorf("SMT_STARTUP_REPLAY_LIMIT_BLOCKS must be non-negative")
+	}
+	if c.SMT.Backend.OrDefault() == SMTBackendRocksDB {
+		if c.SMT.DiskPath == "" {
+			return fmt.Errorf("SMT_DISK_PATH is required when SMT_BACKEND=rocksdb")
+		}
+		if c.Sharding.Mode == ShardingModeParent || c.Sharding.Mode == ShardingModeChild {
+			return fmt.Errorf("SMT_BACKEND=rocksdb is not supported with SHARDING_MODE=%s in this phase", c.Sharding.Mode)
+		}
+		if c.HA.Enabled && c.Sharding.Mode != ShardingModeBFTShard {
+			return fmt.Errorf("SMT_BACKEND=rocksdb with HA is supported only with SHARDING_MODE=bft-shard in this phase")
+		}
+	}
 
 	// Validate log level
-	validLevels := []string{"debug", "info", "warn", "error", "fatal", "panic"}
+	validLevels := []string{"trace", "debug", "info", "warn", "error", "fatal", "panic"}
 	if !contains(validLevels, strings.ToLower(c.Logging.Level)) {
 		return fmt.Errorf("invalid log level: %s", c.Logging.Level)
 	}
@@ -517,6 +619,14 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+func normalizeMongoWriteConcern(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "1"
+	}
+	return value
+}
+
 // Helper functions for environment variable parsing
 func getEnvOrDefault(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
@@ -538,6 +648,15 @@ func getEnvBoolOrDefault(key string, defaultValue bool) bool {
 	if value := os.Getenv(key); value != "" {
 		if boolVal, err := strconv.ParseBool(value); err == nil {
 			return boolVal
+		}
+	}
+	return defaultValue
+}
+
+func getEnvFloatOrDefault(key string, defaultValue float64) float64 {
+	if value := os.Getenv(key); value != "" {
+		if floatVal, err := strconv.ParseFloat(value, 64); err == nil {
+			return floatVal
 		}
 	}
 	return defaultValue

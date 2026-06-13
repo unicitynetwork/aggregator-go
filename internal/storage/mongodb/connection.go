@@ -2,7 +2,10 @@ package mongodb
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -43,8 +46,7 @@ func NewStorage(ctx context.Context, config config.Config) (*Storage, error) {
 		SetMinPoolSize(cfg.MinPoolSize).
 		SetMaxConnIdleTime(cfg.MaxConnIdleTime)
 
-	// Use write concern W1 (primary acknowledged) for lower latency
-	clientOpts.SetWriteConcern(writeconcern.W1())
+	clientOpts.SetWriteConcern(mongoWriteConcern(cfg))
 
 	// Connect to MongoDB
 	connectCtx, cancel := context.WithTimeout(ctx, cfg.ConnectTimeout)
@@ -57,11 +59,17 @@ func NewStorage(ctx context.Context, config config.Config) (*Storage, error) {
 
 	// Ping to verify connection
 	if err := client.Ping(connectCtx, readpref.Primary()); err != nil {
+		_ = client.Disconnect(context.Background())
 		return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
 	}
 
 	// Verify MongoDB is running as a replica set (required for transactions)
 	if err := verifyReplicaSet(connectCtx, client); err != nil {
+		_ = client.Disconnect(context.Background())
+		return nil, err
+	}
+	if err := waitForWritablePrimary(connectCtx, client); err != nil {
+		_ = client.Disconnect(context.Background())
 		return nil, err
 	}
 
@@ -88,15 +96,35 @@ func NewStorage(ctx context.Context, config config.Config) (*Storage, error) {
 
 	// init trust base store cache
 	if err := storage.cachedTrustBaseStorage.ReloadCache(ctx); err != nil {
+		_ = client.Disconnect(context.Background())
 		return nil, fmt.Errorf("failed to init cached trust base storage cache: %w", err)
 	}
 
 	// Create indexes
-	if err := storage.createIndexes(ctx); err != nil {
+	indexCtx, indexCancel := context.WithTimeout(ctx, cfg.ConnectTimeout)
+	defer indexCancel()
+	if err := retryDuringPrimaryTransition(indexCtx, client, storage.createIndexes); err != nil {
+		_ = client.Disconnect(context.Background())
 		return nil, fmt.Errorf("failed to create indexes: %w", err)
 	}
 
 	return storage, nil
+}
+
+func mongoWriteConcern(cfg config.DatabaseConfig) *writeconcern.WriteConcern {
+	writeConcern := strings.TrimSpace(cfg.WriteConcern)
+	var w any = "majority"
+	if writeConcern == "1" {
+		w = 1
+	} else if strings.EqualFold(writeConcern, "majority") {
+		w = "majority"
+	}
+	journaled := cfg.WriteJournal || writeConcern == ""
+	if journaled {
+		journal := true
+		return &writeconcern.WriteConcern{W: w, Journal: &journal}
+	}
+	return &writeconcern.WriteConcern{W: w}
 }
 
 func (s *Storage) Initialize(ctx context.Context) error {
@@ -120,6 +148,92 @@ func verifyReplicaSet(ctx context.Context, client *mongo.Client) error {
 	}
 
 	return nil
+}
+
+func waitForWritablePrimary(ctx context.Context, client *mongo.Client) error {
+	const initialDelay = 25 * time.Millisecond
+	delay := initialDelay
+	var lastErr error
+
+	for {
+		var result bson.M
+		err := client.Database("admin").RunCommand(ctx, bson.D{{Key: "hello", Value: 1}}).Decode(&result)
+		if err == nil && (boolResultField(result, "isWritablePrimary") || boolResultField(result, "ismaster")) {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		}
+
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("timed out waiting for MongoDB writable primary: %w", lastErr)
+			}
+			return fmt.Errorf("timed out waiting for MongoDB writable primary: %w", ctx.Err())
+		case <-time.After(delay):
+		}
+		if delay < 250*time.Millisecond {
+			delay *= 2
+		}
+	}
+}
+
+func retryDuringPrimaryTransition(ctx context.Context, client *mongo.Client, fn func(context.Context) error) error {
+	const maxAttempts = 8
+	delay := 25 * time.Millisecond
+	var lastErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err := fn(ctx)
+		if err == nil {
+			return nil
+		}
+		if !isPrimaryTransitionError(err) {
+			return err
+		}
+		lastErr = err
+
+		if waitErr := waitForWritablePrimary(ctx, client); waitErr != nil {
+			return fmt.Errorf("MongoDB primary transition did not settle after index creation failure: %w", waitErr)
+		}
+		if attempt == maxAttempts {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("MongoDB primary transition retry cancelled: %w", ctx.Err())
+		case <-time.After(delay):
+		}
+		if delay < 250*time.Millisecond {
+			delay *= 2
+		}
+	}
+
+	return fmt.Errorf("MongoDB primary transition persisted after %d attempts: %w", maxAttempts, lastErr)
+}
+
+func boolResultField(result bson.M, name string) bool {
+	value, ok := result[name].(bool)
+	return ok && value
+}
+
+func isPrimaryTransitionError(err error) bool {
+	var cmdErr mongo.CommandError
+	if !errors.As(err, &cmdErr) {
+		return false
+	}
+	switch cmdErr.Code {
+	case 91, 189, 10107, 11602, 13435, 13436:
+		return true
+	}
+	switch cmdErr.Name {
+	case "NotWritablePrimary", "NotPrimaryNoSecondaryOk", "InterruptedDueToReplStateChange", "PrimarySteppedDown", "ShutdownInProgress":
+		return true
+	default:
+		return false
+	}
 }
 
 // CommitmentQueue returns the commitment queue implementation

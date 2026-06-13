@@ -1,12 +1,13 @@
 package round
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
-	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -254,16 +255,54 @@ func recoverMissingData(
 	return nil
 }
 
-// LoadRecoveredNodesIntoSMT loads SMT nodes for a recovered block into the in-memory SMT.
-// Used in HA mode when follower becomes leader.
-func LoadRecoveredNodesIntoSMT(
+// LoadRecoveredNodesIntoBackend loads SMT nodes for a recovered block into the active SMT backend.
+// Used in HA mode when a follower becomes leader.
+func LoadRecoveredNodesIntoBackend(
 	ctx context.Context,
 	log *logger.Logger,
 	storage interfaces.Storage,
-	smtTree *smt.ThreadSafeSMT,
+	backend smtbackend.Backend,
+	blockNumber *api.BigInt,
 	stateIDs []api.StateID,
 ) error {
+	if backend == nil {
+		return fmt.Errorf("SMT backend not initialized")
+	}
+	var expectedRoot []byte
+	if blockNumber != nil {
+		block, err := storage.BlockStorage().GetByNumber(ctx, blockNumber)
+		if err != nil {
+			return fmt.Errorf("failed to load recovered finalized block %s: %w", blockNumber.String(), err)
+		}
+		if block != nil {
+			expectedRoot = block.RootHash
+		}
+	}
 	if len(stateIDs) == 0 {
+		if blockNumber == nil {
+			return nil
+		}
+		state, err := backend.CommittedState(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to read SMT backend state: %w", err)
+		}
+		snapshot, err := backend.CreateSnapshot(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to create SMT snapshot: %w", err)
+		}
+		defer snapshot.Discard(ctx)
+		rootHash := state.RootHash
+		if expectedRoot != nil {
+			if !bytes.Equal(state.RootHash, expectedRoot) {
+				return fmt.Errorf("recovered empty block root mismatch: SMT=%s block=%s",
+					api.HexBytes(state.RootHash).String(), api.HexBytes(expectedRoot).String())
+			}
+			rootHash = expectedRoot
+		}
+		if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: blockNumber, RootHash: rootHash}); err != nil {
+			return fmt.Errorf("failed to advance recovered SMT metadata: %w", err)
+		}
+		log.WithContext(ctx).Info("Advanced recovered SMT metadata", "blockNumber", blockNumber.String())
 		return nil
 	}
 
@@ -295,17 +334,36 @@ func LoadRecoveredNodesIntoSMT(
 		return fmt.Errorf("FATAL: expected %d SMT nodes but found %d - data corruption", len(keys), len(nodes))
 	}
 
-	leaves := make([]*smt.Leaf, len(nodes))
+	leaves := make([]smtbackend.LeafInput, len(nodes))
 	for i, node := range nodes {
-		path, err := api.FixedBytesToPath(node.Key, smtTree.GetKeyLength())
-		if err != nil {
-			return fmt.Errorf("failed to convert SMT key to path: %w", err)
+		leaves[i] = smtbackend.LeafInput{
+			Key:   node.Key,
+			Value: node.Value,
 		}
-		leaves[i] = smt.NewLeaf(path, node.Value)
 	}
 
-	if _, err := smtTree.AddLeaves(leaves); err != nil {
+	snapshot, err := backend.CreateSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create SMT snapshot: %w", err)
+	}
+	defer snapshot.Discard(ctx)
+	result, err := snapshot.AddLeavesClassified(ctx, leaves)
+	if err != nil {
 		return fmt.Errorf("failed to add recovered nodes to SMT: %w", err)
+	}
+	if err := result.ValidateAllAccepted(len(leaves)); err != nil {
+		return fmt.Errorf("failed to add recovered nodes to SMT: %w", err)
+	}
+	rootHash := result.CandidateRoot
+	if expectedRoot != nil {
+		if !bytes.Equal(result.CandidateRoot, expectedRoot) {
+			return fmt.Errorf("recovered SMT root mismatch: candidate=%s block=%s",
+				api.HexBytes(result.CandidateRoot).String(), api.HexBytes(expectedRoot).String())
+		}
+		rootHash = expectedRoot
+	}
+	if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: blockNumber, RootHash: rootHash}); err != nil {
+		return fmt.Errorf("failed to commit recovered nodes to SMT: %w", err)
 	}
 
 	log.WithContext(ctx).Info("Loaded recovered SMT nodes", "count", len(nodes))
