@@ -450,6 +450,10 @@ func TestBFTClientRejectsUCRootMismatch(t *testing.T) {
 	require.Empty(t, rm.finalizedBlocks)
 	require.Nil(t, client.proposedBlock)
 	require.Empty(t, block.UnicityCertificate)
+	// The durable proposal must be abandoned too (not just cleared in memory),
+	// so a stale Proposed block cannot survive restart and re-trigger the fatal.
+	require.Equal(t, 1, rm.durableAbandonCallCnt)
+	require.True(t, bytes.Equal(blockRoot, rm.durableAbandonRoot))
 }
 
 func TestBFTClientRejectsRegressingUC(t *testing.T) {
