@@ -139,60 +139,95 @@ func (rr *RequestRateCounters) IncProofCompleted()  { rr.proofCompleted.Add(1) }
 func (rr *RequestRateCounters) IncProofRetries()    { rr.proofRetries.Add(1) }
 
 type aggregatorLogRaw struct {
-	Time                      string `json:"time"`
-	Msg                       string `json:"msg"`
-	Block                     string `json:"block"`
-	Commitments               int    `json:"commitments"`
-	RoundTime                 string `json:"roundTime"`
-	Processing                string `json:"processing"`
-	BftWait                   string `json:"bftWait"`
-	Finalization              string `json:"finalization"`
-	FinalizeScan              string `json:"finalizeScan"`
-	FinalizeConvert           string `json:"finalizeConvert"`
-	FinalizeStoreBlock        string `json:"finalizeStoreBlock"`
-	FinalizeStoreBlockDoc     string `json:"finalizeStoreBlockDoc"`
-	FinalizeStoreBlockRecords string `json:"finalizeStoreBlockRecords"`
-	FinalizeStoreData         string `json:"finalizeStoreData"`
-	FinalizeStoreSmt          string `json:"finalizeStoreSmt"`
-	FinalizeStoreRecords      string `json:"finalizeStoreRecords"`
-	FinalizeLockWait          string `json:"finalizeLockWait"`
-	FinalizeSmtCommit         string `json:"finalizeSmtCommit"`
-	FinalizeSetFinalized      string `json:"finalizeSetFinalized"`
-	FinalizeAck               string `json:"finalizeAck"`
-	ProofReadyMedian          string `json:"proofReadyMedian"`
-	ProofReadyP95             string `json:"proofReadyP95"`
-	ProofReadyP99             string `json:"proofReadyP99"`
-	RedisTotal                int    `json:"redisTotal"`
-	RedisPending              int    `json:"redisPending"`
+	Time                         string `json:"time"`
+	Msg                          string `json:"msg"`
+	Block                        string `json:"block"`
+	Commitments                  int    `json:"commitments"`
+	Leaves                       int    `json:"leaves"`
+	RoundTime                    string `json:"roundTime"`
+	Processing                   string `json:"processing"`
+	BftWait                      string `json:"bftWait"`
+	Finalization                 string `json:"finalization"`
+	FinalizeScan                 string `json:"finalizeScan"`
+	FinalizeConvert              string `json:"finalizeConvert"`
+	FinalizeStoreBlock           string `json:"finalizeStoreBlock"`
+	FinalizeStoreBlockDoc        string `json:"finalizeStoreBlockDoc"`
+	FinalizeStoreBlockRecords    string `json:"finalizeStoreBlockRecords"`
+	FinalizeStoreData            string `json:"finalizeStoreData"`
+	FinalizeStoreSmt             string `json:"finalizeStoreSmt"`
+	FinalizeStoreRecords         string `json:"finalizeStoreRecords"`
+	FinalizeLockWait             string `json:"finalizeLockWait"`
+	FinalizeSmtCommit            string `json:"finalizeSmtCommit"`
+	FinalizeSmtCommitCollect     string `json:"finalizeSmtCommitCollect"`
+	FinalizeSmtCommitTombstone   string `json:"finalizeSmtCommitTombstone"`
+	FinalizeSmtCommitBatchBuild  string `json:"finalizeSmtCommitBatchBuild"`
+	FinalizeSmtCommitRootHash    string `json:"finalizeSmtCommitRootHash"`
+	FinalizeSmtCommitEngineWrite string `json:"finalizeSmtCommitEngineWrite"`
+	FinalizeSmtCommitCacheUpdate string `json:"finalizeSmtCommitCacheUpdate"`
+	FinalizeSmtCommitNodeWrites  int    `json:"finalizeSmtCommitNodeWrites"`
+	FinalizeSmtCommitNodeDeletes int    `json:"finalizeSmtCommitNodeDeletes"`
+	FinalizeSetFinalized         string `json:"finalizeSetFinalized"`
+	FinalizeAck                  string `json:"finalizeAck"`
+	ProposalToProofReady         string `json:"proposalToProofReady"`
+	ProofReadyMedian             string `json:"proofReadyMedian"`
+	ProofReadyP95                string `json:"proofReadyP95"`
+	ProofReadyP99                string `json:"proofReadyP99"`
+	PendingAtAdvance             int    `json:"pendingAtAdvance"`
+	TailMerged                   int    `json:"tailMerged"`
+	TailRemaining                int    `json:"tailRemaining"`
+	AlreadyPrepared              bool   `json:"alreadyPrepared"`
+	AdvanceFlush                 string `json:"advanceFlush"`
+	FlushCalls                   int    `json:"flushCalls"`
+	FlushAdded                   int    `json:"flushAdded"`
+	FlushTotal                   string `json:"flushTotal"`
+	FlushMax                     string `json:"flushMax"`
+	StageCalls                   int    `json:"stageCalls"`
+	StageAdded                   int    `json:"stageAdded"`
+	StageTotal                   string `json:"stageTotal"`
+	StageMax                     string `json:"stageMax"`
+	Fork                         string `json:"fork"`
+	Total                        string `json:"total"`
+	RedisTotal                   int    `json:"redisTotal"`
+	RedisPending                 int    `json:"redisPending"`
 }
 
 type aggregatorRoundSummary struct {
-	Timestamp                 time.Time
-	Block                     string
-	Commitments               int
-	RoundTime                 time.Duration
-	Processing                time.Duration
-	BftWait                   time.Duration
-	Finalization              time.Duration
-	HasFinalizationBreakdown  bool
-	FinalizeScan              time.Duration
-	FinalizeConvert           time.Duration
-	FinalizeStoreBlock        time.Duration
-	FinalizeStoreBlockDoc     time.Duration
-	FinalizeStoreBlockRecords time.Duration
-	FinalizeStoreData         time.Duration
-	FinalizeStoreSmt          time.Duration
-	FinalizeStoreRecords      time.Duration
-	FinalizeLockWait          time.Duration
-	FinalizeSmtCommit         time.Duration
-	FinalizeSetFinalized      time.Duration
-	FinalizeAck               time.Duration
-	HasProofReady             bool
-	ProofMedian               time.Duration
-	ProofP95                  time.Duration
-	ProofP99                  time.Duration
-	RedisTotal                int
-	RedisPending              int
+	Timestamp                    time.Time
+	Block                        string
+	Commitments                  int
+	RoundTime                    time.Duration
+	Processing                   time.Duration
+	BftWait                      time.Duration
+	Finalization                 time.Duration
+	HasFinalizationBreakdown     bool
+	FinalizeScan                 time.Duration
+	FinalizeConvert              time.Duration
+	FinalizeStoreBlock           time.Duration
+	FinalizeStoreBlockDoc        time.Duration
+	FinalizeStoreBlockRecords    time.Duration
+	FinalizeStoreData            time.Duration
+	FinalizeStoreSmt             time.Duration
+	FinalizeStoreRecords         time.Duration
+	FinalizeLockWait             time.Duration
+	FinalizeSmtCommit            time.Duration
+	FinalizeSmtCommitCollect     time.Duration
+	FinalizeSmtCommitTombstone   time.Duration
+	FinalizeSmtCommitBatchBuild  time.Duration
+	FinalizeSmtCommitRootHash    time.Duration
+	FinalizeSmtCommitEngineWrite time.Duration
+	FinalizeSmtCommitCacheUpdate time.Duration
+	FinalizeSmtCommitNodeWrites  int
+	FinalizeSmtCommitNodeDeletes int
+	FinalizeSetFinalized         time.Duration
+	FinalizeAck                  time.Duration
+	HasProposalToProofReady      bool
+	ProposalToProofReady         time.Duration
+	HasProofReady                bool
+	ProofMedian                  time.Duration
+	ProofP95                     time.Duration
+	ProofP99                     time.Duration
+	RedisTotal                   int
+	RedisPending                 int
 }
 
 func (m *Metrics) addProofLatency(latency time.Duration) {
@@ -558,10 +593,15 @@ func (c *JSONRPCClient) call(method string, params interface{}) (*JSONRPCRespons
 func (c *JSONRPCClient) callWithContext(ctx context.Context, method string, params interface{}) (*JSONRPCResponse, error) {
 	id := atomic.AddInt64(&c.requestID, 1)
 
+	encodedParams, err := encodeJSONRPCParams(method, params)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode JSON-RPC params: %w", err)
+	}
+
 	request := JSONRPCRequest{
 		JSONRPC: "2.0",
 		Method:  method,
-		Params:  params,
+		Params:  encodedParams,
 		ID:      int(id),
 	}
 
