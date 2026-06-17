@@ -459,6 +459,52 @@ func (suite *ParentRoundManagerTestSuite) TestBlockRootMatchesSMTRoot() {
 	suite.Assert().Equal(expectedRoot, latestBlock.RootHash, "stored block root should match SMT root")
 }
 
+func (suite *ParentRoundManagerTestSuite) TestReactivateDeactivatesPreviousActivation() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := *suite.cfg
+	cfg.Sharding.ParentCollectPhaseDuration = 0
+	prm, err := NewParentRoundManager(ctx, &cfg, suite.logger, suite.storage, nil, suite.eventBus, smt.NewThreadSafeSMT(smt.NewParentSparseMerkleTree(api.SHA256, cfg.Sharding.ShardIDLength)), suite.storage.TrustBaseStorage())
+	suite.Require().NoError(err)
+	defer prm.Stop(ctx)
+	suite.Require().NoError(prm.Start(ctx))
+
+	oldCtx, oldCancel := context.WithCancel(context.Background())
+	oldRound := &ParentRound{
+		Number:       api.NewBigIntFromUint64(99),
+		State:        RoundStateCollecting,
+		ShardUpdates: make(map[int]*models.ShardRootUpdate),
+	}
+	oldDone := make(chan struct{})
+
+	prm.roundMutex.Lock()
+	prm.activeCtx = oldCtx
+	prm.activeCancel = oldCancel
+	prm.currentRound = oldRound
+	prm.roundMutex.Unlock()
+
+	prm.roundWG.Add(1)
+	go func() {
+		defer prm.roundWG.Done()
+		defer close(oldDone)
+		<-oldCtx.Done()
+	}()
+
+	suite.Require().NoError(prm.Activate(ctx))
+
+	select {
+	case <-oldDone:
+	default:
+		suite.Fail("reactivation returned before the previous active round stopped")
+	}
+
+	currentRound, ok := prm.GetCurrentRound().(*ParentRound)
+	suite.Require().True(ok)
+	suite.Require().NotNil(currentRound)
+	suite.Require().NotEqual(oldRound.Number.String(), currentRound.Number.String(), "reactivation must clear stale parent round state")
+}
+
 // TestParentRoundManagerSuite runs the test suite
 func TestParentRoundManagerSuite(t *testing.T) {
 	suite.Run(t, new(ParentRoundManagerTestSuite))

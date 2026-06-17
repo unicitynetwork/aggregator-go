@@ -937,6 +937,74 @@ func TestChildPrecollector_DeactivateDuringInFlightRound(t *testing.T) {
 	rm.wg.Wait()
 }
 
+func TestChildRound_ReactivateCancelsInFlightRound(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{
+			Database: "test_child_reactivate_inflight",
+		},
+		Processing: config.ProcessingConfig{
+			RoundDuration:          100 * time.Millisecond,
+			MaxCommitmentsPerRound: 1000,
+		},
+		Sharding: config.ShardingConfig{
+			Mode:          config.ShardingModeChild,
+			ShardIDLength: 1,
+			Child: config.ChildConfig{
+				ShardID:            0b11,
+				ParentPollTimeout:  5 * time.Second,
+				ParentPollInterval: 10 * time.Millisecond,
+			},
+		},
+	}
+	store := testutil.SetupTestStorage(t, cfg)
+
+	testLogger := newTestLogger(t)
+	rootClient := newBlockingProofRootAggregatorClient()
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		store.CommitmentQueue(),
+		store,
+		rootClient,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		smtInstance,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, rm.Start(ctx))
+	require.NoError(t, rm.Activate(ctx))
+
+	select {
+	case <-rootClient.proofPollStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for round 1 to enter proof polling")
+	}
+
+	rm.roundMutex.RLock()
+	oldRound := rm.currentRound
+	rm.roundMutex.RUnlock()
+	require.NotNil(t, oldRound)
+
+	require.NoError(t, rm.Activate(ctx))
+
+	rm.roundMutex.RLock()
+	newRound := rm.currentRound
+	rm.roundMutex.RUnlock()
+	require.NotNil(t, newRound)
+	require.NotSame(t, oldRound, newRound, "reactivation must not keep the stale in-flight round")
+
+	require.NoError(t, rm.Deactivate(ctx))
+	rm.wg.Wait()
+}
+
 func TestChildRound_ParentProofTimeoutIsRetriable(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

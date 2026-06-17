@@ -720,6 +720,17 @@ func (s *FinalizeDuplicateTestSuite) Test9_EmptyRoundCannotFinalizeChangedRoot()
 	require.ErrorContains(t, err, "snapshot root")
 }
 
+func (s *FinalizeDuplicateTestSuite) Test10_FinalizeBlockWithRetryPropagatesCancellation() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	block := models.NewBlock(api.NewBigInt(big.NewInt(10)), "unicity", 0, "1.0", "mainnet", api.HexBytes{}, api.HexBytes{}, api.HexBytes{})
+	rm := &RoundManager{}
+
+	err := rm.FinalizeBlockWithRetry(ctx, block)
+	require.ErrorIs(s.T(), err, context.Canceled)
+}
+
 func repeatByte(n int, value byte) []byte {
 	out := make([]byte, n)
 	for i := range out {

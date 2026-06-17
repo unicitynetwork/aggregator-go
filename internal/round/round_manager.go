@@ -1211,6 +1211,16 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 func (rm *RoundManager) Activate(ctx context.Context) error {
 	rm.logger.WithContext(ctx).Info("Activating round manager")
 
+	rm.roundMutex.RLock()
+	alreadyActive := rm.activeCancel != nil
+	rm.roundMutex.RUnlock()
+	if alreadyActive {
+		rm.logger.WithContext(ctx).Warn("Round manager already active, deactivating previous activation")
+		if err := rm.Deactivate(ctx); err != nil {
+			return fmt.Errorf("failed to deactivate previous activation: %w", err)
+		}
+	}
+
 	activeCtx, activeCancel := context.WithCancel(ctx)
 	activated := false
 	defer func() {
@@ -1218,18 +1228,13 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 			return
 		}
 		activeCancel()
-		rm.roundMutex.Lock()
-		if rm.activeCtx == activeCtx {
-			rm.activeCtx = nil
-			rm.activeCancel = nil
+		if err := rm.Deactivate(ctx); err != nil {
+			rm.logger.WithContext(ctx).Error("Failed to deactivate after activation failure",
+				"error", err.Error())
 		}
-		rm.roundMutex.Unlock()
 	}()
 
 	rm.roundMutex.Lock()
-	if rm.activeCancel != nil {
-		rm.activeCancel()
-	}
 	rm.activeCtx = activeCtx
 	rm.activeCancel = activeCancel
 	rm.precollectorDisabled = false

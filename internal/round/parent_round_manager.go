@@ -472,11 +472,30 @@ func (prm *ParentRoundManager) Activate(ctx context.Context) error {
 	prm.logger.WithContext(ctx).Info("Activating parent round manager")
 	prm.ready.Store(false)
 
-	activeCtx, activeCancel := context.WithCancel(ctx)
-	prm.roundMutex.Lock()
-	if prm.activeCancel != nil {
-		prm.activeCancel()
+	prm.roundMutex.RLock()
+	alreadyActive := prm.activeCancel != nil
+	prm.roundMutex.RUnlock()
+	if alreadyActive {
+		prm.logger.WithContext(ctx).Warn("Parent round manager already active, deactivating previous activation")
+		if err := prm.Deactivate(ctx); err != nil {
+			return fmt.Errorf("failed to deactivate previous activation: %w", err)
+		}
 	}
+
+	activeCtx, activeCancel := context.WithCancel(ctx)
+	activated := false
+	defer func() {
+		if activated {
+			return
+		}
+		activeCancel()
+		if err := prm.Deactivate(ctx); err != nil {
+			prm.logger.WithContext(ctx).Error("Failed to deactivate after activation failure",
+				"error", err.Error())
+		}
+	}()
+
+	prm.roundMutex.Lock()
 	prm.activeCtx = activeCtx
 	prm.activeCancel = activeCancel
 	prm.roundMutex.Unlock()
@@ -526,6 +545,7 @@ func (prm *ParentRoundManager) Activate(ctx context.Context) error {
 		"initialRound", nextRoundNumber.String())
 
 	prm.ready.Store(true)
+	activated = true
 	return nil
 }
 
