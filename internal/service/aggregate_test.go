@@ -78,7 +78,6 @@ func TestGetBlockTotalCommitments(t *testing.T) {
 			BlockNumber:           api.NewBigInt(big.NewInt(1)),
 			LeafIndex:             api.NewBigInt(big.NewInt(0)),
 			CreatedAt:             api.Now(),
-			FinalizedAt:           api.Now(),
 		}
 
 		apiRecord := modelToAPIAggregatorRecord(modelRecord)

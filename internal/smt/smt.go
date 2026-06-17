@@ -36,9 +36,8 @@ func hashLen(algo api.HashAlgorithm) int {
 	}
 }
 
-// buildImprint constructs the hash imprint used for SMT root hashes.
-// Used at API boundaries (GetRootHash, GetPath) where a full DataHash object
-// is not needed.
+// buildImprint supports the legacy MerkleTreePath proof API. New v2 proof and
+// UC paths use raw roots via GetRootHashRaw/GetRootHashHex.
 func buildImprint(algo api.HashAlgorithm, raw []byte) []byte {
 	alg := uint(algo)
 	out := make([]byte, len(raw)+2)
@@ -199,12 +198,12 @@ func (snapshot *SmtSnapshot) AddLeaves(leaves []*Leaf) error {
 	return snapshot.SparseMerkleTree.AddLeaves(leaves)
 }
 
-// GetRootHash returns the current root hash of the snapshot
+// GetRootHash returns the current raw root hash of the snapshot.
 func (snapshot *SmtSnapshot) GetRootHash() []byte {
 	return snapshot.SparseMerkleTree.GetRootHash()
 }
 
-// GetRootHashHex returns the current root hash of the snapshot as hex string
+// GetRootHashHex returns the current raw root hash of the snapshot as a hex string.
 func (snapshot *SmtSnapshot) GetRootHashHex() string {
 	return snapshot.SparseMerkleTree.GetRootHashHex()
 }
@@ -518,18 +517,14 @@ func (smt *SparseMerkleTree) ensureHashes() {
 	smt.root.calculateHash(hasher)
 }
 
-// GetRootHash returns the root hash as imprint
+// GetRootHash returns the raw 32-byte root hash.
 func (smt *SparseMerkleTree) GetRootHash() []byte {
-	// Create a new hasher to ensure thread safety
-	hasher := api.NewDataHasher(smt.algorithm)
-	return buildImprint(smt.algorithm, smt.root.calculateHash(hasher))
+	return smt.GetRootHashRaw()
 }
 
-// GetRootHashHex returns the root hash as hex string
+// GetRootHashHex returns the raw 32-byte root hash as a hex string.
 func (smt *SparseMerkleTree) GetRootHashHex() string {
-	// Create a new hasher to ensure thread safety
-	hasher := api.NewDataHasher(smt.algorithm)
-	return fmt.Sprintf("%x", buildImprint(smt.algorithm, smt.root.calculateHash(hasher)))
+	return api.HexBytes(smt.GetRootHashRaw()).String()
 }
 
 // GetRootHashRaw returns the raw 32-byte root hash without the algorithm

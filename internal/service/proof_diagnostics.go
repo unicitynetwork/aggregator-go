@@ -2,10 +2,11 @@ package service
 
 import (
 	"context"
-	"sync/atomic"
+	"errors"
 	"time"
 
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 )
 
 const (
@@ -21,102 +22,50 @@ const (
 	proofPathError          = "error"
 )
 
-type proofDiagnostics struct {
-	lastLogSecond atomic.Int64
+const (
+	proofBuildSourcePublishedView = "published_view"
+	proofBuildSourceLiveTree      = "live_tree"
 
-	requests       atomic.Int64
-	knownNotReady  atomic.Int64
-	precomputedHit atomic.Int64
-	metadataHit    atomic.Int64
-	metadataMiss   atomic.Int64
-	mongoBlock     atomic.Int64
-	mongoRecord    atomic.Int64
-	emptyResponses atomic.Int64
-	liveCert       atomic.Int64
-	errors         atomic.Int64
-}
+	proofBuildResultOK          = "ok"
+	proofBuildResultNotFound    = "not_found"
+	proofBuildResultRootChanged = "root_changed"
+	proofBuildResultError       = "error"
+)
 
-func (as *AggregatorService) recordProofPath(ctx context.Context, path string) {
+func (as *AggregatorService) recordProofPath(_ context.Context, path string) {
 	if as == nil {
 		return
 	}
 
 	metrics.InclusionProofPathTotal.WithLabelValues(path).Inc()
-
-	switch path {
-	case proofPathRequest:
-		as.proofDiag.requests.Add(1)
-	case proofPathKnownNotReady:
-		as.proofDiag.knownNotReady.Add(1)
-	case proofPathPrecomputedHit:
-		as.proofDiag.precomputedHit.Add(1)
-	case proofPathMetadataHit:
-		as.proofDiag.metadataHit.Add(1)
-	case proofPathMetadataMiss:
-		as.proofDiag.metadataMiss.Add(1)
-	case proofPathMongoBlock:
-		as.proofDiag.mongoBlock.Add(1)
-	case proofPathMongoRecord:
-		as.proofDiag.mongoRecord.Add(1)
-	case proofPathEmpty:
-		as.proofDiag.emptyResponses.Add(1)
-	case proofPathLiveCert:
-		as.proofDiag.liveCert.Add(1)
-	case proofPathError:
-		as.proofDiag.errors.Add(1)
-	}
-
-	now := time.Now().Unix()
-	if !as.proofDiag.lastLogSecond.CompareAndSwap(now-1, now) {
-		last := as.proofDiag.lastLogSecond.Load()
-		if last == now || !as.proofDiag.lastLogSecond.CompareAndSwap(last, now) {
-			return
-		}
-	}
-	as.logProofPathSnapshot(ctx)
 }
 
-func (as *AggregatorService) logProofPathSnapshot(ctx context.Context) {
-	requests := as.proofDiag.requests.Swap(0)
-	knownNotReady := as.proofDiag.knownNotReady.Swap(0)
-	precomputedHit := as.proofDiag.precomputedHit.Swap(0)
-	metadataHit := as.proofDiag.metadataHit.Swap(0)
-	metadataMiss := as.proofDiag.metadataMiss.Swap(0)
-	mongoBlock := as.proofDiag.mongoBlock.Swap(0)
-	mongoRecord := as.proofDiag.mongoRecord.Swap(0)
-	emptyResponses := as.proofDiag.emptyResponses.Swap(0)
-	liveCert := as.proofDiag.liveCert.Swap(0)
-	errors := as.proofDiag.errors.Swap(0)
-
-	if requests == 0 &&
-		knownNotReady == 0 &&
-		precomputedHit == 0 &&
-		metadataHit == 0 &&
-		metadataMiss == 0 &&
-		mongoBlock == 0 &&
-		mongoRecord == 0 &&
-		emptyResponses == 0 &&
-		liveCert == 0 &&
-		errors == 0 {
+func (as *AggregatorService) recordProofBuildDuration(_ context.Context, source, result string, duration time.Duration) {
+	if as == nil {
 		return
 	}
-	if as.logger == nil {
-		return
+	if duration < 0 {
+		duration = 0
 	}
-	pending, records, blocks := as.roundManager.GetProofCacheStats()
+	metrics.SMTInclusionCertBuildDuration.WithLabelValues(source, result).Observe(duration.Seconds())
+}
 
-	as.logger.WithContext(ctx).Info("PERF: Proof path",
-		"requests", requests,
-		"knownNotReady", knownNotReady,
-		"precomputedHit", precomputedHit,
-		"metadataCacheHit", metadataHit,
-		"metadataCacheMiss", metadataMiss,
-		"mongoBlockLookup", mongoBlock,
-		"mongoRecordLookup", mongoRecord,
-		"emptyResponses", emptyResponses,
-		"liveCert", liveCert,
-		"errors", errors,
-		"proofPending", pending,
-		"proofCacheRecords", records,
-		"proofCacheBlocks", blocks)
+func proofBuildResultFromPublishedErr(err error) string {
+	if err == nil {
+		return proofBuildResultOK
+	}
+	if errors.Is(err, smtbackend.ErrPublishedProofLeafNotFound) {
+		return proofBuildResultNotFound
+	}
+	if errors.Is(err, smtbackend.ErrPublishedProofRootChanged) {
+		return proofBuildResultRootChanged
+	}
+	return proofBuildResultError
+}
+
+func proofBuildResultFromErr(err error) string {
+	if err == nil {
+		return proofBuildResultOK
+	}
+	return proofBuildResultError
 }

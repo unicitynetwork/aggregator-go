@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -52,6 +53,21 @@ type PreparedProofView interface {
 
 type ProofViewPreparingSnapshot interface {
 	CommitAndPrepareProofView(ctx context.Context, meta CommitMetadata) (PreparedProofView, error)
+}
+
+type CommitTimingProvider interface {
+	LastCommitTiming() CommitTiming
+}
+
+type CommitTiming struct {
+	CollectDuration     time.Duration
+	TombstoneDuration   time.Duration
+	BatchBuildDuration  time.Duration
+	RootHashDuration    time.Duration
+	EngineWriteDuration time.Duration
+	CacheUpdateDuration time.Duration
+	NodeWrites          int
+	NodeDeletes         int
 }
 
 type ProofViewPublisher interface {

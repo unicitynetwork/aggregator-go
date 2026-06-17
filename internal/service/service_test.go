@@ -419,7 +419,6 @@ func TestGetInclusionProofV2Child_ComposesParentFragment(t *testing.T) {
 		BlockNumber: api.NewBigIntFromUint64(1),
 		LeafIndex:   api.NewBigIntFromUint64(0),
 		CreatedAt:   api.Now(),
-		FinalizedAt: api.Now(),
 	}
 
 	service := newAggregatorServiceForTest(t, shardingCfg, childTree)
@@ -663,7 +662,6 @@ func TestGetInclusionProofUsesCachedProofMetadata(t *testing.T) {
 		BlockNumber: api.NewBigIntFromUint64(9),
 		LeafIndex:   api.NewBigIntFromUint64(0),
 		CreatedAt:   api.Now(),
-		FinalizedAt: api.Now(),
 	}
 
 	blockStorage := &testBlockStorage{latestByRoot: map[string]*models.Block{rootHash.String(): block}}
@@ -1054,14 +1052,13 @@ type testStorage struct {
 func (s *testStorage) AggregatorRecordStorage() interfaces.AggregatorRecordStorage {
 	return s.recordStorage
 }
-func (s *testStorage) BlockStorage() interfaces.BlockStorage               { return s.blockStorage }
-func (s *testStorage) SmtStorage() interfaces.SmtStorage                   { return nil }
-func (s *testStorage) BlockRecordsStorage() interfaces.BlockRecordsStorage { return nil }
-func (s *testStorage) LeadershipStorage() interfaces.LeadershipStorage     { return nil }
-func (s *testStorage) TrustBaseStorage() interfaces.TrustBaseStorage       { return nil }
-func (s *testStorage) Initialize(context.Context) error                    { return nil }
-func (s *testStorage) Ping(context.Context) error                          { return nil }
-func (s *testStorage) Close(context.Context) error                         { return nil }
+func (s *testStorage) BlockStorage() interfaces.BlockStorage           { return s.blockStorage }
+func (s *testStorage) SmtStorage() interfaces.SmtStorage               { return nil }
+func (s *testStorage) LeadershipStorage() interfaces.LeadershipStorage { return nil }
+func (s *testStorage) TrustBaseStorage() interfaces.TrustBaseStorage   { return nil }
+func (s *testStorage) Initialize(context.Context) error                { return nil }
+func (s *testStorage) Ping(context.Context) error                      { return nil }
+func (s *testStorage) Close(context.Context) error                     { return nil }
 func (s *testStorage) WithTransaction(ctx context.Context, fn func(context.Context) error) error {
 	return fn(ctx)
 }

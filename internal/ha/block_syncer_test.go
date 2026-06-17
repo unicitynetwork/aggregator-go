@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -216,6 +217,7 @@ func createBlock(t *testing.T, storage *mongodb.Storage, blockNum int64) api.Hex
 	// persist aggregator records
 	leaves := make([]*smt.Leaf, len(testCommitments))
 	records := make([]*models.AggregatorRecord, len(testCommitments))
+	proposalID := fmt.Sprintf("proposal-%s", blockNumber.String())
 	for i, c := range testCommitments {
 		path, err := c.StateID.GetPath()
 		require.NoError(t, err)
@@ -225,6 +227,7 @@ func createBlock(t *testing.T, storage *mongodb.Storage, blockNum int64) api.Hex
 
 		leaves[i] = &smt.Leaf{Path: path, Value: val}
 		records[i] = models.NewAggregatorRecord(c, blockNumber, api.NewBigInt(big.NewInt(int64(i))))
+		records[i].ProposalID = proposalID
 
 		err = storage.AggregatorRecordStorage().Store(ctx, records[i])
 		require.NoError(t, err)
@@ -250,16 +253,8 @@ func createBlock(t *testing.T, storage *mongodb.Storage, blockNum int64) api.Hex
 	// persist block
 	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", rootHash, nil, nil)
 	block.Finalized = true // Mark as finalized so GetLatestNumber finds it
+	block.ProposalID = proposalID
 	err = storage.BlockStorage().Store(ctx, block)
-	require.NoError(t, err)
-
-	// persist block records (mapping state IDs)
-	stateIDs := make([]api.StateID, len(testCommitments))
-	for i, c := range testCommitments {
-		stateIDs[i] = c.StateID
-	}
-	blockRecords := models.NewBlockRecords(blockNumber, stateIDs)
-	err = storage.BlockRecordsStorage().Store(ctx, blockRecords)
 	require.NoError(t, err)
 
 	return rootHash
@@ -310,8 +305,9 @@ func (f *blockSyncerFixture) addBlock(t *testing.T, blockNum int64, commitmentCo
 	ctx := t.Context()
 	blockNumber := api.NewBigInt(big.NewInt(blockNum))
 	leaves := make([]*smt.Leaf, 0, commitmentCount)
-	stateIDs := make([]api.StateID, 0, commitmentCount)
 	nodes := make([]*models.SmtNode, 0, commitmentCount)
+	records := make([]*models.AggregatorRecord, 0, commitmentCount)
+	proposalID := fmt.Sprintf("proposal-%d", blockNum)
 
 	for i := 0; i < commitmentCount; i++ {
 		c := testutil.CreateTestCertificationRequest(t, fmt.Sprintf("block_%d_request_%d", blockNum, i))
@@ -323,8 +319,10 @@ func (f *blockSyncerFixture) addBlock(t *testing.T, blockNum int64, commitmentCo
 		require.NoError(t, err)
 
 		leaves = append(leaves, &smt.Leaf{Path: path, Value: value})
-		stateIDs = append(stateIDs, c.StateID)
 		nodes = append(nodes, models.NewSmtNode(api.HexBytes(key), api.HexBytes(value)))
+		record := models.NewAggregatorRecord(c, blockNumber, api.NewBigInt(big.NewInt(int64(i))))
+		record.ProposalID = proposalID
+		records = append(records, record)
 	}
 
 	if len(leaves) > 0 {
@@ -334,8 +332,9 @@ func (f *blockSyncerFixture) addBlock(t *testing.T, blockNum int64, commitmentCo
 
 	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "test", rootHash, nil, nil)
 	block.Finalized = true
+	block.ProposalID = proposalID
 	require.NoError(t, f.storage.BlockStorage().Store(ctx, block))
-	require.NoError(t, f.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(blockNumber, stateIDs)))
+	require.NoError(t, f.storage.AggregatorRecordStorage().StoreBatch(ctx, records))
 	require.NoError(t, f.storage.SmtStorage().StoreBatch(ctx, nodes))
 	return rootHash
 }
@@ -346,11 +345,10 @@ func commitFixtureBlockToBackend(t *testing.T, ctx context.Context, backend smtb
 	block, err := storage.BlockStorage().GetByNumber(ctx, blockNumber)
 	require.NoError(t, err)
 	require.NotNil(t, block)
-	blockRecord, err := storage.BlockRecordsStorage().GetByBlockNumber(ctx, blockNumber)
+	records, err := storage.AggregatorRecordStorage().GetByBlockNumber(ctx, blockNumber)
 	require.NoError(t, err)
-	require.NotNil(t, blockRecord)
 
-	leaves, err := fixtureLeavesForStateIDs(ctx, storage, blockRecord.StateIDs)
+	leaves, err := replayLeavesForAggregatorRecords(records)
 	require.NoError(t, err)
 	snapshot, err := backend.CreateSnapshot(ctx)
 	require.NoError(t, err)
@@ -359,26 +357,6 @@ func commitFixtureBlockToBackend(t *testing.T, ctx context.Context, backend smtb
 	require.NoError(t, result.ValidateAllAccepted(len(leaves)))
 	require.Equal(t, block.RootHash.String(), api.HexBytes(result.CandidateRoot).String())
 	require.NoError(t, snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: blockNumber, RootHash: block.RootHash}))
-}
-
-func fixtureLeavesForStateIDs(ctx context.Context, storage *blockSyncerTestStorage, stateIDs []api.StateID) ([]smtbackend.LeafInput, error) {
-	keys := make([]api.HexBytes, 0, len(stateIDs))
-	for _, stateID := range stateIDs {
-		key, err := stateID.GetTreeKey()
-		if err != nil {
-			return nil, err
-		}
-		keys = append(keys, api.HexBytes(key))
-	}
-	nodes, err := storage.SmtStorage().GetByKeys(ctx, keys)
-	if err != nil {
-		return nil, err
-	}
-	leaves := make([]smtbackend.LeafInput, len(nodes))
-	for i, node := range nodes {
-		leaves[i] = smtbackend.LeafInput{Key: node.Key, Value: node.Value}
-	}
-	return leaves, nil
 }
 
 func bytesOf(n int, value byte) []byte {
@@ -390,21 +368,21 @@ func bytesOf(n int, value byte) []byte {
 }
 
 type blockSyncerTestStorage struct {
-	blocks       *blockSyncerTestBlockStorage
-	blockRecords *blockSyncerTestBlockRecordsStorage
-	smtNodes     *blockSyncerTestSMTStorage
+	blocks   *blockSyncerTestBlockStorage
+	records  *blockSyncerTestAggregatorRecordStorage
+	smtNodes *blockSyncerTestSMTStorage
 }
 
 func newBlockSyncerTestStorage() *blockSyncerTestStorage {
 	return &blockSyncerTestStorage{
-		blocks:       &blockSyncerTestBlockStorage{byNumber: make(map[string]*models.Block)},
-		blockRecords: &blockSyncerTestBlockRecordsStorage{byNumber: make(map[string]*models.BlockRecords)},
-		smtNodes:     &blockSyncerTestSMTStorage{byKey: make(map[string]*models.SmtNode)},
+		blocks:   &blockSyncerTestBlockStorage{byNumber: make(map[string]*models.Block)},
+		records:  &blockSyncerTestAggregatorRecordStorage{byBlock: make(map[string][]*models.AggregatorRecord)},
+		smtNodes: &blockSyncerTestSMTStorage{byKey: make(map[string]*models.SmtNode)},
 	}
 }
 
 func (s *blockSyncerTestStorage) AggregatorRecordStorage() interfaces.AggregatorRecordStorage {
-	return nil
+	return s.records
 }
 
 func (s *blockSyncerTestStorage) BlockStorage() interfaces.BlockStorage {
@@ -413,10 +391,6 @@ func (s *blockSyncerTestStorage) BlockStorage() interfaces.BlockStorage {
 
 func (s *blockSyncerTestStorage) SmtStorage() interfaces.SmtStorage {
 	return s.smtNodes
-}
-
-func (s *blockSyncerTestStorage) BlockRecordsStorage() interfaces.BlockRecordsStorage {
-	return s.blockRecords
 }
 
 func (s *blockSyncerTestStorage) LeadershipStorage() interfaces.LeadershipStorage {
@@ -480,8 +454,21 @@ func (s *blockSyncerTestBlockStorage) Count(context.Context) (int64, error) {
 	return int64(len(s.byNumber)), nil
 }
 
-func (s *blockSyncerTestBlockStorage) GetRange(context.Context, *api.BigInt, *api.BigInt) ([]*models.Block, error) {
-	return nil, nil
+func (s *blockSyncerTestBlockStorage) GetRange(_ context.Context, fromBlock, toBlock *api.BigInt) ([]*models.Block, error) {
+	var out []*models.Block
+	for _, block := range s.byNumber {
+		if !block.Finalized {
+			continue
+		}
+		if block.Index.Cmp(fromBlock.Int) < 0 || block.Index.Cmp(toBlock.Int) > 0 {
+			continue
+		}
+		out = append(out, block)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Index.Cmp(out[j].Index.Int) < 0
+	})
+	return out, nil
 }
 
 func (s *blockSyncerTestBlockStorage) SetFinalized(_ context.Context, blockNumber *api.BigInt, finalized bool) error {
@@ -501,44 +488,77 @@ func (s *blockSyncerTestBlockStorage) GetUnfinalized(context.Context) ([]*models
 	return out, nil
 }
 
-type blockSyncerTestBlockRecordsStorage struct {
-	byNumber map[string]*models.BlockRecords
+type blockSyncerTestAggregatorRecordStorage struct {
+	byBlock map[string][]*models.AggregatorRecord
 }
 
-func (s *blockSyncerTestBlockRecordsStorage) Store(_ context.Context, records *models.BlockRecords) error {
-	s.byNumber[records.BlockNumber.String()] = records
+func (s *blockSyncerTestAggregatorRecordStorage) Store(_ context.Context, record *models.AggregatorRecord) error {
+	s.byBlock[record.BlockNumber.String()] = append(s.byBlock[record.BlockNumber.String()], record)
 	return nil
 }
 
-func (s *blockSyncerTestBlockRecordsStorage) GetByBlockNumber(_ context.Context, blockNumber *api.BigInt) (*models.BlockRecords, error) {
-	return s.byNumber[blockNumber.String()], nil
-}
-
-func (s *blockSyncerTestBlockRecordsStorage) Count(context.Context) (int64, error) {
-	return int64(len(s.byNumber)), nil
-}
-
-func (s *blockSyncerTestBlockRecordsStorage) GetNextBlock(_ context.Context, blockNumber *api.BigInt) (*models.BlockRecords, error) {
-	var next *models.BlockRecords
-	for _, record := range s.byNumber {
-		if blockNumber != nil && record.BlockNumber.Cmp(blockNumber.Int) <= 0 {
-			continue
-		}
-		if next == nil || record.BlockNumber.Cmp(next.BlockNumber.Int) < 0 {
-			next = record
+func (s *blockSyncerTestAggregatorRecordStorage) StoreBatch(ctx context.Context, records []*models.AggregatorRecord) error {
+	for _, record := range records {
+		if err := s.Store(ctx, record); err != nil {
+			return err
 		}
 	}
-	return next, nil
+	return nil
 }
 
-func (s *blockSyncerTestBlockRecordsStorage) GetLatestBlockNumber(context.Context) (*api.BigInt, error) {
-	var latest *api.BigInt
-	for _, record := range s.byNumber {
-		if latest == nil || record.BlockNumber.Cmp(latest.Int) > 0 {
-			latest = record.BlockNumber
+func (s *blockSyncerTestAggregatorRecordStorage) GetByStateID(_ context.Context, stateID api.StateID) (*models.AggregatorRecord, error) {
+	for _, records := range s.byBlock {
+		for _, record := range records {
+			if record != nil && string(record.StateID) == string(stateID) {
+				return record, nil
+			}
 		}
 	}
-	return latest, nil
+	return nil, nil
+}
+
+func (s *blockSyncerTestAggregatorRecordStorage) GetByBlockNumber(_ context.Context, blockNumber *api.BigInt) ([]*models.AggregatorRecord, error) {
+	records := append([]*models.AggregatorRecord(nil), s.byBlock[blockNumber.String()]...)
+	sort.SliceStable(records, func(i, j int) bool {
+		left := records[i].LeafIndex
+		right := records[j].LeafIndex
+		if left == nil || left.Int == nil {
+			return right != nil && right.Int != nil
+		}
+		if right == nil || right.Int == nil {
+			return false
+		}
+		return left.Int.Cmp(right.Int) < 0
+	})
+	return records, nil
+}
+
+func (s *blockSyncerTestAggregatorRecordStorage) Count(context.Context) (int64, error) {
+	var count int64
+	for _, records := range s.byBlock {
+		count += int64(len(records))
+	}
+	return count, nil
+}
+
+func (s *blockSyncerTestAggregatorRecordStorage) GetExistingStateIDs(_ context.Context, stateIDs []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(stateIDs))
+	wanted := make(map[string]struct{}, len(stateIDs))
+	for _, stateID := range stateIDs {
+		wanted[stateID] = struct{}{}
+	}
+	for _, records := range s.byBlock {
+		for _, record := range records {
+			if record == nil {
+				continue
+			}
+			key := record.StateID.String()
+			if _, ok := wanted[key]; ok {
+				out[key] = true
+			}
+		}
+	}
+	return out, nil
 }
 
 type blockSyncerTestSMTStorage struct {
@@ -616,10 +636,9 @@ func (s *blockSyncerTestSMTStorage) GetExistingKeys(_ context.Context, keys []st
 }
 
 var (
-	_ interfaces.Storage             = (*blockSyncerTestStorage)(nil)
-	_ interfaces.BlockStorage        = (*blockSyncerTestBlockStorage)(nil)
-	_ interfaces.BlockRecordsStorage = (*blockSyncerTestBlockRecordsStorage)(nil)
-	_ interfaces.SmtStorage          = (*blockSyncerTestSMTStorage)(nil)
-	_ smtbackend.DiskBacked          = (*fakeDiskBackend)(nil)
-	_ smtbackend.ProofViewPublisher  = (*fakeDiskBackend)(nil)
+	_ interfaces.Storage            = (*blockSyncerTestStorage)(nil)
+	_ interfaces.BlockStorage       = (*blockSyncerTestBlockStorage)(nil)
+	_ interfaces.SmtStorage         = (*blockSyncerTestSMTStorage)(nil)
+	_ smtbackend.DiskBacked         = (*fakeDiskBackend)(nil)
+	_ smtbackend.ProofViewPublisher = (*fakeDiskBackend)(nil)
 )

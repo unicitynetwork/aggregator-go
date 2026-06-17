@@ -48,6 +48,44 @@ func (s *discardCountingSnapshot) Discard(ctx context.Context) {
 	s.Snapshot.Discard(ctx)
 }
 
+func storeDurableProposalForCurrentRound(t *testing.T, ctx context.Context, rm *RoundManager, block *models.Block) []*models.AggregatorRecord {
+	t.Helper()
+	require.NotNil(t, rm.currentRound)
+	if rm.currentRound.ProposalID == "" {
+		rm.currentRound.ProposalID = "proposal-" + block.Index.String()
+	}
+	block.ProposalID = rm.currentRound.ProposalID
+	records, err := rm.proposalRecordsForRound(rm.currentRound, block.Index)
+	require.NoError(t, err)
+	require.NoError(t, rm.storeProposedBlockAndRecords(ctx, block, records))
+	return records
+}
+
+func recordsForBlock(commitments []*models.CertificationRequest, block *models.Block) []*models.AggregatorRecord {
+	records := make([]*models.AggregatorRecord, len(commitments))
+	for i, commitment := range commitments {
+		record := models.NewAggregatorRecord(commitment, block.Index, api.NewBigInt(big.NewInt(int64(i))))
+		record.ProposalID = block.ProposalID
+		records[i] = record
+	}
+	return records
+}
+
+func TestSameStateIDsRequiresSameMembershipNotOrder(t *testing.T) {
+	a := []api.StateID{
+		api.RequireNewImprintV2("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		api.RequireNewImprintV2("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+		api.RequireNewImprintV2("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+	}
+	b := []api.StateID{a[2], a[0], a[1]}
+	missing := []api.StateID{a[0], a[1]}
+	duplicate := []api.StateID{a[0], a[1], a[1]}
+
+	require.True(t, sameStateIDs(a, b))
+	require.False(t, sameStateIDs(a, missing))
+	require.False(t, sameStateIDs(a, duplicate))
+}
+
 func TestFinalizeDuplicateSuite(t *testing.T) {
 	suite.Run(t, new(FinalizeDuplicateTestSuite))
 }
@@ -74,8 +112,8 @@ func (s *FinalizeDuplicateTestSuite) SetupSuite() {
 	}
 }
 
-// TestDuplicateRecovery tests that FinalizeBlock succeeds even when
-// some SMT nodes and aggregator records already exist (simulating crash recovery).
+// TestDuplicateRecovery tests that FinalizeBlock succeeds even when some SMT
+// nodes already exist (simulating a retry after a partial local node write).
 func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 	t := s.T()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -111,22 +149,18 @@ func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 	smtCountBefore, _ := s.storage.SmtStorage().Count(ctx)
 	recordCountBefore, _ := s.storage.AggregatorRecordStorage().Count(ctx)
 
-	// Pre-populate storage with 2 out of 5 records (simulating partial write before crash)
+	// Pre-populate storage with 2 out of 5 SMT nodes (simulating partial write before crash)
 	partialLeaves := rm.currentRound.PendingLeaves[:2]
 	preExistingNodes, err := rm.convertLeavesToNodes(partialLeaves)
 	require.NoError(t, err)
 	err = s.storage.SmtStorage().StoreBatch(ctx, preExistingNodes)
 	require.NoError(t, err, "Pre-populating SMT nodes should succeed")
 
-	preExistingRecords := rm.convertCommitmentsToRecords(commitments[:2], api.NewBigInt(big.NewInt(1)))
-	err = s.storage.AggregatorRecordStorage().StoreBatch(ctx, preExistingRecords)
-	require.NoError(t, err, "Pre-populating aggregator records should succeed")
-
 	// Verify pre-existing data added
 	smtCount, _ := s.storage.SmtStorage().Count(ctx)
 	require.Equal(t, smtCountBefore+2, smtCount, "Should have added 2 pre-existing SMT nodes")
 	recordCount, _ := s.storage.AggregatorRecordStorage().Count(ctx)
-	require.Equal(t, recordCountBefore+2, recordCount, "Should have added 2 pre-existing aggregator records")
+	require.Equal(t, recordCountBefore, recordCount, "Should not have pre-existing aggregator records")
 
 	// Get root hash from snapshot
 	rootHash := testSnapshotRootHex(t, ctx, rm.currentRound.Snapshot)
@@ -145,6 +179,7 @@ func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 		api.HexBytes{},
 		api.HexBytes{},
 	)
+	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 
 	// FinalizeBlock should succeed despite duplicates
 	err = rm.FinalizeBlock(ctx, block)
@@ -203,6 +238,7 @@ func (s *FinalizeDuplicateTestSuite) Test2_NoDuplicates() {
 		api.HexBytes{},
 		api.HexBytes{},
 	)
+	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 
 	// Should succeed on first try (no duplicates)
 	err = rm.FinalizeBlock(ctx, block)
@@ -244,14 +280,11 @@ func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 	smtCountBefore, _ := s.storage.SmtStorage().Count(ctx)
 	recordCountBefore, _ := s.storage.AggregatorRecordStorage().Count(ctx)
 
-	// Pre-populate ALL SMT nodes and aggregator records
+	// Pre-populate ALL SMT nodes. Aggregator records are stored once as the
+	// durable proposal before certification.
 	allNodes, err := rm.convertLeavesToNodes(rm.currentRound.PendingLeaves)
 	require.NoError(t, err)
 	err = s.storage.SmtStorage().StoreBatch(ctx, allNodes)
-	require.NoError(t, err)
-
-	allRecords := rm.convertCommitmentsToRecords(commitments, api.NewBigInt(big.NewInt(3)))
-	err = s.storage.AggregatorRecordStorage().StoreBatch(ctx, allRecords)
 	require.NoError(t, err)
 
 	rootHash := testSnapshotRootHex(t, ctx, rm.currentRound.Snapshot)
@@ -268,6 +301,7 @@ func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 		api.HexBytes{},
 		api.HexBytes{},
 	)
+	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 
 	// Should succeed even when all records are duplicates
 	err = rm.FinalizeBlock(ctx, block)
@@ -326,25 +360,14 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 		api.HexBytes{},
 	)
 
-	// Pre-store the block (simulating previous attempt that stored block but failed on MarkProcessed)
-	block.Finalized = false
-	err = s.storage.BlockStorage().Store(ctx, block)
-	require.NoError(t, err, "Pre-storing block should succeed")
-
-	// Also pre-store block records
-	stateIDs := make([]api.StateID, len(commitments))
-	for i, c := range commitments {
-		stateIDs[i] = c.StateID
-	}
-	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, stateIDs))
-	require.NoError(t, err, "Pre-storing block records should succeed")
+	// Pre-store the durable proposal (simulating the real pre-certification flow).
+	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 
 	// Get counts before FinalizeBlock
 	smtCountBefore, _ := s.storage.SmtStorage().Count(ctx)
 	recordCountBefore, _ := s.storage.AggregatorRecordStorage().Count(ctx)
 
-	// FinalizeBlock should succeed despite duplicate block
-	// It should skip block storage and continue with remaining steps
+	// FinalizeBlock should use the already-stored proposal and not rewrite records.
 	err = rm.FinalizeBlock(ctx, block)
 	require.NoError(t, err, "FinalizeBlock should succeed with duplicate block")
 
@@ -353,7 +376,7 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 	require.Equal(t, smtCountBefore+3, smtCountAfter, "Should have stored 3 SMT nodes despite duplicate block")
 
 	recordCountAfter, _ := s.storage.AggregatorRecordStorage().Count(ctx)
-	require.Equal(t, recordCountBefore+3, recordCountAfter, "Should have stored 3 aggregator records despite duplicate block")
+	require.Equal(t, recordCountBefore, recordCountAfter, "FinalizeBlock should not store aggregator records")
 
 	// Verify block was finalized
 	storedBlock, err := s.storage.BlockStorage().GetByNumber(ctx, block.Index)
@@ -409,6 +432,7 @@ func (s *FinalizeDuplicateTestSuite) Test4b_MarkProcessedFailureAfterFinalizatio
 		api.HexBytes{},
 		api.HexBytes{},
 	)
+	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 
 	err = rm.FinalizeBlock(ctx, block)
 	require.NoError(t, err, "post-finalization ACK failure should not fail FinalizeBlock")
@@ -469,16 +493,10 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 
 	// Pre-store the block as FINALIZED (simulating previous successful attempt except MarkProcessed)
 	block.Finalized = true
+	block.Status = models.FinalityStatusFinalized
+	block.ProposalID = "proposal-" + block.Index.String()
 	err = s.storage.BlockStorage().Store(ctx, block)
 	require.NoError(t, err, "Pre-storing finalized block should succeed")
-
-	// Pre-store block records
-	stateIDs := make([]api.StateID, len(commitments))
-	for i, c := range commitments {
-		stateIDs[i] = c.StateID
-	}
-	err = s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, stateIDs))
-	require.NoError(t, err, "Pre-storing block records should succeed")
 
 	// Pre-store all SMT nodes and records (simulating full previous attempt)
 	allNodes, err := rm.convertLeavesToNodes(rm.currentRound.PendingLeaves)
@@ -486,7 +504,7 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	err = s.storage.SmtStorage().StoreBatch(ctx, allNodes)
 	require.NoError(t, err)
 
-	allRecords := rm.convertCommitmentsToRecords(commitments, block.Index)
+	allRecords := recordsForBlock(commitments, block)
 	err = s.storage.AggregatorRecordStorage().StoreBatch(ctx, allRecords)
 	require.NoError(t, err)
 
@@ -519,10 +537,10 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 	t.Log("✓ FinalizeBlock succeeded with already-finalized block")
 }
 
-// Test6_BlockRecordsMatchPendingCommitmentsOnConflict verifies that FinalizeBlock
-// stores BlockRecords/SMT nodes/aggregator records from the filtered pending set,
-// not from all round commitments when one commitment conflicts.
-func (s *FinalizeDuplicateTestSuite) Test6_BlockRecordsMatchPendingCommitmentsOnConflict() {
+// Test6_ProposalRecordsMatchPendingCommitmentsOnConflict verifies that the
+// durable proposal is built from the filtered pending set, not from all round
+// commitments when one commitment conflicts.
+func (s *FinalizeDuplicateTestSuite) Test6_ProposalRecordsMatchPendingCommitmentsOnConflict() {
 	t := s.T()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -584,18 +602,15 @@ func (s *FinalizeDuplicateTestSuite) Test6_BlockRecordsMatchPendingCommitmentsOn
 		api.HexBytes{},
 		api.HexBytes{},
 	)
+	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 
 	err = rm.FinalizeBlock(ctx, block)
 	require.NoError(t, err)
 
-	blockRecords, err := s.storage.BlockRecordsStorage().GetByBlockNumber(ctx, block.Index)
-	require.NoError(t, err)
-	require.NotNil(t, blockRecords)
-	require.Equal(t, []api.StateID{commitment1.StateID, commitment2.StateID}, blockRecords.StateIDs)
-
 	recordsByBlock, err := s.storage.AggregatorRecordStorage().GetByBlockNumber(ctx, block.Index)
 	require.NoError(t, err)
 	require.Len(t, recordsByBlock, 2)
+	require.Equal(t, []api.StateID{commitment1.StateID, commitment2.StateID}, []api.StateID{recordsByBlock[0].StateID, recordsByBlock[1].StateID})
 
 	smtCountAfter, err := s.storage.SmtStorage().Count(ctx)
 	require.NoError(t, err)
@@ -603,7 +618,7 @@ func (s *FinalizeDuplicateTestSuite) Test6_BlockRecordsMatchPendingCommitmentsOn
 
 	recordCountAfter, err := s.storage.AggregatorRecordStorage().Count(ctx)
 	require.NoError(t, err)
-	require.Equal(t, recordCountBefore+2, recordCountAfter, "should persist only filtered aggregator records")
+	require.Equal(t, recordCountBefore+2, recordCountAfter, "should stage only filtered aggregator records")
 }
 
 func (s *FinalizeDuplicateTestSuite) Test7_FinalizeBlockRejectsRoundNumberMismatch() {
@@ -669,12 +684,14 @@ func (s *FinalizeDuplicateTestSuite) Test8_DuplicateBlockMustMatchRootAndStateID
 
 	existing := models.NewBlock(api.NewBigInt(big.NewInt(8)), "unicity", 0, "1.0", "mainnet", api.HexBytes(repeatByte(32, 7)), api.HexBytes{}, api.HexBytes{})
 	existing.Finalized = true
+	existing.Status = models.FinalityStatusFinalized
+	existing.ProposalID = "proposal-8-existing"
 	require.NoError(t, s.storage.BlockStorage().Store(ctx, existing))
-	require.NoError(t, s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(existing.Index, []api.StateID{commitments[0].StateID})))
+	require.NoError(t, s.storage.AggregatorRecordStorage().StoreBatch(ctx, recordsForBlock(commitments[:1], existing)))
 
 	block := models.NewBlock(api.NewBigInt(big.NewInt(8)), "unicity", 0, "1.0", "mainnet", rootHashBytes, api.HexBytes{}, api.HexBytes{})
 	err = rm.FinalizeBlock(ctx, block)
-	require.ErrorContains(t, err, "duplicate block")
+	require.ErrorContains(t, err, "root mismatch")
 }
 
 func (s *FinalizeDuplicateTestSuite) Test9_EmptyRoundCannotFinalizeChangedRoot() {

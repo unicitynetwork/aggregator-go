@@ -151,25 +151,6 @@ type SmtStorage interface {
 	GetExistingKeys(ctx context.Context, keys []string) (map[string]bool, error)
 }
 
-// BlockRecordsStorage handles block to state ID mappings
-type BlockRecordsStorage interface {
-	// Store stores a new block records entry
-	Store(ctx context.Context, records *models.BlockRecords) error
-
-	// GetByBlockNumber retrieves block records by block number
-	GetByBlockNumber(ctx context.Context, blockNumber *api.BigInt) (*models.BlockRecords, error)
-
-	// Count returns the total number of block records
-	Count(ctx context.Context) (int64, error)
-
-	// GetNextBlock retrieves the first block after the given block number.
-	// If blockNumber is nil then returns the very first block.
-	GetNextBlock(ctx context.Context, blockNumber *api.BigInt) (*models.BlockRecords, error)
-
-	// GetLatestBlockNumber retrieves the latest block
-	GetLatestBlockNumber(ctx context.Context) (*api.BigInt, error)
-}
-
 // LeadershipStorage handles high availability leadership state
 type LeadershipStorage interface {
 	// TryAcquireLock attempts to acquire the leadership lock,
@@ -207,7 +188,6 @@ type Storage interface {
 	AggregatorRecordStorage() AggregatorRecordStorage
 	BlockStorage() BlockStorage
 	SmtStorage() SmtStorage
-	BlockRecordsStorage() BlockRecordsStorage
 	LeadershipStorage() LeadershipStorage
 	TrustBaseStorage() TrustBaseStorage
 

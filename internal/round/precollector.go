@@ -3,18 +3,25 @@ package round
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"sync"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 type preCollectionResult struct {
-	snapshot    smtbackend.Snapshot
-	commitments []*models.CertificationRequest
-	leaves      []smtbackend.LeafInput
+	snapshot      smtbackend.Snapshot
+	commitments   []*models.CertificationRequest
+	leaves        []smtbackend.LeafInput
+	recordsStaged bool
+	blockNumber   *api.BigInt
+	proposalID    string
 }
 
 type advanceRequest struct {
@@ -26,12 +33,35 @@ type advanceResponse struct {
 	err    error
 }
 
+type precollectorPrepareStats struct {
+	flushCalls int
+	flushAdded int
+	flushTotal time.Duration
+	flushMax   time.Duration
+	stageCalls int
+	stageAdded int
+	stageTotal time.Duration
+	stageMax   time.Duration
+	fork       time.Duration
+	total      time.Duration
+}
+
+type precollectorPrepareOutcome struct {
+	result       *preCollectionResult
+	nextSnapshot smtbackend.Snapshot
+	stats        precollectorPrepareStats
+	err          error
+}
+
 type childPrecollector struct {
 	commitmentStream <-chan *models.CertificationRequest
 	commitmentQueue  interfaces.CommitmentQueue
 	logger           *logger.Logger
 	maxPerRound      int
 	markProofPending func([]*models.CertificationRequest)
+	blockNumber      *api.BigInt
+	proposalID       string
+	stageProposed    func(context.Context, *api.BigInt, string, int, []*models.CertificationRequest) error
 
 	advanceCh chan advanceRequest
 	stopCh    chan struct{}
@@ -46,9 +76,15 @@ func newChildPrecollector(
 	log *logger.Logger,
 	maxPerRound int,
 	markProofPending func([]*models.CertificationRequest),
+	blockNumber *api.BigInt,
+	proposalID string,
+	stageProposed func(context.Context, *api.BigInt, string, int, []*models.CertificationRequest) error,
 ) *childPrecollector {
 	if maxPerRound <= 0 {
 		maxPerRound = 10000
+	}
+	if proposalID == "" {
+		proposalID = uuid.NewString()
 	}
 	return &childPrecollector{
 		commitmentStream: stream,
@@ -56,6 +92,9 @@ func newChildPrecollector(
 		logger:           log,
 		maxPerRound:      maxPerRound,
 		markProofPending: markProofPending,
+		blockNumber:      cloneBigInt(blockNumber),
+		proposalID:       proposalID,
+		stageProposed:    stageProposed,
 		advanceCh:        make(chan advanceRequest),
 		stopCh:           make(chan struct{}),
 		doneCh:           make(chan struct{}),
@@ -104,39 +143,120 @@ func (cp *childPrecollector) Stop() {
 func (cp *childPrecollector) run(ctx context.Context, snapshot smtbackend.Snapshot) {
 	defer close(cp.doneCh)
 
+	commitments := make([]*models.CertificationRequest, 0)
+
 	defer func() {
 		if snapshot != nil {
 			snapshot.Discard(ctx)
 		}
 	}()
-	commitments := make([]*models.CertificationRequest, 0)
-	leaves := make([]smtbackend.LeafInput, 0)
-	pending := make([]*models.CertificationRequest, 0, miniBatchSize)
-	count := 0
 
-	flush := func() error {
-		if len(pending) == 0 {
-			return nil
+	prepareRound := func(
+		snapshot smtbackend.Snapshot,
+		blockNumber *api.BigInt,
+		proposalID string,
+		rawCommitments []*models.CertificationRequest,
+	) precollectorPrepareOutcome {
+		prepareStart := time.Now()
+		outcome := precollectorPrepareOutcome{}
+
+		var added []*models.CertificationRequest
+		var addedLeaves []smtbackend.LeafInput
+		if len(rawCommitments) > 0 {
+			start := time.Now()
+			var err error
+			added, addedLeaves, err = cp.addBatch(ctx, snapshot, rawCommitments)
+			elapsed := time.Since(start)
+			outcome.stats.flushCalls = 1
+			outcome.stats.flushAdded = len(added)
+			outcome.stats.flushTotal = elapsed
+			outcome.stats.flushMax = elapsed
+			if err != nil {
+				outcome.err = err
+				outcome.stats.total = time.Since(prepareStart)
+				return outcome
+			}
 		}
-		added, addedLeaves, err := cp.addBatch(ctx, snapshot, pending)
-		if err != nil {
-			return err
+
+		stageDone := make(chan error, 1)
+		if len(added) > 0 && cp.stageProposed != nil && blockNumber != nil {
+			outcome.stats.stageCalls = 1
+			outcome.stats.stageAdded = len(added)
+			go func() {
+				stageStart := time.Now()
+				err := cp.stageProposed(ctx, blockNumber, proposalID, 0, added)
+				stageElapsed := time.Since(stageStart)
+				outcome.stats.stageTotal = stageElapsed
+				outcome.stats.stageMax = stageElapsed
+				stageDone <- err
+			}()
+		} else {
+			stageDone <- nil
 		}
+
 		if cp.markProofPending != nil {
 			cp.markProofPending(added)
 		}
-		commitments = append(commitments, added...)
-		leaves = append(leaves, addedLeaves...)
-		count += len(added)
-		pending = pending[:0]
-		return nil
+
+		forkStart := time.Now()
+		nextSnapshot, forkErr := snapshot.Fork(ctx)
+		outcome.stats.fork = time.Since(forkStart)
+		stageErr := <-stageDone
+		if stageErr != nil {
+			if nextSnapshot != nil {
+				nextSnapshot.Discard(ctx)
+			}
+			outcome.err = stageErr
+			outcome.stats.total = time.Since(prepareStart)
+			return outcome
+		}
+		if forkErr != nil {
+			outcome.err = fmt.Errorf("failed to fork next precollector snapshot: %w", forkErr)
+			outcome.stats.total = time.Since(prepareStart)
+			return outcome
+		}
+
+		outcome.result = &preCollectionResult{
+			snapshot:      snapshot,
+			commitments:   added,
+			leaves:        addedLeaves,
+			recordsStaged: len(added) > 0 && cp.stageProposed != nil && blockNumber != nil,
+			blockNumber:   cloneBigInt(blockNumber),
+			proposalID:    proposalID,
+		}
+		outcome.nextSnapshot = nextSnapshot
+		outcome.stats.total = time.Since(prepareStart)
+		return outcome
+	}
+
+	prepareSynchronously := func() (precollectorPrepareOutcome, error) {
+		outcome := prepareRound(snapshot, cloneBigInt(cp.blockNumber), cp.proposalID, commitments)
+		if outcome.err != nil {
+			return outcome, outcome.err
+		}
+		cp.logger.WithContext(ctx).Debug("Precollector prepared",
+			"commitments", len(outcome.result.commitments),
+			"leaves", len(outcome.result.leaves),
+			"maxPerRound", cp.maxPerRound,
+			"flushCalls", outcome.stats.flushCalls,
+			"flushAdded", outcome.stats.flushAdded,
+			"flushTotal", outcome.stats.flushTotal.String(),
+			"flushMax", outcome.stats.flushMax.String(),
+			"stageCalls", outcome.stats.stageCalls,
+			"stageAdded", outcome.stats.stageAdded,
+			"stageTotal", outcome.stats.stageTotal.String(),
+			"stageMax", outcome.stats.stageMax.String(),
+			"fork", outcome.stats.fork.String(),
+			"total", outcome.stats.total.String())
+		return outcome, nil
 	}
 
 	// streamCh is nil when we've hit maxPerRound so we stop reading
 	streamCh := cp.commitmentStream
 
 	for {
-		if count+len(pending) >= cp.maxPerRound {
+		activeCount := len(commitments)
+		if activeCount >= cp.maxPerRound {
 			streamCh = nil
 		} else {
 			streamCh = cp.commitmentStream
@@ -144,85 +264,61 @@ func (cp *childPrecollector) run(ctx context.Context, snapshot smtbackend.Snapsh
 
 		select {
 		case commitment := <-streamCh:
-			pending = append(pending, commitment)
-			if len(pending) >= miniBatchSize {
-				if err := flush(); err != nil {
-					cp.setStopErr(err)
-					return
-				}
-			}
+			commitments = append(commitments, commitment)
 
 		case req := <-cp.advanceCh:
-			if err := drainBufferedCommitments(cp.commitmentStream, cp.maxPerRound, &count, &pending, flush); err != nil {
-				cp.setStopErr(err)
-				req.resultCh <- advanceResponse{err: err}
-				return
-			}
-			if err := flush(); err != nil {
-				cp.setStopErr(err)
-				req.resultCh <- advanceResponse{err: err}
-				return
-			}
-			result := &preCollectionResult{
-				snapshot:    snapshot,
-				commitments: commitments,
-				leaves:      leaves,
-			}
-			// Chain new collection from current snapshot
-			nextSnapshot, err := snapshot.Fork(ctx)
+			advanceStart := time.Now()
+			pendingAtAdvance := len(commitments)
+			outcome, err := prepareSynchronously()
 			if err != nil {
-				err = fmt.Errorf("failed to fork next precollector snapshot: %w", err)
 				cp.setStopErr(err)
 				req.resultCh <- advanceResponse{err: err}
 				return
 			}
-			snapshot = nextSnapshot
+			result := outcome.result
+			cp.logger.WithContext(ctx).Debug("Precollector advanced",
+				"commitments", len(result.commitments),
+				"leaves", len(result.leaves),
+				"pendingAtAdvance", pendingAtAdvance,
+				"maxPerRound", cp.maxPerRound,
+				"advanceFlush", outcome.stats.flushTotal.String(),
+				"total", time.Since(advanceStart).String(),
+				"flushCalls", outcome.stats.flushCalls,
+				"flushAdded", outcome.stats.flushAdded,
+				"flushTotal", outcome.stats.flushTotal.String(),
+				"flushMax", outcome.stats.flushMax.String(),
+				"stageCalls", outcome.stats.stageCalls,
+				"stageAdded", outcome.stats.stageAdded,
+				"stageTotal", outcome.stats.stageTotal.String(),
+				"stageMax", outcome.stats.stageMax.String(),
+				"fork", outcome.stats.fork.String())
+			snapshot = outcome.nextSnapshot
+			cp.blockNumber = incrementBigInt(cp.blockNumber)
+			cp.proposalID = uuid.NewString()
 			commitments = make([]*models.CertificationRequest, 0)
-			leaves = make([]smtbackend.LeafInput, 0)
-			count = 0
 			req.resultCh <- advanceResponse{result: result}
 
 		case <-cp.stopCh:
-			if err := flush(); err != nil {
-				cp.setStopErr(err)
-			}
 			return
 
 		case <-ctx.Done():
-			if err := flush(); err != nil {
-				cp.setStopErr(err)
-			}
 			return
 		}
 	}
 }
 
-// drainBufferedCommitments folds already-buffered commitments into the current
-// round before an advance boundary is cut.
-func drainBufferedCommitments(
-	stream <-chan *models.CertificationRequest,
-	maxPerRound int,
-	count *int,
-	pending *[]*models.CertificationRequest,
-	flush func() error,
-) error {
-	for *count+len(*pending) < maxPerRound {
-		select {
-		case commitment, ok := <-stream:
-			if !ok {
-				return nil
-			}
-			*pending = append(*pending, commitment)
-			if len(*pending) >= miniBatchSize {
-				if err := flush(); err != nil {
-					return err
-				}
-			}
-		default:
-			return nil
-		}
+func cloneBigInt(v *api.BigInt) *api.BigInt {
+	if v == nil || v.Int == nil {
+		return nil
 	}
-	return nil
+	return api.NewBigInt(new(big.Int).Set(v.Int))
+}
+
+func incrementBigInt(v *api.BigInt) *api.BigInt {
+	if v == nil || v.Int == nil {
+		return nil
+	}
+	return api.NewBigInt(new(big.Int).Add(v.Int, big.NewInt(1)))
 }
 
 func (cp *childPrecollector) addBatch(

@@ -63,24 +63,11 @@ func TestAggregatorRecordStorage_CreateIndexes_ProductionIndexSet(t *testing.T) 
 	require.NoError(t, storage.CreateIndexes(ctx))
 
 	indexes := listIndexSpecsByName(t, ctx, storage.collection)
-	requireIndexNames(t, indexes, "_id_", "stateId_1", "blockNumber_1")
-	requireIndexKey(t, indexes["stateId_1"], bson.D{{Key: "stateId", Value: 1}})
-	requireIndexKey(t, indexes["blockNumber_1"], bson.D{{Key: "blockNumber", Value: 1}})
-	assert.True(t, indexes["stateId_1"].Unique, "stateId must stay unique for proof lookup and duplicate protection")
-	assert.False(t, indexes["blockNumber_1"].Unique, "multiple records belong to the same block")
-}
-
-func TestBlockRecordsStorage_CreateIndexes_ProductionIndexSet(t *testing.T) {
-	db := setupTestDB(t)
-	storage := NewBlockRecordsStorage(db)
-	ctx := context.Background()
-
-	require.NoError(t, storage.CreateIndexes(ctx))
-
-	indexes := listIndexSpecsByName(t, ctx, storage.collection)
-	requireIndexNames(t, indexes, "_id_", "blockNumber_1")
-	requireIndexKey(t, indexes["blockNumber_1"], bson.D{{Key: "blockNumber", Value: 1}})
-	assert.True(t, indexes["blockNumber_1"].Unique, "one block_records document is stored per block")
+	requireIndexNames(t, indexes, "_id_", "stateId_hashed", "blockNumber_1_proposalId_1")
+	requireIndexKey(t, indexes["stateId_hashed"], bson.D{{Key: "stateId", Value: "hashed"}})
+	requireIndexKey(t, indexes["blockNumber_1_proposalId_1"], bson.D{{Key: "blockNumber", Value: 1}, {Key: "proposalId", Value: 1}})
+	assert.False(t, indexes["stateId_hashed"].Unique, "duplicate filtering is handled by the SMT apply path")
+	assert.False(t, indexes["blockNumber_1_proposalId_1"].Unique, "multiple records belong to the same proposal")
 }
 
 func TestSmtStorage_CreateIndexes_ProductionIndexSet(t *testing.T) {

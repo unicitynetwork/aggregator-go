@@ -19,7 +19,7 @@ func TestSMTGetRoot(t *testing.T) {
 	// v2 reference values for basic tree shapes.
 	t.Run("EmptyTree", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
-		expected := "000047dc540c94ceb704a23875c11273e16bb0b8a87aed84de911f2133568115f254"
+		expected := "47dc540c94ceb704a23875c11273e16bb0b8a87aed84de911f2133568115f254"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
@@ -27,7 +27,7 @@ func TestSMTGetRoot(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
 		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
 
-		expected := "0000d4cb5334dcabbcaff56bfc78706f041b72c0d29337db87d8c85d4e1aaf9fea3a"
+		expected := "d4cb5334dcabbcaff56bfc78706f041b72c0d29337db87d8c85d4e1aaf9fea3a"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
@@ -35,7 +35,7 @@ func TestSMTGetRoot(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
 		smt.AddLeaf(big.NewInt(0b111), []byte{0x62})
 
-		expected := "000064a2f31a60210df058e75a10312c486538f8874e4681de085e3e2d9985b5fd50"
+		expected := "64a2f31a60210df058e75a10312c486538f8874e4681de085e3e2d9985b5fd50"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
@@ -44,7 +44,7 @@ func TestSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
 		smt.AddLeaf(big.NewInt(0b111), []byte{0x62})
 
-		expected := "0000f0698f0230044b700c1e5e433f7776b8af113199905b6122b19504274dd77111"
+		expected := "f0698f0230044b700c1e5e433f7776b8af113199905b6122b19504274dd77111"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
@@ -55,7 +55,7 @@ func TestSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b1011), []byte{0x63})
 		smt.AddLeaf(big.NewInt(0b1111), []byte{0x64})
 
-		expected := "0000728a4e5f71d239df87b57bdf1e3bd5ca3383d2b0d16758a9b3f2aedff02e4c24"
+		expected := "728a4e5f71d239df87b57bdf1e3bd5ca3383d2b0d16758a9b3f2aedff02e4c24"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 }
@@ -65,7 +65,7 @@ func TestChildSMTGetRoot(t *testing.T) {
 		smt := NewChildSparseMerkleTree(api.SHA256, 2, 0b10)
 		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
 
-		expected := "0000d4cb5334dcabbcaff56bfc78706f041b72c0d29337db87d8c85d4e1aaf9fea3a"
+		expected := "d4cb5334dcabbcaff56bfc78706f041b72c0d29337db87d8c85d4e1aaf9fea3a"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
@@ -73,7 +73,7 @@ func TestChildSMTGetRoot(t *testing.T) {
 		smt := NewChildSparseMerkleTree(api.SHA256, 2, 0b11)
 		smt.AddLeaf(big.NewInt(0b111), []byte{0x62})
 
-		expected := "000064a2f31a60210df058e75a10312c486538f8874e4681de085e3e2d9985b5fd50"
+		expected := "64a2f31a60210df058e75a10312c486538f8874e4681de085e3e2d9985b5fd50"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
@@ -82,7 +82,7 @@ func TestChildSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b10010), []byte{0x61})
 		smt.AddLeaf(big.NewInt(0b11010), []byte{0x62})
 
-		expected := "0000564b213cf6cee27badc130c7b9c7f06c27b76e8bbe25149e1412646d24027d2d"
+		expected := "564b213cf6cee27badc130c7b9c7f06c27b76e8bbe25149e1412646d24027d2d"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
@@ -91,7 +91,7 @@ func TestChildSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b10101), []byte{0x63})
 		smt.AddLeaf(big.NewInt(0b11101), []byte{0x64})
 
-		expected := "0000c5f0538e97bb172a7e423848673faa84141b2201cc803b328f1824299f24dd7f"
+		expected := "c5f0538e97bb172a7e423848673faa84141b2201cc803b328f1824299f24dd7f"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 }
@@ -104,7 +104,7 @@ func TestParentSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b10), left)
 		smt.AddLeaf(big.NewInt(0b11), right)
 
-		expected := "0000245915b6e866e0dfa36eb5c1323325c6663bd0ea7fe9ea7c60efe54700901577"
+		expected := "245915b6e866e0dfa36eb5c1323325c6663bd0ea7fe9ea7c60efe54700901577"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
@@ -115,7 +115,7 @@ func TestParentSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b110), left)
 		smt.AddLeaf(big.NewInt(0b101), right)
 
-		expected := "00001f52283972b0b30de79673b0a889357af74859504f70a657c7516ab77b698302"
+		expected := "1f52283972b0b30de79673b0a889357af74859504f70a657c7516ab77b698302"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 }
@@ -227,7 +227,7 @@ func TestSMTBatchOperations(t *testing.T) {
 // TestSMTRootHashRegressionFixture pins an implementation reference root hash
 // for a fixed leaf set, so refactors cannot accidentally change hash behavior.
 func TestSMTRootHashRegressionFixture(t *testing.T) {
-	const expectedRoot = "00008f12d069a0a8d02649dae4485d97ea1d98f2742b5c22de64a4f331b6f0b7b7dd"
+	const expectedRoot = "8f12d069a0a8d02649dae4485d97ea1d98f2742b5c22de64a4f331b6f0b7b7dd"
 
 	leaves := []*Leaf{
 		NewLeaf(big.NewInt(0b110010000), []byte("value00010000")), // 400
@@ -254,9 +254,9 @@ func TestSMTRootHashRegressionFixture(t *testing.T) {
 // deterministic child-root inputs.
 func TestParentSMTRootHashRegressionFixture(t *testing.T) {
 	const (
-		expectedEmpty      = "0000cd123cd6893ea82539bbce16cd69f196ad3770a1a16806acd624061684f04c22"
-		expectedOneUpdate  = "0000b3bf509ebc9114647fd69f72b817b257b07b8bd32ed82f6b85b8f5b19dedcfc8"
-		expectedTwoUpdates = "00000eb669e4b5572cd9c2cf3b4a18b491354f67c0591d549cc2879a63defe0a7759"
+		expectedEmpty      = "cd123cd6893ea82539bbce16cd69f196ad3770a1a16806acd624061684f04c22"
+		expectedOneUpdate  = "b3bf509ebc9114647fd69f72b817b257b07b8bd32ed82f6b85b8f5b19dedcfc8"
+		expectedTwoUpdates = "0eb669e4b5572cd9c2cf3b4a18b491354f67c0591d549cc2879a63defe0a7759"
 	)
 
 	make32 := func(start byte) []byte {
@@ -552,7 +552,7 @@ func TestSMTGetPath(t *testing.T) {
 		merklePath, err := smt.GetPath(path)
 		require.NoError(t, err)
 		require.NotNil(t, merklePath, "GetPath should return a path")
-		require.Equal(t, smt.GetRootHashHex(), merklePath.Root, "Root hash should match expected value")
+		require.Equal(t, legacyPathRootHex(smt), merklePath.Root, "Root hash should match expected value")
 		require.NotNil(t, merklePath.Steps, "Steps should not be nil")
 		require.Equal(t, 2, len(merklePath.Steps), "There should be exactly two steps in the path")
 		// First step should be the LeafNode hash step
@@ -585,7 +585,7 @@ func TestSMTGetPath(t *testing.T) {
 		t.Logf("✅ GetPath for existing leaf - Root: %s, Steps: %d", path.Root, len(path.Steps))
 
 		// Verify the root hash matches the tree's root
-		expectedRoot := smt.GetRootHashHex()
+		expectedRoot := legacyPathRootHex(smt)
 		require.Equal(t, expectedRoot, path.Root, "Path root should match tree root")
 	})
 
@@ -659,7 +659,7 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		path, err := smt.GetPath(leafPath)
 		require.NoError(t, err)
 		require.NotNil(t, path, "GetPath should return a path")
-		require.Equal(t, smt.GetRootHashHex(), path.Root, "Path root should match tree root")
+		require.Equal(t, legacyPathRootHex(smt), path.Root, "Path root should match tree root")
 
 		step := path.Steps[0]
 		require.Equal(t, leafPath.String(), step.Path, "Step path should match leaf path")
@@ -686,14 +686,14 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		merkPath1, err := smt.GetPath(path1)
 		require.NoError(t, err)
 		require.NotNil(t, merkPath1, "GetPath should return a path")
-		require.Equal(t, smt.GetRootHashHex(), merkPath1.Root, "Path root should match tree root")
+		require.Equal(t, legacyPathRootHex(smt), merkPath1.Root, "Path root should match tree root")
 		require.NotEmpty(t, merkPath1.Steps, "Should have steps")
 
 		// Get path for second leaf
 		merkPath2, err := smt.GetPath(path2)
 		require.NoError(t, err)
 		require.NotNil(t, merkPath2, "GetPath should return a path")
-		require.Equal(t, smt.GetRootHashHex(), merkPath2.Root, "Path root should match tree root")
+		require.Equal(t, legacyPathRootHex(smt), merkPath2.Root, "Path root should match tree root")
 		require.NotEmpty(t, merkPath2.Steps, "Should have steps")
 
 		// Both paths should have the same root but different steps
@@ -728,7 +728,7 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		merkPath, err := smt.GetPath(nonExistentPath)
 		require.NoError(t, err)
 		require.NotNil(t, merkPath, "GetPath should return a path even for non-existent paths")
-		require.Equal(t, smt.GetRootHashHex(), merkPath.Root, "Path root should match tree root")
+		require.Equal(t, legacyPathRootHex(smt), merkPath.Root, "Path root should match tree root")
 		require.NotEmpty(t, merkPath.Steps, "Should have steps even for non-existent path")
 
 		t.Logf("✅ Non-existent path: Root=%s, Steps=%d",
@@ -761,7 +761,7 @@ func TestSMTGetPathComprehensive(t *testing.T) {
 		}
 
 		// Get paths for all leaves and verify they're consistent
-		rootHash := smt.GetRootHashHex()
+		rootHash := legacyPathRootHex(smt)
 
 		for i, path := range testPaths {
 			merkPath, err := smt.GetPath(path)

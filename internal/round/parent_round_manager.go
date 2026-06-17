@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/big"
 	"sync"
@@ -59,6 +60,9 @@ type ParentRoundManager struct {
 	roundMutex   sync.RWMutex
 	stopChan     chan struct{}
 	wg           sync.WaitGroup
+	roundWG      sync.WaitGroup
+	activeCtx    context.Context
+	activeCancel context.CancelFunc
 
 	// Metrics
 	totalRounds       int64
@@ -185,19 +189,40 @@ func (prm *ParentRoundManager) StartNewRound(ctx context.Context, roundNumber *a
 // StartNextRoundFromPrecollector exists to satisfy the BFT RoundManager
 // interface. Parent mode keeps its existing collect behavior.
 func (prm *ParentRoundManager) StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt) error {
-	return prm.StartNewRound(ctx, roundNumber)
+	prm.roundMutex.RLock()
+	activeCtx := prm.activeCtx
+	prm.roundMutex.RUnlock()
+	if activeCtx == nil {
+		return ErrDeactivated
+	}
+
+	prm.roundWG.Add(1)
+	go func() {
+		defer prm.roundWG.Done()
+		if err := prm.StartNewRound(activeCtx, roundNumber); err != nil && !errors.Is(err, ErrDeactivated) && !errors.Is(err, context.Canceled) {
+			prm.logger.WithContext(ctx).Error("Failed to start next parent round",
+				"roundNumber", roundNumber.String(),
+				"error", err.Error())
+		}
+	}()
+	return nil
 }
 
 // startNewRound is the internal implementation
 func (prm *ParentRoundManager) startNewRound(ctx context.Context, roundNumber *api.BigInt) error {
 	prm.roundMutex.Lock()
+	if prm.activeCtx == nil {
+		prm.roundMutex.Unlock()
+		return ErrDeactivated
+	}
 
 	// Check if this round or a later one is already in progress
 	if prm.currentRound != nil && prm.currentRound.Number.Cmp(roundNumber.Int) >= 0 {
+		currentRound := prm.currentRound.Number.String()
 		prm.roundMutex.Unlock()
 		prm.logger.WithContext(ctx).Debug("Skipping duplicate round start",
 			"requestedRound", roundNumber.String(),
-			"currentRound", prm.currentRound.Number.String())
+			"currentRound", currentRound)
 		return nil
 	}
 
@@ -247,6 +272,9 @@ func (prm *ParentRoundManager) processCurrentRound(ctx context.Context) error {
 
 	if prm.currentRound == nil {
 		prm.roundMutex.Unlock()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("no current round to process")
 	}
 
@@ -402,6 +430,17 @@ func (prm *ParentRoundManager) GetSMTBackend() smtbackend.Backend {
 	return prm.smtBackend
 }
 
+func (prm *ParentRoundManager) CommittedRoot(ctx context.Context) ([]byte, *api.BigInt, error) {
+	if prm.smtBackend == nil {
+		return nil, nil, fmt.Errorf("SMT backend is not initialized")
+	}
+	state, err := prm.smtBackend.CommittedState(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return state.RootHash, state.BlockNumber, nil
+}
+
 // IsReady reports whether the parent round manager is ready to accept shard roots.
 func (prm *ParentRoundManager) IsReady() bool {
 	return prm.ready.Load()
@@ -433,21 +472,20 @@ func (prm *ParentRoundManager) Activate(ctx context.Context) error {
 	prm.logger.WithContext(ctx).Info("Activating parent round manager")
 	prm.ready.Store(false)
 
+	activeCtx, activeCancel := context.WithCancel(ctx)
+	prm.roundMutex.Lock()
+	if prm.activeCancel != nil {
+		prm.activeCancel()
+	}
+	prm.activeCtx = activeCtx
+	prm.activeCancel = activeCancel
+	prm.roundMutex.Unlock()
+
 	// Reconstruct parent SMT from current shard states in storage
 	// This ensures the follower-turned-leader has the latest state
 	prm.logger.WithContext(ctx).Info("Reconstructing parent SMT from storage on leadership transition")
 	if err := prm.reconstructParentSMT(ctx); err != nil {
 		return fmt.Errorf("failed to reconstruct parent SMT on activation: %w", err)
-	}
-
-	// Start BFT client
-	if err := prm.bftClient.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start BFT client: %w", err)
-	}
-
-	// Wait for BFT client to receive first UC from root chain before starting rounds.
-	if err := prm.bftClient.WaitForInitialized(ctx); err != nil {
-		return fmt.Errorf("failed to wait for BFT client initialization: %w", err)
 	}
 
 	// Get latest block number to determine starting round
@@ -467,8 +505,20 @@ func (prm *ParentRoundManager) Activate(ctx context.Context) error {
 		nextRoundNumber.Add(nextRoundNumber.Int, big.NewInt(1))
 	}
 
+	// Start BFT client after the initial round number is known. The real BFT
+	// client only initializes network state; the local stub would otherwise
+	// start its own round and race the explicit parent round start below.
+	if prm.config.BFT.Enabled {
+		if err := prm.bftClient.Start(activeCtx); err != nil {
+			return fmt.Errorf("failed to start BFT client: %w", err)
+		}
+		if err := prm.bftClient.WaitForInitialized(activeCtx); err != nil {
+			return fmt.Errorf("failed to wait for BFT client initialization: %w", err)
+		}
+	}
+
 	// Start first round
-	if err := prm.startNewRound(ctx, nextRoundNumber); err != nil {
+	if err := prm.startNewRound(activeCtx, nextRoundNumber); err != nil {
 		return fmt.Errorf("failed to start initial round: %w", err)
 	}
 
@@ -484,12 +534,19 @@ func (prm *ParentRoundManager) Deactivate(ctx context.Context) error {
 	prm.logger.WithContext(ctx).Info("Deactivating parent round manager")
 	prm.ready.Store(false)
 
-	// Stop BFT client
-	prm.bftClient.Stop()
-
 	prm.roundMutex.Lock()
+	activeCancel := prm.activeCancel
+	prm.activeCancel = nil
+	prm.activeCtx = nil
 	prm.currentRound = nil
 	prm.roundMutex.Unlock()
+
+	if activeCancel != nil {
+		activeCancel()
+	}
+	// Stop BFT client
+	prm.bftClient.Stop()
+	prm.roundWG.Wait()
 
 	prm.logger.WithContext(ctx).Info("Parent round manager deactivated successfully")
 	return nil
@@ -616,7 +673,7 @@ func (prm *ParentRoundManager) FinalizeBlock(ctx context.Context, block *models.
 		"bftWait", shortDur(bftWait),
 		"finalization", shortDur(finalizationTime),
 	}
-	prm.logger.WithContext(ctx).Info("PERF: Parent round completed", logFields...)
+	prm.logger.WithContext(ctx).Info("Parent round completed", logFields...)
 
 	prm.logger.WithContext(ctx).Info("Parent block finalized successfully",
 		"blockNumber", block.Index.String())

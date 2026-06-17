@@ -8,7 +8,6 @@ import (
 	"math/big"
 	"runtime"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -77,17 +76,19 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 		"blockNumber", blockNumber.String(),
 		"rootHash", rootHash.String())
 
+	if round == nil {
+		return bft.ErrStaleCertificationRound
+	}
+
 	rm.roundMutex.Lock()
 	if rm.currentRound != round {
 		rm.roundMutex.Unlock()
 		return bft.ErrStaleCertificationRound
 	}
-	if round != nil {
-		rm.logger.WithContext(ctx).Debug("Changing round state to finalizing",
-			"roundNumber", round.Number.String(),
-			"previousState", round.State.String())
-		round.State = RoundStateFinalizing
-	}
+	rm.logger.WithContext(ctx).Debug("Changing round state to finalizing",
+		"roundNumber", round.Number.String(),
+		"previousState", round.State.String())
+	round.State = RoundStateFinalizing
 	rm.roundMutex.Unlock()
 
 	rm.logger.WithContext(ctx).Info("Creating block proposal",
@@ -124,6 +125,10 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 			parentHash,
 			nil,
 		)
+		block.ProposalID = round.ProposalID
+		if err := rm.ensureDurableProposal(ctx, round, block); err != nil {
+			return err
+		}
 		if round != nil && !round.StartTime.IsZero() {
 			metrics.RoundPreparationDuration.Observe(time.Since(round.StartTime).Seconds())
 		}
@@ -133,12 +138,20 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 		superseded := rm.currentRound != round
 		rm.roundMutex.RUnlock()
 		if superseded {
+			if err := rm.AbandonDurableProposal(ctx, block.Index, block.RootHash); err != nil {
+				return fmt.Errorf("failed to abandon superseded durable proposal: %w", err)
+			}
 			return bft.ErrStaleCertificationRound
 		}
 		rm.logger.WithContext(ctx).Info("Sending certification request to BFT client",
 			"blockNumber", blockNumber.String(),
 			"bftClientType", fmt.Sprintf("%T", rm.bftClient))
 		if err := rm.bftClient.CertificationRequest(ctx, block); err != nil {
+			if errors.Is(err, bft.ErrStaleCertificationRound) {
+				if abandonErr := rm.AbandonDurableProposal(ctx, block.Index, block.RootHash); abandonErr != nil {
+					return fmt.Errorf("failed to abandon stale durable proposal: %w", abandonErr)
+				}
+			}
 			rm.logger.WithContext(ctx).Error("Failed to send certification request",
 				"blockNumber", blockNumber.String(),
 				"error", err.Error())
@@ -216,6 +229,10 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 			proof.ParentFragment,
 			proof.BlockNumber,
 		)
+		block.ProposalID = round.ProposalID
+		if err := rm.ensureDurableProposal(ctx, round, block); err != nil {
+			return err
+		}
 		if err := rm.FinalizeBlockWithRetry(ctx, block); err != nil {
 			return fmt.Errorf("failed to finalize block after retries: %w", err)
 		}
@@ -231,6 +248,12 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 		if cp != nil {
 			preResult, advErr := rm.advancePrecollectorForHandoff(cp)
 			if advErr == nil {
+				nextRound := api.NewBigInt(nextRoundNumber)
+				if err := validatePrecollectorBlockNumber(preResult, nextRound); err != nil {
+					preResult.snapshot.Discard(ctx)
+					rm.logger.WithContext(ctx).Error("Precollector block number mismatch.", "error", err.Error())
+					return err
+				}
 				if err := preResult.snapshot.SetCommitTarget(ctx, rm.smtBackend); err != nil {
 					preResult.snapshot.Discard(ctx)
 					rm.logger.WithContext(ctx).Error("Failed to set precollector commit target.", "error", err.Error())
@@ -238,7 +261,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 				}
 				// StartNewRoundWithSnapshot atomically checks precollectorDisabled
 				// under roundMutex — no race with concurrent Deactivate.
-				if err := rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(nextRoundNumber), preResult.snapshot, preResult.commitments, preResult.leaves); err != nil {
+				if err := rm.StartNewRoundWithSnapshot(ctx, nextRound, preResult.snapshot, preResult.commitments, preResult.leaves, preResult.recordsStaged, preResult.proposalID); err != nil {
 					preResult.snapshot.Discard(ctx)
 					if !errors.Is(err, ErrDeactivated) {
 						rm.logger.WithContext(ctx).Error("Failed to start new round with snapshot.", "error", err.Error())
@@ -261,6 +284,61 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 	default:
 		return fmt.Errorf("invalid sharding mode: %s", rm.config.Sharding.Mode)
 	}
+}
+
+func (rm *RoundManager) ensureDurableProposal(ctx context.Context, round *Round, block *models.Block) error {
+	records, err := rm.proposalRecordsForRound(round, block.Index)
+	if err != nil {
+		return err
+	}
+	if err := rm.storeProposedBlockAndRecords(ctx, block, records); err != nil {
+		if !errors.Is(err, interfaces.ErrDuplicateKey) {
+			return fmt.Errorf("failed to store durable proposal: %w", err)
+		}
+		if _, err := rm.validateStoredDurableProposalBlock(ctx, block); err != nil {
+			return err
+		}
+		rm.logger.WithContext(ctx).Info("Durable proposal already exists",
+			"blockNumber", block.Index.String())
+	}
+	return nil
+}
+
+func (rm *RoundManager) proposalRecordsForRound(round *Round, blockNumber *api.BigInt) ([]*models.AggregatorRecord, error) {
+	if round == nil {
+		return nil, bft.ErrStaleCertificationRound
+	}
+	rm.roundMutex.RLock()
+	if rm.currentRound != round {
+		rm.roundMutex.RUnlock()
+		return nil, bft.ErrStaleCertificationRound
+	}
+	pendingCommitments := append([]*models.CertificationRequest(nil), round.PendingCommitments...)
+	recordsStaged := round.ProposalRecordsStaged
+	rm.roundMutex.RUnlock()
+
+	if recordsStaged {
+		return nil, nil
+	}
+	records := rm.convertCommitmentsToRecords(pendingCommitments, blockNumber)
+	for _, record := range records {
+		record.ProposalID = round.ProposalID
+	}
+	return records, nil
+}
+
+func (rm *RoundManager) stageProposedCommitments(ctx context.Context, blockNumber *api.BigInt, proposalID string, leafIndexOffset int, commitments []*models.CertificationRequest) error {
+	if blockNumber == nil || len(commitments) == 0 {
+		return nil
+	}
+	records := rm.convertCommitmentsToRecordsFrom(commitments, blockNumber, leafIndexOffset)
+	for _, record := range records {
+		record.ProposalID = proposalID
+	}
+	if err := rm.storage.AggregatorRecordStorage().StoreBatch(ctx, records); err != nil {
+		return fmt.Errorf("failed to stage proposed aggregator records: %w", err)
+	}
+	return nil
 }
 
 func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash api.HexBytes) (*api.RootShardInclusionProof, *types.UnicityCertificate, error) {
@@ -379,7 +457,7 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 		} else if len(unfinalizedBlocks) > 0 {
 			rm.logger.Info("Found unfinalized block, attempting recovery",
 				"blockNumber", unfinalizedBlocks[0].Index.String())
-			recoveryResult, recoverErr := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+			recoveryResult, recoverErr := recoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue, !rm.usesDiskSMTBackend())
 			if recoverErr != nil {
 				return fmt.Errorf("recovery failed: %w", recoverErr)
 			}
@@ -503,68 +581,67 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	}
 	finalizationScanDuration := time.Since(finalizationScanStart)
 
-	finalizationConvertStart := time.Now()
-	smtNodes, err := rm.convertLeavesToNodes(pendingLeaves)
-	if err != nil {
-		return fmt.Errorf("failed to convert leaves to storage nodes: %w", err)
-	}
-	records := rm.convertCommitmentsToRecords(pendingCommitments, block.Index)
-	finalizationConvertDuration := time.Since(finalizationConvertStart)
-
-	block.Finalized = false
-	storeBlockStart := time.Now()
-	if err := rm.storeBlockAndRecords(ctx, block, stateIDs); err != nil {
-		if !errors.Is(err, interfaces.ErrDuplicateKey) {
-			return fmt.Errorf("failed to store block and records: %w", err)
-		}
-		existingBlock, err := rm.validateDuplicateBlock(ctx, block, stateIDs)
+	var smtNodesToStore []*models.SmtNode
+	var finalizationConvertDuration time.Duration
+	if !rm.usesDiskSMTBackend() {
+		finalizationConvertStart := time.Now()
+		var err error
+		smtNodesToStore, err = rm.convertLeavesToNodes(pendingLeaves)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to convert leaves to storage nodes: %w", err)
 		}
-		if existingBlock.Finalized {
-			localRoot, err := rm.smtBackend.RootHashRaw(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to validate local SMT root for finalized duplicate block %s: %w", block.Index.String(), err)
-			}
-			if bytes.Equal(localRoot, block.RootHash) {
-				if publisher, ok := rm.smtBackend.(smtbackend.ProofViewPublisher); ok {
-					if err := publisher.RefreshPublishedProofView(ctx, block.RootHash); err != nil {
-						return fmt.Errorf("failed to refresh proof view for finalized duplicate block %s: %w", block.Index.String(), err)
-					}
-				}
-				block.Finalized = true
-				rm.markProofsReady(block, stateIDs, records)
-				if snapshot != nil {
-					snapshot.Discard(ctx)
-				}
-				rm.clearFinalizedRound(round, block)
-				rm.logger.WithContext(ctx).Info("Block already finalized with matching local SMT root, skipping duplicate finalization",
-					"blockNumber", block.Index.String())
-				return nil
-			}
+		finalizationConvertDuration = time.Since(finalizationConvertStart)
+	}
+
+	storeBlockStart := time.Now()
+	var existingBlock *models.Block
+	var records []*models.AggregatorRecord
+	var err error
+	existingBlock, err = rm.validateStoredDurableProposalBlock(ctx, block)
+	if err != nil {
+		return err
+	}
+	records = rm.convertCommitmentsToRecords(pendingCommitments, block.Index)
+	for _, record := range records {
+		record.ProposalID = existingBlock.ProposalID
+	}
+	block.ProposalID = existingBlock.ProposalID
+	if existingBlock.Finalized {
+		localRoot, err := rm.smtBackend.RootHashRaw(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to validate local SMT root for finalized duplicate block %s: %w", block.Index.String(), err)
 		}
-		rm.logger.WithContext(ctx).Info("Block already exists, continuing with remaining steps",
-			"blockNumber", block.Index.String())
+		if bytes.Equal(localRoot, block.RootHash) {
+			if publisher, ok := rm.smtBackend.(smtbackend.ProofViewPublisher); ok {
+				if err := publisher.RefreshPublishedProofView(ctx, block.RootHash); err != nil {
+					return fmt.Errorf("failed to refresh proof view for finalized duplicate block %s: %w", block.Index.String(), err)
+				}
+			}
+			block.Finalized = true
+			rm.markProofsReady(block, stateIDs, records)
+			if snapshot != nil {
+				snapshot.Discard(ctx)
+			}
+			rm.clearFinalizedRound(round, block)
+			rm.logger.WithContext(ctx).Info("Block already finalized with matching local SMT root, skipping duplicate finalization",
+				"blockNumber", block.Index.String())
+			return nil
+		}
 	}
 	storeBlockDuration := time.Since(storeBlockStart)
 
 	var storeDataTiming storeDataTiming
 	var smtCommitDuration time.Duration
+	var smtCommitTiming smtbackend.CommitTiming
 	var finalizationLockWaitDuration time.Duration
 	var preparedProofView smtbackend.PreparedProofView
 
 	diskFinalize := rm.usesDiskSMTBackend() && snapshot != nil
-	if diskFinalize {
+	if !diskFinalize {
 		var err error
-		storeDataTiming, smtCommitDuration, finalizationLockWaitDuration, preparedProofView, err = rm.storeDataAndCommitDiskSnapshot(ctx, block, snapshot, smtNodes, records)
+		storeDataTiming, err = rm.storeDataParallel(ctx, smtNodesToStore)
 		if err != nil {
-			return err
-		}
-	} else {
-		var err error
-		storeDataTiming, err = rm.storeDataParallel(ctx, smtNodes, records)
-		if err != nil {
-			return fmt.Errorf("failed to store SMT nodes and aggregator records: %w", err)
+			return fmt.Errorf("failed to store SMT nodes: %w", err)
 		}
 
 		lockWaitStart := time.Now()
@@ -580,7 +657,6 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		}
 		smtCommitDuration = time.Since(smtCommitStart)
 	}
-	metrics.SMTCommitDuration.Observe(smtCommitDuration.Seconds())
 	proofViewPublished := false
 	defer func() {
 		if preparedProofView != nil && !proofViewPublished {
@@ -589,14 +665,25 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	}()
 
 	setFinalizedStart := time.Now()
-	if err := rm.storage.BlockStorage().SetFinalized(ctx, block.Index, true); err != nil {
+	if err := setBlockFinalizedWithCertificate(ctx, rm.storage, block); err != nil {
 		if !diskFinalize {
 			rm.finalizationMu.Unlock()
 		}
-		return fmt.Errorf("failed to set block as finalized: %w", err)
+		return err
 	}
 	setFinalizedDuration := time.Since(setFinalizedStart)
 	block.Finalized = true
+	block.Status = models.FinalityStatusFinalized
+
+	if diskFinalize {
+		var err error
+		smtCommitDuration, smtCommitTiming, preparedProofView, err = rm.commitDiskSnapshotForFinalizedBlock(ctx, block, snapshot)
+		if err != nil {
+			return err
+		}
+	}
+	metrics.SMTCommitDuration.Observe(smtCommitDuration.Seconds())
+
 	precomputeProofDuration := time.Duration(0)
 	precomputeProofTiming := precomputeProofTiming{}
 	if rm.config.SMT.PrecomputeProofs {
@@ -675,12 +762,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		totalRoundTime = processingTime + actualFinalizationTime
 	}
 
-	shortDur := func(d time.Duration) string {
-		if d <= 0 {
-			return "0ms"
-		}
-		return fmt.Sprintf("%dms", d.Milliseconds())
-	}
+	shortDur := shortPerfDuration
 
 	logFields := []interface{}{
 		"block", block.Index.String(),
@@ -697,6 +779,14 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		"finalizeStoreRecords", shortDur(storeDataTiming.records),
 		"finalizeLockWait", shortDur(finalizationLockWaitDuration),
 		"finalizeSmtCommit", shortDur(smtCommitDuration),
+		"finalizeSmtCommitCollect", shortDur(smtCommitTiming.CollectDuration),
+		"finalizeSmtCommitTombstone", shortDur(smtCommitTiming.TombstoneDuration),
+		"finalizeSmtCommitBatchBuild", shortDur(smtCommitTiming.BatchBuildDuration),
+		"finalizeSmtCommitRootHash", shortDur(smtCommitTiming.RootHashDuration),
+		"finalizeSmtCommitEngineWrite", shortDur(smtCommitTiming.EngineWriteDuration),
+		"finalizeSmtCommitCacheUpdate", shortDur(smtCommitTiming.CacheUpdateDuration),
+		"finalizeSmtCommitNodeWrites", smtCommitTiming.NodeWrites,
+		"finalizeSmtCommitNodeDeletes", smtCommitTiming.NodeDeletes,
 		"finalizeSetFinalized", shortDur(setFinalizedDuration),
 		"finalizePrecomputeProofs", shortDur(precomputeProofDuration),
 		"finalizePrecomputeKeys", shortDur(precomputeProofTiming.keys),
@@ -704,6 +794,11 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		"finalizePrecomputeResponses", shortDur(precomputeProofTiming.responses),
 		"finalizePrecomputeStore", shortDur(precomputeProofTiming.store),
 		"finalizeAck", shortDur(ackDuration),
+	}
+	if !proposalTime.IsZero() {
+		logFields = append(logFields,
+			"proposalToProofReady", shortDur(proofReadyAt.Sub(proposalTime)),
+		)
 	}
 
 	if len(proofTimes) > 0 {
@@ -742,7 +837,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		)
 	}
 
-	rm.logger.WithContext(ctx).Info("PERF: Round completed", logFields...)
+	rm.logger.WithContext(ctx).Info("Round completed", logFields...)
 
 	rm.logger.WithContext(ctx).Info("Block finalized and stored successfully",
 		"blockNumber", block.Index.String(),
@@ -783,6 +878,13 @@ func (rm *RoundManager) validateBlockForMode(block *models.Block) error {
 	return nil
 }
 
+func shortPerfDuration(d time.Duration) string {
+	if d <= 0 {
+		return "0ms"
+	}
+	return fmt.Sprintf("%dms", d.Milliseconds())
+}
+
 // convertLeavesToNodes converts backend leaf inputs to storage models.
 func (rm *RoundManager) convertLeavesToNodes(leaves []smtbackend.LeafInput) ([]*models.SmtNode, error) {
 	if len(leaves) == 0 {
@@ -803,13 +905,17 @@ func (rm *RoundManager) convertLeavesToNodes(leaves []smtbackend.LeafInput) ([]*
 
 // convertCommitmentsToRecords converts commitments to aggregator records
 func (rm *RoundManager) convertCommitmentsToRecords(commitments []*models.CertificationRequest, blockIndex *api.BigInt) []*models.AggregatorRecord {
+	return rm.convertCommitmentsToRecordsFrom(commitments, blockIndex, 0)
+}
+
+func (rm *RoundManager) convertCommitmentsToRecordsFrom(commitments []*models.CertificationRequest, blockIndex *api.BigInt, leafIndexOffset int) []*models.AggregatorRecord {
 	if len(commitments) == 0 {
 		return nil
 	}
 
 	records := make([]*models.AggregatorRecord, len(commitments))
 	for i, commitment := range commitments {
-		leafIndex := api.NewBigInt(big.NewInt(int64(i)))
+		leafIndex := api.NewBigInt(big.NewInt(int64(leafIndexOffset + i)))
 		records[i] = models.NewAggregatorRecord(commitment, blockIndex, leafIndex)
 	}
 	return records
@@ -915,16 +1021,30 @@ func precomputedProofBlockNumber(mode config.ShardingMode, block *models.Block) 
 	return block.ParentBlockNumber, nil
 }
 
-// executeBlockTransaction executes the block finalization transaction.
-// storeBlockAndRecords stores the block and block records in a mini-transaction.
-// The block is stored with finalized=false.
-func (rm *RoundManager) storeBlockAndRecords(ctx context.Context, block *models.Block, stateIDs []api.StateID) error {
+func (rm *RoundManager) storeProposedBlockAndRecords(
+	ctx context.Context,
+	block *models.Block,
+	records []*models.AggregatorRecord,
+) error {
+	block.Finalized = false
+	block.Status = models.FinalityStatusProposed
+
 	return rm.storage.WithTransaction(ctx, func(txCtx context.Context) error {
 		if err := rm.storage.BlockStorage().Store(txCtx, block); err != nil {
-			return fmt.Errorf("failed to store block: %w", err)
+			return fmt.Errorf("failed to store proposed block: %w", err)
 		}
-		if err := rm.storage.BlockRecordsStorage().Store(txCtx, models.NewBlockRecords(block.Index, stateIDs)); err != nil {
-			return fmt.Errorf("failed to store block records: %w", err)
+		if len(records) > 0 {
+			if serial, ok := rm.storage.AggregatorRecordStorage().(aggregatorRecordSerialBatchStorage); ok {
+				if err := serial.StoreBatchSerial(txCtx, records); err != nil {
+					return fmt.Errorf("failed to store proposed aggregator records: %w", err)
+				}
+			} else {
+				for _, record := range records {
+					if err := rm.storage.AggregatorRecordStorage().Store(txCtx, record); err != nil {
+						return fmt.Errorf("failed to store proposed aggregator record: %w", err)
+					}
+				}
+			}
 		}
 		return nil
 	})
@@ -942,61 +1062,35 @@ func (rm *RoundManager) clearFinalizedRound(round *Round, block *models.Block) {
 	}
 }
 
-func (rm *RoundManager) validateDuplicateBlock(ctx context.Context, block *models.Block, stateIDs []api.StateID) (*models.Block, error) {
-	existingBlock, err := rm.getExistingBlockAnyFinalization(ctx, block.Index)
+func (rm *RoundManager) validateStoredDurableProposalBlock(ctx context.Context, block *models.Block) (*models.Block, error) {
+	existingBlock, err := getBlockAnyFinalization(ctx, rm.storage, block.Index)
 	if err != nil {
-		return nil, fmt.Errorf("failed to validate duplicate block %s: %w", block.Index.String(), err)
+		return nil, fmt.Errorf("failed to load durable proposal block %s: %w", block.Index.String(), err)
 	}
 	if existingBlock == nil {
-		return nil, fmt.Errorf("duplicate block %s exists but could not be loaded", block.Index.String())
+		return nil, fmt.Errorf("durable proposal block %s not found before finalization", block.Index.String())
 	}
 	if !bytes.Equal(existingBlock.RootHash, block.RootHash) {
-		return nil, fmt.Errorf("duplicate block %s root mismatch: existing %s new %s",
+		return nil, fmt.Errorf("durable proposal block %s root mismatch: existing %s new %s",
 			block.Index.String(), existingBlock.RootHash.String(), block.RootHash.String())
 	}
-
-	existingRecords, err := rm.storage.BlockRecordsStorage().GetByBlockNumber(ctx, block.Index)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load duplicate block records %s: %w", block.Index.String(), err)
-	}
-	if existingRecords == nil {
-		return nil, fmt.Errorf("duplicate block %s has no block records", block.Index.String())
-	}
-	if !sameStateIDs(existingRecords.StateIDs, stateIDs) {
-		return nil, fmt.Errorf("duplicate block %s state IDs mismatch", block.Index.String())
-	}
 	return existingBlock, nil
-}
-
-func (rm *RoundManager) getExistingBlockAnyFinalization(ctx context.Context, blockNumber *api.BigInt) (*models.Block, error) {
-	block, err := rm.storage.BlockStorage().GetByNumber(ctx, blockNumber)
-	if err != nil {
-		return nil, err
-	}
-	if block != nil {
-		return block, nil
-	}
-
-	unfinalized, err := rm.storage.BlockStorage().GetUnfinalized(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, candidate := range unfinalized {
-		if candidate != nil && candidate.Index.Cmp(blockNumber.Int) == 0 {
-			return candidate, nil
-		}
-	}
-	return nil, nil
 }
 
 func sameStateIDs(a, b []api.StateID) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i := range a {
-		if !bytes.Equal(a[i], b[i]) {
+	counts := make(map[string]int, len(a))
+	for _, stateID := range a {
+		counts[stateID.String()]++
+	}
+	for _, stateID := range b {
+		key := stateID.String()
+		if counts[key] == 0 {
 			return false
 		}
+		counts[key]--
 	}
 	return true
 }
@@ -1075,33 +1169,21 @@ func signedBytesToMB(bytes int64) int64 {
 	return bytes / (1024 * 1024)
 }
 
-type storeDataResult struct {
-	timing storeDataTiming
-	err    error
-}
-
-// storeDataAndCommitDiskSnapshot overlaps Mongo finalization data writes with
-// the RocksDB snapshot commit. The block is still marked finalized only after
-// both operations succeed, so either side can be recovered from the existing
-// unfinalized-block startup path if the process crashes or one operation fails.
+// commitDiskSnapshotForFinalizedBlock advances the local RocksDB committed
+// state only after Mongo has persisted the UC/finalized block. If the process
+// crashes between the Mongo finalize and this commit, startup can replay the
+// finalized block from Mongo. The reverse ordering can leave RocksDB ahead of
+// Mongo with only an uncertified proposed block, which is not recoverable.
 //
 // Disk proof reads do not use finalizationMu: they read from the last published
 // proof view. On success this returns a proof view captured at the RocksDB
 // commit point; the caller publishes it only after Mongo finalization and proof
 // metadata are ready.
-func (rm *RoundManager) storeDataAndCommitDiskSnapshot(
+func (rm *RoundManager) commitDiskSnapshotForFinalizedBlock(
 	ctx context.Context,
 	block *models.Block,
 	snapshot smtbackend.Snapshot,
-	smtNodes []*models.SmtNode,
-	records []*models.AggregatorRecord,
-) (storeDataTiming, time.Duration, time.Duration, smtbackend.PreparedProofView, error) {
-	storeCh := make(chan storeDataResult, 1)
-	go func() {
-		timing, err := rm.storeDataParallel(ctx, smtNodes, records)
-		storeCh <- storeDataResult{timing: timing, err: err}
-	}()
-
+) (time.Duration, smtbackend.CommitTiming, smtbackend.PreparedProofView, error) {
 	smtCommitStart := time.Now()
 	var preparedProofView smtbackend.PreparedProofView
 	var commitErr error
@@ -1111,71 +1193,46 @@ func (rm *RoundManager) storeDataAndCommitDiskSnapshot(
 		commitErr = snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: block.Index, RootHash: block.RootHash})
 	}
 	smtCommitDuration := time.Since(smtCommitStart)
+	var smtCommitTiming smtbackend.CommitTiming
+	if timingProvider, ok := snapshot.(smtbackend.CommitTimingProvider); ok {
+		smtCommitTiming = timingProvider.LastCommitTiming()
+	}
 
-	storeResult := <-storeCh
-	if commitErr != nil || storeResult.err != nil {
+	if commitErr != nil {
 		if preparedProofView != nil {
 			preparedProofView.Discard(ctx)
 		}
-		if commitErr != nil && storeResult.err != nil {
-			return storeResult.timing, smtCommitDuration, 0, nil,
-				fmt.Errorf("failed to store finalization data and commit SMT snapshot: store=%v commit=%w", storeResult.err, commitErr)
-		}
-		if commitErr != nil {
-			return storeResult.timing, smtCommitDuration, 0, nil,
-				fmt.Errorf("failed to commit SMT snapshot: %w", commitErr)
-		}
-		return storeResult.timing, smtCommitDuration, 0, nil,
-			fmt.Errorf("failed to store SMT nodes and aggregator records: %w", storeResult.err)
+		return smtCommitDuration, smtCommitTiming, nil, fmt.Errorf("failed to commit SMT snapshot: %w", commitErr)
 	}
 
-	return storeResult.timing, smtCommitDuration, 0, preparedProofView, nil
+	return smtCommitDuration, smtCommitTiming, preparedProofView, nil
 }
 
-// storeDataParallel stores SMT nodes and aggregator records in parallel.
-// StoreBatch handles duplicates internally (ignores duplicate key errors).
+// storeDataParallel stores SMT nodes. Aggregator records are written once as a
+// durable proposal before certification, never during finalization.
 func (rm *RoundManager) storeDataParallel(
 	ctx context.Context,
 	smtNodes []*models.SmtNode,
-	records []*models.AggregatorRecord,
 ) (storeDataTiming, error) {
 	start := time.Now()
 
-	var smtErr, recordsErr error
-	var smtTime, recordsTime time.Duration
-
-	// Run SMT and AggregatorRecords storage in parallel
-	var wg sync.WaitGroup
+	var smtErr error
+	var smtTime time.Duration
 
 	if len(smtNodes) > 0 {
-		wg.Go(func() {
-			t := time.Now()
-			smtErr = rm.storage.SmtStorage().StoreBatch(ctx, smtNodes)
-			smtTime = time.Since(t)
-		})
+		t := time.Now()
+		smtErr = rm.storage.SmtStorage().StoreBatch(ctx, smtNodes)
+		smtTime = time.Since(t)
 	}
-
-	if len(records) > 0 {
-		wg.Go(func() {
-			t := time.Now()
-			recordsErr = rm.storage.AggregatorRecordStorage().StoreBatch(ctx, records)
-			recordsTime = time.Since(t)
-		})
-	}
-
-	wg.Wait()
 
 	timing := storeDataTiming{
 		total:   time.Since(start),
 		smt:     smtTime,
-		records: recordsTime,
+		records: 0,
 	}
 
 	if smtErr != nil {
 		return timing, fmt.Errorf("failed to store SMT nodes: %w", smtErr)
-	}
-	if recordsErr != nil {
-		return timing, fmt.Errorf("failed to store aggregator records: %w", recordsErr)
 	}
 
 	return timing, nil

@@ -17,6 +17,14 @@ import (
 
 const blockCollection = "blocks"
 
+func finalizingBlockFilter() bson.M {
+	return bson.M{"$or": []bson.M{
+		{"status": bson.M{"$exists": false}},
+		{"status": ""},
+		{"status": models.FinalityStatusFinalizing},
+	}}
+}
+
 // BlockStorage implements block storage for MongoDB
 type BlockStorage struct {
 	collection *mongo.Collection
@@ -57,9 +65,21 @@ func (bs *BlockStorage) Store(ctx context.Context, block *models.Block) error {
 
 // GetByNumber retrieves a block by number
 func (bs *BlockStorage) GetByNumber(ctx context.Context, blockNumber *api.BigInt) (*models.Block, error) {
+	return bs.getByNumber(ctx, blockNumber, true)
+}
+
+// GetByNumberAnyFinalization retrieves a block regardless of its finality status.
+func (bs *BlockStorage) GetByNumberAnyFinalization(ctx context.Context, blockNumber *api.BigInt) (*models.Block, error) {
+	return bs.getByNumber(ctx, blockNumber, false)
+}
+
+func (bs *BlockStorage) getByNumber(ctx context.Context, blockNumber *api.BigInt, finalizedOnly bool) (*models.Block, error) {
 	var blockBSON models.BlockBSON
 	indexDecimal := bigIntToDecimal128(blockNumber)
-	filter := bson.M{"index": indexDecimal, "finalized": true}
+	filter := bson.M{"index": indexDecimal}
+	if finalizedOnly {
+		filter["finalized"] = true
+	}
 	err := bs.collection.FindOne(ctx, filter).Decode(&blockBSON)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
@@ -228,6 +248,15 @@ func (bs *BlockStorage) CreateIndexes(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to migrate blocks finalized field: %w", err)
 	}
+	_, err = bs.collection.UpdateMany(ctx,
+		bson.M{"status": bson.M{"$exists": false}},
+		[]bson.M{
+			{"$set": bson.M{"status": bson.M{"$cond": []interface{}{"$finalized", models.FinalityStatusFinalized, models.FinalityStatusFinalizing}}}},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to migrate blocks status field: %w", err)
+	}
 
 	return nil
 }
@@ -236,7 +265,11 @@ func (bs *BlockStorage) CreateIndexes(ctx context.Context) error {
 func (bs *BlockStorage) SetFinalized(ctx context.Context, blockNumber *api.BigInt, finalized bool) error {
 	indexDecimal := bigIntToDecimal128(blockNumber)
 	filter := bson.M{"index": indexDecimal}
-	update := bson.M{"$set": bson.M{"finalized": finalized}}
+	status := models.FinalityStatusFinalizing
+	if finalized {
+		status = models.FinalityStatusFinalized
+	}
+	update := bson.M{"$set": bson.M{"finalized": finalized, "status": status}}
 
 	result, err := bs.collection.UpdateOne(ctx, filter, update)
 	if err != nil {
@@ -248,9 +281,47 @@ func (bs *BlockStorage) SetFinalized(ctx context.Context, blockNumber *api.BigIn
 	return nil
 }
 
+func (bs *BlockStorage) SetStatus(ctx context.Context, blockNumber *api.BigInt, status string) error {
+	filter := bson.M{"index": bigIntToDecimal128(blockNumber)}
+	update := bson.M{"status": status, "finalized": status == models.FinalityStatusFinalized}
+	result, err := bs.collection.UpdateOne(ctx, filter, bson.M{"$set": update})
+	if err != nil {
+		return fmt.Errorf("failed to set block status: %w", err)
+	}
+	if result.MatchedCount == 0 {
+		return fmt.Errorf("block %s not found", blockNumber.String())
+	}
+	return nil
+}
+
+// SetFinalizedWithCertificate marks a block finalized and persists the UC that
+// may have arrived after the proposed block was first stored.
+func (bs *BlockStorage) SetFinalizedWithCertificate(ctx context.Context, block *models.Block) error {
+	if block == nil {
+		return errors.New("block is nil")
+	}
+	indexDecimal := bigIntToDecimal128(block.Index)
+	filter := bson.M{"index": indexDecimal}
+	update := bson.M{"$set": bson.M{
+		"finalized":          true,
+		"status":             models.FinalityStatusFinalized,
+		"unicityCertificate": block.UnicityCertificate.String(),
+	}}
+
+	result, err := bs.collection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("failed to set block as finalized with certificate: %w", err)
+	}
+	if result.MatchedCount == 0 {
+		return fmt.Errorf("block %s not found", block.Index.String())
+	}
+	return nil
+}
+
 // GetUnfinalized returns all unfinalized blocks (should be at most 1 in normal operation)
 func (bs *BlockStorage) GetUnfinalized(ctx context.Context) ([]*models.Block, error) {
-	filter := bson.M{"finalized": false}
+	filter := finalizingBlockFilter()
+	filter["finalized"] = false
 	opts := options.Find().SetSort(bson.M{"index": 1})
 
 	cursor, err := bs.collection.Find(ctx, filter, opts)

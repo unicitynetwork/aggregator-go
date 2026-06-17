@@ -280,7 +280,7 @@ func TestSnapshotDiscardDoesNotWriteStore(t *testing.T) {
 	require.Equal(t, disk.EmptyRootHash(), tree.RootHash())
 }
 
-func TestSnapshotCommitTombstonesLoadedKeysWithoutFinalWrites(t *testing.T) {
+func TestSnapshotCommitLeavesLoadedKeysAppendOnly(t *testing.T) {
 	store := openTestStore(t, t.TempDir())
 	defer store.Close()
 	tree := openPersistTree(t, store)
@@ -297,7 +297,8 @@ func TestSnapshotCommitTombstonesLoadedKeysWithoutFinalWrites(t *testing.T) {
 	snapshot.loadedKeys[staleKey] = struct{}{}
 	require.NoError(t, snapshot.rebuildOverlay())
 	require.NoError(t, snapshot.Commit(api.NewBigIntFromUint64(3)))
-	requireNodeMissing(t, store, staleKey)
+	requireNodeExists(t, store, staleKey)
+	require.Equal(t, disk.EmptyRootHash(), tree.RootHash())
 }
 
 func TestSnapshotCommitWriteWinsOverLoadedKeyTombstone(t *testing.T) {
@@ -423,23 +424,47 @@ func TestSnapshotForkUsesParentOverlayWithoutPersistingParent(t *testing.T) {
 	require.Equal(t, childResult.CandidateRoot, tree.RootHash())
 }
 
-func TestSnapshotForkRejectsUncommittedGrandparentOverlay(t *testing.T) {
+func TestSnapshotForkFlattensUncommittedGrandparentOverlay(t *testing.T) {
 	store := openTestStore(t, t.TempDir())
 	defer store.Close()
 	tree := openPersistTree(t, store)
 
+	k1 := keyWithFirstByte(0x01)
+	k2 := keyWithFirstByte(0x03)
+	k3 := keyWithFirstByte(0x07)
+	v1 := []byte("value-one")
+	v2 := []byte("value-two")
+	v3 := []byte("value-three")
+
 	parent, err := tree.CreateSnapshot()
 	require.NoError(t, err)
-	_, err = parent.AddLeaves([]disk.LeafInput{leafInput(keyWithFirstByte(0x01), []byte("value-one"))})
+	parentResult, err := parent.AddLeaves([]disk.LeafInput{leafInput(k1, v1)})
 	require.NoError(t, err)
 
 	child, err := parent.Fork()
 	require.NoError(t, err)
-	_, err = child.AddLeaves([]disk.LeafInput{leafInput(keyWithFirstByte(0x03), []byte("value-two"))})
+	childResult, err := child.AddLeaves([]disk.LeafInput{leafInput(k2, v2)})
 	require.NoError(t, err)
 
-	_, err = child.Fork()
-	require.ErrorContains(t, err, "uncommitted grandparent overlay")
+	grandchild, err := child.Fork()
+	require.NoError(t, err)
+	grandchildResult, err := grandchild.AddLeaves([]disk.LeafInput{leafInput(k3, v3)})
+	require.NoError(t, err)
+
+	require.NoError(t, parent.Commit(api.NewBigIntFromUint64(1)))
+	require.Equal(t, parentResult.CandidateRoot, tree.RootHash())
+
+	require.NoError(t, child.SetCommitTarget(tree))
+	require.NoError(t, child.Commit(api.NewBigIntFromUint64(2)))
+	require.Equal(t, childResult.CandidateRoot, tree.RootHash())
+
+	require.NoError(t, grandchild.SetCommitTarget(tree))
+	require.NoError(t, grandchild.Commit(api.NewBigIntFromUint64(3)))
+	require.Equal(t, memoryRootAfterLeaves(t,
+		memoryLeaf{key: k1, value: v1},
+		memoryLeaf{key: k2, value: v2},
+		memoryLeaf{key: k3, value: v3},
+	), grandchildResult.CandidateRoot)
 }
 
 func TestSnapshotForkAfterOlderParentCommitDropsGrandparentOverlay(t *testing.T) {

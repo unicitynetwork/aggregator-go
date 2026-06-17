@@ -60,10 +60,10 @@ func TestDiskSMTBFTShardPendingAlignmentWithDuplicateFiltering(t *testing.T) {
 	require.Len(t, dropped, 1)
 	require.True(t, block1.Finalized)
 
-	block1Records, err := storage.BlockRecordsStorage().GetByBlockNumber(ctx, block1.Index)
+	block1Records, err := storage.AggregatorRecordStorage().GetByBlockNumber(ctx, block1.Index)
 	require.NoError(t, err)
-	require.NotNil(t, block1Records)
-	require.Equal(t, []api.StateID{c1.StateID, c2.StateID}, block1Records.StateIDs)
+	require.Len(t, block1Records, 2)
+	require.Equal(t, []api.StateID{c1.StateID, c2.StateID}, stateIDsFromAggregatorRecords(block1Records))
 
 	c3 := testutil.CreateTestCertificationRequest(t, "disk_align_3")
 	committedConflict := *c1
@@ -73,10 +73,10 @@ func TestDiskSMTBFTShardPendingAlignmentWithDuplicateFiltering(t *testing.T) {
 	require.Len(t, dropped, 1)
 	require.True(t, block2.Finalized)
 
-	block2Records, err := storage.BlockRecordsStorage().GetByBlockNumber(ctx, block2.Index)
+	block2Records, err := storage.AggregatorRecordStorage().GetByBlockNumber(ctx, block2.Index)
 	require.NoError(t, err)
-	require.NotNil(t, block2Records)
-	require.Equal(t, []api.StateID{c3.StateID}, block2Records.StateIDs)
+	require.Len(t, block2Records, 1)
+	require.Equal(t, []api.StateID{c3.StateID}, stateIDsFromAggregatorRecords(block2Records))
 }
 
 func TestDiskSMTBFTShardSequentialRoundsMatchMemoryBackend(t *testing.T) {
@@ -127,10 +127,9 @@ func TestDiskSMTBFTShardSequentialRoundsMatchMemoryBackend(t *testing.T) {
 		require.Equal(t, api.HexBytes(expectedRoot), block.RootHash, "round %d root mismatch", blockNumber)
 		require.Equal(t, stateIDsFromAcks(expectedDropped), stateIDsFromAcks(diskDropped), "round %d dropped set mismatch", blockNumber)
 
-		blockRecords, err := storage.BlockRecordsStorage().GetByBlockNumber(ctx, block.Index)
+		blockRecords, err := storage.AggregatorRecordStorage().GetByBlockNumber(ctx, block.Index)
 		require.NoError(t, err)
-		require.NotNil(t, blockRecords)
-		require.Equal(t, expectedStateIDs, blockRecords.StateIDs, "round %d block records mismatch", blockNumber)
+		require.Equal(t, expectedStateIDs, stateIDsFromAggregatorRecords(blockRecords), "round %d block records mismatch", blockNumber)
 
 		diskState, err := rm.smtBackend.CommittedState(ctx)
 		require.NoError(t, err)
@@ -313,8 +312,17 @@ func finalizeManualDiskRound(
 		api.HexBytes{},
 		uc,
 	)
+	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 	require.NoError(t, rm.FinalizeBlock(ctx, block))
 	return block, dropped
+}
+
+func stateIDsFromAggregatorRecords(records []*models.AggregatorRecord) []api.StateID {
+	stateIDs := make([]api.StateID, len(records))
+	for i, record := range records {
+		stateIDs[i] = record.StateID
+	}
+	return stateIDs
 }
 
 func testDiskStoreCounters(t *testing.T, ctx context.Context, rm *RoundManager) diskstorage.Counters {

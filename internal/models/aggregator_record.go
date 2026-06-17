@@ -17,8 +17,8 @@ type AggregatorRecord struct {
 	AggregateRequestCount uint64            `json:"aggregateRequestCount"`
 	BlockNumber           *api.BigInt       `json:"blockNumber"`
 	LeafIndex             *api.BigInt       `json:"leafIndex"`
+	ProposalID            string            `json:"proposalId,omitempty"`
 	CreatedAt             *api.Timestamp    `json:"createdAt"`
-	FinalizedAt           *api.Timestamp    `json:"finalizedAt"`
 }
 
 // AggregatorRecordBSON represents the BSON version of AggregatorRecord for MongoDB storage
@@ -29,8 +29,8 @@ type AggregatorRecordBSON struct {
 	AggregateRequestCount uint64                `bson:"aggregateRequestCount"`
 	BlockNumber           primitive.Decimal128  `bson:"blockNumber"`
 	LeafIndex             primitive.Decimal128  `bson:"leafIndex"`
+	ProposalID            string                `bson:"proposalId,omitempty"`
 	CreatedAt             time.Time             `bson:"createdAt"`
-	FinalizedAt           time.Time             `bson:"finalizedAt"`
 }
 
 // NewAggregatorRecord creates a new aggregator record from a certification request
@@ -43,7 +43,6 @@ func NewAggregatorRecord(certRequest *CertificationRequest, blockNumber, leafInd
 		BlockNumber:           blockNumber,
 		LeafIndex:             leafIndex,
 		CreatedAt:             certRequest.CreatedAt,
-		FinalizedAt:           api.Now(),
 	}
 }
 
@@ -57,6 +56,10 @@ func (ar *AggregatorRecord) ToBSON() (*AggregatorRecordBSON, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error converting leaf index to decimal-128: %w", err)
 	}
+	var createdAt time.Time
+	if ar.CreatedAt != nil {
+		createdAt = ar.CreatedAt.Time
+	}
 	return &AggregatorRecordBSON{
 		Version:               ar.Version,
 		StateID:               ar.StateID.String(),
@@ -64,8 +67,8 @@ func (ar *AggregatorRecord) ToBSON() (*AggregatorRecordBSON, error) {
 		AggregateRequestCount: ar.AggregateRequestCount,
 		BlockNumber:           blockNumber,
 		LeafIndex:             leafIndex,
-		CreatedAt:             ar.CreatedAt.Time,
-		FinalizedAt:           ar.FinalizedAt.Time,
+		ProposalID:            ar.ProposalID,
+		CreatedAt:             createdAt,
 	}, nil
 }
 
@@ -91,14 +94,15 @@ func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
 		return nil, fmt.Errorf("failed to decode stateID: %w", err)
 	}
 
-	return &AggregatorRecord{
+	record := &AggregatorRecord{
 		Version:               arb.Version,
 		StateID:               stateID,
 		CertificationData:     *certDataBSON,
 		AggregateRequestCount: arb.AggregateRequestCount,
 		BlockNumber:           blockNumber,
 		LeafIndex:             leafIndex,
+		ProposalID:            arb.ProposalID,
 		CreatedAt:             api.NewTimestamp(arb.CreatedAt),
-		FinalizedAt:           api.NewTimestamp(arb.FinalizedAt),
-	}, nil
+	}
+	return record, nil
 }

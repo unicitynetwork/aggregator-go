@@ -170,30 +170,21 @@ func (bs *BlockSyncer) syncMemoryToBlock(ctx context.Context, endBlock *big.Int)
 	// fetch last synced smt block number and last stored block number
 	currBlock := bs.stateTracker.GetLastSyncedBlock()
 	for currBlock.Cmp(endBlock) < 0 {
-		// fetch the next block record
-		b, err := bs.storage.BlockRecordsStorage().GetNextBlock(ctx, api.NewBigInt(currBlock))
+		b, err := bs.nextFinalizedBlock(ctx, currBlock, endBlock)
 		if err != nil {
-			return fmt.Errorf("failed to fetch next block: %w", err)
+			return err
 		}
 		if b == nil {
-			return fmt.Errorf("next block record not found block: %s", currBlock.String())
+			return fmt.Errorf("next finalized block not found after block: %s", currBlock.String())
 		}
 
-		// skip empty blocks
-		if len(b.StateIDs) == 0 {
-			bs.logger.WithContext(ctx).Debug("skipping block sync (empty block)", "blockNumber", b.BlockNumber.String())
-			currBlock = b.BlockNumber.Int
-			bs.stateTracker.SetLastSyncedBlock(currBlock)
-			continue
-		}
-		bs.logger.WithContext(ctx).Debug("updating SMT for round", "blockNumber", b.BlockNumber.String())
+		bs.logger.WithContext(ctx).Debug("updating SMT for round", "blockNumber", b.Index.String())
 
-		// apply changes from block record to SMT
 		if err := bs.updateSMTForBlock(ctx, b); err != nil {
 			return fmt.Errorf("failed to update SMT: %w", err)
 		}
 
-		currBlock = b.BlockNumber.Int
+		currBlock = b.Index.Int
 		bs.stateTracker.SetLastSyncedBlock(currBlock)
 		bs.logger.Info("SMT updated for round", "roundNumber", currBlock)
 	}
@@ -211,28 +202,21 @@ func (bs *BlockSyncer) syncDiskToBlock(ctx context.Context, endBlock *big.Int) e
 	}
 
 	for currBlock.Cmp(endBlock) < 0 {
-		b, err := bs.storage.BlockRecordsStorage().GetNextBlock(ctx, api.NewBigInt(currBlock))
+		b, err := bs.nextFinalizedBlock(ctx, currBlock, endBlock)
 		if err != nil {
-			return fmt.Errorf("failed to fetch next block: %w", err)
+			return err
 		}
 		if b == nil {
-			return fmt.Errorf("next block record not found block: %s", currBlock.String())
-		}
-		if b.BlockNumber.Int.Cmp(endBlock) > 0 {
-			return fmt.Errorf("next block record %s is after latest finalized block %s", b.BlockNumber.String(), endBlock.String())
+			return fmt.Errorf("next finalized block not found after block: %s", currBlock.String())
 		}
 
-		if len(b.StateIDs) == 0 {
-			bs.logger.WithContext(ctx).Debug("advancing disk SMT metadata for empty block", "blockNumber", b.BlockNumber.String())
-		} else {
-			bs.logger.WithContext(ctx).Debug("updating disk SMT for round", "blockNumber", b.BlockNumber.String())
-		}
+		bs.logger.WithContext(ctx).Debug("updating disk SMT for round", "blockNumber", b.Index.String())
 
 		if err := bs.updateSMTForBlock(ctx, b); err != nil {
 			return fmt.Errorf("failed to update disk SMT: %w", err)
 		}
 
-		currBlock = new(big.Int).Set(b.BlockNumber.Int)
+		currBlock = new(big.Int).Set(b.Index.Int)
 		if bs.stateTracker != nil {
 			bs.stateTracker.SetLastSyncedBlock(currBlock)
 		}
@@ -264,24 +248,35 @@ func (bs *BlockSyncer) usesDiskSMTBackend() bool {
 	return ok && diskBacked.IsDiskBackedSMT()
 }
 
-func (bs *BlockSyncer) verifySMTForBlock(ctx context.Context, smtRootHash api.HexBytes, blockNumber *api.BigInt) error {
-	block, err := bs.storage.BlockStorage().GetByNumber(ctx, blockNumber)
+func (bs *BlockSyncer) nextFinalizedBlock(ctx context.Context, currBlock, endBlock *big.Int) (*models.Block, error) {
+	from := new(big.Int).Add(currBlock, big.NewInt(1))
+	blocks, err := bs.storage.BlockStorage().GetRange(ctx, api.NewBigInt(from), api.NewBigInt(new(big.Int).Set(endBlock)))
 	if err != nil {
-		return fmt.Errorf("failed to fetch block: %w", err)
+		return nil, fmt.Errorf("failed to fetch finalized blocks after %s: %w", currBlock.String(), err)
 	}
+	if len(blocks) == 0 {
+		return nil, nil
+	}
+	return blocks[0], nil
+}
+
+func (bs *BlockSyncer) verifySMTForBlock(smtRootHash api.HexBytes, block *models.Block) error {
 	if block == nil {
-		return fmt.Errorf("block not found for block number: %s", blockNumber.String())
+		return fmt.Errorf("block is nil")
 	}
-	expectedRootHash := block.RootHash
-	if !bytes.Equal(smtRootHash, expectedRootHash) {
+	if !bytes.Equal(smtRootHash, block.RootHash) {
 		return fmt.Errorf("smt root hash %s does not match latest block root hash %s",
-			smtRootHash.String(), expectedRootHash.String())
+			smtRootHash.String(), block.RootHash.String())
 	}
 	return nil
 }
 
-func (bs *BlockSyncer) updateSMTForBlock(ctx context.Context, blockRecord *models.BlockRecords) error {
-	leaves, err := bs.replayLeavesForStateIDs(ctx, blockRecord.StateIDs)
+func (bs *BlockSyncer) updateSMTForBlock(ctx context.Context, block *models.Block) error {
+	records, err := bs.storage.AggregatorRecordStorage().GetByBlockNumber(ctx, block.Index)
+	if err != nil {
+		return fmt.Errorf("failed to load aggregator records for block %s: %w", block.Index.String(), err)
+	}
+	leaves, err := replayLeavesForAggregatorRecords(records)
 	if err != nil {
 		return err
 	}
@@ -297,23 +292,32 @@ func (bs *BlockSyncer) updateSMTForBlock(ctx context.Context, blockRecord *model
 			snapshot.Discard(ctx)
 		}
 	}()
-	result, err := snapshot.AddLeavesClassified(ctx, leaves)
-	if err != nil {
-		return fmt.Errorf("failed to apply SMT updates for block %s: %w", blockRecord.BlockNumber.String(), err)
+	var smtRootHash api.HexBytes
+	if len(leaves) == 0 {
+		root, err := snapshot.RootHashRaw(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to read SMT root for empty block %s: %w", block.Index.String(), err)
+		}
+		smtRootHash = api.HexBytes(root)
+	} else {
+		result, err := snapshot.AddLeavesClassified(ctx, leaves)
+		if err != nil {
+			return fmt.Errorf("failed to apply SMT updates for block %s: %w", block.Index.String(), err)
+		}
+		if err := result.ValidateAllAccepted(len(leaves)); err != nil {
+			return fmt.Errorf("failed to apply SMT updates for block %s: %w", block.Index.String(), err)
+		}
+		smtRootHash = api.HexBytes(result.CandidateRoot)
 	}
-	if err := result.ValidateAllAccepted(len(leaves)); err != nil {
-		return fmt.Errorf("failed to apply SMT updates for block %s: %w", blockRecord.BlockNumber.String(), err)
-	}
-	smtRootHash := api.HexBytes(result.CandidateRoot)
 	// verify smt root hash matches the raw 32-byte block root hash
-	if err := bs.verifySMTForBlock(ctx, smtRootHash, blockRecord.BlockNumber); err != nil {
+	if err := bs.verifySMTForBlock(smtRootHash, block); err != nil {
 		if bs.usesDiskSMTBackend() {
 			return fmt.Errorf("%w: %w", ErrDiskSMTDiverged, err)
 		}
 		return fmt.Errorf("failed to verify SMT: %w", err)
 	}
 	// commit smt snapshot
-	if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: blockRecord.BlockNumber, RootHash: smtRootHash}); err != nil {
+	if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: block.Index, RootHash: smtRootHash}); err != nil {
 		return fmt.Errorf("failed to commit SMT snapshot: %w", err)
 	}
 	committed = true
@@ -324,40 +328,22 @@ func (bs *BlockSyncer) updateSMTForBlock(ctx context.Context, blockRecord *model
 	return nil
 }
 
-func (bs *BlockSyncer) replayLeavesForStateIDs(ctx context.Context, stateIDs []api.StateID) ([]smtbackend.LeafInput, error) {
-	if len(stateIDs) == 0 {
+func replayLeavesForAggregatorRecords(records []*models.AggregatorRecord) ([]smtbackend.LeafInput, error) {
+	if len(records) == 0 {
 		return nil, nil
 	}
-
-	uniqueStateIds := make(map[string]struct{}, len(stateIDs))
-	leafIDs := make([]api.HexBytes, 0, len(stateIDs))
-	for _, stateID := range stateIDs {
-		key := stateID.String()
-		if _, exists := uniqueStateIds[key]; exists {
-			continue
+	leaves := make([]smtbackend.LeafInput, 0, len(records))
+	for i, record := range records {
+		if record == nil {
+			return nil, fmt.Errorf("nil aggregator record at index %d", i)
 		}
-		uniqueStateIds[key] = struct{}{}
-
-		keyBytes, err := stateID.GetTreeKey()
+		keyBytes, err := record.StateID.GetTreeKey()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get SMT key: %w", err)
 		}
-		leafIDs = append(leafIDs, api.NewHexBytes(keyBytes))
-	}
-
-	smtNodes, err := bs.storage.SmtStorage().GetByKeys(ctx, leafIDs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load smt nodes by keys: %w", err)
-	}
-	if len(smtNodes) != len(leafIDs) {
-		return nil, fmt.Errorf("expected %d SMT leaves, found %d", len(leafIDs), len(smtNodes))
-	}
-
-	leaves := make([]smtbackend.LeafInput, 0, len(smtNodes))
-	for _, smtNode := range smtNodes {
 		leaves = append(leaves, smtbackend.LeafInput{
-			Key:   smtNode.Key,
-			Value: smtNode.Value,
+			Key:   append([]byte(nil), keyBytes...),
+			Value: append([]byte(nil), record.CertificationData.TransactionHash...),
 		})
 	}
 	return leaves, nil

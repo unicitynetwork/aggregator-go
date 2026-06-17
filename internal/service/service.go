@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -75,7 +76,6 @@ type AggregatorService struct {
 	leaderSelector                LeaderSelector
 	certificationRequestValidator *signing.CertificationRequestValidator
 	trustBaseValidator            *trustbase.TrustBaseValidator
-	proofDiag                     proofDiagnostics
 }
 
 type LeaderSelector interface {
@@ -97,7 +97,6 @@ func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.Aggre
 		BlockNumber:           modelRecord.BlockNumber,
 		LeafIndex:             modelRecord.LeafIndex,
 		CreatedAt:             modelRecord.CreatedAt,
-		FinalizedAt:           modelRecord.FinalizedAt,
 	}
 }
 
@@ -286,7 +285,9 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		if err != nil {
 			return nil, fmt.Errorf("failed to get published SMT root hash: %w", err)
 		}
+		certStart := time.Now()
 		childCert, err = publishedProofReader.GetPublishedInclusionCertAtRoot(ctx, rootHash, key)
+		as.recordProofBuildDuration(ctx, proofBuildSourcePublishedView, proofBuildResultFromPublishedErr(err), time.Since(certStart))
 		if errors.Is(err, smtbackend.ErrPublishedProofRootChanged) || errors.Is(err, smtbackend.ErrPublishedProofLeafNotFound) {
 			rootHashRaw := api.HexBytes(rootHash)
 			block, ok := as.roundManager.GetProofReadyBlockByRoot(rootHashRaw)
@@ -346,7 +347,7 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 			return nil, fmt.Errorf("failed to get aggregator record: %w", err)
 		}
 	}
-	if record == nil || record.BlockNumber.Cmp(block.Index.Int) > 0 {
+	if record == nil || record.BlockNumber == nil || record.BlockNumber.Cmp(block.Index.Int) > 0 {
 		// Non-inclusion is not implemented yet. Return an empty v2 proof
 		// payload so verifiers short-circuit with ErrExclusionNotImpl.
 		as.recordProofPath(ctx, proofPathEmpty)
@@ -358,7 +359,9 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 	}
 
 	if childCert == nil {
+		certStart := time.Now()
 		childCert, err = smtBackend.GetInclusionCert(ctx, key)
+		as.recordProofBuildDuration(ctx, proofBuildSourceLiveTree, proofBuildResultFromErr(err), time.Since(certStart))
 		if err != nil {
 			return nil, fmt.Errorf("failed to build inclusion cert for state ID %s: %w", req.StateID, err)
 		}
