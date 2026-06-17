@@ -370,6 +370,10 @@ func (ars *AggregatorRecordStorage) Count(ctx context.Context) (int64, error) {
 // CreateIndexes creates the necessary indexes needed by the submit, proof, and
 // block-record lookup paths.
 func (ars *AggregatorRecordStorage) CreateIndexes(ctx context.Context) error {
+	if err := ars.ensureNoLegacyUniqueStateIDIndex(ctx); err != nil {
+		return err
+	}
+
 	indexes := []mongo.IndexModel{
 		{Keys: bson.D{{Key: "stateId", Value: "hashed"}}},
 		{Keys: bson.D{{Key: "blockNumber", Value: 1}, {Key: "proposalId", Value: 1}}},
@@ -381,4 +385,36 @@ func (ars *AggregatorRecordStorage) CreateIndexes(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// ensureNoLegacyUniqueStateIDIndex fails startup fast if the database still
+// carries the pre-proposalId unique stateId index. The current model writes the
+// same stateId across proposal attempts (visibility is gated by finalized block
+// + proposalId), so a surviving unique stateId index would make StoreBatch
+// silently drop re-staged records (it swallows duplicate-key errors), corrupting
+// recovery. This branch requires a clean database; we enforce that here rather
+// than rely on the operational note alone.
+func (ars *AggregatorRecordStorage) ensureNoLegacyUniqueStateIDIndex(ctx context.Context) error {
+	cursor, err := ars.collection.Indexes().List(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list aggregator record indexes: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	for cursor.Next(ctx) {
+		var idx struct {
+			Name   string `bson:"name"`
+			Key    bson.D `bson:"key"`
+			Unique bool   `bson:"unique"`
+		}
+		if err := cursor.Decode(&idx); err != nil {
+			return fmt.Errorf("failed to decode aggregator record index: %w", err)
+		}
+		if idx.Unique && len(idx.Key) == 1 && idx.Key[0].Key == "stateId" {
+			return fmt.Errorf("legacy unique index %q on %s detected; this branch requires a clean database "+
+				"(drop the unique stateId index or recreate the database before deploying)",
+				idx.Name, aggregatorRecordCollection)
+		}
+	}
+	return cursor.Err()
 }

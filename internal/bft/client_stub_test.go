@@ -3,6 +3,7 @@ package bft
 import (
 	"bytes"
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -34,6 +36,7 @@ type stubRoundManager struct {
 	durableAbandonBlock    *api.BigInt
 	durableAbandonRoot     api.HexBytes
 	durableAbandonCallCnt  int
+	durableAbandonErr      error
 }
 
 func (m *stubRoundManager) FinalizeBlock(ctx context.Context, block *models.Block) error {
@@ -77,7 +80,7 @@ func (m *stubRoundManager) AbandonDurableProposal(_ context.Context, blockNumber
 	m.durableAbandonCallCnt++
 	m.durableAbandonBlock = api.NewBigInt(new(big.Int).Set(blockNumber.Int))
 	m.durableAbandonRoot = append(api.HexBytes(nil), rootHash...)
-	return nil
+	return m.durableAbandonErr
 }
 
 func TestBFTClientCertificationRequestDoesNotRewriteBlockNumber(t *testing.T) {
@@ -454,6 +457,59 @@ func TestBFTClientRejectsUCRootMismatch(t *testing.T) {
 	// so a stale Proposed block cannot survive restart and re-trigger the fatal.
 	require.Equal(t, 1, rm.durableAbandonCallCnt)
 	require.True(t, bytes.Equal(blockRoot, rm.durableAbandonRoot))
+}
+
+func TestBFTClientUCRootMismatchPublishesFatalWhenAbandonFails(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+
+	abandonErr := errors.New("abandon failed")
+	rm := &stubRoundManager{durableAbandonErr: abandonErr}
+	eventBus := events.NewEventBus(log)
+	fatalEvents := eventBus.Subscribe(events.TopicFatalError)
+	blockRoot := api.NewHexBytes(bytes.Repeat([]byte{0x11}, api.SiblingSize))
+	ucRoot := bytes.Repeat([]byte{0x22}, api.SiblingSize)
+	block := models.NewBlock(
+		api.NewBigIntFromUint64(7),
+		"unicity",
+		0,
+		"1.0",
+		"mainnet",
+		blockRoot,
+		nil,
+		nil,
+	)
+	client := &BFTClientImpl{
+		logger:        log,
+		roundManager:  rm,
+		eventBus:      eventBus,
+		proposedBlock: block,
+	}
+
+	err = client.handleUnicityCertificate(
+		t.Context(),
+		&types.UnicityCertificate{
+			InputRecord: &types.InputRecord{
+				Version:     1,
+				RoundNumber: 7,
+				Hash:        ucRoot,
+			},
+			UnicitySeal: &types.UnicitySeal{RootChainRoundNumber: 7},
+		},
+		&certification.TechnicalRecord{Round: 8},
+	)
+
+	require.ErrorIs(t, err, ErrCertifiedRootMismatch)
+	require.Equal(t, 1, rm.durableAbandonCallCnt)
+	select {
+	case event := <-fatalEvents:
+		fatal, ok := event.(events.FatalErrorEvent)
+		require.True(t, ok)
+		require.Equal(t, "bft", fatal.Source)
+		require.Contains(t, fatal.Error, ErrCertifiedRootMismatch.Error())
+	default:
+		t.Fatal("expected fatal event for certified root mismatch")
+	}
 }
 
 func TestBFTClientRejectsRegressingUC(t *testing.T) {

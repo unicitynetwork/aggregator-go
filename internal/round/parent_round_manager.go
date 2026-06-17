@@ -189,14 +189,15 @@ func (prm *ParentRoundManager) StartNewRound(ctx context.Context, roundNumber *a
 // StartNextRoundFromPrecollector exists to satisfy the BFT RoundManager
 // interface. Parent mode keeps its existing collect behavior.
 func (prm *ParentRoundManager) StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt) error {
-	prm.roundMutex.RLock()
+	prm.roundMutex.Lock()
 	activeCtx := prm.activeCtx
-	prm.roundMutex.RUnlock()
 	if activeCtx == nil {
+		prm.roundMutex.Unlock()
 		return ErrDeactivated
 	}
 
 	prm.roundWG.Add(1)
+	prm.roundMutex.Unlock()
 	go func() {
 		defer prm.roundWG.Done()
 		if err := prm.StartNewRound(activeCtx, roundNumber); err != nil && !errors.Is(err, ErrDeactivated) && !errors.Is(err, context.Canceled) {

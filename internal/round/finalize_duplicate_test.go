@@ -38,6 +38,32 @@ func (q *failingMarkProcessedQueue) MarkProcessed(context.Context, []interfaces.
 	return q.err
 }
 
+type finalizationFailStorage struct {
+	interfaces.Storage
+	blockStorage *finalizationFailBlockStorage
+}
+
+func (s *finalizationFailStorage) BlockStorage() interfaces.BlockStorage {
+	return s.blockStorage
+}
+
+type finalizationFailBlockStorage struct {
+	interfaces.BlockStorage
+	finalizeErr error
+}
+
+func (s *finalizationFailBlockStorage) SetFinalizedWithCertificate(context.Context, *models.Block) error {
+	return s.finalizeErr
+}
+
+func (s *finalizationFailBlockStorage) SetFinalizingWithCertificate(ctx context.Context, block *models.Block) error {
+	return s.BlockStorage.(blockCertificateFinalizingMarker).SetFinalizingWithCertificate(ctx, block)
+}
+
+func (s *finalizationFailBlockStorage) GetByNumberAnyFinalization(ctx context.Context, blockNumber *api.BigInt) (*models.Block, error) {
+	return s.BlockStorage.(blockAnyFinalizationStorage).GetByNumberAnyFinalization(ctx, blockNumber)
+}
+
 type discardCountingSnapshot struct {
 	smtbackend.Snapshot
 	discards int
@@ -446,6 +472,66 @@ func (s *FinalizeDuplicateTestSuite) Test4b_MarkProcessedFailureAfterFinalizatio
 	require.GreaterOrEqual(t, recordCount, int64(len(commitments)))
 
 	t.Log("✓ FinalizeBlock succeeded despite post-finalization MarkProcessed failure")
+}
+
+func (s *FinalizeDuplicateTestSuite) Test4c_FinalizeFailureLeavesCertifiedBlockRecoverable() {
+	t := s.T()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	testLogger, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+
+	finalizeErr := errors.New("finalize update failed")
+	storage := &finalizationFailStorage{
+		Storage: s.storage,
+		blockStorage: &finalizationFailBlockStorage{
+			BlockStorage: s.storage.BlockStorage(),
+			finalizeErr:  finalizeErr,
+		},
+	}
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
+	require.NoError(t, err)
+
+	commitments := testutil.CreateTestCertificationRequests(t, 3, "t4c_req")
+	rm.currentRound = &Round{
+		Number:      api.NewBigInt(big.NewInt(47)),
+		State:       RoundStateProcessing,
+		Commitments: commitments,
+		Snapshot:    testRMSnapshot(t, ctx, rm),
+	}
+
+	rm.roundMutex.Lock()
+	_, err = rm.processMiniBatch(ctx, commitments)
+	rm.roundMutex.Unlock()
+	require.NoError(t, err)
+
+	rootHash := testSnapshotRootHex(t, ctx, rm.currentRound.Snapshot)
+	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
+	require.NoError(t, err)
+	certBytes := api.NewHexBytes([]byte{0x04, 0x0c})
+	block := models.NewBlock(
+		api.NewBigInt(big.NewInt(47)),
+		"unicity",
+		0,
+		"1.0",
+		"mainnet",
+		rootHashBytes,
+		api.HexBytes{},
+		certBytes,
+	)
+	storeDurableProposalForCurrentRound(t, ctx, rm, block)
+
+	err = rm.FinalizeBlock(ctx, block)
+	require.ErrorIs(t, err, finalizeErr)
+
+	storedBlock, err := getBlockAnyFinalization(ctx, s.storage, block.Index)
+	require.NoError(t, err)
+	require.NotNil(t, storedBlock)
+	require.False(t, storedBlock.Finalized)
+	require.Equal(t, models.FinalityStatusFinalizing, storedBlock.Status)
+	require.Equal(t, certBytes, storedBlock.UnicityCertificate)
 }
 
 // Test5_DuplicateBlockAlreadyFinalized tests that FinalizeBlock succeeds when

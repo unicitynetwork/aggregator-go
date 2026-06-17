@@ -763,8 +763,10 @@ func TestChildPrecollector_AdvanceRoundFailsOnSnapshotAddError(t *testing.T) {
 }
 
 type precollectorErrorSnapshot struct {
-	forked smtbackend.Snapshot
-	addErr error
+	forked             smtbackend.Snapshot
+	addErr             error
+	setCommitTargetErr error
+	discardCount       int
 }
 
 func (s *precollectorErrorSnapshot) AddLeavesClassified(context.Context, []smtbackend.LeafInput) (smtbackend.BatchApplyResult, error) {
@@ -786,14 +788,16 @@ func (s *precollectorErrorSnapshot) Fork(context.Context) (smtbackend.Snapshot, 
 }
 
 func (s *precollectorErrorSnapshot) SetCommitTarget(context.Context, smtbackend.Backend) error {
-	return nil
+	return s.setCommitTargetErr
 }
 
 func (s *precollectorErrorSnapshot) Commit(context.Context, smtbackend.CommitMetadata) error {
 	return nil
 }
 
-func (s *precollectorErrorSnapshot) Discard(context.Context) {}
+func (s *precollectorErrorSnapshot) Discard(context.Context) {
+	s.discardCount++
+}
 
 // --- Snapshot reparenting test (still valid with precollector) ---
 
@@ -1320,6 +1324,37 @@ func TestStartNextRoundFromPrecollectorDiscardsFailedPrecollector(t *testing.T) 
 	rm.roundMutex.RUnlock()
 	require.False(t, stillBlocking,
 		"failed precollector must be discarded on handoff fallback, not left blocking new precollectors")
+}
+
+func TestStartNextRoundFromPrecollectorDiscardsSnapshotOnSetCommitTargetError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	setTargetErr := errors.New("set target failed")
+	nextSnapshot := &precollectorErrorSnapshot{}
+	handoffSnapshot := &precollectorErrorSnapshot{
+		forked:             nextSnapshot,
+		setCommitTargetErr: setTargetErr,
+	}
+	cp := newChildPrecollector(nil, nil, newTestLogger(t), 10000, nil, nil, "", nil)
+	cp.Start(ctx, handoffSnapshot)
+	t.Cleanup(cp.Stop)
+
+	rm := &RoundManager{
+		config: &config.Config{
+			Processing: config.ProcessingConfig{PrecollectorGracePeriod: 0},
+			Storage:    config.StorageConfig{UseRedisForCommitments: true},
+			Sharding:   config.ShardingConfig{Mode: config.ShardingModeStandalone},
+		},
+		logger: newTestLogger(t),
+	}
+	rm.precollector = cp
+
+	err := rm.StartNextRoundFromPrecollector(ctx, api.NewBigIntFromUint64(2))
+
+	require.ErrorIs(t, err, setTargetErr)
+	require.Equal(t, 1, handoffSnapshot.discardCount)
+	require.Equal(t, 0, nextSnapshot.discardCount, "precollector still owns the next snapshot until Stop")
 }
 
 func TestStandaloneActivePrecollectorLifecycle(t *testing.T) {

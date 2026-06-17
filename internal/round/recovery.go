@@ -83,6 +83,12 @@ func (rm *RoundManager) FinalizeCertifiedProposal(
 	}
 
 	if !rm.usesDiskSMTBackend() {
+		if err := setBlockFinalizingWithCertificate(ctx, rm.storage, block); err != nil {
+			return false, err
+		}
+		block.Finalized = false
+		block.Status = models.FinalityStatusFinalizing
+
 		smtNodes, err := rm.convertLeavesToNodes(leaves)
 		if err != nil {
 			return false, fmt.Errorf("failed to convert durable proposal leaves to SMT nodes: %w", err)
@@ -175,6 +181,10 @@ type blockAnyFinalizationStorage interface {
 
 type blockCertificateFinalizer interface {
 	SetFinalizedWithCertificate(ctx context.Context, block *models.Block) error
+}
+
+type blockCertificateFinalizingMarker interface {
+	SetFinalizingWithCertificate(ctx context.Context, block *models.Block) error
 }
 
 type blockStatusUpdater interface {
@@ -540,6 +550,16 @@ func setBlockFinalizedWithCertificate(ctx context.Context, storage interfaces.St
 		return fmt.Errorf("failed to set block as finalized: %w", err)
 	}
 	return nil
+}
+
+func setBlockFinalizingWithCertificate(ctx context.Context, storage interfaces.Storage, block *models.Block) error {
+	if updater, ok := storage.BlockStorage().(blockCertificateFinalizingMarker); ok {
+		if err := updater.SetFinalizingWithCertificate(ctx, block); err != nil {
+			return fmt.Errorf("failed to set block as finalizing: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("block storage does not support certified finalizing marker")
 }
 
 func getAggregatorRecordAnyFinalization(ctx context.Context, storage interfaces.Storage, stateID api.StateID) (*models.AggregatorRecord, error) {

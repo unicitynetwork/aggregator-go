@@ -1595,6 +1595,7 @@ func (rm *RoundManager) StartNextRoundFromPrecollector(ctx context.Context, roun
 		return err
 	}
 	if err := preResult.snapshot.SetCommitTarget(ctx, rm.smtBackend); err != nil {
+		preResult.snapshot.Discard(ctx)
 		return fmt.Errorf("failed to set precollector commit target: %w", err)
 	}
 	if err := rm.StartNewRoundWithSnapshot(ctx, roundNumber, preResult.snapshot, preResult.commitments, preResult.leaves, preResult.recordsStaged, preResult.proposalID); err != nil {

@@ -569,7 +569,8 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 			"blockRoot", c.proposedBlock.RootHash.String(),
 			"ucRoot", api.HexBytes(uc.InputRecord.Hash).String())
 		if abandonErr := c.abandonProposedBlockLocked(ctx, "certified root mismatch"); abandonErr != nil {
-			return abandonErr
+			c.logger.WithContext(ctx).Error("Failed to abandon proposed block after certified root mismatch",
+				"error", abandonErr.Error())
 		}
 		metrics.BFTErrorsTotal.Inc()
 		if c.eventBus != nil {

@@ -324,6 +324,29 @@ func (bs *BlockStorage) SetStatus(ctx context.Context, blockNumber *api.BigInt, 
 	return nil
 }
 
+// SetFinalizingWithCertificate marks a certified block as finalizing and
+// persists the UC before non-disk SMT node writes begin.
+func (bs *BlockStorage) SetFinalizingWithCertificate(ctx context.Context, block *models.Block) error {
+	if block == nil {
+		return errors.New("block is nil")
+	}
+	filter := bson.M{"index": bigIntToDecimal128(block.Index)}
+	update := bson.M{"$set": bson.M{
+		"finalized":          false,
+		"status":             models.FinalityStatusFinalizing,
+		"unicityCertificate": block.UnicityCertificate.String(),
+	}}
+
+	result, err := bs.collection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("failed to set block as finalizing with certificate: %w", err)
+	}
+	if result.MatchedCount == 0 {
+		return fmt.Errorf("block %s not found", block.Index.String())
+	}
+	return nil
+}
+
 // SetFinalizedWithCertificate marks a block finalized and persists the UC that
 // may have arrived after the proposed block was first stored.
 func (bs *BlockStorage) SetFinalizedWithCertificate(ctx context.Context, block *models.Block) error {

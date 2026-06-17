@@ -668,6 +668,12 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 
 	diskFinalize := rm.usesDiskSMTBackend() && snapshot != nil
 	if !diskFinalize {
+		if err := setBlockFinalizingWithCertificate(ctx, rm.storage, block); err != nil {
+			return err
+		}
+		block.Finalized = false
+		block.Status = models.FinalityStatusFinalizing
+
 		var err error
 		storeDataTiming, err = rm.storeDataParallel(ctx, smtNodesToStore)
 		if err != nil {
