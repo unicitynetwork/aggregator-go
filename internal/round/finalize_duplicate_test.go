@@ -592,11 +592,10 @@ func (s *FinalizeDuplicateTestSuite) Test7_FinalizeBlockRejectsRoundNumberMismat
 	}
 }
 
-// Test8_DuplicateFinalizedBlockMustNotCommitDifferentSnapshot verifies that a
-// retry for an already-finalized block is only idempotent if it is replaying the
-// same block state. A duplicate block must not commit whatever snapshot happens
-// to be in currentRound.
-func (s *FinalizeDuplicateTestSuite) Test8_DuplicateFinalizedBlockMustNotCommitDifferentSnapshot() {
+// Test8_DuplicateFinalizedBlockRejectsSnapshotRootMismatch verifies that a
+// duplicate block retry cannot commit whatever snapshot happens to be in
+// currentRound when that snapshot does not match the block root.
+func (s *FinalizeDuplicateTestSuite) Test8_DuplicateFinalizedBlockRejectsSnapshotRootMismatch() {
 	t := s.T()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -664,4 +663,104 @@ func (s *FinalizeDuplicateTestSuite) Test8_DuplicateFinalizedBlockMustNotCommitD
 	require.NoError(t, err)
 	require.NotNil(t, storedBlock)
 	assert.Equal(t, emptyRoot, storedBlock.RootHash.String(), "stored block root should remain unchanged")
+}
+
+// Test9_DuplicateFinalizedBlockRejectsDifferentBlockRecords verifies the
+// duplicate-content guard after the snapshot-root guard has passed.
+func (s *FinalizeDuplicateTestSuite) Test9_DuplicateFinalizedBlockRejectsDifferentBlockRecords() {
+	t := s.T()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	testLogger, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, 16+256))
+	rm, err := NewRoundManager(ctx, s.cfg, testLogger, s.storage.CommitmentQueue(), s.storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), threadSafeSMT, nil)
+	require.NoError(t, err)
+
+	commitments := testutil.CreateTestCertificationRequests(t, 2, "t9_req")
+	rm.currentRound = &Round{
+		Number:      api.NewBigInt(big.NewInt(72)),
+		State:       RoundStateProcessing,
+		Commitments: commitments,
+		Snapshot:    rm.smt.CreateSnapshot(),
+	}
+
+	rm.roundMutex.Lock()
+	err = rm.processMiniBatch(ctx, commitments)
+	rm.roundMutex.Unlock()
+	require.NoError(t, err)
+
+	rootHash := rm.currentRound.Snapshot.GetRootHash()
+	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
+	require.NoError(t, err)
+
+	block := models.NewBlock(
+		api.NewBigInt(big.NewInt(72)),
+		"unicity",
+		0,
+		"1.0",
+		"mainnet",
+		rootHashBytes,
+		api.HexBytes{},
+		api.HexBytes{},
+		nil,
+	)
+	block.Finalized = true
+	require.NoError(t, s.storage.BlockStorage().Store(ctx, block))
+
+	otherCommitments := testutil.CreateTestCertificationRequests(t, 1, "t9_existing")
+	require.NoError(t, s.storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, []api.StateID{otherCommitments[0].StateID})))
+
+	blockCountBefore, err := s.storage.BlockStorage().Count(ctx)
+	require.NoError(t, err)
+	blockRecordsCountBefore, err := s.storage.BlockRecordsStorage().Count(ctx)
+	require.NoError(t, err)
+	smtCountBefore, err := s.storage.SmtStorage().Count(ctx)
+	require.NoError(t, err)
+	recordCountBefore, err := s.storage.AggregatorRecordStorage().Count(ctx)
+	require.NoError(t, err)
+
+	block.Finalized = false
+	err = rm.FinalizeBlock(ctx, block)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "different request IDs")
+
+	blockCountAfter, countErr := s.storage.BlockStorage().Count(ctx)
+	require.NoError(t, countErr)
+	assert.Equal(t, blockCountBefore, blockCountAfter, "duplicate mismatch must not store another block")
+
+	blockRecordsCountAfter, countErr := s.storage.BlockRecordsStorage().Count(ctx)
+	require.NoError(t, countErr)
+	assert.Equal(t, blockRecordsCountBefore, blockRecordsCountAfter, "duplicate mismatch must not store block_records")
+
+	smtCountAfter, countErr := s.storage.SmtStorage().Count(ctx)
+	require.NoError(t, countErr)
+	assert.Equal(t, smtCountBefore, smtCountAfter, "duplicate mismatch must not store SMT nodes")
+
+	recordCountAfter, countErr := s.storage.AggregatorRecordStorage().Count(ctx)
+	require.NoError(t, countErr)
+	assert.Equal(t, recordCountBefore, recordCountAfter, "duplicate mismatch must not store aggregator records")
+}
+
+func (s *FinalizeDuplicateTestSuite) Test10_FinalizeBlockWithRetryPropagatesCancellation() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	block := models.NewBlock(
+		api.NewBigInt(big.NewInt(73)),
+		"unicity",
+		0,
+		"1.0",
+		"mainnet",
+		api.HexBytes{},
+		api.HexBytes{},
+		api.HexBytes{},
+		nil,
+	)
+	rm := &RoundManager{}
+
+	err := rm.FinalizeBlockWithRetry(ctx, block)
+	require.ErrorIs(s.T(), err, context.Canceled)
 }

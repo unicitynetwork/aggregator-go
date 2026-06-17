@@ -366,9 +366,19 @@ const (
 // FinalizeBlockWithRetry retries finalization and uses recovery if block was partially stored.
 func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *models.Block) error {
 	for attempt := 1; attempt <= maxFinalizeRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		err := rm.FinalizeBlock(ctx, block)
 		if err == nil {
 			return nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 
 		rm.logger.Error("FinalizeBlock failed",
@@ -393,7 +403,18 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 
 		if attempt < maxFinalizeRetries {
 			rm.logger.Info("Retrying FinalizeBlock", "attempt", attempt)
-			time.Sleep(finalizeRetryDelay)
+			timer := time.NewTimer(finalizeRetryDelay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return ctx.Err()
+			}
 		}
 	}
 	return fmt.Errorf("FinalizeBlock failed after %d attempts", maxFinalizeRetries)
