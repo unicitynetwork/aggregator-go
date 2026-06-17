@@ -1174,6 +1174,86 @@ func TestUsesActivePrecollectorDoesNotDependOnGrace(t *testing.T) {
 	require.False(t, rm.usesActivePrecollector())
 }
 
+// TestStartNextRoundFromPrecollectorDiscardsFailedPrecollector guards the merge
+// fix at round_manager.go: when a precollector handoff fails and we fall back to
+// StartNewRound, the dead precollector must be discarded. Otherwise StartNewRound
+// (which only discards when abandoning a pending round) leaves rm.precollector set,
+// and startActivePrecollectorIfNeeded then refuses to start a fresh one.
+func TestStartNextRoundFromPrecollectorDiscardsFailedPrecollector(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{Database: "test_precollector_handoff_failure_discard"},
+		Processing: config.ProcessingConfig{
+			RoundDuration:           100 * time.Millisecond,
+			PrecollectorGracePeriod: 150 * time.Millisecond,
+			MaxCommitmentsPerRound:  1000,
+		},
+		Storage:  config.StorageConfig{UseRedisForCommitments: true},
+		Sharding: config.ShardingConfig{Mode: config.ShardingModeStandalone},
+		BFT: config.BFTConfig{
+			Enabled:   false,
+			StubDelay: 5 * time.Second,
+		},
+	}
+	storage := testutil.SetupTestStorage(t, cfg)
+	testLogger := newTestLogger(t)
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		storage.CommitmentQueue(),
+		storage,
+		nil,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		smtInstance,
+		nil,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer shutdownCancel()
+		_ = rm.Stop(shutdownCtx)
+	})
+
+	stageErr := errors.New("stage boom")
+	cp := newChildPrecollector(
+		rm.commitmentStream,
+		rm.commitmentQueue,
+		rm.logger,
+		rm.config.Processing.MaxCommitmentsPerRound,
+		rm.markProofsPending,
+		api.NewBigInt(big.NewInt(2)),
+		"failed-handoff-proposal",
+		func(context.Context, *api.BigInt, string, int, []*models.CertificationRequest) error {
+			return stageErr
+		},
+	)
+	rm.roundMutex.Lock()
+	rm.precollectorDisabled = false
+	rm.precollectorDone = make(chan struct{})
+	rm.precollector = cp
+	rm.roundMutex.Unlock()
+	cp.Start(ctx, testBackendSnapshot(t, ctx, testMemoryBackend(smtInstance)))
+
+	// One commitment so the handoff has records to stage (and fail on); the grace
+	// period gives the collect loop time to pick it up before AdvanceRound.
+	rm.commitmentStream <- testutil.CreateTestCertificationRequest(t, "handoff_failure")
+
+	require.NoError(t, rm.StartNextRoundFromPrecollector(ctx, api.NewBigInt(big.NewInt(2))))
+
+	rm.roundMutex.RLock()
+	stillBlocking := rm.precollector == cp
+	rm.roundMutex.RUnlock()
+	require.False(t, stillBlocking,
+		"failed precollector must be discarded on handoff fallback, not left blocking new precollectors")
+}
+
 func TestStandaloneActivePrecollectorLifecycle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1491,8 +1571,6 @@ func TestChildMode_RequiresFreshParentProof(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		block, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(2)))
-		return err == nil && block != nil
+		return err == nil && block != nil && rm.lastAcceptedParentUCRound.Load() == 2
 	}, 3*time.Second, 25*time.Millisecond, "block 2 should be created once a fresh parent proof is available")
-
-	assert.EqualValues(t, 2, rm.lastAcceptedParentUCRound.Load())
 }

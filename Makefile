@@ -180,14 +180,14 @@ docker-run-bft-sh-clean:
 
 docker-run-bft-sh-ha-clean:
 	@echo "Rebuilding fixed 2-shard BFT HA services with clean state as current user..."
-	@docker compose -f bft-sharding-compose.yml -f bft-sharding-ha-compose.yml down --remove-orphans
+	@docker compose -f bft-sharding-ha-compose.yml down --remove-orphans
 	@rm -rf ./data/bft-sharding ./logs/bft-shard0 ./logs/bft-shard1 ./logs/bft-shard0-b ./logs/bft-shard1-b
 	@mkdir -p ./data/bft-sharding/genesis ./data/bft-sharding/genesis-root ./data/bft-sharding/mongodb_shard0_data ./data/bft-sharding/mongodb_shard1_data ./data/bft-sharding/redis_data ./data/bft-sharding/smt-rocksdb-shard0 ./data/bft-sharding/smt-rocksdb-shard1 ./data/bft-sharding/smt-rocksdb-shard0-b ./data/bft-sharding/smt-rocksdb-shard1-b
 	@rm -rf ./data/bft-sharding/genesis/root
 	@chmod -R 777 ./data/bft-sharding
 	@mkdir -p ./logs/bft-shard0 ./logs/bft-shard1 ./logs/bft-shard0-b ./logs/bft-shard1-b && chmod -R 777 ./logs/bft-shard0 ./logs/bft-shard1 ./logs/bft-shard0-b ./logs/bft-shard1-b
 	@docker network inspect aggregator-go_default >/dev/null 2>&1 || docker network create aggregator-go_default >/dev/null
-	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=$${LOG_LEVEL:-info} docker compose -f bft-sharding-compose.yml -f bft-sharding-ha-compose.yml up --force-recreate -d --build
+	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=$${LOG_LEVEL:-info} docker compose -f bft-sharding-ha-compose.yml up --force-recreate -d --build
 	@echo "Fixed 2-shard BFT HA services rebuilt with user UID=$$(id -u):$$(id -g)"
 
 docker-run-bft-sh-clean-keep-tb:
@@ -204,14 +204,14 @@ docker-run-bft-sh-clean-keep-tb:
 
 docker-run-bft-sh-ha-clean-keep-tb:
 	@echo "Rebuilding fixed 2-shard BFT HA services with clean DB/Redis state but preserving BFT genesis as current user..."
-	@docker compose -f bft-sharding-compose.yml -f bft-sharding-ha-compose.yml down --remove-orphans
+	@docker compose -f bft-sharding-ha-compose.yml down --remove-orphans
 	@rm -rf ./data/bft-sharding/mongodb_data ./data/bft-sharding/mongodb_shard0_data ./data/bft-sharding/mongodb_shard1_data ./data/bft-sharding/redis_data ./data/bft-sharding/smt-rocksdb-shard0 ./data/bft-sharding/smt-rocksdb-shard1 ./data/bft-sharding/smt-rocksdb-shard0-b ./data/bft-sharding/smt-rocksdb-shard1-b
 	@mkdir -p ./data/bft-sharding/genesis ./data/bft-sharding/genesis-root ./data/bft-sharding/mongodb_shard0_data ./data/bft-sharding/mongodb_shard1_data ./data/bft-sharding/redis_data ./data/bft-sharding/smt-rocksdb-shard0 ./data/bft-sharding/smt-rocksdb-shard1 ./data/bft-sharding/smt-rocksdb-shard0-b ./data/bft-sharding/smt-rocksdb-shard1-b
 	@rm -rf ./data/bft-sharding/genesis/root
 	@chmod -R 777 ./data/bft-sharding
 	@mkdir -p ./logs/bft-shard0 ./logs/bft-shard1 ./logs/bft-shard0-b ./logs/bft-shard1-b && chmod -R 777 ./logs/bft-shard0 ./logs/bft-shard1 ./logs/bft-shard0-b ./logs/bft-shard1-b
 	@docker network inspect aggregator-go_default >/dev/null 2>&1 || docker network create aggregator-go_default >/dev/null
-	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=$${LOG_LEVEL:-info} docker compose -f bft-sharding-compose.yml -f bft-sharding-ha-compose.yml up --force-recreate -d --build
+	@USER_UID=$$(id -u) USER_GID=$$(id -g) LOG_LEVEL=$${LOG_LEVEL:-info} docker compose -f bft-sharding-ha-compose.yml up --force-recreate -d --build
 	@echo "Fixed 2-shard BFT HA services rebuilt with user UID=$$(id -u):$$(id -g)"
 
 docker-restart-sh-ha:

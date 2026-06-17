@@ -570,6 +570,8 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 		}
 	}
 
+	as.addDiskProofReadiness(ctx, status)
+
 	if as.config.Sharding.Mode == config.ShardingModeChild {
 		if err := as.roundManager.CheckParentHealth(ctx); err != nil {
 			status.Status = api.HealthStatusUnhealthy
@@ -582,6 +584,47 @@ func (as *AggregatorService) GetHealthStatus(ctx context.Context) (*api.HealthSt
 	}
 
 	return modelToAPIHealthStatus(status), nil
+}
+
+func (as *AggregatorService) addDiskProofReadiness(ctx context.Context, status *models.HealthStatus) {
+	if as.roundManager == nil || as.storage == nil {
+		return
+	}
+	smtBackend := as.roundManager.GetSMTBackend()
+	if smtBackend == nil {
+		return
+	}
+	if _, usesPublishedProofView := smtBackend.(smtbackend.PublishedProofReader); !usesPublishedProofView {
+		return
+	}
+	latest, err := as.storage.BlockStorage().GetLatest(ctx)
+	if err != nil {
+		as.markDiskProofNotReady(ctx, status, "block_storage_error", err)
+		return
+	}
+	if latest == nil {
+		return
+	}
+	state, err := smtBackend.CommittedState(ctx)
+	if err != nil {
+		as.markDiskProofNotReady(ctx, status, "disk_smt_state_error", err)
+		return
+	}
+	if state.BlockNumber == nil {
+		as.markDiskProofNotReady(ctx, status, "disk_smt_initial_sync", nil)
+	}
+}
+
+func (as *AggregatorService) markDiskProofNotReady(ctx context.Context, status *models.HealthStatus, reason string, err error) {
+	status.Status = api.HealthStatusUnhealthy
+	status.AddDetail("ready", "false")
+	status.AddDetail("ready_reason", reason)
+	if err != nil {
+		status.AddDetail("ready_error", err.Error())
+		as.logger.WithContext(ctx).Warn("Disk proof readiness check failed", "reason", reason, "error", err.Error())
+		return
+	}
+	as.logger.WithContext(ctx).Warn("Disk proof readiness check NOT_READY", "reason", reason)
 }
 
 // buildShardingHealth builds the api.Sharding health payload. In bft-shard

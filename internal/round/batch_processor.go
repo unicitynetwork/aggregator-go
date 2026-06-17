@@ -107,6 +107,15 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 		if err != nil {
 			return fmt.Errorf("failed to get previous block %s: %w", prevBlockNumber.String(), err)
 		}
+		if prevBlock == nil {
+			latestBlock, err := rm.storage.BlockStorage().GetLatest(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to get latest block: %w", err)
+			}
+			if latestBlock != nil && latestBlock.Index.Cmp(blockNumber.Int) < 0 {
+				prevBlock = latestBlock
+			}
+		}
 		if prevBlock != nil {
 			// Use the block's root hash as the "hash" for now
 			parentHash = prevBlock.RootHash

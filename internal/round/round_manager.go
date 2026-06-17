@@ -528,19 +528,18 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 // StartNewRound starts a new round for processing commitments (delegates to unified function)
 func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
 	abandonPendingRound := rm.hasPendingRoundToAbandon(roundNumber)
-	var supersededSnapshot smtbackend.Snapshot
 	if abandonPendingRound {
 		rm.roundMutex.Lock()
-		supersededSnapshot = rm.abandonSupersededRoundLocked(roundNumber)
+		supersededSnapshot := rm.abandonSupersededRoundLocked(roundNumber)
 		rm.roundMutex.Unlock()
-	}
-	if supersededSnapshot != nil {
-		supersededSnapshot.Discard(ctx)
-	}
-	resetDone := rm.discardActivePrecollector(ctx)
-	if abandonPendingRound && !resetDone {
-		rm.clearProofPending()
-		rm.resetRedisPendingSweep(ctx)
+		if supersededSnapshot != nil {
+			supersededSnapshot.Discard(ctx)
+		}
+		resetDone := rm.discardActivePrecollector(ctx)
+		if !resetDone {
+			rm.clearProofPending()
+			rm.resetRedisPendingSweep(ctx)
+		}
 	}
 	return rm.StartNewRoundWithSnapshot(ctx, roundNumber, nil, nil, nil, false, "")
 }
@@ -607,7 +606,26 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 			"previousRoundNumber", currentRoundNumberString,
 			"previousRoundState", currentRoundState.String(),
 			"previousRoundAge", currentRoundAge.String())
-		if currentRoundNumber != nil && currentRoundNumber.Cmp(roundNumber.Int) >= 0 {
+		if currentRoundNumber != nil && currentRoundNumber.Cmp(roundNumber.Int) == 0 {
+			retryRound := rm.currentRound
+			shouldRetry := retryRound.State == RoundStateFinalizing && !retryRound.ProposalTime.IsZero()
+			rm.roundMutex.Unlock()
+			if snapshot != nil {
+				snapshot.Discard(ctx)
+			}
+			if shouldRetry {
+				rm.logger.WithContext(ctx).Info("Retrying existing round proposal",
+					"roundNumber", roundNumber.String(),
+					"currentRoundState", currentRoundState.String())
+				rm.startRoundProposalRetry(roundCtx, retryRound)
+			} else {
+				rm.logger.WithContext(ctx).Info("Skipping duplicate round start",
+					"roundNumber", roundNumber.String(),
+					"currentRoundState", currentRoundState.String())
+			}
+			return nil
+		}
+		if currentRoundNumber != nil && currentRoundNumber.Cmp(roundNumber.Int) > 0 {
 			rm.roundMutex.Unlock()
 			if snapshot != nil {
 				snapshot.Discard(ctx)
@@ -693,6 +711,62 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 		"commitments", len(commitments))
 
 	return nil
+}
+
+func (rm *RoundManager) startRoundProposalRetry(ctx context.Context, round *Round) {
+	rm.roundWG.Go(func() {
+		if err := rm.retryRoundProposal(ctx, round); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, bft.ErrStaleCertificationRound) {
+				rm.logger.WithContext(ctx).Info("Round proposal retry stopped",
+					"error", err.Error())
+				return
+			}
+			roundNumber := "<nil>"
+			if round != nil && round.Number != nil {
+				roundNumber = round.Number.String()
+			}
+			rm.logger.WithContext(ctx).Error("Round proposal retry failed, requesting shutdown",
+				"roundNumber", roundNumber,
+				"error", err.Error())
+			if rm.eventBus != nil {
+				rm.eventBus.Publish(events.TopicFatalError, events.FatalErrorEvent{
+					Source: "round_manager",
+					Error:  err.Error(),
+				})
+			}
+		}
+	})
+}
+
+func (rm *RoundManager) retryRoundProposal(ctx context.Context, round *Round) error {
+	if round == nil || round.Number == nil {
+		return fmt.Errorf("no round to retry")
+	}
+
+	rm.roundMutex.Lock()
+	if rm.currentRound != round {
+		rm.roundMutex.Unlock()
+		return bft.ErrStaleCertificationRound
+	}
+	rootHash := append(api.HexBytes(nil), round.PendingRootHash...)
+	if len(rootHash) == 0 && round.Snapshot != nil {
+		rootHashRaw, err := round.Snapshot.RootHashRaw(ctx)
+		if err != nil {
+			rm.roundMutex.Unlock()
+			return fmt.Errorf("failed to get SMT snapshot root: %w", err)
+		}
+		rootHash = append(api.HexBytes(nil), rootHashRaw...)
+		round.PendingRootHash = rootHash
+	}
+	if len(rootHash) == 0 {
+		rm.roundMutex.Unlock()
+		return fmt.Errorf("round %s has no proposal root to retry", round.Number.String())
+	}
+	round.ProposalTime = time.Now()
+	roundNumber := round.Number
+	rm.roundMutex.Unlock()
+
+	return rm.proposeBlock(ctx, round, roundNumber, rootHash)
 }
 
 // abandonSupersededRoundLocked cancels the current round when it is being
@@ -1504,6 +1578,10 @@ func (rm *RoundManager) StartNextRoundFromPrecollector(ctx context.Context, roun
 		rm.logger.WithContext(ctx).Warn("Failed to advance precollector, falling back to fixed collect round",
 			"error", err.Error(),
 			"advanceDuration", advanceDuration.String())
+		// The precollector failed to hand off; discard it here so a fresh one
+		// can start. StartNewRound only discards when abandoning a pending
+		// round, which is not the case on the post-finalization fallback path.
+		rm.discardActivePrecollector(ctx)
 		return rm.StartNewRound(ctx, roundNumber)
 	}
 

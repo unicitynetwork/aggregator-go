@@ -748,6 +748,102 @@ func TestGetInclusionProofPublishedViewReturnsEmptyBeforeRecordRootIsPublished(t
 	require.Equal(t, 0, recordStorage.getByStateIDCalls, "missing leaf must not trigger Mongo record lookup")
 }
 
+func TestGetHealthStatusPublishedProofFollowerNotReadyDuringInitialDiskSync(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	latestRoot := api.HexBytes(make([]byte, api.SiblingSize))
+	latestRoot[0] = 9
+	latestBlock := models.NewBlock(
+		api.NewBigIntFromUint64(9),
+		"test-chain",
+		0,
+		"v",
+		"f",
+		latestRoot,
+		nil,
+		testChildProofUC(t, 9, latestRoot),
+	)
+	latestBlock.Finalized = true
+	backend := &publishedProofBackend{
+		root: make([]byte, api.SiblingSize),
+		committedState: smtbackend.CommittedState{
+			RootHash: make([]byte, api.SiblingSize),
+		},
+		certErr: smtbackend.ErrPublishedProofLeafNotFound,
+	}
+	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+	service := &AggregatorService{
+		config: &config.Config{
+			HA:       config.HAConfig{Enabled: true, ServerID: "follower-1"},
+			Sharding: shardingCfg,
+		},
+		logger:          log,
+		commitmentQueue: &recordingCommitmentQueue{},
+		storage: &testStorage{
+			blockStorage: &testBlockStorage{latest: latestBlock},
+		},
+		roundManager:   &stubRoundManager{backend: backend},
+		leaderSelector: &staticLeaderSelector{leader: false},
+	}
+
+	status, err := service.GetHealthStatus(ctx)
+	require.NoError(t, err)
+	require.Equal(t, api.HealthStatusUnhealthy, status.Status)
+	require.Equal(t, api.HealthRoleFollower, status.Role)
+	require.Equal(t, "false", status.Details["ready"])
+	require.Equal(t, "disk_smt_initial_sync", status.Details["ready_reason"])
+}
+
+func TestGetHealthStatusPublishedProofFollowerReadyAfterInitialDiskSync(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	latestRoot := api.HexBytes(make([]byte, api.SiblingSize))
+	latestRoot[0] = 9
+	latestBlock := models.NewBlock(
+		api.NewBigIntFromUint64(9),
+		"test-chain",
+		0,
+		"v",
+		"f",
+		latestRoot,
+		nil,
+		testChildProofUC(t, 9, latestRoot),
+	)
+	latestBlock.Finalized = true
+	backend := &publishedProofBackend{
+		root: latestRoot,
+		committedState: smtbackend.CommittedState{
+			BlockNumber: latestBlock.Index,
+			RootHash:    latestRoot,
+		},
+	}
+	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+	service := &AggregatorService{
+		config: &config.Config{
+			HA:       config.HAConfig{Enabled: true, ServerID: "follower-1"},
+			Sharding: shardingCfg,
+		},
+		logger:          log,
+		commitmentQueue: &recordingCommitmentQueue{},
+		storage: &testStorage{
+			blockStorage: &testBlockStorage{latest: latestBlock},
+		},
+		roundManager:   &stubRoundManager{backend: backend},
+		leaderSelector: &staticLeaderSelector{leader: false},
+	}
+
+	status, err := service.GetHealthStatus(ctx)
+	require.NoError(t, err)
+	require.Equal(t, api.HealthStatusOk, status.Status)
+	require.Equal(t, api.HealthRoleFollower, status.Role)
+	require.Empty(t, status.Details["ready"])
+	require.Empty(t, status.Details["ready_reason"])
+}
+
 func TestGetInclusionProofPublishedViewRootChangeReturnsEmpty(t *testing.T) {
 	ctx := context.Background()
 	log, err := logger.New("error", "text", "stdout", false)
@@ -947,6 +1043,7 @@ func (b *precomputedProofBackend) GetPrecomputedProofResponse(_ context.Context,
 type publishedProofBackend struct {
 	countingSMTBackend
 	root               []byte
+	committedState     smtbackend.CommittedState
 	cert               *api.InclusionCert
 	certErr            error
 	publishedRootCalls int
@@ -956,6 +1053,11 @@ type publishedProofBackend struct {
 func (b *publishedProofBackend) PublishedRoot(context.Context) ([]byte, error) {
 	b.publishedRootCalls++
 	return append([]byte(nil), b.root...), nil
+}
+
+func (b *publishedProofBackend) CommittedState(context.Context) (smtbackend.CommittedState, error) {
+	b.touch()
+	return b.committedState, nil
 }
 
 func (b *publishedProofBackend) GetPublishedInclusionCertAtRoot(_ context.Context, expectedRoot []byte, _ []byte) (*api.InclusionCert, error) {

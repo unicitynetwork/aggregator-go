@@ -22,8 +22,9 @@ import (
 )
 
 type recordedBFTProposal struct {
-	blockNumber uint64
-	rootHash    []byte
+	blockNumber    uint64
+	rootHash       []byte
+	parentRootHash []byte
 }
 
 type recordingBFTClient struct {
@@ -45,8 +46,9 @@ func (c *recordingBFTClient) WaitForInitialized(context.Context) error {
 func (c *recordingBFTClient) CertificationRequest(_ context.Context, block *models.Block) error {
 	c.mu.Lock()
 	c.proposals = append(c.proposals, recordedBFTProposal{
-		blockNumber: block.Index.Uint64(),
-		rootHash:    append([]byte(nil), block.RootHash...),
+		blockNumber:    block.Index.Uint64(),
+		rootHash:       append([]byte(nil), block.RootHash...),
+		parentRootHash: append([]byte(nil), block.PreviousBlockHash...),
 	})
 	c.mu.Unlock()
 	select {
@@ -330,4 +332,137 @@ func TestStaleCertificationRequestAbandonsStoredDurableProposal(t *testing.T) {
 	_, found, err := rm.LoadDurableProposal(ctx, api.NewBigInt(big.NewInt(1)))
 	require.NoError(t, err)
 	require.False(t, found)
+}
+
+func TestStartNewRoundRetriesEqualFinalizingRoundProposal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{
+			Database: "test_start_new_round_retries_equal_finalizing_round",
+		},
+		Processing: config.ProcessingConfig{
+			CollectPhaseDuration:       time.Hour,
+			CommitmentStreamBufferSize: 16,
+			MaxCommitmentsPerRound:     1000,
+		},
+		Sharding: config.ShardingConfig{Mode: config.ShardingModeBFTShard},
+	}
+	storage := testutil.SetupTestStorage(t, cfg)
+	testLogger := newTestLogger(t)
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		storage.CommitmentQueue(),
+		storage,
+		nil,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		threadSafeSMT,
+		nil,
+	)
+	require.NoError(t, err)
+	recorder := newRecordingBFTClient()
+	rm.bftClient = recorder
+	defer func() {
+		cancel()
+		rm.roundWG.Wait()
+	}()
+
+	commitment := testutil.CreateTestCertificationRequest(t, "repeat_uc_equal_round_retry")
+	leaf, err := commitmentLeafInput(commitment)
+	require.NoError(t, err)
+	snapshot := testRMSnapshot(t, ctx, rm)
+	result, err := snapshot.AddLeavesClassified(ctx, []smtbackend.LeafInput{leaf})
+	require.NoError(t, err)
+	require.NoError(t, result.ValidateAllAccepted(1))
+	rootHash, err := snapshot.RootHashRaw(ctx)
+	require.NoError(t, err)
+
+	rm.currentRound = &Round{
+		Number:             api.NewBigInt(big.NewInt(7)),
+		StartTime:          time.Now(),
+		State:              RoundStateFinalizing,
+		Commitments:        []*models.CertificationRequest{commitment},
+		Snapshot:           snapshot,
+		PendingRootHash:    append(api.HexBytes(nil), rootHash...),
+		PendingLeaves:      []smtbackend.LeafInput{leaf},
+		PendingCommitments: []*models.CertificationRequest{commitment},
+		ProposalTime:       time.Now(),
+	}
+
+	require.NoError(t, rm.StartNewRound(ctx, api.NewBigInt(big.NewInt(7))))
+
+	require.Eventually(t, func() bool {
+		return len(recorder.snapshot()) == 1
+	}, time.Second, 10*time.Millisecond)
+
+	proposals := recorder.snapshot()
+	require.Len(t, proposals, 1)
+	require.EqualValues(t, 7, proposals[0].blockNumber)
+	require.True(t, bytes.Equal(rootHash, proposals[0].rootHash))
+	require.Same(t, snapshot, rm.currentRound.Snapshot)
+}
+
+func TestProposeBlockLinksToLatestFinalizedBlockAcrossRoundGap(t *testing.T) {
+	ctx := context.Background()
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{
+			Database: "test_propose_block_links_to_latest_finalized_gap",
+		},
+		Sharding: config.ShardingConfig{Mode: config.ShardingModeBFTShard},
+	}
+	storage := testutil.SetupTestStorage(t, cfg)
+	testLogger := newTestLogger(t)
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		storage.CommitmentQueue(),
+		storage,
+		nil,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		threadSafeSMT,
+		nil,
+	)
+	require.NoError(t, err)
+	recorder := newRecordingBFTClient()
+	rm.bftClient = recorder
+
+	parentRoot := api.HexBytes(bytes.Repeat([]byte{0x11}, 32))
+	block1 := models.NewBlock(
+		api.NewBigInt(big.NewInt(1)),
+		cfg.Chain.ID,
+		0,
+		cfg.Chain.Version,
+		cfg.Chain.ForkID,
+		parentRoot,
+		nil,
+		nil,
+	)
+	block1.Finalized = true
+	require.NoError(t, storage.BlockStorage().Store(ctx, block1))
+
+	rootHash := api.HexBytes(bytes.Repeat([]byte{0x33}, 32))
+	round := &Round{
+		Number:     api.NewBigInt(big.NewInt(3)),
+		StartTime:  time.Now(),
+		State:      RoundStateProcessing,
+		ProposalID: "gap-proposal-3",
+	}
+	rm.currentRound = round
+	require.NoError(t, rm.proposeBlock(ctx, round, api.NewBigInt(big.NewInt(3)), rootHash))
+
+	proposals := recorder.snapshot()
+	require.Len(t, proposals, 1)
+	require.EqualValues(t, 3, proposals[0].blockNumber)
+	require.True(t, bytes.Equal(rootHash, proposals[0].rootHash))
+	require.True(t, bytes.Equal(parentRoot, proposals[0].parentRootHash))
 }

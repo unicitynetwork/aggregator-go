@@ -2,10 +2,18 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	corecbor "github.com/unicitynetwork/aggregator-go/pkg/cbor"
 )
+
+// ErrCertificationRequestNotCanonical is returned by
+// UnmarshalCertificationRequestCBOR when the input is not encoded in canonical
+// Core Deterministic CBOR form.
+var ErrCertificationRequestNotCanonical = corecbor.ErrNotCanonical
 
 // CertificationRequest represents the certification_request JSON-RPC request,
 // sometimes also referred to as StateTransitionCertificationRequest, Commitment or UnicityServiceRequest.
@@ -60,7 +68,30 @@ func (c *CertificationRequest) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &hb); err != nil {
 		return fmt.Errorf("failed to unmarshal JSON to HexBytes: %w", err)
 	}
-	return types.Cbor.Unmarshal(hb, c)
+	return UnmarshalCertificationRequestCBOR(hb, c)
+}
+
+// UnmarshalCertificationRequestCBOR decodes data into out. The CBOR payload
+// must be canonical Core Deterministic CBOR; non-canonical inputs are rejected
+// so the same logical request cannot be expressed by multiple distinct byte
+// sequences (see issue #150).
+func UnmarshalCertificationRequestCBOR(data []byte, out *CertificationRequest) error {
+	if out == nil {
+		return errors.New("nil CertificationRequest output")
+	}
+	if err := corecbor.ValidateCoreDeterministic(data); err != nil {
+		return err
+	}
+	if err := types.Cbor.Unmarshal(data, out); err != nil {
+		return err
+	}
+	if out.Version != 1 {
+		return fmt.Errorf("unsupported CertificationRequest version: %d", out.Version)
+	}
+	if out.CertificationData.Version != 1 {
+		return fmt.Errorf("unsupported CertificationData version: %d", out.CertificationData.Version)
+	}
+	return nil
 }
 
 // CertificationResponse represents the certification_request JSON-RPC response.
@@ -117,12 +148,20 @@ func (c *CertificationData) UnmarshalCBOR(data []byte) error {
 // SigDataHash returns the data hash used for signature generation.
 // The hash is calculated as the CBOR array [SourceStateHash, TransactionHash].
 func (c CertificationData) SigDataHash() (*DataHash, error) {
+	if len(c.SourceStateHash) != StateTreeKeyLengthBytes {
+		return nil, fmt.Errorf("invalid source state hash length: expected %d bytes, got %d", StateTreeKeyLengthBytes, len(c.SourceStateHash))
+	}
+	if len(c.TransactionHash) != StateTreeKeyLengthBytes {
+		return nil, fmt.Errorf("invalid transaction hash length: expected %d bytes, got %d", StateTreeKeyLengthBytes, len(c.TransactionHash))
+	}
 	return SigDataHash(c.SourceStateHash, c.TransactionHash), nil
 }
 
 // SigDataHash returns the data hash used for signature generation.
 // The hash is calculated as the CBOR array [sourceStateHash, transactionHash].
 func SigDataHash(sourceStateHash []byte, transactionHash []byte) *DataHash {
+	// Reverted to manual construction to avoid unnecessary marshal error path.
+	// CborArray(2) and AddCborBytes produce shortest-form canonical headers.
 	return NewDataHasher(SHA256).AddData(
 		CborArray(2)).
 		AddCborBytes(sourceStateHash).
@@ -149,16 +188,35 @@ func (c CertificationData) CreateStateID() (StateID, error) {
 // The hash is calculated as the CBOR array
 // [OwnerPredicate, SourceStateHash, TransactionHash, Witness].
 func CertDataHash(ownerPredicate Predicate, sourceStateHash, transactionHash, signature []byte) (*DataHash, error) {
-	predicateBytes, err := types.Cbor.Marshal(ownerPredicate)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal owner predicate: %w", err)
+	if len(sourceStateHash) != StateTreeKeyLengthBytes {
+		return nil, fmt.Errorf("invalid source state hash length: expected %d bytes, got %d", StateTreeKeyLengthBytes, len(sourceStateHash))
+	}
+	if len(transactionHash) != StateTreeKeyLengthBytes {
+		return nil, fmt.Errorf("invalid transaction hash length: expected %d bytes, got %d", StateTreeKeyLengthBytes, len(transactionHash))
 	}
 
-	return NewDataHasher(SHA256).AddData(
-		CborArray(4)).
-		AddData(predicateBytes).
-		AddCborBytes(sourceStateHash).
-		AddCborBytes(transactionHash).
-		AddCborBytes(signature).
-		GetHash(), nil
+	// We use an explicit struct to ensure canonical Core Deterministic CBOR
+	// encoding of the array and its elements. This also ensures no extra data
+	// is included in the hash computation.
+	type certDataInput struct {
+		_               struct{} `cbor:",toarray"`
+		OwnerPredicate  Predicate
+		SourceStateHash []byte
+		TransactionHash []byte
+		Witness         []byte
+	}
+
+	input := certDataInput{
+		OwnerPredicate:  ownerPredicate,
+		SourceStateHash: sourceStateHash,
+		TransactionHash: transactionHash,
+		Witness:         signature,
+	}
+
+	inputBytes, err := types.Cbor.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal certification data inputs: %w", err)
+	}
+
+	return NewDataHasher(SHA256).AddData(inputBytes).GetHash(), nil
 }
