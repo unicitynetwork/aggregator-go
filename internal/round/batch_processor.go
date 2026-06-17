@@ -318,6 +318,14 @@ func (rm *RoundManager) pollForParentProof(ctx context.Context, rootHash string)
 // ErrParentProofPollTimeout marks a single poll window timeout while waiting for a parent proof.
 var ErrParentProofPollTimeout = errors.New("parent shard inclusion proof poll timeout")
 
+const (
+	finalizeRejectNoActiveRound     = "no_active_round"
+	finalizeRejectRoundMismatch     = "round_mismatch"
+	finalizeRejectSnapshotMissing   = "snapshot_missing"
+	finalizeRejectSnapshotRoot      = "root_mismatch"
+	finalizeRejectDuplicateMismatch = "duplicate_mismatch"
+)
+
 func (rm *RoundManager) submitShardRootWithRetry(ctx context.Context, req *api.SubmitShardRootRequest) error {
 	if rm.rootClient == nil {
 		return fmt.Errorf("root client not configured")
@@ -358,9 +366,19 @@ const (
 // FinalizeBlockWithRetry retries finalization and uses recovery if block was partially stored.
 func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *models.Block) error {
 	for attempt := 1; attempt <= maxFinalizeRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		err := rm.FinalizeBlock(ctx, block)
 		if err == nil {
 			return nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 
 		rm.logger.Error("FinalizeBlock failed",
@@ -385,7 +403,18 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 
 		if attempt < maxFinalizeRetries {
 			rm.logger.Info("Retrying FinalizeBlock", "attempt", attempt)
-			time.Sleep(finalizeRetryDelay)
+			timer := time.NewTimer(finalizeRetryDelay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return ctx.Err()
+			}
 		}
 	}
 	return fmt.Errorf("FinalizeBlock failed after %d attempts", maxFinalizeRetries)
@@ -393,6 +422,12 @@ func (rm *RoundManager) FinalizeBlockWithRetry(ctx context.Context, block *model
 
 // FinalizeBlock creates and persists a new block with the given data
 func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) error {
+	if block == nil {
+		return fmt.Errorf("cannot finalize nil block")
+	}
+	if block.Index == nil || block.Index.Int == nil {
+		return fmt.Errorf("cannot finalize block: missing block index")
+	}
 	rm.logger.WithContext(ctx).Info("FinalizeBlock called",
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String(),
@@ -406,20 +441,50 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	commitmentCount := 0
 
 	rm.roundMutex.Lock()
-	if rm.currentRound != nil && rm.currentRound.Number.String() == block.Index.String() {
-		proposalTime = rm.currentRound.ProposalTime
-		processingTime = rm.currentRound.ProcessingTime
+	round := rm.currentRound
+	if round == nil {
+		rm.roundMutex.Unlock()
+		rm.logFinalizationRejected(ctx, finalizeRejectNoActiveRound, "Rejected block finalization: no active round",
+			"blockNumber", block.Index.String(),
+			"rootHash", block.RootHash.String())
+		return fmt.Errorf("cannot finalize block %s: no active round", block.Index.String())
 	}
-	rm.roundMutex.Unlock()
+	if round.Number == nil || round.Number.Cmp(block.Index.Int) != 0 {
+		current := "<nil>"
+		if round.Number != nil {
+			current = round.Number.String()
+		}
+		rm.roundMutex.Unlock()
+		rm.logFinalizationRejected(ctx, finalizeRejectRoundMismatch, "Rejected block finalization: active round mismatch",
+			"blockNumber", block.Index.String(),
+			"activeRound", current,
+			"rootHash", block.RootHash.String())
+		return fmt.Errorf("cannot finalize block %s: active round is %s", block.Index.String(), current)
+	}
 
-	rm.roundMutex.Lock()
 	var pendingLeaves []*smt.Leaf
 	var pendingCommitments []*models.CertificationRequest
 	var snapshot *smt.ThreadSafeSmtSnapshot
-	if rm.currentRound != nil {
-		pendingLeaves = rm.currentRound.PendingLeaves
-		pendingCommitments = rm.currentRound.PendingCommitments
-		snapshot = rm.currentRound.Snapshot
+	proposalTime = round.ProposalTime
+	processingTime = round.ProcessingTime
+	pendingLeaves = append(pendingLeaves, round.PendingLeaves...)
+	pendingCommitments = append(pendingCommitments, round.PendingCommitments...)
+	snapshot = round.Snapshot
+	if snapshot == nil {
+		rm.roundMutex.Unlock()
+		rm.logFinalizationRejected(ctx, finalizeRejectSnapshotMissing, "Rejected block finalization: active round has no SMT snapshot",
+			"blockNumber", block.Index.String(),
+			"rootHash", block.RootHash.String())
+		return fmt.Errorf("cannot finalize block %s: active round has no SMT snapshot", block.Index.String())
+	}
+	if snapshotRoot := snapshot.GetRootHash(); snapshotRoot != block.RootHash.String() {
+		rm.roundMutex.Unlock()
+		rm.logFinalizationRejected(ctx, finalizeRejectSnapshotRoot, "Rejected block finalization: snapshot root mismatch",
+			"blockNumber", block.Index.String(),
+			"snapshotRoot", snapshotRoot,
+			"blockRoot", block.RootHash.String())
+		return fmt.Errorf("cannot finalize block %s: snapshot root %s does not match block root %s",
+			block.Index.String(), snapshotRoot, block.RootHash.String())
 	}
 	rm.roundMutex.Unlock()
 
@@ -451,7 +516,14 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		if !errors.Is(err, interfaces.ErrDuplicateKey) {
 			return fmt.Errorf("failed to store block and records: %w", err)
 		}
-		rm.logger.WithContext(ctx).Info("Block already exists, continuing with remaining steps",
+		if err := rm.validateDuplicateBlock(ctx, block, requestIds); err != nil {
+			rm.logFinalizationRejected(ctx, finalizeRejectDuplicateMismatch, "Rejected duplicate block finalization",
+				"blockNumber", block.Index.String(),
+				"rootHash", block.RootHash.String(),
+				"error", err.Error())
+			return err
+		}
+		rm.logger.WithContext(ctx).Info("Block already exists with matching root and records, continuing with remaining steps",
 			"blockNumber", block.Index.String())
 	}
 
@@ -484,7 +556,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	}
 
 	rm.roundMutex.Lock()
-	if rm.currentRound != nil {
+	if rm.currentRound == round {
 		rm.currentRound.Block = block
 		rm.currentRound.PendingRootHash = ""
 		rm.currentRound.PendingLeaves = nil
@@ -590,6 +662,11 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	return nil
 }
 
+func (rm *RoundManager) logFinalizationRejected(ctx context.Context, reason, message string, fields ...interface{}) {
+	logFields := append([]interface{}{"reason", reason}, fields...)
+	rm.logger.WithContext(ctx).Warn(message, logFields...)
+}
+
 // convertLeavesToNodes converts SMT leaves to storage models
 func (rm *RoundManager) convertLeavesToNodes(leaves []*smt.Leaf) []*models.SmtNode {
 	if len(leaves) == 0 {
@@ -633,6 +710,67 @@ func (rm *RoundManager) storeBlockAndRecords(ctx context.Context, block *models.
 		}
 		return nil
 	})
+}
+
+func (rm *RoundManager) validateDuplicateBlock(ctx context.Context, block *models.Block, requestIds []api.StateID) error {
+	existingBlock, err := rm.getExistingBlockAnyFinalization(ctx, block.Index)
+	if err != nil {
+		return fmt.Errorf("failed to load existing block %s after duplicate insert: %w", block.Index.String(), err)
+	}
+	if existingBlock == nil {
+		return fmt.Errorf("duplicate block %s reported but existing block was not found", block.Index.String())
+	}
+	if existingBlock.RootHash.String() != block.RootHash.String() {
+		return fmt.Errorf("duplicate block %s has root %s, attempted root %s",
+			block.Index.String(), existingBlock.RootHash.String(), block.RootHash.String())
+	}
+
+	existingRecords, err := rm.storage.BlockRecordsStorage().GetByBlockNumber(ctx, block.Index)
+	if err != nil {
+		return fmt.Errorf("failed to load existing block records for block %s: %w", block.Index.String(), err)
+	}
+	if existingRecords == nil {
+		return fmt.Errorf("duplicate block %s exists without block records", block.Index.String())
+	}
+	if !sameStateIDs(existingRecords.StateIDs, requestIds) {
+		return fmt.Errorf("duplicate block %s has different request IDs: existing=%d attempted=%d",
+			block.Index.String(), len(existingRecords.StateIDs), len(requestIds))
+	}
+
+	return nil
+}
+
+func (rm *RoundManager) getExistingBlockAnyFinalization(ctx context.Context, blockNumber *api.BigInt) (*models.Block, error) {
+	if blockNumber == nil || blockNumber.Int == nil {
+		return nil, fmt.Errorf("missing block number")
+	}
+	existingBlock, err := rm.storage.BlockStorage().GetByNumber(ctx, blockNumber)
+	if err != nil || existingBlock != nil {
+		return existingBlock, err
+	}
+
+	unfinalizedBlocks, err := rm.storage.BlockStorage().GetUnfinalized(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range unfinalizedBlocks {
+		if candidate.Index != nil && candidate.Index.Int != nil && candidate.Index.Cmp(blockNumber.Int) == 0 {
+			return candidate, nil
+		}
+	}
+	return nil, nil
+}
+
+func sameStateIDs(a, b []api.StateID) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].String() != b[i].String() {
+			return false
+		}
+	}
+	return true
 }
 
 // storeDataParallel stores SMT nodes and aggregator records in parallel.
