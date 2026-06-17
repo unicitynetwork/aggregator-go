@@ -471,6 +471,22 @@ func (s *blockSyncerTestBlockStorage) GetRange(_ context.Context, fromBlock, toB
 	return out, nil
 }
 
+func (s *blockSyncerTestBlockStorage) GetNextFinalizedAfter(_ context.Context, afterBlock, toBlock *api.BigInt) (*models.Block, error) {
+	var next *models.Block
+	for _, block := range s.byNumber {
+		if !block.Finalized {
+			continue
+		}
+		if block.Index.Cmp(afterBlock.Int) <= 0 || block.Index.Cmp(toBlock.Int) > 0 {
+			continue
+		}
+		if next == nil || block.Index.Cmp(next.Index.Int) < 0 {
+			next = block
+		}
+	}
+	return next, nil
+}
+
 func (s *blockSyncerTestBlockStorage) SetFinalized(_ context.Context, blockNumber *api.BigInt, finalized bool) error {
 	if block := s.byNumber[blockNumber.String()]; block != nil {
 		block.Finalized = finalized

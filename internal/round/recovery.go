@@ -161,6 +161,10 @@ type aggregatorRecordProposalAnyFinalizationStorage interface {
 	GetByBlockNumberAndProposalIDAnyFinalization(ctx context.Context, blockNumber *api.BigInt, proposalID string) ([]*models.AggregatorRecord, error)
 }
 
+type aggregatorRecordProposalDeleter interface {
+	DeleteByBlockNumberAndProposalID(ctx context.Context, blockNumber *api.BigInt, proposalID string) error
+}
+
 type aggregatorRecordSerialBatchStorage interface {
 	StoreBatchSerial(ctx context.Context, records []*models.AggregatorRecord) error
 }
@@ -177,9 +181,7 @@ type blockStatusUpdater interface {
 	SetStatus(ctx context.Context, blockNumber *api.BigInt, status string) error
 }
 
-// AbandonDurableProposal removes an uncertified proposed block from the retry
-// path. Proposed aggregator records are proposalId-scoped and left for lazy
-// cleanup so abandonment stays a one-document status transition.
+// AbandonDurableProposal removes an uncertified proposed block from the retry path.
 func (rm *RoundManager) AbandonDurableProposal(ctx context.Context, blockNumber *api.BigInt, rootHash api.HexBytes) error {
 	block, err := getBlockAnyFinalization(ctx, rm.storage, blockNumber)
 	if err != nil {
@@ -196,6 +198,11 @@ func (rm *RoundManager) AbandonDurableProposal(ctx context.Context, blockNumber 
 	return rm.storage.WithTransaction(ctx, func(txCtx context.Context) error {
 		if updater, ok := rm.storage.BlockStorage().(blockStatusUpdater); ok {
 			if err := updater.SetStatus(txCtx, block.Index, models.FinalityStatusAbandoned); err != nil {
+				return err
+			}
+		}
+		if deleter, ok := rm.storage.AggregatorRecordStorage().(aggregatorRecordProposalDeleter); ok {
+			if err := deleter.DeleteByBlockNumberAndProposalID(txCtx, block.Index, block.ProposalID); err != nil {
 				return err
 			}
 		}

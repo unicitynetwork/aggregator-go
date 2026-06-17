@@ -244,6 +244,22 @@ func (ars *AggregatorRecordStorage) GetByBlockNumberAndProposalIDAnyFinalization
 	return ars.findByBlockFilter(ctx, filter, false)
 }
 
+// DeleteByBlockNumberAndProposalID deletes records for one durable proposal.
+func (ars *AggregatorRecordStorage) DeleteByBlockNumberAndProposalID(
+	ctx context.Context,
+	blockNumber *api.BigInt,
+	proposalID string,
+) error {
+	filter := bson.M{
+		"blockNumber": bigIntToDecimal128(blockNumber),
+		"proposalId":  proposalID,
+	}
+	if _, err := ars.collection.DeleteMany(ctx, filter); err != nil {
+		return fmt.Errorf("failed to delete aggregator records by block and proposal: %w", err)
+	}
+	return nil
+}
+
 func (ars *AggregatorRecordStorage) getByBlockNumber(ctx context.Context, blockNumber *api.BigInt, finalizedOnly bool) ([]*models.AggregatorRecord, error) {
 	filter := bson.M{"blockNumber": bigIntToDecimal128(blockNumber)}
 	if finalizedOnly {

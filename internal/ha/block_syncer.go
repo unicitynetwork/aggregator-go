@@ -249,15 +249,11 @@ func (bs *BlockSyncer) usesDiskSMTBackend() bool {
 }
 
 func (bs *BlockSyncer) nextFinalizedBlock(ctx context.Context, currBlock, endBlock *big.Int) (*models.Block, error) {
-	from := new(big.Int).Add(currBlock, big.NewInt(1))
-	blocks, err := bs.storage.BlockStorage().GetRange(ctx, api.NewBigInt(from), api.NewBigInt(new(big.Int).Set(endBlock)))
+	block, err := bs.storage.BlockStorage().GetNextFinalizedAfter(ctx, api.NewBigInt(new(big.Int).Set(currBlock)), api.NewBigInt(new(big.Int).Set(endBlock)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch finalized blocks after %s: %w", currBlock.String(), err)
 	}
-	if len(blocks) == 0 {
-		return nil, nil
-	}
-	return blocks[0], nil
+	return block, nil
 }
 
 func (bs *BlockSyncer) verifySMTForBlock(smtRootHash api.HexBytes, block *models.Block) error {

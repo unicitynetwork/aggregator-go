@@ -23,6 +23,13 @@ func setupTestDB(t *testing.T) *mongo.Database {
 	if err != nil {
 		t.Skipf("Skipping MongoDB tests - cannot start MongoDB container: %v", err)
 	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+		defer cancel()
+		if err := mongoContainer.Terminate(ctx); err != nil {
+			t.Logf("Failed to terminate MongoDB container: %v", err)
+		}
+	})
 
 	mongoURI, err := mongoContainer.ConnectionString(ctx)
 	if err != nil {
@@ -36,6 +43,13 @@ func setupTestDB(t *testing.T) *mongo.Database {
 	if err != nil {
 		t.Fatalf("Failed to connect to MongoDB: %v", err)
 	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+		defer cancel()
+		if err := client.Disconnect(ctx); err != nil {
+			t.Logf("Failed to disconnect MongoDB client: %v", err)
+		}
+	})
 
 	if err := client.Ping(connectCtx, nil); err != nil {
 		t.Fatalf("Failed to ping MongoDB: %v", err)
@@ -48,12 +62,6 @@ func setupTestDB(t *testing.T) *mongo.Database {
 
 		if err := db.Drop(ctx); err != nil {
 			t.Logf("Failed to drop test database: %v", err)
-		}
-		if err := client.Disconnect(ctx); err != nil {
-			t.Logf("Failed to disconnect MongoDB client: %v", err)
-		}
-		if err := mongoContainer.Terminate(ctx); err != nil {
-			t.Logf("Failed to terminate MongoDB container: %v", err)
 		}
 	})
 

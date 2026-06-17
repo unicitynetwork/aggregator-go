@@ -395,10 +395,11 @@ func (s *RecoveryTestSuite) Test04c_FinalizeCertifiedProposalFromDurableRecordsW
 func (s *RecoveryTestSuite) Test04d_AbandonDurableProposalFreesStateIDsForRestage() {
 	t := s.T()
 
-	commitments, block, stateIDs := s.createTestData(42, 2, "t04d")
+	commitments, block, _ := s.createTestData(42, 2, "t04d")
 	block.Status = models.FinalityStatusProposed
 	block.Finalized = false
 	block.ProposalID = "proposal-42a"
+	neighborCommitments, _, _ := s.createTestData(42, 1, "t04d_neighbor")
 
 	records := make([]*models.AggregatorRecord, len(commitments))
 	for i, c := range commitments {
@@ -406,12 +407,17 @@ func (s *RecoveryTestSuite) Test04d_AbandonDurableProposalFreesStateIDsForRestag
 		record.ProposalID = block.ProposalID
 		records[i] = record
 	}
+	neighborRecord := models.NewAggregatorRecord(neighborCommitments[0], block.Index, api.NewBigInt(big.NewInt(99)))
+	neighborRecord.ProposalID = "proposal-42b"
 
 	require.NoError(t, s.storage.WithTransaction(s.ctx, func(txCtx context.Context) error {
 		if err := s.storage.BlockStorage().Store(txCtx, block); err != nil {
 			return err
 		}
-		return s.storage.AggregatorRecordStorage().StoreBatch(txCtx, records)
+		if err := s.storage.AggregatorRecordStorage().StoreBatch(txCtx, records); err != nil {
+			return err
+		}
+		return s.storage.AggregatorRecordStorage().Store(txCtx, neighborRecord)
 	}))
 
 	rm := &RoundManager{storage: s.storage}
@@ -428,7 +434,8 @@ func (s *RecoveryTestSuite) Test04d_AbandonDurableProposalFreesStateIDsForRestag
 
 	oldRecords, err := getAggregatorRecordsByBlockAnyFinalization(s.ctx, s.storage, block.Index)
 	require.NoError(t, err)
-	require.Len(t, oldRecords, len(stateIDs))
+	require.Len(t, oldRecords, 1)
+	require.Equal(t, neighborRecord.ProposalID, oldRecords[0].ProposalID)
 
 	restaged := models.NewAggregatorRecord(commitments[0], api.NewBigInt(big.NewInt(43)), api.NewBigInt(big.NewInt(0)))
 	restaged.ProposalID = "proposal-43"

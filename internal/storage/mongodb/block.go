@@ -214,6 +214,36 @@ func (bs *BlockStorage) GetRange(ctx context.Context, fromBlock, toBlock *api.Bi
 	return blocks, nil
 }
 
+// GetNextFinalizedAfter retrieves the first finalized block after afterBlock, up to toBlock.
+func (bs *BlockStorage) GetNextFinalizedAfter(ctx context.Context, afterBlock, toBlock *api.BigInt) (*models.Block, error) {
+	afterDecimal := bigIntToDecimal128(afterBlock)
+	toDecimal := bigIntToDecimal128(toBlock)
+
+	filter := bson.M{
+		"index": bson.M{
+			"$gt":  afterDecimal,
+			"$lte": toDecimal,
+		},
+		"finalized": true,
+	}
+	opts := options.FindOne().SetSort(bson.M{"index": 1})
+
+	var blockBSON models.BlockBSON
+	err := bs.collection.FindOne(ctx, filter, opts).Decode(&blockBSON)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to find next finalized block after %s: %w", afterBlock.String(), err)
+	}
+
+	block, err := blockBSON.FromBSON()
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+	}
+	return block, nil
+}
+
 // CreateIndexes creates necessary indexes for the block collection
 func (bs *BlockStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{

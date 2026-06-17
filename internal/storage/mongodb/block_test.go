@@ -664,3 +664,36 @@ func TestBlockStorage_GetRange(t *testing.T) {
 		assert.Equal(t, 0, largeIndexBigInt.Cmp(blocks[0].Index.Int), "Large index should match")
 	})
 }
+
+func TestBlockStorage_GetNextFinalizedAfter(t *testing.T) {
+	db, cleanup := setupBlockTestDB(t)
+	defer cleanup()
+
+	storage := NewBlockStorage(db)
+	ctx := context.Background()
+
+	err := storage.CreateIndexes(ctx)
+	require.NoError(t, err)
+
+	blocks := createTestBlocksRange(1, 5)
+	blocks[1].Finalized = false
+	blocks[1].Status = models.FinalityStatusFinalizing
+	for _, block := range blocks {
+		err := storage.Store(ctx, block)
+		require.NoError(t, err)
+	}
+
+	next, err := storage.GetNextFinalizedAfter(ctx, api.NewBigInt(big.NewInt(1)), api.NewBigInt(big.NewInt(5)))
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	require.Equal(t, int64(3), next.Index.Int64())
+
+	next, err = storage.GetNextFinalizedAfter(ctx, api.NewBigInt(big.NewInt(3)), api.NewBigInt(big.NewInt(4)))
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	require.Equal(t, int64(4), next.Index.Int64())
+
+	next, err = storage.GetNextFinalizedAfter(ctx, api.NewBigInt(big.NewInt(4)), api.NewBigInt(big.NewInt(4)))
+	require.NoError(t, err)
+	require.Nil(t, next)
+}

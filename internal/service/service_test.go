@@ -1181,6 +1181,9 @@ func (s *testBlockStorage) Count(context.Context) (int64, error)                
 func (s *testBlockStorage) GetRange(context.Context, *api.BigInt, *api.BigInt) ([]*models.Block, error) {
 	return nil, nil
 }
+func (s *testBlockStorage) GetNextFinalizedAfter(context.Context, *api.BigInt, *api.BigInt) (*models.Block, error) {
+	return nil, nil
+}
 func (s *testBlockStorage) SetFinalized(context.Context, *api.BigInt, bool) error { return nil }
 func (s *testBlockStorage) GetUnfinalized(context.Context) ([]*models.Block, error) {
 	return nil, nil

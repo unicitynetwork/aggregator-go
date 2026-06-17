@@ -619,6 +619,18 @@ func (s *diskStartupBlockStorage) GetRange(_ context.Context, fromBlock, toBlock
 	}
 	return blocks, nil
 }
+func (s *diskStartupBlockStorage) GetNextFinalizedAfter(_ context.Context, afterBlock, toBlock *api.BigInt) (*models.Block, error) {
+	var next *models.Block
+	for _, block := range s.blocks {
+		if !block.Finalized || block.Index.Cmp(afterBlock.Int) <= 0 || block.Index.Cmp(toBlock.Int) > 0 {
+			continue
+		}
+		if next == nil || block.Index.Cmp(next.Index.Int) < 0 {
+			next = block
+		}
+	}
+	return next, nil
+}
 func (s *diskStartupBlockStorage) SetFinalized(_ context.Context, blockNumber *api.BigInt, finalized bool) error {
 	block := s.blocks[blockNumber.String()]
 	if block == nil {

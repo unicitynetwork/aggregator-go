@@ -105,6 +105,9 @@ type BlockStorage interface {
 	// GetRange retrieves blocks in a range
 	GetRange(ctx context.Context, fromBlock, toBlock *api.BigInt) ([]*models.Block, error)
 
+	// GetNextFinalizedAfter retrieves the first finalized block after afterBlock, up to toBlock.
+	GetNextFinalizedAfter(ctx context.Context, afterBlock, toBlock *api.BigInt) (*models.Block, error)
+
 	// SetFinalized marks a block as finalized or unfinalized
 	SetFinalized(ctx context.Context, blockNumber *api.BigInt, finalized bool) error
 
