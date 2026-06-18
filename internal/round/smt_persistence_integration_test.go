@@ -230,6 +230,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 		api.HexBytes{},
 		nil,
 	)
+	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 
 	err = rm.FinalizeBlock(ctx, block)
 	require.NoError(t, err, "FinalizeBlock should succeed")

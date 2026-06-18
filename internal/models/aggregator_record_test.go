@@ -28,7 +28,6 @@ func TestAggregatorRecordSerialization(t *testing.T) {
 		BlockNumber:           originalBlockNumber,
 		LeafIndex:             originalLeafIndex,
 		CreatedAt:             api.Now(),
-		FinalizedAt:           api.Now(),
 	}
 
 	// Convert to BSON

@@ -760,7 +760,9 @@ const (
 	columnFamilyMeta
 )
 
-var proofResponseKeyPrefix = []byte("proof:")
+var (
+	proofResponseKeyPrefix = []byte("proof:")
+)
 
 func (s *Store) columnFamily(cf columnFamilyID) *C.rocksdb_column_family_handle_t {
 	switch cf {
@@ -1035,13 +1037,17 @@ func nodeKey(key disk.NodeKey) []byte {
 }
 
 func proofResponseKey(stateID api.StateID) ([]byte, error) {
+	return prefixedStateKey(proofResponseKeyPrefix, stateID)
+}
+
+func prefixedStateKey(prefix []byte, stateID api.StateID) ([]byte, error) {
 	key, err := stateID.GetTreeKey()
 	if err != nil {
 		return nil, err
 	}
-	out := make([]byte, len(proofResponseKeyPrefix)+len(key))
-	copy(out, proofResponseKeyPrefix)
-	copy(out[len(proofResponseKeyPrefix):], key)
+	out := make([]byte, len(prefix)+len(key))
+	copy(out, prefix)
+	copy(out[len(prefix):], key)
 	return out, nil
 }
 

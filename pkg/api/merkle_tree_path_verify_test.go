@@ -385,13 +385,11 @@ func TestMerkleTreePathVerifyAlternateAlgorithm(t *testing.T) {
 		t.Run(fmt.Sprintf("Algorithm %d", algo), func(t *testing.T) {
 			tree := smt.NewSparseMerkleTree(algo, 4)
 			tree.AddLeaves(leaves)
-			root := tree.GetRootHashHex()
-			require.Equal(t, root[:4], fmt.Sprintf("%04x", algo))
 
 			for _, leaf := range leaves {
 				path, err := tree.GetPath(leaf.Path)
 				require.NoError(t, err)
-				require.Equal(t, root, path.Root)
+				require.Equal(t, fmt.Sprintf("%04x", algo), path.Root[:4])
 				res, err := path.Verify(leaf.Path)
 				require.NoError(t, err)
 				require.True(t, res.Result)

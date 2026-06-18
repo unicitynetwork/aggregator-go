@@ -91,7 +91,7 @@ func TestGetInclusionCert_GoldenVector(t *testing.T) {
 	addLeaf(t, tree, k2, v2)
 	addLeaf(t, tree, k3, v3)
 
-	const expectedRoot = "0000b08cae8f98a168a4b39dced99fc3ea2833291c8c53a0eb447e0056044dee598a"
+	const expectedRoot = "b08cae8f98a168a4b39dced99fc3ea2833291c8c53a0eb447e0056044dee598a"
 	require.Equal(t, expectedRoot, tree.GetRootHashHex())
 
 	cert, err := tree.GetInclusionCert(k2)
@@ -307,8 +307,8 @@ func TestGetShardInclusionFragment_SkipsNilSiblingAfterNonNilSibling(t *testing.
 	require.NoError(t, fragment.Verify(0b100, 2, leaf4, root, api.SHA256))
 }
 
-// TestGetRootHashRaw_MatchesHex confirms that GetRootHashRaw produces
-// the 32-byte hash portion of GetRootHashHex.
+// TestGetRootHashRaw_MatchesHex confirms that GetRootHashHex is the raw root
+// hex encoding, with no algorithm/imprint prefix.
 func TestGetRootHashRaw_MatchesHex(t *testing.T) {
 	tree := NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
 	addLeaf(t, tree,
@@ -322,7 +322,7 @@ func TestGetRootHashRaw_MatchesHex(t *testing.T) {
 	require.Len(t, rawHex, 64, "raw root must be 32 bytes hex-encoded")
 
 	fullHex := tree.GetRootHashHex()
-	require.Equal(t, "0000"+rawHex, fullHex, "raw root must match the hash portion of the hex root")
+	require.Equal(t, rawHex, fullHex, "hex root must be the raw 32-byte root")
 }
 
 // addLeaf is a small helper that converts a 32-byte key to its path form

@@ -30,6 +30,7 @@ func validTestConfig() *Config {
 		Processing: ProcessingConfig{
 			CommitmentStreamBufferSize: 10000,
 			CollectPhaseDuration:       200 * time.Millisecond,
+			CollectMiniBatchSize:       500,
 		},
 		BFT: BFTConfig{
 			Enabled: false,
@@ -152,6 +153,19 @@ func TestConfigValidate_CollectPhaseDuration(t *testing.T) {
 	}
 }
 
+func TestConfigValidate_CollectMiniBatchSize(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Processing.CollectMiniBatchSize = 0
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "COLLECT_MINI_BATCH_SIZE") {
+		t.Fatalf("Validate() error = %q, want mini batch env name", err.Error())
+	}
+}
+
 func TestConfigValidateTraceLogLevel(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Logging.Level = "trace"
@@ -270,6 +284,28 @@ func TestMongoWriteConcernEnvDefaults(t *testing.T) {
 	}
 	if !cfg.Database.WriteJournal {
 		t.Fatal("Database.WriteJournal = false, want true")
+	}
+}
+
+func TestCollectMiniBatchSizeEnv(t *testing.T) {
+	t.Setenv("BFT_ENABLED", "false")
+	t.Setenv("DISABLE_HIGH_AVAILABILITY", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Processing.CollectMiniBatchSize != 500 {
+		t.Fatalf("CollectMiniBatchSize = %d, want default 500", cfg.Processing.CollectMiniBatchSize)
+	}
+
+	t.Setenv("COLLECT_MINI_BATCH_SIZE", "750")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Processing.CollectMiniBatchSize != 750 {
+		t.Fatalf("CollectMiniBatchSize = %d, want env override 750", cfg.Processing.CollectMiniBatchSize)
 	}
 }
 

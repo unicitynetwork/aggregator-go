@@ -117,6 +117,7 @@ type ProcessingConfig struct {
 	PrecollectorGracePeriod    time.Duration `mapstructure:"precollector_grace_period"`     // Extra wait before cutting a precollected round snapshot
 	MaxCommitmentsPerRound     int           `mapstructure:"max_commitments_per_round"`     // Stop waiting once this many commitments collected
 	CollectPhaseDuration       time.Duration `mapstructure:"collect_phase_duration"`        // Non-child fixed collection window before proposing a round
+	CollectMiniBatchSize       int           `mapstructure:"collect_mini_batch_size"`       // SMT/proposal staging mini-batch size during collection
 	CommitmentStreamBufferSize int           `mapstructure:"commitment_stream_buffer_size"` // Buffer between queue streamer and round collection
 	SkipDuplicateCheck         bool          `mapstructure:"skip_duplicate_check"`          // Skip finalized record lookup on submit
 }
@@ -384,6 +385,7 @@ func Load() (*Config, error) {
 			PrecollectorGracePeriod:    getEnvDurationOrDefault("PRECOLLECTOR_GRACE_PERIOD", "0s"),
 			MaxCommitmentsPerRound:     getEnvIntOrDefault("MAX_COMMITMENTS_PER_ROUND", 20000),
 			CollectPhaseDuration:       getEnvDurationOrDefault("COLLECT_PHASE_DURATION", "200ms"),
+			CollectMiniBatchSize:       getEnvIntOrDefault("COLLECT_MINI_BATCH_SIZE", 500),
 			CommitmentStreamBufferSize: getEnvIntOrDefault("COMMITMENT_STREAM_BUFFER_SIZE", 50000),
 			SkipDuplicateCheck:         getEnvBoolOrDefault("SKIP_DUPLICATE_CHECK", true),
 		},
@@ -421,7 +423,7 @@ func Load() (*Config, error) {
 			RocksDBSubcompactions:     getEnvIntOrDefault("SMT_ROCKSDB_SUBCOMPACTIONS", 4),
 			RocksDBBloomBits:          getEnvFloatOrDefault("SMT_ROCKSDB_BLOOM_BITS", 10),
 			RocksDBMemTableMB:         getEnvIntOrDefault("SMT_ROCKSDB_MEMTABLE_MB", 64),
-			MaterializeWorkers:        getEnvIntOrDefault("SMT_MATERIALIZE_WORKERS", 64),
+			MaterializeWorkers:        getEnvIntOrDefault("SMT_MATERIALIZE_WORKERS", 16),
 			StartupReplayLimitBlocks:  getEnvIntOrDefault("SMT_STARTUP_REPLAY_LIMIT_BLOCKS", 100),
 			PrecomputeProofs:          getEnvBoolOrDefault("SMT_PRECOMPUTE_PROOFS", false),
 			ProofMetadataCacheEntries: getEnvIntOrDefault("SMT_PROOF_METADATA_CACHE_ENTRIES", 250000),
@@ -518,6 +520,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Processing.CollectPhaseDuration <= 0 {
 		return fmt.Errorf("COLLECT_PHASE_DURATION must be positive")
+	}
+	if c.Processing.CollectMiniBatchSize <= 0 {
+		return fmt.Errorf("COLLECT_MINI_BATCH_SIZE must be positive")
 	}
 	if c.Processing.PrecollectorGracePeriod < 0 {
 		return fmt.Errorf("PRECOLLECTOR_GRACE_PERIOD must be non-negative")

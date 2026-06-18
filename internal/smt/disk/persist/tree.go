@@ -25,6 +25,7 @@ type Tree struct {
 	materializeMode    string
 	frontierReadMode   string
 	materializeWorkers int
+	trackApplyStats    bool
 	nodeCacheDepth     int
 	nodeCache          map[disk.NodeKey]cachedNode
 	nodeCacheBytes     int64
@@ -62,6 +63,9 @@ type Options struct {
 	// MaterializeWorkers bounds concurrent branch materialization in
 	// MaterializeParallel mode. Zero uses GOMAXPROCS.
 	MaterializeWorkers int
+	// DisableApplyStats skips detailed per-node materialization counters. Keep
+	// false unless a performance run only needs commit timings.
+	DisableApplyStats bool
 }
 
 type NodeCacheStats struct {
@@ -147,6 +151,7 @@ func OpenWithOptions(store storage.Store, opts Options) (*Tree, error) {
 		materializeMode:    opts.MaterializeMode,
 		frontierReadMode:   opts.FrontierReadMode,
 		materializeWorkers: opts.MaterializeWorkers,
+		trackApplyStats:    !opts.DisableApplyStats,
 		nodeCacheDepth:     opts.NodeCacheDepth,
 	}
 	if opts.NodeCacheDepth >= 0 {
@@ -592,23 +597,28 @@ func (s *Snapshot) LastCommitStats() CommitStats {
 	return s.commitStats
 }
 
-// Fork creates a child snapshot over this snapshot's overlay. The caller must
-// preserve the precollector invariant: at most one uncommitted parent snapshot
-// may sit between this child and the committed backend.
+// Fork creates a child snapshot over this snapshot's overlay. If this snapshot
+// already depends on an uncommitted parent overlay, flatten the inherited
+// overlays into the child so chained precollection can continue without
+// requiring every intermediate snapshot to commit first.
 func (s *Snapshot) Fork() (*Snapshot, error) {
-	if s == nil || s.tree == nil {
+	if s == nil {
 		return nil, fmt.Errorf("disk SMT persist: nil snapshot")
 	}
 	if s.closed {
 		return nil, fmt.Errorf("disk SMT persist: snapshot is closed")
 	}
-	if s.parentOverlay != nil && s.parent.RootHash() != s.baseRoot {
-		return nil, fmt.Errorf("disk SMT persist: cannot fork snapshot with uncommitted grandparent overlay")
+	if s.tree == nil {
+		return nil, fmt.Errorf("disk SMT persist: nil snapshot")
 	}
 	if s.rootHash != s.baseRoot && len(s.ownOverlay) == 0 {
 		if err := s.rebuildOverlay(); err != nil {
 			return nil, err
 		}
+	}
+	parentOverlay := cloneOverlay(s.ownOverlay)
+	if s.parentOverlay != nil && s.parent.RootHash() != s.baseRoot {
+		parentOverlay = mergeOverlays(s.parentOverlay, s.ownOverlay)
 	}
 	return &Snapshot{
 		parent:        s.parent,
@@ -616,17 +626,20 @@ func (s *Snapshot) Fork() (*Snapshot, error) {
 		baseRoot:      s.rootHash,
 		rootHash:      s.rootHash,
 		ownOverlay:    make(nodeOverlay),
-		parentOverlay: cloneOverlay(s.ownOverlay),
+		parentOverlay: parentOverlay,
 		loadedKeys:    make(map[disk.NodeKey]struct{}),
 	}, nil
 }
 
 func (s *Snapshot) SetCommitTarget(target *Tree) error {
-	if s == nil || s.tree == nil {
+	if s == nil {
 		return fmt.Errorf("disk SMT persist: nil snapshot")
 	}
 	if s.closed {
 		return fmt.Errorf("disk SMT persist: snapshot is closed")
+	}
+	if s.tree == nil {
+		return fmt.Errorf("disk SMT persist: nil snapshot")
 	}
 	if target == nil {
 		return fmt.Errorf("disk SMT persist: nil commit target")
@@ -641,11 +654,14 @@ func (s *Snapshot) SetCommitTarget(target *Tree) error {
 }
 
 func (s *Snapshot) AddLeaves(inputs []disk.LeafInput) (disk.ApplyResult, error) {
-	if s == nil || s.tree == nil {
+	if s == nil {
 		return disk.ApplyResult{}, fmt.Errorf("disk SMT persist: nil snapshot")
 	}
 	if s.closed {
 		return disk.ApplyResult{}, fmt.Errorf("disk SMT persist: snapshot is closed")
+	}
+	if s.tree == nil {
+		return disk.ApplyResult{}, fmt.Errorf("disk SMT persist: nil snapshot")
 	}
 
 	materializedBefore := s.stats.MaterializedNodes
@@ -713,11 +729,14 @@ func (s *Snapshot) AddLeaves(inputs []disk.LeafInput) (disk.ApplyResult, error) 
 }
 
 func (s *Snapshot) Commit(blockNumber *api.BigInt) error {
-	if s == nil || s.tree == nil || s.parent == nil {
+	if s == nil {
 		return fmt.Errorf("disk SMT persist: nil snapshot")
 	}
 	if s.closed {
 		return fmt.Errorf("disk SMT persist: snapshot is closed")
+	}
+	if s.tree == nil || s.parent == nil {
+		return fmt.Errorf("disk SMT persist: nil snapshot")
 	}
 
 	var stats CommitStats
@@ -785,13 +804,26 @@ func (s *Snapshot) Commit(blockNumber *api.BigInt) error {
 	s.parent.applyNodeCacheUpdate(s.cacheDeletes, s.cacheWrites)
 	stats.CacheUpdateDuration = time.Since(cacheUpdateStart)
 	s.closed = true
+	s.releaseBuffers()
 	return nil
 }
 
 func (s *Snapshot) Discard() {
 	if s != nil {
 		s.closed = true
+		s.releaseBuffers()
 	}
+}
+
+func (s *Snapshot) releaseBuffers() {
+	s.tree = nil
+	s.ownOverlay = nil
+	s.parentOverlay = nil
+	s.overlayWrites = nil
+	s.overlayDeletes = nil
+	s.loadedKeys = nil
+	s.cacheWrites = nil
+	s.cacheDeletes = nil
 }
 
 func (s *Snapshot) rebuildOverlay() error {
@@ -809,27 +841,21 @@ func (s *Snapshot) rebuildOverlay() error {
 	collectDuration := time.Since(collectStart)
 
 	tombstoneStart := time.Now()
-	deletes := make([]disk.NodeKey, 0, len(s.loadedKeys))
-	for key := range s.loadedKeys {
-		if _, written := writeSet[key]; written {
-			continue
-		}
-		deletes = append(deletes, key)
-	}
+	// Disk SMT node storage is append-only from the tree's perspective: updated
+	// path nodes are overwritten, and obsolete path nodes are left unreachable.
+	// Keeping old nodes lets speculative child snapshots materialize safely while
+	// their parent snapshot is being committed.
 	tombstoneDuration := time.Since(tombstoneStart)
 
-	overlay := make(nodeOverlay, len(writes)+len(deletes))
-	for _, key := range deletes {
-		overlay[key] = overlayEntry{delete: true}
-	}
+	overlay := make(nodeOverlay, len(writes))
 	for _, write := range writes {
 		overlay[write.Key] = overlayEntry{value: write.Value}
 	}
 	s.ownOverlay = overlay
 	s.overlayWrites = writes
-	s.overlayDeletes = deletes
+	s.overlayDeletes = nil
 	s.cacheWrites = cacheWrites
-	s.cacheDeletes = s.parent.prepareNodeCacheDeletes(s.loadedKeys, writeSet)
+	s.cacheDeletes = nil
 	s.commitStats.CollectDuration = collectDuration
 	s.commitStats.TombstoneDuration = tombstoneDuration
 	return nil
@@ -841,6 +867,24 @@ func cloneOverlay(in nodeOverlay) nodeOverlay {
 	}
 	out := make(nodeOverlay, len(in))
 	for key, entry := range in {
+		next := overlayEntry{delete: entry.delete}
+		if entry.value != nil {
+			next.value = append([]byte(nil), entry.value...)
+		}
+		out[key] = next
+	}
+	return out
+}
+
+func mergeOverlays(base, override nodeOverlay) nodeOverlay {
+	out := cloneOverlay(base)
+	if len(override) == 0 {
+		return out
+	}
+	if out == nil {
+		out = make(nodeOverlay, len(override))
+	}
+	for key, entry := range override {
 		next := overlayEntry{delete: entry.delete}
 		if entry.value != nil {
 			next.value = append([]byte(nil), entry.value...)
@@ -888,20 +932,6 @@ func (t *Tree) newNodeCacheWrites() map[disk.NodeKey]cachedNode {
 	return make(map[disk.NodeKey]cachedNode)
 }
 
-func (t *Tree) prepareNodeCacheDeletes(loadedKeys map[disk.NodeKey]struct{}, writeSet map[disk.NodeKey]struct{}) []disk.NodeKey {
-	if t == nil || t.nodeCacheDepth < 0 {
-		return nil
-	}
-	deletes := make([]disk.NodeKey, 0)
-	for key := range loadedKeys {
-		if _, written := writeSet[key]; written || !t.shouldCacheNode(key) {
-			continue
-		}
-		deletes = append(deletes, key)
-	}
-	return deletes
-}
-
 func (t *Tree) applyNodeCacheUpdate(deletes []disk.NodeKey, updates map[disk.NodeKey]cachedNode) {
 	if t == nil || t.nodeCacheDepth < 0 {
 		return
@@ -947,11 +977,17 @@ func (s *Snapshot) materializeInputs(inputs []disk.LeafInput) error {
 		seen[key] = struct{}{}
 		keys = append(keys, key)
 	}
-	sortStart := time.Now()
+	trackStats := s.trackApplyStats()
+	var sortStart time.Time
+	if trackStats {
+		sortStart = time.Now()
+	}
 	sort.Slice(keys, func(i, j int) bool {
 		return keyPathLess(keys[i], keys[j])
 	})
-	s.stats.MaterializeSortDuration += time.Since(sortStart)
+	if trackStats {
+		s.stats.MaterializeSortDuration += time.Since(sortStart)
+	}
 	if s.parent != nil && (s.parent.materializeMode == MaterializeFrontier || s.parent.materializeMode == MaterializeParallel) {
 		if s.parent.materializeMode == MaterializeParallel {
 			return s.materializeInputsParallel(keys)
@@ -1051,9 +1087,15 @@ func (s *Snapshot) materializeBranchParallel(branch *disk.Branch, nodeKey disk.N
 		return nil, fmt.Errorf("disk SMT persist: malformed internal node")
 	}
 
-	routeStart := time.Now()
+	trackStats := s.trackApplyStats()
+	var routeStart time.Time
+	if trackStats {
+		routeStart = time.Now()
+	}
 	leftKeys, rightKeys, err := routeSortedKeysForInternal(keys, node.Path, startBit)
-	s.recordMaterializeRoute(time.Since(routeStart))
+	if trackStats {
+		s.recordMaterializeRoute(time.Since(routeStart))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1181,8 +1223,11 @@ func (s *Snapshot) loadBranchFromOverlay(key disk.NodeKey, expectedHash disk.Has
 	if lockedStats {
 		s.recordMaterialized(key, branch.Kind, int64(len(entry.value)), false, 0, 0, 0, 0, addLoaded)
 	} else {
-		if addLoaded {
+		if addLoaded && s.trackLoadedKeys() {
 			s.loadedKeys[key] = struct{}{}
+		}
+		if !s.trackApplyStats() {
+			return branch, true, nil
 		}
 		s.stats.MaterializedNodes++
 		s.stats.MaterializedBytes += int64(len(entry.value))
@@ -1215,10 +1260,18 @@ func (s *Snapshot) recordParallelMaterialized(key disk.NodeKey, kind disk.Branch
 }
 
 func (s *Snapshot) recordMaterialized(key disk.NodeKey, kind disk.BranchKind, encodedBytes int64, cacheHit bool, cacheBytes int64, readDuration, decodeDuration, hashDuration time.Duration, addLoaded bool) {
+	trackStats := s.trackApplyStats()
+	trackLoaded := addLoaded && s.trackLoadedKeys()
+	if !trackStats && !trackLoaded {
+		return
+	}
 	s.statsMu.Lock()
 	defer s.statsMu.Unlock()
-	if addLoaded {
+	if trackLoaded {
 		s.loadedKeys[key] = struct{}{}
+	}
+	if !trackStats {
+		return
 	}
 	s.stats.MaterializedNodes++
 	s.stats.MaterializedBytes += encodedBytes
@@ -1239,21 +1292,38 @@ func (s *Snapshot) recordMaterialized(key disk.NodeKey, kind disk.BranchKind, en
 }
 
 func (s *Snapshot) recordNodeReads(count int) {
+	if !s.trackApplyStats() {
+		return
+	}
 	s.statsMu.Lock()
 	defer s.statsMu.Unlock()
 	s.stats.NodeReads += count
 }
 
 func (s *Snapshot) recordMaterializeRoute(duration time.Duration) {
+	if !s.trackApplyStats() {
+		return
+	}
 	s.statsMu.Lock()
 	defer s.statsMu.Unlock()
 	s.stats.MaterializeRouteDuration += duration
 }
 
 func (s *Snapshot) recordMaterializeFork() {
+	if !s.trackApplyStats() {
+		return
+	}
 	s.statsMu.Lock()
 	defer s.statsMu.Unlock()
 	s.stats.MaterializeParallelForks++
+}
+
+func (s *Snapshot) trackApplyStats() bool {
+	return s != nil && s.parent != nil && s.parent.trackApplyStats
+}
+
+func (s *Snapshot) trackLoadedKeys() bool {
+	return s != nil && s.parent != nil && s.parent.nodeCacheDepth >= 0
 }
 
 func recordMaterializedDepth(stats *disk.ApplyStats, depth int) {

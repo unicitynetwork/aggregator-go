@@ -34,7 +34,9 @@ const (
 
 var (
 	ErrStaleCertificationRound = errors.New("stale certification round")
-	ErrCertifiedStateMismatch  = errors.New("certified state mismatch")
+	ErrCertifiedRootMismatch   = errors.New("certified root does not match proposed block root")
+	ErrInvalidUCSequence       = errors.New("invalid unicity certificate sequence")
+	ErrCertifiedStateMismatch  = errors.New("local committed state does not match latest certified root")
 )
 
 // BFTClientImpl handles communication with the BFT root chain via P2P network
@@ -54,11 +56,14 @@ type (
 		signer  cryptobft.Signer
 
 		// Latest UC this node has seen. Can be ahead of the committed UC during recovery.
-		luc           atomic.Pointer[types.UnicityCertificate]
-		roundManager  RoundManager
-		proposedBlock *models.Block
+		luc                    atomic.Pointer[types.UnicityCertificate]
+		roundManager           RoundManager
+		proposedBlock          *models.Block
+		resumedDurableProposal bool
 		// Track the next round number expected by root chain
 		nextExpectedRound atomic.Uint64
+		// Track the next epoch expected by root chain technical record
+		nextExpectedEpoch atomic.Uint64
 		// Track the root round number to detect repeat UCs
 		lastRootRound atomic.Uint64
 		// Mutex to ensure sequential UC processing
@@ -86,6 +91,19 @@ type (
 		FinalizeBlockWithRetry(ctx context.Context, block *models.Block) error
 		StartNewRound(ctx context.Context, roundNumber *api.BigInt) error
 		StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt) error
+		CommittedRoot(ctx context.Context) ([]byte, *api.BigInt, error)
+	}
+
+	DurableProposalFinalizer interface {
+		FinalizeCertifiedProposal(ctx context.Context, blockNumber *api.BigInt, rootHash api.HexBytes, unicityCertificate api.HexBytes) (bool, error)
+	}
+
+	DurableProposalLoader interface {
+		LoadDurableProposal(ctx context.Context, blockNumber *api.BigInt) (*models.Block, bool, error)
+	}
+
+	DurableProposalAbandoner interface {
+		AbandonDurableProposal(ctx context.Context, blockNumber *api.BigInt, rootHash api.HexBytes) error
 	}
 
 	TrustBaseStore interface {
@@ -329,6 +347,11 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		"rootRound", uc.GetRootRoundNumber())
 
 	prevLUC := c.luc.Load()
+	if prevLUC != nil {
+		if err := types.CheckNonEquivocatingCertificates(prevLUC, uc); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidUCSequence, err)
+		}
+	}
 	// as we can be connected to several root nodes, we can receive the same UC multiple times
 	if uc.IsDuplicate(prevLUC) {
 		c.logger.WithContext(ctx).Debug(fmt.Sprintf("duplicate UC (same root round %d)", uc.GetRootRoundNumber()))
@@ -345,21 +368,20 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 			"prevRootRound", prevLUC.GetRootRoundNumber(),
 			"newRootRound", uc.GetRootRoundNumber())
 
-		// Store the repeat UC and update root round tracking
+		if err := c.abandonProposedBlockLocked(ctx, "repeat UC"); err != nil {
+			return err
+		}
+
+		// Store the repeat UC and update root round tracking after durable
+		// cleanup succeeds, so a failed cleanup can be retried by the next UC.
 		c.luc.Store(uc)
 		c.lastRootRound.Store(uc.GetRootRoundNumber())
-
-		// Clear any proposed block as it wasn't accepted in time
-		if c.proposedBlock != nil {
-			c.logger.WithContext(ctx).Info("Clearing proposed block due to repeat UC",
-				"proposedBlockNumber", c.proposedBlock.Index.String())
-			c.proposedBlock = nil
-		}
 
 		// Start new round immediately with the next expected round
 		nextRoundNumber := big.NewInt(0)
 		nextRoundNumber.SetUint64(tr.Round)
 		c.nextExpectedRound.Store(tr.Round)
+		c.nextExpectedEpoch.Store(tr.Epoch)
 
 		c.logger.WithContext(ctx).Info("Starting new round after repeat UC",
 			"nextRoundNumber", nextRoundNumber.String())
@@ -386,6 +408,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 
 	// Store the next expected round number
 	c.nextExpectedRound.Store(tr.Round)
+	c.nextExpectedEpoch.Store(tr.Epoch)
 
 	wasInitializing := c.status.Load() == initializing
 	if wasInitializing {
@@ -393,7 +416,30 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 			"nextRoundNumber", nextRoundNumber.String())
 		// First UC received after an initial handshake with a root node -> initialization finished.
 		c.status.Store(normal)
-		err := c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+		recovered, err := c.finalizeCertifiedDurableProposalLocked(ctx, uc)
+		if err != nil {
+			return err
+		}
+		if recovered {
+			c.logger.WithContext(ctx).Info("Durable proposal finalized from initialization UC",
+				"ucRound", uc.GetRoundNumber(),
+				"nextRoundNumber", nextRoundNumber.String())
+			err := c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+			if err != nil {
+				c.logger.WithContext(ctx).Error("Failed to start first round after durable proposal recovery",
+					"nextRoundNumber", nextRoundNumber.String(),
+					"error", err.Error())
+			}
+			return err
+		}
+		resumed, err := c.resumeDurableProposalLocked(ctx, api.NewBigInt(nextRoundNumber))
+		if err != nil {
+			return err
+		}
+		if resumed {
+			return nil
+		}
+		err = c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
 		if err != nil {
 			c.logger.WithContext(ctx).Error("Failed to start first round after initialization",
 				"nextRoundNumber", nextRoundNumber.String(),
@@ -422,10 +468,9 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 					"ucRound", expectedRound,
 					"ourProposedRound", proposedRound,
 					"nextRoundRequired", tr.Round)
-				// This UC is for an older round, but we still need to process it
-				// to stay in sync with root chain. Clear our proposed block and
-				// start fresh with the root chain's expected round
-				c.proposedBlock = nil
+				if err := c.abandonProposedBlockLocked(ctx, "round mismatch"); err != nil {
+					return err
+				}
 
 				// Start new round immediately with root chain's next round
 				c.logger.WithContext(ctx).Info("Starting new round to sync with root chain",
@@ -439,14 +484,59 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 				return err
 			}
 
-			// If UC is for an older round than proposed, it's a stale UC
-			c.logger.WithContext(ctx).Debug("Received UC for older round than proposed block, ignoring")
-			return nil
+			c.logger.WithContext(ctx).Warn("UC is newer than proposed block, abandoning stale proposal",
+				"ucRound", expectedRound,
+				"proposedBlockRound", proposedRound,
+				"nextRound", tr.Round)
+			if err := c.abandonProposedBlockLocked(ctx, "newer UC"); err != nil {
+				return err
+			}
+			blockNum = "nil"
 		}
 	}
 
 	// Check if we have a proposed block to finalize
 	if c.proposedBlock == nil {
+		if uc != nil && uc.InputRecord != nil {
+			ucCbor, err := types.Cbor.Marshal(uc)
+			if err != nil {
+				c.logger.WithContext(ctx).Error("Failed to encode unicity certificate",
+					"error", err.Error())
+				return fmt.Errorf("failed to encode unicity certificate: %w", err)
+			}
+			if finalizer, ok := c.roundManager.(DurableProposalFinalizer); ok {
+				recovered, err := finalizer.FinalizeCertifiedProposal(ctx,
+					api.NewBigInt(new(big.Int).SetUint64(expectedRound)),
+					api.HexBytes(append([]byte(nil), uc.InputRecord.Hash...)),
+					api.NewHexBytes(ucCbor),
+				)
+				if err != nil {
+					c.logger.WithContext(ctx).Error("Failed to finalize durable proposal",
+						"ucRound", expectedRound,
+						"error", err.Error())
+					metrics.BFTErrorsTotal.Inc()
+					if c.eventBus != nil {
+						c.eventBus.Publish(events.TopicFatalError, events.FatalErrorEvent{
+							Source: "bft",
+							Error:  err.Error(),
+						})
+					}
+					return fmt.Errorf("failed to finalize durable proposal: %w", err)
+				}
+				if recovered {
+					c.logger.WithContext(ctx).Info("Durable proposal finalized from UC",
+						"ucRound", expectedRound,
+						"nextRoundNumber", nextRoundNumber.String())
+					err := c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+					if err != nil {
+						c.logger.WithContext(ctx).Error("Failed to start next round after durable proposal recovery",
+							"nextRoundNumber", nextRoundNumber.String(),
+							"error", err.Error())
+					}
+					return err
+				}
+			}
+		}
 		c.logger.WithContext(ctx).Warn("No proposed block to finalize, starting next round",
 			"ucRound", expectedRound,
 			"nextRoundNumber", nextRoundNumber.String())
@@ -465,27 +555,24 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		return err
 	}
 
-	c.logger.WithContext(ctx).Info("Finalizing block with unicity certificate",
-		"blockNumber", blockNum,
-		"ucRound", expectedRound)
-
-	if c.proposedBlock == nil || uc.InputRecord == nil || !bytes.Equal(c.proposedBlock.RootHash, uc.InputRecord.Hash) {
-		proposedRoot := "<nil>"
-		if c.proposedBlock != nil {
-			proposedRoot = c.proposedBlock.RootHash.String()
-		}
-		certifiedRoot := "<nil>"
-		if uc.InputRecord != nil {
-			certifiedRoot = api.HexBytes(uc.InputRecord.Hash).String()
-		}
-		err := fmt.Errorf("%w: block %s proposed root %s, UC root %s",
-			ErrCertifiedStateMismatch, blockNum, proposedRoot, certifiedRoot)
+	if uc == nil || uc.InputRecord == nil {
+		return fmt.Errorf("cannot finalize block %s: UC input record is missing", c.proposedBlock.Index.String())
+	}
+	if !bytes.Equal(uc.InputRecord.Hash, c.proposedBlock.RootHash) {
+		err := fmt.Errorf("%w: block %s root %s, UC root %s",
+			ErrCertifiedRootMismatch,
+			c.proposedBlock.Index.String(),
+			c.proposedBlock.RootHash.String(),
+			api.HexBytes(uc.InputRecord.Hash).String())
 		c.logger.WithContext(ctx).Error("UC root does not match proposed block root",
-			"blockNumber", blockNum,
-			"proposedRoot", proposedRoot,
-			"certifiedRoot", certifiedRoot)
+			"blockNumber", c.proposedBlock.Index.String(),
+			"blockRoot", c.proposedBlock.RootHash.String(),
+			"ucRoot", api.HexBytes(uc.InputRecord.Hash).String())
+		if abandonErr := c.abandonProposedBlockLocked(ctx, "certified root mismatch"); abandonErr != nil {
+			c.logger.WithContext(ctx).Error("Failed to abandon proposed block after certified root mismatch",
+				"error", abandonErr.Error())
+		}
 		metrics.BFTErrorsTotal.Inc()
-		c.proposedBlock = nil
 		if c.eventBus != nil {
 			c.eventBus.Publish(events.TopicFatalError, events.FatalErrorEvent{
 				Source: "bft",
@@ -494,6 +581,10 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		}
 		return err
 	}
+
+	c.logger.WithContext(ctx).Info("Finalizing block with unicity certificate",
+		"blockNumber", blockNum,
+		"ucRound", expectedRound)
 
 	if certStart := c.certRequestTime.Swap(0); certStart > 0 {
 		metrics.BFTCertificationDuration.Observe(float64(time.Now().UnixNano()-certStart) / 1e9)
@@ -506,6 +597,46 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		return fmt.Errorf("failed to encode unicity certificate: %w", err)
 	}
 	c.proposedBlock.UnicityCertificate = api.NewHexBytes(ucCbor)
+
+	if c.resumedDurableProposal {
+		finalizer, ok := c.roundManager.(DurableProposalFinalizer)
+		if !ok {
+			return errors.New("round manager does not support durable proposal finalization")
+		}
+		recovered, err := finalizer.FinalizeCertifiedProposal(ctx,
+			api.NewBigInt(new(big.Int).Set(c.proposedBlock.Index.Int)),
+			api.HexBytes(append([]byte(nil), uc.InputRecord.Hash...)),
+			api.NewHexBytes(ucCbor),
+		)
+		if err != nil {
+			c.logger.WithContext(ctx).Error("Failed to finalize resumed durable proposal",
+				"blockNumber", c.proposedBlock.Index.String(),
+				"error", err.Error())
+			metrics.BFTErrorsTotal.Inc()
+			if c.eventBus != nil {
+				c.eventBus.Publish(events.TopicFatalError, events.FatalErrorEvent{
+					Source: "bft",
+					Error:  err.Error(),
+				})
+			}
+			return fmt.Errorf("failed to finalize resumed durable proposal: %w", err)
+		}
+		if !recovered {
+			return fmt.Errorf("resumed durable proposal %s was not finalized", c.proposedBlock.Index.String())
+		}
+		c.proposedBlock = nil
+		c.resumedDurableProposal = false
+
+		c.logger.WithContext(ctx).Info("Resumed durable proposal finalized, starting new round",
+			"nextRoundNumber", nextRoundNumber.String())
+		err = c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+		if err != nil {
+			c.logger.WithContext(ctx).Error("Failed to start new round",
+				"nextRoundNumber", nextRoundNumber.String(),
+				"error", err.Error())
+		}
+		return err
+	}
 
 	if err := c.roundManager.FinalizeBlockWithRetry(ctx, c.proposedBlock); err != nil {
 		c.logger.WithContext(ctx).Error("Failed to finalize block after retries",
@@ -523,6 +654,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 
 	// Clear the proposed block after finalization
 	c.proposedBlock = nil
+	c.resumedDurableProposal = false
 
 	c.logger.WithContext(ctx).Info("Block finalized, starting new round",
 		"nextRoundNumber", nextRoundNumber.String())
@@ -536,6 +668,95 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 	return err
 }
 
+func (c *BFTClientImpl) finalizeCertifiedDurableProposalLocked(ctx context.Context, uc *types.UnicityCertificate) (bool, error) {
+	if uc == nil || uc.InputRecord == nil {
+		return false, nil
+	}
+	if c.roundManager == nil {
+		return false, errors.New("round manager is not initialized")
+	}
+	localRoot, localBlockNumber, err := c.roundManager.CommittedRoot(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to read local committed SMT state: %w", err)
+	}
+	if uc.GetRoundNumber() == 0 && len(uc.InputRecord.Hash) == 0 && localBlockNumber == nil {
+		return false, nil
+	}
+	if bytes.Equal(localRoot, uc.InputRecord.Hash) {
+		return false, nil
+	}
+	finalizer, ok := c.roundManager.(DurableProposalFinalizer)
+	if !ok {
+		return false, nil
+	}
+	ucCbor, err := types.Cbor.Marshal(uc)
+	if err != nil {
+		c.logger.WithContext(ctx).Error("Failed to encode unicity certificate",
+			"error", err.Error())
+		return false, fmt.Errorf("failed to encode unicity certificate: %w", err)
+	}
+	recovered, err := finalizer.FinalizeCertifiedProposal(ctx,
+		api.NewBigInt(new(big.Int).SetUint64(uc.GetRoundNumber())),
+		api.HexBytes(append([]byte(nil), uc.InputRecord.Hash...)),
+		api.NewHexBytes(ucCbor),
+	)
+	if err != nil {
+		return false, err
+	}
+	return recovered, nil
+}
+
+func (c *BFTClientImpl) abandonProposedBlockLocked(ctx context.Context, reason string) error {
+	if c.proposedBlock == nil {
+		return nil
+	}
+	block := c.proposedBlock
+	c.logger.WithContext(ctx).Info("Abandoning proposed block",
+		"blockNumber", block.Index.String(),
+		"rootHash", block.RootHash.String(),
+		"reason", reason)
+	if abandoner, ok := c.roundManager.(DurableProposalAbandoner); ok {
+		if err := abandoner.AbandonDurableProposal(ctx, block.Index, block.RootHash); err != nil {
+			return fmt.Errorf("failed to abandon durable proposal %s: %w", block.Index.String(), err)
+		}
+	}
+	c.proposedBlock = nil
+	c.resumedDurableProposal = false
+	return nil
+}
+
+func (c *BFTClientImpl) resumeDurableProposalLocked(ctx context.Context, roundNumber *api.BigInt) (bool, error) {
+	loader, ok := c.roundManager.(DurableProposalLoader)
+	if !ok {
+		return false, nil
+	}
+	block, found, err := loader.LoadDurableProposal(ctx, roundNumber)
+	if err != nil {
+		return false, fmt.Errorf("failed to load durable proposal for round %s: %w", roundNumber.String(), err)
+	}
+	if !found {
+		return false, nil
+	}
+	if block == nil {
+		return false, fmt.Errorf("durable proposal for round %s is nil", roundNumber.String())
+	}
+	if block.Index.Cmp(roundNumber.Int) != 0 {
+		return false, fmt.Errorf("durable proposal round mismatch: expected %s, got %s", roundNumber.String(), block.Index.String())
+	}
+
+	c.logger.WithContext(ctx).Info("Resending durable proposal after BFT initialization",
+		"blockNumber", block.Index.String(),
+		"rootHash", block.RootHash.String())
+	c.proposedBlock = block
+	c.resumedDurableProposal = true
+	c.certRequestTime.Store(time.Now().UnixNano())
+	if err := c.sendCertificationRequest(ctx, block.RootHash.String(), block.Index.Uint64()); err != nil {
+		metrics.BFTErrorsTotal.Inc()
+		return true, fmt.Errorf("failed to resend durable proposal %s: %w", block.Index.String(), err)
+	}
+	return true, nil
+}
+
 func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash string, roundNumber uint64) error {
 	rootHashBytes, err := hex.DecodeString(rootHash)
 	if err != nil {
@@ -547,9 +768,15 @@ func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 		return fmt.Errorf("failed to prepare certification request: %w", err)
 	}
 
-	var blockHash []byte
-	if !bytes.Equal(rootHashBytes, luc.InputRecord.Hash) {
-		blockHash = rootHashBytes
+	inputRecord, err := c.buildCertificationInputRecord(luc, rootHashBytes, roundNumber)
+	if err != nil {
+		return err
+	}
+	if err := c.verifyLocalRootExtendsLatestUC(ctx, luc); err != nil {
+		return err
+	}
+	if c.network == nil || c.peer == nil || c.signer == nil {
+		return errors.New("BFT client network is not initialized")
 	}
 
 	// send new input record for certification
@@ -557,18 +784,7 @@ func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 		PartitionID: c.PartitionID(),
 		ShardID:     c.ShardID(),
 		NodeID:      c.peer.ID().String(),
-		InputRecord: &types.InputRecord{
-			Version:         1,
-			RoundNumber:     roundNumber,
-			Epoch:           luc.InputRecord.Epoch,
-			PreviousHash:    luc.InputRecord.Hash,
-			Hash:            rootHashBytes,
-			SummaryValue:    []byte{}, // cant be nil if RoundNumber > 0
-			Timestamp:       luc.UnicitySeal.Timestamp,
-			BlockHash:       blockHash,
-			SumOfEarnedFees: 0,
-			ETHash:          nil, // can be nil, not validated
-		},
+		InputRecord: inputRecord,
 	}
 
 	if err = req.Sign(c.signer); err != nil {
@@ -586,6 +802,61 @@ func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 		return fmt.Errorf("selecting root nodes: %w", err)
 	}
 	return c.network.Send(ctx, req, rootIDs...)
+}
+
+func (c *BFTClientImpl) buildCertificationInputRecord(luc *types.UnicityCertificate, rootHashBytes []byte, roundNumber uint64) (*types.InputRecord, error) {
+	if luc == nil || luc.InputRecord == nil || luc.UnicitySeal == nil {
+		return nil, errors.New("latest UC is incomplete")
+	}
+
+	var blockHash []byte
+	if !bytes.Equal(rootHashBytes, luc.InputRecord.Hash) {
+		blockHash = rootHashBytes
+	}
+
+	epoch := luc.InputRecord.Epoch
+	if expectedEpoch := c.nextExpectedEpoch.Load(); expectedEpoch > 0 {
+		epoch = expectedEpoch
+	}
+
+	return &types.InputRecord{
+		Version:         1,
+		RoundNumber:     roundNumber,
+		Epoch:           epoch,
+		PreviousHash:    luc.InputRecord.Hash,
+		Hash:            rootHashBytes,
+		SummaryValue:    []byte{}, // cant be nil if RoundNumber > 0
+		Timestamp:       luc.UnicitySeal.Timestamp,
+		BlockHash:       blockHash,
+		SumOfEarnedFees: 0,
+		ETHash:          nil, // can be nil, not validated
+	}, nil
+}
+
+func (c *BFTClientImpl) verifyLocalRootExtendsLatestUC(ctx context.Context, luc *types.UnicityCertificate) error {
+	if luc == nil || luc.InputRecord == nil {
+		return errors.New("latest UC input record is missing")
+	}
+	if c.roundManager == nil {
+		return errors.New("round manager is not initialized")
+	}
+	localRoot, localBlockNumber, err := c.roundManager.CommittedRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to read local committed SMT state: %w", err)
+	}
+	// BFT represents the genesis/no-state root as empty bytes; the local SMT
+	// represents its empty tree as a real hash. After the first committed block,
+	// both sides use the aggregator-computed root and must match exactly.
+	if luc.GetRoundNumber() == 0 && len(luc.InputRecord.Hash) == 0 && localBlockNumber == nil {
+		return nil
+	}
+	if !bytes.Equal(localRoot, luc.InputRecord.Hash) {
+		return fmt.Errorf("%w: local root %s, latest UC root %s",
+			ErrCertifiedStateMismatch,
+			api.HexBytes(localRoot).String(),
+			api.HexBytes(luc.InputRecord.Hash).String())
+	}
+	return nil
 }
 
 func (c *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.Block) error {
@@ -635,6 +906,7 @@ func (c *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.
 		}
 
 		c.proposedBlock = block
+		c.resumedDurableProposal = false
 		c.certRequestTime.Store(time.Now().UnixNano())
 		return nil
 	}(); err != nil {

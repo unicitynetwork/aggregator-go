@@ -111,8 +111,12 @@ func TestDiskSMTHAFollowerRejectsDivergentFinalizedRoot(t *testing.T) {
 		uc,
 	)
 	block.Finalized = true
+	block.Status = models.FinalityStatusFinalized
+	block.ProposalID = "proposal-" + block.Index.String()
 	require.NoError(t, storage.BlockStorage().Store(ctx, block))
-	require.NoError(t, storage.BlockRecordsStorage().Store(ctx, models.NewBlockRecords(block.Index, []api.StateID{commitment.StateID})))
+	record := models.NewAggregatorRecord(commitment, block.Index, api.NewBigIntFromUint64(0))
+	record.ProposalID = block.ProposalID
+	require.NoError(t, storage.AggregatorRecordStorage().Store(ctx, record))
 	require.NoError(t, storage.SmtStorage().Store(ctx, models.NewSmtNode(leaf.Key, leaf.Value)))
 
 	followerCfg := cfg

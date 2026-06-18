@@ -22,9 +22,9 @@ type DiskBackend struct {
 	store storage.Store
 	tree  *persist.Tree
 
-	mu              sync.Mutex
-	lastCommitStats persist.CommitStats
-	snapshotWarning sync.Once
+	lastCommitStatsMu sync.RWMutex
+	lastCommitStats   persist.CommitStats
+	snapshotWarning   sync.Once
 
 	proofViewMu sync.RWMutex
 	proofView   *diskProofView
@@ -57,8 +57,6 @@ func (b *DiskBackend) RootHashRaw(context.Context) ([]byte, error) {
 	if b == nil || b.tree == nil {
 		return nil, fmt.Errorf("disk SMT backend not initialized")
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	return hashBytes(b.tree.RootHash()), nil
 }
 
@@ -66,8 +64,6 @@ func (b *DiskBackend) CommittedState(context.Context) (CommittedState, error) {
 	if b == nil || b.store == nil {
 		return CommittedState{}, fmt.Errorf("disk SMT backend not initialized")
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	state, err := b.store.CommittedState()
 	if err != nil {
 		return CommittedState{}, err
@@ -82,8 +78,6 @@ func (b *DiskBackend) CreateSnapshot(context.Context) (Snapshot, error) {
 	if b == nil || b.tree == nil {
 		return nil, fmt.Errorf("disk SMT backend not initialized")
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	snapshot, err := b.tree.CreateSnapshot()
 	if err != nil {
 		return nil, err
@@ -252,9 +246,9 @@ func (b *DiskBackend) Stats(ctx context.Context) BackendStats {
 	if b == nil {
 		return BackendStats{RootHash: root}
 	}
-	b.mu.Lock()
+	b.lastCommitStatsMu.RLock()
 	lastCommitStats := b.lastCommitStats
-	b.mu.Unlock()
+	b.lastCommitStatsMu.RUnlock()
 
 	raw := map[string]any{
 		"last_commit": lastCommitStats,
@@ -289,20 +283,16 @@ func (b *DiskBackend) RefreshPublishedProofView(_ context.Context, expectedRoot 
 	if b == nil || b.tree == nil {
 		return fmt.Errorf("disk SMT backend not initialized")
 	}
-	b.mu.Lock()
 	root := b.tree.RootHash()
 	if expectedRoot != nil && !bytes.Equal(hashBytes(root), expectedRoot) {
-		b.mu.Unlock()
 		return fmt.Errorf("refusing to publish proof view: disk SMT root %s does not match expected finalized root %s",
 			api.HexBytes(hashBytes(root)).String(), api.HexBytes(expectedRoot).String())
 	}
 	view, err := b.prepareProofViewLocked(root)
 	if err != nil {
-		b.mu.Unlock()
 		return err
 	}
 	old := b.swapProofView(view)
-	b.mu.Unlock()
 	if old != nil {
 		old.close()
 	}
@@ -375,15 +365,12 @@ func (p *preparedDiskProofView) Publish(context.Context) error {
 		return fmt.Errorf("disk SMT prepared proof view is not initialized")
 	}
 	// Refuse to publish if the disk advanced since prepare; that would roll the served view backward.
-	p.target.mu.Lock()
 	current := p.target.tree.RootHash()
 	if current != p.view.root {
-		p.target.mu.Unlock()
 		return fmt.Errorf("refusing to publish prepared proof view: disk SMT root advanced to %x since the view was prepared at %x", current, p.view.root)
 	}
 	old := p.target.swapProofView(p.view)
 	p.view = nil
-	p.target.mu.Unlock()
 	if old != nil {
 		old.close()
 	}
@@ -406,8 +393,6 @@ func (s *DiskSnapshot) AddLeavesClassified(_ context.Context, inputs []LeafInput
 	if s == nil || s.snapshot == nil || s.target == nil {
 		return BatchApplyResult{}, fmt.Errorf("disk SMT snapshot not initialized")
 	}
-	s.target.mu.Lock()
-	defer s.target.mu.Unlock()
 	result, err := s.snapshot.AddLeaves(toDiskLeafInputs(inputs))
 	if err != nil {
 		return BatchApplyResult{}, err
@@ -426,8 +411,6 @@ func (s *DiskSnapshot) Fork(context.Context) (Snapshot, error) {
 	if s == nil || s.snapshot == nil || s.target == nil {
 		return nil, fmt.Errorf("disk SMT snapshot not initialized")
 	}
-	s.target.mu.Lock()
-	defer s.target.mu.Unlock()
 	child, err := s.snapshot.Fork()
 	if err != nil {
 		return nil, err
@@ -449,8 +432,6 @@ func (s *DiskSnapshot) SetCommitTarget(_ context.Context, target Backend) error 
 	if diskTarget == nil || diskTarget.tree == nil {
 		return fmt.Errorf("disk snapshot commit target is not initialized")
 	}
-	diskTarget.mu.Lock()
-	defer diskTarget.mu.Unlock()
 	if err := s.snapshot.SetCommitTarget(diskTarget.tree); err != nil {
 		return err
 	}
@@ -467,12 +448,27 @@ func (s *DiskSnapshot) CommitAndPrepareProofView(_ context.Context, meta CommitM
 	return s.commit(meta, true)
 }
 
+func (s *DiskSnapshot) LastCommitTiming() CommitTiming {
+	if s == nil || s.snapshot == nil {
+		return CommitTiming{}
+	}
+	stats := s.snapshot.LastCommitStats()
+	return CommitTiming{
+		CollectDuration:     stats.CollectDuration,
+		TombstoneDuration:   stats.TombstoneDuration,
+		BatchBuildDuration:  stats.BatchBuildDuration,
+		RootHashDuration:    stats.RootHashDuration,
+		EngineWriteDuration: stats.EngineWriteDuration,
+		CacheUpdateDuration: stats.CacheUpdateDuration,
+		NodeWrites:          stats.NodeWrites,
+		NodeDeletes:         stats.NodeDeletes,
+	}
+}
+
 func (s *DiskSnapshot) commit(meta CommitMetadata, prepareProofView bool) (PreparedProofView, error) {
 	if s == nil || s.snapshot == nil || s.target == nil {
 		return nil, fmt.Errorf("disk SMT snapshot not initialized")
 	}
-	s.target.mu.Lock()
-	defer s.target.mu.Unlock()
 	root := hashBytes(s.snapshot.RootHash())
 	if meta.RootHash != nil && !bytes.Equal(root, meta.RootHash) {
 		return nil, fmt.Errorf("disk SMT snapshot root %x does not match expected root %x", root, meta.RootHash)
@@ -480,7 +476,9 @@ func (s *DiskSnapshot) commit(meta CommitMetadata, prepareProofView bool) (Prepa
 	if err := s.snapshot.Commit(meta.BlockNumber); err != nil {
 		return nil, err
 	}
+	s.target.lastCommitStatsMu.Lock()
 	s.target.lastCommitStats = s.snapshot.LastCommitStats()
+	s.target.lastCommitStatsMu.Unlock()
 	if !prepareProofView {
 		return nil, nil
 	}
@@ -494,10 +492,6 @@ func (s *DiskSnapshot) commit(meta CommitMetadata, prepareProofView bool) (Prepa
 func (s *DiskSnapshot) Discard(context.Context) {
 	if s == nil || s.snapshot == nil {
 		return
-	}
-	if s.target != nil {
-		s.target.mu.Lock()
-		defer s.target.mu.Unlock()
 	}
 	s.snapshot.Discard()
 }

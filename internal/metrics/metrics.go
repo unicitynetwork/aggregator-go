@@ -244,6 +244,17 @@ var (
 		[]string{"path"},
 	)
 
+	SMTInclusionCertBuildDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "aggregator_smt_inclusion_cert_build_duration_seconds",
+			Help: "SMT inclusion certificate construction latency inside get_inclusion_proof.v2; excludes proof-readiness and client polling.",
+			Buckets: []float64{
+				.0005, .001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5,
+			},
+		},
+		[]string{"source", "result"},
+	)
+
 	ParentProofErrorsTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "aggregator_parent_proof_errors_total",

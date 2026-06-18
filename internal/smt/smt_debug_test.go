@@ -40,7 +40,7 @@ func TestAddLeaves_DebugInvalidPath(t *testing.T) {
 		require.True(t, res.PathIncluded)
 		require.True(t, res.PathValid)
 
-		rh := tree.GetRootHashHex()
+		rh := legacyPathRootHex(tree)
 		require.Equal(t, rh, merkleTreePath.Root)
 
 		return rh

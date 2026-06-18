@@ -277,7 +277,7 @@ func newTestPrecollector(t *testing.T, stream chan *models.CertificationRequest,
 	if maxPerRound <= 0 {
 		maxPerRound = 10000
 	}
-	cp := newChildPrecollector(stream, nil, log, maxPerRound, nil)
+	cp := newChildPrecollector(stream, nil, log, maxPerRound, nil, nil, "", nil)
 	return cp, smtInstance
 }
 
@@ -432,31 +432,6 @@ func TestReconcileRecoveredFinalization_MismatchedBlockClearsProofPendingOnly(t 
 	require.False(t, pendingAfter)
 }
 
-func TestDrainBufferedCommitments_StopsAtRoundBoundary(t *testing.T) {
-	stream := make(chan *models.CertificationRequest, 8)
-	pending := make([]*models.CertificationRequest, 0, miniBatchSize)
-	collected := make([]*models.CertificationRequest, 0, 5)
-	count := 0
-	maxPerRound := 5
-
-	flush := func() error {
-		collected = append(collected, pending...)
-		count += len(pending)
-		pending = pending[:0]
-		return nil
-	}
-
-	for i := 0; i < maxPerRound+2; i++ {
-		stream <- testutil.CreateTestCertificationRequest(t, "drain_boundary")
-	}
-
-	require.NoError(t, drainBufferedCommitments(stream, maxPerRound, &count, &pending, flush))
-	require.NoError(t, flush())
-
-	require.Len(t, collected, maxPerRound)
-	require.Len(t, stream, 2)
-}
-
 // --- Tests for childPrecollector ---
 
 func TestChildPrecollector_CollectsContinuouslyAcrossRound(t *testing.T) {
@@ -509,8 +484,8 @@ func TestChildPrecollector_AdvanceRound_FlushesPendingBatch(t *testing.T) {
 	cp.Start(ctx, baseSnapshot)
 	defer cp.Stop()
 
-	// Send fewer than miniBatchSize commitments (pending but not flushed)
-	count := miniBatchSize - 1
+	// Send fewer than defaultMiniBatchSize commitments (pending but not flushed)
+	count := defaultMiniBatchSize - 1
 	for i := 0; i < count; i++ {
 		stream <- testutil.CreateTestCertificationRequest(t, "pending_flush")
 	}
@@ -520,6 +495,67 @@ func TestChildPrecollector_AdvanceRound_FlushesPendingBatch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, result.commitments, count, "AdvanceRound must flush pending batch")
 	assert.Len(t, result.leaves, count)
+}
+
+func TestChildPrecollector_AdvanceRoundStagesOneShotHandoff(t *testing.T) {
+	stream := make(chan *models.CertificationRequest, 200)
+	cp, smtInstance := newTestPrecollector(t, stream, 10000)
+	cp.blockNumber = api.NewBigIntFromUint64(12)
+	cp.proposalID = "proposal-12"
+
+	var stagedMu sync.Mutex
+	var stagedBlocks []string
+	var stagedProposalIDs []string
+	var stagedOffsets []int
+	var stagedCounts []int
+	cp.stageProposed = func(_ context.Context, blockNumber *api.BigInt, proposalID string, leafIndexOffset int, commitments []*models.CertificationRequest) error {
+		stagedMu.Lock()
+		defer stagedMu.Unlock()
+		stagedBlocks = append(stagedBlocks, blockNumber.String())
+		stagedProposalIDs = append(stagedProposalIDs, proposalID)
+		stagedOffsets = append(stagedOffsets, leafIndexOffset)
+		stagedCounts = append(stagedCounts, len(commitments))
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	baseSnapshot := testBackendSnapshot(t, ctx, testMemoryBackend(smtInstance))
+	cp.Start(ctx, baseSnapshot)
+	defer cp.Stop()
+
+	for i := 0; i < 5; i++ {
+		stream <- testutil.CreateTestCertificationRequest(t, "one_shot_stage")
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	result, err := cp.AdvanceRound()
+	require.NoError(t, err)
+	require.True(t, result.recordsStaged)
+	require.EqualValues(t, 12, result.blockNumber.Uint64())
+	require.Len(t, result.commitments, 5)
+	require.Len(t, result.leaves, 5)
+
+	stagedMu.Lock()
+	defer stagedMu.Unlock()
+	require.Equal(t, []string{"12"}, stagedBlocks)
+	require.Equal(t, []string{"proposal-12"}, stagedProposalIDs)
+	require.Equal(t, []int{0}, stagedOffsets)
+	require.Equal(t, []int{5}, stagedCounts)
+}
+
+func TestValidatePrecollectorBlockNumberRejectsStagedMismatch(t *testing.T) {
+	preResult := &preCollectionResult{
+		recordsStaged: true,
+		blockNumber:   api.NewBigIntFromUint64(12),
+	}
+
+	require.NoError(t, validatePrecollectorBlockNumber(preResult, api.NewBigIntFromUint64(12)))
+	require.ErrorContains(t, validatePrecollectorBlockNumber(preResult, api.NewBigIntFromUint64(13)), "cannot start round 13")
+
+	preResult.recordsStaged = false
+	require.NoError(t, validatePrecollectorBlockNumber(preResult, api.NewBigIntFromUint64(13)))
 }
 
 func TestChildPrecollector_AdvanceRound_NoDropAcrossBoundary(t *testing.T) {
@@ -708,7 +744,7 @@ func TestChildPrecollector_AdvanceRoundFailsOnSnapshotAddError(t *testing.T) {
 	addErr := errors.New("snapshot hash mismatch")
 	childSnapshot := &precollectorErrorSnapshot{addErr: addErr}
 	baseSnapshot := &precollectorErrorSnapshot{forked: childSnapshot}
-	cp := newChildPrecollector(stream, nil, testLogger, 10000, nil)
+	cp := newChildPrecollector(stream, nil, testLogger, 10000, nil, nil, "", nil)
 	t.Cleanup(cp.Stop)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -718,6 +754,7 @@ func TestChildPrecollector_AdvanceRoundFailsOnSnapshotAddError(t *testing.T) {
 	require.NoError(t, err)
 	cp.Start(ctx, forked)
 	stream <- testutil.CreateTestCertificationRequest(t, "snapshot_add_error")
+	time.Sleep(50 * time.Millisecond)
 
 	result, err := cp.AdvanceRound()
 	require.Error(t, err)
@@ -726,8 +763,10 @@ func TestChildPrecollector_AdvanceRoundFailsOnSnapshotAddError(t *testing.T) {
 }
 
 type precollectorErrorSnapshot struct {
-	forked smtbackend.Snapshot
-	addErr error
+	forked             smtbackend.Snapshot
+	addErr             error
+	setCommitTargetErr error
+	discardCount       int
 }
 
 func (s *precollectorErrorSnapshot) AddLeavesClassified(context.Context, []smtbackend.LeafInput) (smtbackend.BatchApplyResult, error) {
@@ -749,14 +788,16 @@ func (s *precollectorErrorSnapshot) Fork(context.Context) (smtbackend.Snapshot, 
 }
 
 func (s *precollectorErrorSnapshot) SetCommitTarget(context.Context, smtbackend.Backend) error {
-	return nil
+	return s.setCommitTargetErr
 }
 
 func (s *precollectorErrorSnapshot) Commit(context.Context, smtbackend.CommitMetadata) error {
 	return nil
 }
 
-func (s *precollectorErrorSnapshot) Discard(context.Context) {}
+func (s *precollectorErrorSnapshot) Discard(context.Context) {
+	s.discardCount++
+}
 
 // --- Snapshot reparenting test (still valid with precollector) ---
 
@@ -782,7 +823,7 @@ func TestPreCollectionReparenting(t *testing.T) {
 
 		// Start precollector from Round N's snapshot
 		stream := make(chan *models.CertificationRequest, 100)
-		cp := newChildPrecollector(stream, nil, testLogger, 10000, nil)
+		cp := newChildPrecollector(stream, nil, testLogger, 10000, nil, nil, "", nil)
 		forked, err := roundNSnapshot.Fork(ctx)
 		require.NoError(t, err)
 		cp.Start(ctx, forked)
@@ -897,6 +938,74 @@ func TestChildPrecollector_DeactivateDuringInFlightRound(t *testing.T) {
 	assert.Nil(t, block2, "no block 2 should be created after Deactivate")
 
 	// Wait for goroutines to drain
+	rm.wg.Wait()
+}
+
+func TestChildRound_ReactivateCancelsInFlightRound(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{
+			Database: "test_child_reactivate_inflight",
+		},
+		Processing: config.ProcessingConfig{
+			RoundDuration:          100 * time.Millisecond,
+			MaxCommitmentsPerRound: 1000,
+		},
+		Sharding: config.ShardingConfig{
+			Mode:          config.ShardingModeChild,
+			ShardIDLength: 1,
+			Child: config.ChildConfig{
+				ShardID:            0b11,
+				ParentPollTimeout:  5 * time.Second,
+				ParentPollInterval: 10 * time.Millisecond,
+			},
+		},
+	}
+	store := testutil.SetupTestStorage(t, cfg)
+
+	testLogger := newTestLogger(t)
+	rootClient := newBlockingProofRootAggregatorClient()
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		store.CommitmentQueue(),
+		store,
+		rootClient,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		smtInstance,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, rm.Start(ctx))
+	require.NoError(t, rm.Activate(ctx))
+
+	select {
+	case <-rootClient.proofPollStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for round 1 to enter proof polling")
+	}
+
+	rm.roundMutex.RLock()
+	oldRound := rm.currentRound
+	rm.roundMutex.RUnlock()
+	require.NotNil(t, oldRound)
+
+	require.NoError(t, rm.Activate(ctx))
+
+	rm.roundMutex.RLock()
+	newRound := rm.currentRound
+	rm.roundMutex.RUnlock()
+	require.NotNil(t, newRound)
+	require.NotSame(t, oldRound, newRound, "reactivation must not keep the stale in-flight round")
+
+	require.NoError(t, rm.Deactivate(ctx))
 	rm.wg.Wait()
 }
 
@@ -1019,7 +1128,7 @@ func TestStartNewRoundWithSnapshot(t *testing.T) {
 		preLeaves := []smtbackend.LeafInput{testLeafInputFromLegacyLeaf(t, leaf)}
 
 		startTime := time.Now()
-		err = rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(big.NewInt(1)), preSnapshot, preCommitments, preLeaves)
+		err = rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(big.NewInt(1)), preSnapshot, preCommitments, preLeaves, false, "")
 		require.NoError(t, err)
 
 		rm.roundMutex.RLock()
@@ -1086,6 +1195,9 @@ func TestStandalonePrecollectorGraceIncludesLateCommitment(t *testing.T) {
 		rm.logger,
 		rm.config.Processing.MaxCommitmentsPerRound,
 		rm.markProofsPending,
+		nil,
+		"",
+		nil,
 	)
 	rm.roundMutex.Lock()
 	rm.precollectorDisabled = false
@@ -1116,6 +1228,133 @@ func TestStandalonePrecollectorGraceIncludesLateCommitment(t *testing.T) {
 	assert.EqualValues(t, 2, currentRound.Number.Int64())
 	require.Len(t, commitments, 1)
 	assert.Equal(t, lateCommitment.StateID, commitments[0].StateID)
+}
+
+func TestUsesActivePrecollectorDoesNotDependOnGrace(t *testing.T) {
+	cfg := config.Config{
+		Processing: config.ProcessingConfig{PrecollectorGracePeriod: 0},
+		Storage:    config.StorageConfig{UseRedisForCommitments: true},
+		Sharding:   config.ShardingConfig{Mode: config.ShardingModeBFTShard},
+	}
+	rm := &RoundManager{config: &cfg}
+	require.True(t, rm.usesActivePrecollector())
+
+	cfg.Processing.PrecollectorGracePeriod = 150 * time.Millisecond
+	require.True(t, rm.usesActivePrecollector())
+
+	cfg.Storage.UseRedisForCommitments = false
+	require.False(t, rm.usesActivePrecollector())
+}
+
+// TestStartNextRoundFromPrecollectorDiscardsFailedPrecollector guards the merge
+// fix at round_manager.go: when a precollector handoff fails and we fall back to
+// StartNewRound, the dead precollector must be discarded. Otherwise StartNewRound
+// (which only discards when abandoning a pending round) leaves rm.precollector set,
+// and startActivePrecollectorIfNeeded then refuses to start a fresh one.
+func TestStartNextRoundFromPrecollectorDiscardsFailedPrecollector(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{Database: "test_precollector_handoff_failure_discard"},
+		Processing: config.ProcessingConfig{
+			RoundDuration:           100 * time.Millisecond,
+			PrecollectorGracePeriod: 150 * time.Millisecond,
+			MaxCommitmentsPerRound:  1000,
+		},
+		Storage:  config.StorageConfig{UseRedisForCommitments: true},
+		Sharding: config.ShardingConfig{Mode: config.ShardingModeStandalone},
+		BFT: config.BFTConfig{
+			Enabled:   false,
+			StubDelay: 5 * time.Second,
+		},
+	}
+	storage := testutil.SetupTestStorage(t, cfg)
+	testLogger := newTestLogger(t)
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		storage.CommitmentQueue(),
+		storage,
+		nil,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		smtInstance,
+		nil,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer shutdownCancel()
+		_ = rm.Stop(shutdownCtx)
+	})
+
+	stageErr := errors.New("stage boom")
+	cp := newChildPrecollector(
+		rm.commitmentStream,
+		rm.commitmentQueue,
+		rm.logger,
+		rm.config.Processing.MaxCommitmentsPerRound,
+		rm.markProofsPending,
+		api.NewBigInt(big.NewInt(2)),
+		"failed-handoff-proposal",
+		func(context.Context, *api.BigInt, string, int, []*models.CertificationRequest) error {
+			return stageErr
+		},
+	)
+	rm.roundMutex.Lock()
+	rm.precollectorDisabled = false
+	rm.precollectorDone = make(chan struct{})
+	rm.precollector = cp
+	rm.roundMutex.Unlock()
+	cp.Start(ctx, testBackendSnapshot(t, ctx, testMemoryBackend(smtInstance)))
+
+	// One commitment so the handoff has records to stage (and fail on); the grace
+	// period gives the collect loop time to pick it up before AdvanceRound.
+	rm.commitmentStream <- testutil.CreateTestCertificationRequest(t, "handoff_failure")
+
+	require.NoError(t, rm.StartNextRoundFromPrecollector(ctx, api.NewBigInt(big.NewInt(2))))
+
+	rm.roundMutex.RLock()
+	stillBlocking := rm.precollector == cp
+	rm.roundMutex.RUnlock()
+	require.False(t, stillBlocking,
+		"failed precollector must be discarded on handoff fallback, not left blocking new precollectors")
+}
+
+func TestStartNextRoundFromPrecollectorDiscardsSnapshotOnSetCommitTargetError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	setTargetErr := errors.New("set target failed")
+	nextSnapshot := &precollectorErrorSnapshot{}
+	handoffSnapshot := &precollectorErrorSnapshot{
+		forked:             nextSnapshot,
+		setCommitTargetErr: setTargetErr,
+	}
+	cp := newChildPrecollector(nil, nil, newTestLogger(t), 10000, nil, nil, "", nil)
+	cp.Start(ctx, handoffSnapshot)
+	t.Cleanup(cp.Stop)
+
+	rm := &RoundManager{
+		config: &config.Config{
+			Processing: config.ProcessingConfig{PrecollectorGracePeriod: 0},
+			Storage:    config.StorageConfig{UseRedisForCommitments: true},
+			Sharding:   config.ShardingConfig{Mode: config.ShardingModeStandalone},
+		},
+		logger: newTestLogger(t),
+	}
+	rm.precollector = cp
+
+	err := rm.StartNextRoundFromPrecollector(ctx, api.NewBigIntFromUint64(2))
+
+	require.ErrorIs(t, err, setTargetErr)
+	require.Equal(t, 1, handoffSnapshot.discardCount)
+	require.Equal(t, 0, nextSnapshot.discardCount, "precollector still owns the next snapshot until Stop")
 }
 
 func TestStandaloneActivePrecollectorLifecycle(t *testing.T) {

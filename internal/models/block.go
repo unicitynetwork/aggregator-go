@@ -24,6 +24,8 @@ type Block struct {
 	ParentFragment      *api.ParentInclusionFragment `json:"parentFragment,omitempty"`    // child mode only
 	ParentBlockNumber   uint64                       `json:"parentBlockNumber,omitempty"` // child mode only
 	Finalized           bool                         `json:"finalized"`                   // true when all data is persisted
+	Status              string                       `json:"status"`
+	ProposalID          string                       `json:"proposalId,omitempty"`
 }
 
 // BlockBSON represents the BSON version of Block for MongoDB storage
@@ -41,6 +43,8 @@ type BlockBSON struct {
 	ParentFragment      *ParentFragmentBSON  `bson:"parentFragment,omitempty"` // child mode only
 	ParentBlockNumber   uint64               `bson:"parentBlockNumber,omitempty"`
 	Finalized           bool                 `bson:"finalized"`
+	Status              string               `bson:"status,omitempty"`
+	ProposalID          string               `bson:"proposalId,omitempty"`
 }
 
 // ParentFragmentBSON is the BSON representation of ParentInclusionFragment.
@@ -76,6 +80,8 @@ func (b *Block) ToBSON() (*BlockBSON, error) {
 		ParentFragment:      parentFragment,
 		ParentBlockNumber:   b.ParentBlockNumber,
 		Finalized:           b.Finalized,
+		Status:              b.Status,
+		ProposalID:          b.ProposalID,
 	}, nil
 }
 
@@ -128,6 +134,8 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 		ParentFragment:      parentFragment,
 		ParentBlockNumber:   bb.ParentBlockNumber,
 		Finalized:           bb.Finalized,
+		Status:              bb.Status,
+		ProposalID:          bb.ProposalID,
 	}, nil
 }
 

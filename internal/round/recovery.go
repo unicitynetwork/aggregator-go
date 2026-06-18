@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
@@ -18,10 +19,205 @@ type RecoveryResult struct {
 	StateIDs    []api.StateID
 }
 
-// indexedStateID tracks a state ID with its original position in the block.
-type indexedStateID struct {
-	stateID   api.StateID
-	leafIndex int
+// FinalizeCertifiedProposal completes a previously stored proposed block when
+// BFT returns the UC after this process lost its in-memory proposedBlock.
+func (rm *RoundManager) FinalizeCertifiedProposal(
+	ctx context.Context,
+	blockNumber *api.BigInt,
+	rootHash api.HexBytes,
+	unicityCertificate api.HexBytes,
+) (bool, error) {
+	if rm.smtBackend == nil {
+		return false, fmt.Errorf("SMT backend not initialized")
+	}
+
+	block, err := getBlockAnyFinalization(ctx, rm.storage, blockNumber)
+	if err != nil {
+		return false, fmt.Errorf("failed to load durable proposal block %s: %w", blockNumber.String(), err)
+	}
+	if block == nil {
+		return false, nil
+	}
+	if !bytes.Equal(block.RootHash, rootHash) {
+		return false, fmt.Errorf("durable proposal block %s root %s does not match certified root %s",
+			block.Index.String(), block.RootHash.String(), rootHash.String())
+	}
+	if block.Finalized {
+		return true, nil
+	}
+	if block.Status != "" && block.Status != models.FinalityStatusProposed && block.Status != models.FinalityStatusFinalizing {
+		return false, nil
+	}
+	block.UnicityCertificate = unicityCertificate
+
+	records, err := loadAggregatorRecordsForBlockAnyFinalization(ctx, rm.storage, block)
+	if err != nil {
+		return false, fmt.Errorf("failed to load durable proposal records %s: %w", block.Index.String(), err)
+	}
+	stateIDs, leaves, err := stateIDsAndLeavesFromAggregatorRecords(records)
+	if err != nil {
+		return false, fmt.Errorf("failed to derive durable proposal leaves for block %s: %w", block.Index.String(), err)
+	}
+
+	rm.finalizationMu.Lock()
+	defer rm.finalizationMu.Unlock()
+
+	snapshot, err := rm.smtBackend.CreateSnapshot(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to create SMT snapshot for durable proposal %s: %w", block.Index.String(), err)
+	}
+	snapshotCommitted := false
+	defer func() {
+		if !snapshotCommitted {
+			snapshot.Discard(ctx)
+		}
+	}()
+
+	candidateRoot, err := applyDurableProposalLeaves(ctx, snapshot, leaves)
+	if err != nil {
+		return false, fmt.Errorf("failed to apply durable proposal leaves for block %s: %w", block.Index.String(), err)
+	}
+	if !bytes.Equal(candidateRoot, rootHash) {
+		return false, fmt.Errorf("durable proposal block %s candidate root %s does not match certified root %s",
+			block.Index.String(), api.HexBytes(candidateRoot).String(), rootHash.String())
+	}
+
+	if !rm.usesDiskSMTBackend() {
+		if err := setBlockFinalizingWithCertificate(ctx, rm.storage, block); err != nil {
+			return false, err
+		}
+		block.Finalized = false
+		block.Status = models.FinalityStatusFinalizing
+
+		smtNodes, err := rm.convertLeavesToNodes(leaves)
+		if err != nil {
+			return false, fmt.Errorf("failed to convert durable proposal leaves to SMT nodes: %w", err)
+		}
+		if _, err := rm.storeDataParallel(ctx, smtNodes); err != nil {
+			return false, fmt.Errorf("failed to store durable proposal SMT nodes: %w", err)
+		}
+	}
+
+	var preparedProofView smtbackend.PreparedProofView
+	proofViewPublished := false
+	defer func() {
+		if preparedProofView != nil && !proofViewPublished {
+			preparedProofView.Discard(ctx)
+		}
+	}()
+	if rm.usesDiskSMTBackend() {
+		if err := setBlockFinalizedWithCertificate(ctx, rm.storage, block); err != nil {
+			return false, err
+		}
+		block.Finalized = true
+		block.Status = models.FinalityStatusFinalized
+	}
+	if publishable, ok := snapshot.(smtbackend.ProofViewPreparingSnapshot); ok {
+		preparedProofView, err = publishable.CommitAndPrepareProofView(ctx, smtbackend.CommitMetadata{BlockNumber: block.Index, RootHash: rootHash})
+	} else {
+		err = snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: block.Index, RootHash: rootHash})
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to commit durable proposal SMT snapshot: %w", err)
+	}
+	snapshotCommitted = true
+
+	if !rm.usesDiskSMTBackend() {
+		if err := setBlockFinalizedWithCertificate(ctx, rm.storage, block); err != nil {
+			return false, err
+		}
+		block.Finalized = true
+		block.Status = models.FinalityStatusFinalized
+	}
+
+	rm.markProofsReady(block, stateIDs, records)
+	if preparedProofView != nil {
+		if err := preparedProofView.Publish(ctx); err != nil {
+			return false, fmt.Errorf("failed to publish durable proposal proof view: %w", err)
+		}
+		proofViewPublished = true
+	}
+	rm.stateTracker.SetLastSyncedBlock(block.Index.Int)
+	rm.ackRecoveredProposalCommitments(ctx, block.Index, stateIDs)
+	rm.logger.WithContext(ctx).Info("Durable proposal finalized",
+		"blockNumber", block.Index.String(),
+		"records", len(records))
+	return true, nil
+}
+
+// LoadDurableProposal returns a stored uncertified proposal for the requested
+// round, if one exists.
+func (rm *RoundManager) LoadDurableProposal(ctx context.Context, blockNumber *api.BigInt) (*models.Block, bool, error) {
+	block, err := getBlockAnyFinalization(ctx, rm.storage, blockNumber)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to load durable proposal block %s: %w", blockNumber.String(), err)
+	}
+	if block == nil || block.Finalized || block.Status != models.FinalityStatusProposed {
+		return nil, false, nil
+	}
+	return block, true, nil
+}
+
+type aggregatorRecordAnyFinalizationStorage interface {
+	GetByStateIDAnyFinalization(ctx context.Context, stateID api.StateID) (*models.AggregatorRecord, error)
+	GetByBlockNumberAnyFinalization(ctx context.Context, blockNumber *api.BigInt) ([]*models.AggregatorRecord, error)
+}
+
+type aggregatorRecordProposalAnyFinalizationStorage interface {
+	GetByBlockNumberAndProposalIDAnyFinalization(ctx context.Context, blockNumber *api.BigInt, proposalID string) ([]*models.AggregatorRecord, error)
+}
+
+type aggregatorRecordProposalDeleter interface {
+	DeleteByBlockNumberAndProposalID(ctx context.Context, blockNumber *api.BigInt, proposalID string) error
+}
+
+type aggregatorRecordSerialBatchStorage interface {
+	StoreBatchSerial(ctx context.Context, records []*models.AggregatorRecord) error
+}
+
+type blockAnyFinalizationStorage interface {
+	GetByNumberAnyFinalization(ctx context.Context, blockNumber *api.BigInt) (*models.Block, error)
+}
+
+type blockCertificateFinalizer interface {
+	SetFinalizedWithCertificate(ctx context.Context, block *models.Block) error
+}
+
+type blockCertificateFinalizingMarker interface {
+	SetFinalizingWithCertificate(ctx context.Context, block *models.Block) error
+}
+
+type blockStatusUpdater interface {
+	SetStatus(ctx context.Context, blockNumber *api.BigInt, status string) error
+}
+
+// AbandonDurableProposal removes an uncertified proposed block from the retry path.
+func (rm *RoundManager) AbandonDurableProposal(ctx context.Context, blockNumber *api.BigInt, rootHash api.HexBytes) error {
+	block, err := getBlockAnyFinalization(ctx, rm.storage, blockNumber)
+	if err != nil {
+		return fmt.Errorf("failed to load durable proposal block %s: %w", blockNumber.String(), err)
+	}
+	if block == nil || block.Finalized || block.Status != models.FinalityStatusProposed {
+		return nil
+	}
+	if !bytes.Equal(block.RootHash, rootHash) {
+		return fmt.Errorf("refusing to abandon durable proposal %s: stored root %s does not match expected root %s",
+			block.Index.String(), block.RootHash.String(), rootHash.String())
+	}
+
+	return rm.storage.WithTransaction(ctx, func(txCtx context.Context) error {
+		if updater, ok := rm.storage.BlockStorage().(blockStatusUpdater); ok {
+			if err := updater.SetStatus(txCtx, block.Index, models.FinalityStatusAbandoned); err != nil {
+				return err
+			}
+		}
+		if deleter, ok := rm.storage.AggregatorRecordStorage().(aggregatorRecordProposalDeleter); ok {
+			if err := deleter.DeleteByBlockNumberAndProposalID(txCtx, block.Index, block.ProposalID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // RecoverUnfinalizedBlock checks for and completes any unfinalized blocks.
@@ -31,6 +227,16 @@ func RecoverUnfinalizedBlock(
 	log *logger.Logger,
 	storage interfaces.Storage,
 	commitmentQueue interfaces.CommitmentQueue,
+) (*RecoveryResult, error) {
+	return recoverUnfinalizedBlock(ctx, log, storage, commitmentQueue, true)
+}
+
+func recoverUnfinalizedBlock(
+	ctx context.Context,
+	log *logger.Logger,
+	storage interfaces.Storage,
+	commitmentQueue interfaces.CommitmentQueue,
+	repairSMTNodes bool,
 ) (*RecoveryResult, error) {
 	log.WithContext(ctx).Info("Checking for unfinalized blocks...")
 
@@ -60,7 +266,7 @@ func RecoverUnfinalizedBlock(
 		"blockNumber", block.Index.String(),
 		"rootHash", block.RootHash.String())
 
-	stateIDs, err := recoverBlock(ctx, log, storage, commitmentQueue, block)
+	stateIDs, err := recoverBlock(ctx, log, storage, commitmentQueue, block, repairSMTNodes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to recover block %s: %w", block.Index.String(), err)
 	}
@@ -79,62 +285,61 @@ func recoverBlock(
 	storage interfaces.Storage,
 	commitmentQueue interfaces.CommitmentQueue,
 	block *models.Block,
+	repairSMTNodes bool,
 ) ([]api.StateID, error) {
-	blockRecords, err := storage.BlockRecordsStorage().GetByBlockNumber(ctx, block.Index)
+	records, err := loadAggregatorRecordsForBlockAnyFinalization(ctx, storage, block)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get block records: %w", err)
+		return nil, fmt.Errorf("failed to get aggregator records: %w", err)
 	}
-	if blockRecords == nil {
-		return nil, fmt.Errorf("FATAL: block records not found for block %s", block.Index.String())
-	}
-
-	stateIDs := blockRecords.StateIDs
-	log.WithContext(ctx).Info("Block records found", "stateCount", len(stateIDs))
-
-	existingRecordIDs, err := storage.AggregatorRecordStorage().GetExistingStateIDs(ctx, stateIDsToStrings(stateIDs))
+	stateIDs, _, err := stateIDsAndLeavesFromAggregatorRecords(records)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check existing records: %w", err)
+		return nil, err
 	}
 
-	smtKeyStrings := make([]string, len(stateIDs))
-	for i, stateID := range stateIDs {
-		keyBytes, err := stateID.GetTreeKey()
+	log.WithContext(ctx).Info("Aggregator records found", "stateCount", len(stateIDs))
+
+	if repairSMTNodes {
+		smtKeyStrings := make([]string, len(stateIDs))
+		for i, stateID := range stateIDs {
+			keyBytes, err := stateID.GetTreeKey()
+			if err != nil {
+				return nil, fmt.Errorf("failed to get SMT key for stateID: %w", err)
+			}
+			smtKeyStrings[i] = api.HexBytes(keyBytes).String()
+		}
+		existingSmtKeys, err := storage.SmtStorage().GetExistingKeys(ctx, smtKeyStrings)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get SMT key for stateID: %w", err)
+			return nil, fmt.Errorf("failed to check existing SMT nodes: %w", err)
 		}
-		smtKeyStrings[i] = api.HexBytes(keyBytes).String()
-	}
-	existingSmtKeys, err := storage.SmtStorage().GetExistingKeys(ctx, smtKeyStrings)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check existing SMT nodes: %w", err)
-	}
 
-	var missingRecords []indexedStateID
-	var missingSmtKeys []api.StateID
-	for i, stateID := range stateIDs {
-		if !existingRecordIDs[stateID.String()] {
-			missingRecords = append(missingRecords, indexedStateID{stateID: stateID, leafIndex: i})
+		var missingSmtKeys []api.StateID
+		for i, stateID := range stateIDs {
+			if !existingSmtKeys[smtKeyStrings[i]] {
+				missingSmtKeys = append(missingSmtKeys, stateID)
+			}
 		}
-		if !existingSmtKeys[smtKeyStrings[i]] {
-			missingSmtKeys = append(missingSmtKeys, stateID)
-		}
-	}
 
-	log.WithContext(ctx).Info("Recovery status",
-		"totalStateIDs", len(stateIDs),
-		"existingRecords", len(existingRecordIDs),
-		"existingSmtNodes", len(existingSmtKeys),
-		"missingRecords", len(missingRecords),
-		"missingSmtNodes", len(missingSmtKeys))
+		log.WithContext(ctx).Info("Recovery status",
+			"totalStateIDs", len(stateIDs),
+			"existingRecords", len(records),
+			"existingSmtNodes", len(existingSmtKeys),
+			"missingRecords", 0,
+			"missingSmtNodes", len(missingSmtKeys))
 
-	if len(missingRecords) > 0 || len(missingSmtKeys) > 0 {
-		if err := recoverMissingData(ctx, log, storage, commitmentQueue, block.Index, missingRecords, missingSmtKeys); err != nil {
-			return nil, err
+		if len(missingSmtKeys) > 0 {
+			if err := recoverMissingSMTNodes(ctx, log, storage, commitmentQueue, missingSmtKeys); err != nil {
+				return nil, err
+			}
 		}
+	} else {
+		log.WithContext(ctx).Info("Recovery status",
+			"totalStateIDs", len(stateIDs),
+			"existingRecords", len(records),
+			"repairSMTNodes", false)
 	}
 
-	if err := storage.BlockStorage().SetFinalized(ctx, block.Index, true); err != nil {
-		return nil, fmt.Errorf("failed to set block as finalized: %w", err)
+	if err := setBlockFinalizedWithCertificate(ctx, storage, block); err != nil {
+		return nil, err
 	}
 
 	// Ack certification requests in Redis - fetch only the ones we need by state ID.
@@ -159,100 +364,242 @@ func recoverBlock(
 	return stateIDs, nil
 }
 
-func recoverMissingData(
+func sortAggregatorRecordsByLeafIndex(records []*models.AggregatorRecord) {
+	sort.SliceStable(records, func(i, j int) bool {
+		left := records[i]
+		right := records[j]
+		if left == nil || left.LeafIndex == nil || left.LeafIndex.Int == nil {
+			return right != nil && right.LeafIndex != nil && right.LeafIndex.Int != nil
+		}
+		if right == nil || right.LeafIndex == nil || right.LeafIndex.Int == nil {
+			return false
+		}
+		return left.LeafIndex.Int.Cmp(right.LeafIndex.Int) < 0
+	})
+}
+
+func loadAggregatorRecordsForBlockAnyFinalization(ctx context.Context, storage interfaces.Storage, block *models.Block) ([]*models.AggregatorRecord, error) {
+	if block == nil {
+		return nil, fmt.Errorf("block is nil")
+	}
+	records, err := getAggregatorRecordsByBlockAndProposalAnyFinalization(ctx, storage, block.Index, block.ProposalID)
+	if err != nil {
+		return nil, err
+	}
+	sortAggregatorRecordsByLeafIndex(records)
+	return records, nil
+}
+
+func stateIDsAndLeavesFromAggregatorRecords(records []*models.AggregatorRecord) ([]api.StateID, []smtbackend.LeafInput, error) {
+	stateIDs := make([]api.StateID, len(records))
+	leaves := make([]smtbackend.LeafInput, len(records))
+	for i, record := range records {
+		if record == nil {
+			return nil, nil, fmt.Errorf("nil aggregator record at index %d", i)
+		}
+		stateIDs[i] = record.StateID
+		key, err := record.StateID.GetTreeKey()
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get SMT key for stateID %s: %w", record.StateID.String(), err)
+		}
+		leaves[i] = smtbackend.LeafInput{
+			Key:   append([]byte(nil), key...),
+			Value: append([]byte(nil), record.CertificationData.TransactionHash...),
+		}
+	}
+	return stateIDs, leaves, nil
+}
+
+func applyDurableProposalLeaves(ctx context.Context, snapshot smtbackend.Snapshot, leaves []smtbackend.LeafInput) ([]byte, error) {
+	if len(leaves) == 0 {
+		return snapshot.RootHashRaw(ctx)
+	}
+	result, err := snapshot.AddLeavesClassified(ctx, leaves)
+	if err != nil {
+		return nil, err
+	}
+	if err := result.ValidateAllAccepted(len(leaves)); err != nil {
+		return nil, err
+	}
+	return result.CandidateRoot, nil
+}
+
+func (rm *RoundManager) ackRecoveredProposalCommitments(ctx context.Context, blockNumber *api.BigInt, stateIDs []api.StateID) {
+	if rm.commitmentQueue == nil || len(stateIDs) == 0 {
+		return
+	}
+	commitmentMap, err := rm.commitmentQueue.GetByStateIDs(ctx, stateIDs)
+	if err != nil {
+		rm.logger.WithContext(ctx).Warn("Failed to load durable proposal commitments for ack",
+			"blockNumber", blockNumber.String(),
+			"error", err.Error())
+		return
+	}
+	if len(commitmentMap) == 0 {
+		return
+	}
+	ackEntries := make([]interfaces.CertificationRequestAck, 0, len(commitmentMap))
+	for _, commitment := range commitmentMap {
+		ackEntries = append(ackEntries, interfaces.CertificationRequestAck{
+			StateID:  commitment.StateID,
+			StreamID: commitment.StreamID,
+		})
+	}
+	if err := rm.commitmentQueue.MarkProcessed(ctx, ackEntries); err != nil {
+		rm.logger.WithContext(ctx).Warn("Failed to ack durable proposal commitments",
+			"blockNumber", blockNumber.String(),
+			"commitments", len(ackEntries),
+			"error", err.Error())
+	}
+}
+
+func recoverMissingSMTNodes(
 	ctx context.Context,
 	log *logger.Logger,
 	storage interfaces.Storage,
 	commitmentQueue interfaces.CommitmentQueue,
-	blockNumber *api.BigInt,
-	missingRecords []indexedStateID,
 	missingSmtKeys []api.StateID,
 ) error {
-	// Collect all needed state IDs.
-	neededIDsMap := make(map[string]api.StateID, len(missingRecords)+len(missingSmtKeys))
-	for _, missing := range missingRecords {
-		neededIDsMap[missing.stateID.String()] = missing.stateID
-	}
-	for _, stateID := range missingSmtKeys {
-		neededIDsMap[stateID.String()] = stateID
-	}
-	neededIDs := make([]api.StateID, 0, len(neededIDsMap))
-	for _, stateID := range neededIDsMap {
-		neededIDs = append(neededIDs, stateID)
+	if len(missingSmtKeys) == 0 {
+		return nil
 	}
 
-	// Fetch only the certification requests we need (streams in batches internally).
-	commitmentMap, err := commitmentQueue.GetByStateIDs(ctx, neededIDs)
+	commitmentMap, err := commitmentQueue.GetByStateIDs(ctx, missingSmtKeys)
 	if err != nil {
 		return fmt.Errorf("failed to get commitments: %w", err)
 	}
 
-	if len(missingRecords) > 0 {
-		var records []*models.AggregatorRecord
-		for _, missing := range missingRecords {
-			commitment, ok := commitmentMap[missing.stateID.String()]
-			if !ok {
-				existingRecord, err := storage.AggregatorRecordStorage().GetByStateID(ctx, missing.stateID)
-				if err != nil {
-					return fmt.Errorf("failed to check existing record: %w", err)
-				}
-				if existingRecord != nil {
-					continue
-				}
-				return fmt.Errorf("FATAL: certification request not found for stateID %s", missing.stateID)
+	var nodes []*models.SmtNode
+	for _, stateID := range missingSmtKeys {
+		commitment, ok := commitmentMap[stateID.String()]
+		if !ok {
+			keyBytes, err := stateID.GetTreeKey()
+			if err != nil {
+				return fmt.Errorf("failed to get SMT key for stateID: %w", err)
 			}
-			leafIndex := api.NewBigInt(nil)
-			leafIndex.SetInt64(int64(missing.leafIndex))
-			records = append(records, models.NewAggregatorRecord(commitment, blockNumber, leafIndex))
+			existingNode, err := storage.SmtStorage().GetByKey(ctx, keyBytes)
+			if err != nil {
+				return fmt.Errorf("failed to check existing SMT node: %w", err)
+			}
+			if existingNode != nil {
+				continue
+			}
+			existingRecord, err := getAggregatorRecordAnyFinalization(ctx, storage, stateID)
+			if err != nil {
+				return fmt.Errorf("failed to check existing aggregator record: %w", err)
+			}
+			if existingRecord == nil {
+				return fmt.Errorf("FATAL: durable aggregator record not found for SMT key %s", stateID)
+			}
+			nodes = append(nodes, models.NewSmtNode(keyBytes, append([]byte(nil), existingRecord.CertificationData.TransactionHash...)))
+			continue
 		}
 
-		if len(records) > 0 {
-			if err := storage.AggregatorRecordStorage().StoreBatch(ctx, records); err != nil {
-				return fmt.Errorf("failed to store missing aggregator records: %w", err)
-			}
-			log.WithContext(ctx).Info("Stored missing aggregator records", "count", len(records))
+		keyBytes, err := commitment.StateID.GetTreeKey()
+		if err != nil {
+			return fmt.Errorf("failed to get SMT key for commitment: %w", err)
 		}
+		leafValue, err := commitment.LeafValue()
+		if err != nil {
+			return fmt.Errorf("failed to create leaf value: %w", err)
+		}
+		nodes = append(nodes, models.NewSmtNode(keyBytes, leafValue))
 	}
 
-	if len(missingSmtKeys) > 0 {
-		var nodes []*models.SmtNode
-		for _, stateID := range missingSmtKeys {
-			commitment, ok := commitmentMap[stateID.String()]
-			if !ok {
-				keyBytes, err := stateID.GetTreeKey()
-				if err != nil {
-					return fmt.Errorf("failed to get SMT key for stateID: %w", err)
-				}
-				existingNode, err := storage.SmtStorage().GetByKey(ctx, keyBytes)
-				if err != nil {
-					return fmt.Errorf("failed to check existing SMT node: %w", err)
-				}
-				if existingNode != nil {
-					continue
-				}
-				return fmt.Errorf("FATAL: certification request not found for SMT key %s", stateID)
-			}
-
-			keyBytes, err := commitment.StateID.GetTreeKey()
-			if err != nil {
-				return fmt.Errorf("failed to get SMT key for commitment: %w", err)
-			}
-			leafValue, err := commitment.LeafValue()
-			if err != nil {
-				return fmt.Errorf("failed to create leaf value: %w", err)
-			}
-			nodes = append(nodes, models.NewSmtNode(keyBytes, leafValue))
+	if len(nodes) > 0 {
+		if err := storage.SmtStorage().StoreBatch(ctx, nodes); err != nil {
+			return fmt.Errorf("failed to store missing SMT nodes: %w", err)
 		}
-
-		if len(nodes) > 0 {
-			if err := storage.SmtStorage().StoreBatch(ctx, nodes); err != nil {
-				return fmt.Errorf("failed to store missing SMT nodes: %w", err)
-			}
-			log.WithContext(ctx).Info("Stored missing SMT nodes", "count", len(nodes))
-		}
+		log.WithContext(ctx).Info("Stored missing SMT nodes", "count", len(nodes))
 	}
 
 	return nil
+}
+
+func getBlockAnyFinalization(ctx context.Context, storage interfaces.Storage, blockNumber *api.BigInt) (*models.Block, error) {
+	if reader, ok := storage.BlockStorage().(blockAnyFinalizationStorage); ok {
+		return reader.GetByNumberAnyFinalization(ctx, blockNumber)
+	}
+	block, err := storage.BlockStorage().GetByNumber(ctx, blockNumber)
+	if err != nil {
+		return nil, err
+	}
+	if block != nil {
+		return block, nil
+	}
+	unfinalized, err := storage.BlockStorage().GetUnfinalized(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range unfinalized {
+		if candidate != nil && candidate.Index.Cmp(blockNumber.Int) == 0 {
+			return candidate, nil
+		}
+	}
+	return nil, nil
+}
+
+func setBlockFinalizedWithCertificate(ctx context.Context, storage interfaces.Storage, block *models.Block) error {
+	if updater, ok := storage.BlockStorage().(blockCertificateFinalizer); ok {
+		if err := updater.SetFinalizedWithCertificate(ctx, block); err != nil {
+			return fmt.Errorf("failed to set block as finalized: %w", err)
+		}
+		return nil
+	}
+	if err := storage.BlockStorage().SetFinalized(ctx, block.Index, true); err != nil {
+		return fmt.Errorf("failed to set block as finalized: %w", err)
+	}
+	return nil
+}
+
+func setBlockFinalizingWithCertificate(ctx context.Context, storage interfaces.Storage, block *models.Block) error {
+	if updater, ok := storage.BlockStorage().(blockCertificateFinalizingMarker); ok {
+		if err := updater.SetFinalizingWithCertificate(ctx, block); err != nil {
+			return fmt.Errorf("failed to set block as finalizing: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("block storage does not support certified finalizing marker")
+}
+
+func getAggregatorRecordAnyFinalization(ctx context.Context, storage interfaces.Storage, stateID api.StateID) (*models.AggregatorRecord, error) {
+	if reader, ok := storage.AggregatorRecordStorage().(aggregatorRecordAnyFinalizationStorage); ok {
+		return reader.GetByStateIDAnyFinalization(ctx, stateID)
+	}
+	return storage.AggregatorRecordStorage().GetByStateID(ctx, stateID)
+}
+
+func getAggregatorRecordsByBlockAnyFinalization(ctx context.Context, storage interfaces.Storage, blockNumber *api.BigInt) ([]*models.AggregatorRecord, error) {
+	if reader, ok := storage.AggregatorRecordStorage().(aggregatorRecordAnyFinalizationStorage); ok {
+		return reader.GetByBlockNumberAnyFinalization(ctx, blockNumber)
+	}
+	return storage.AggregatorRecordStorage().GetByBlockNumber(ctx, blockNumber)
+}
+
+func getAggregatorRecordsByBlockAndProposalAnyFinalization(
+	ctx context.Context,
+	storage interfaces.Storage,
+	blockNumber *api.BigInt,
+	proposalID string,
+) ([]*models.AggregatorRecord, error) {
+	if reader, ok := storage.AggregatorRecordStorage().(aggregatorRecordProposalAnyFinalizationStorage); ok {
+		return reader.GetByBlockNumberAndProposalIDAnyFinalization(ctx, blockNumber, proposalID)
+	}
+	records, err := getAggregatorRecordsByBlockAnyFinalization(ctx, storage, blockNumber)
+	if err != nil {
+		return nil, err
+	}
+	return filterAggregatorRecordsByProposalID(records, proposalID), nil
+}
+
+func filterAggregatorRecordsByProposalID(records []*models.AggregatorRecord, proposalID string) []*models.AggregatorRecord {
+	filtered := records[:0]
+	for _, record := range records {
+		if record != nil && record.ProposalID == proposalID {
+			filtered = append(filtered, record)
+		}
+	}
+	return filtered
 }
 
 // LoadRecoveredNodesIntoBackend loads SMT nodes for a recovered block into the active SMT backend.
@@ -269,8 +616,10 @@ func LoadRecoveredNodesIntoBackend(
 		return fmt.Errorf("SMT backend not initialized")
 	}
 	var expectedRoot []byte
+	var block *models.Block
 	if blockNumber != nil {
-		block, err := storage.BlockStorage().GetByNumber(ctx, blockNumber)
+		var err error
+		block, err = storage.BlockStorage().GetByNumber(ctx, blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to load recovered finalized block %s: %w", blockNumber.String(), err)
 		}
@@ -282,28 +631,29 @@ func LoadRecoveredNodesIntoBackend(
 		if blockNumber == nil {
 			return nil
 		}
-		state, err := backend.CommittedState(ctx)
+		return loadRecoveredLeavesIntoBackend(ctx, log, backend, blockNumber, expectedRoot, nil)
+	}
+
+	if usesDiskBackedBackend(backend) {
+		if blockNumber == nil {
+			return fmt.Errorf("disk recovered block number is nil")
+		}
+		if block == nil {
+			return fmt.Errorf("failed to load recovered finalized block %s", blockNumber.String())
+		}
+		records, err := loadAggregatorRecordsForBlockAnyFinalization(ctx, storage, block)
 		if err != nil {
-			return fmt.Errorf("failed to read SMT backend state: %w", err)
+			return fmt.Errorf("failed to load recovered aggregator records: %w", err)
 		}
-		snapshot, err := backend.CreateSnapshot(ctx)
+		recordStateIDs, leaves, err := stateIDsAndLeavesFromAggregatorRecords(records)
 		if err != nil {
-			return fmt.Errorf("failed to create SMT snapshot: %w", err)
+			return fmt.Errorf("failed to load recovered leaves from aggregator records: %w", err)
 		}
-		defer snapshot.Discard(ctx)
-		rootHash := state.RootHash
-		if expectedRoot != nil {
-			if !bytes.Equal(state.RootHash, expectedRoot) {
-				return fmt.Errorf("recovered empty block root mismatch: SMT=%s block=%s",
-					api.HexBytes(state.RootHash).String(), api.HexBytes(expectedRoot).String())
-			}
-			rootHash = expectedRoot
+		if !sameStateIDs(recordStateIDs, stateIDs) {
+			return fmt.Errorf("recovered aggregator records state IDs mismatch: records=%d recovered=%d", len(recordStateIDs), len(stateIDs))
 		}
-		if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: blockNumber, RootHash: rootHash}); err != nil {
-			return fmt.Errorf("failed to advance recovered SMT metadata: %w", err)
-		}
-		log.WithContext(ctx).Info("Advanced recovered SMT metadata", "blockNumber", blockNumber.String())
-		return nil
+		log.WithContext(ctx).Info("Loading recovered records into disk SMT", "count", len(leaves))
+		return loadRecoveredLeavesIntoBackend(ctx, log, backend, blockNumber, expectedRoot, leaves)
 	}
 
 	log.WithContext(ctx).Info("Loading recovered SMT nodes", "count", len(stateIDs))
@@ -342,23 +692,49 @@ func LoadRecoveredNodesIntoBackend(
 		}
 	}
 
+	return loadRecoveredLeavesIntoBackend(ctx, log, backend, blockNumber, expectedRoot, leaves)
+}
+
+func usesDiskBackedBackend(backend smtbackend.Backend) bool {
+	diskBacked, ok := backend.(smtbackend.DiskBacked)
+	return ok && diskBacked.IsDiskBackedSMT()
+}
+
+func loadRecoveredLeavesIntoBackend(
+	ctx context.Context,
+	log *logger.Logger,
+	backend smtbackend.Backend,
+	blockNumber *api.BigInt,
+	expectedRoot []byte,
+	leaves []smtbackend.LeafInput,
+) error {
 	snapshot, err := backend.CreateSnapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create SMT snapshot: %w", err)
 	}
 	defer snapshot.Discard(ctx)
-	result, err := snapshot.AddLeavesClassified(ctx, leaves)
-	if err != nil {
-		return fmt.Errorf("failed to add recovered nodes to SMT: %w", err)
+
+	var rootHash []byte
+	if len(leaves) == 0 {
+		state, err := backend.CommittedState(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to read SMT backend state: %w", err)
+		}
+		rootHash = state.RootHash
+	} else {
+		result, err := snapshot.AddLeavesClassified(ctx, leaves)
+		if err != nil {
+			return fmt.Errorf("failed to add recovered nodes to SMT: %w", err)
+		}
+		if err := result.ValidateAllAccepted(len(leaves)); err != nil {
+			return fmt.Errorf("failed to add recovered nodes to SMT: %w", err)
+		}
+		rootHash = result.CandidateRoot
 	}
-	if err := result.ValidateAllAccepted(len(leaves)); err != nil {
-		return fmt.Errorf("failed to add recovered nodes to SMT: %w", err)
-	}
-	rootHash := result.CandidateRoot
 	if expectedRoot != nil {
-		if !bytes.Equal(result.CandidateRoot, expectedRoot) {
+		if !bytes.Equal(rootHash, expectedRoot) {
 			return fmt.Errorf("recovered SMT root mismatch: candidate=%s block=%s",
-				api.HexBytes(result.CandidateRoot).String(), api.HexBytes(expectedRoot).String())
+				api.HexBytes(rootHash).String(), api.HexBytes(expectedRoot).String())
 		}
 		rootHash = expectedRoot
 	}
@@ -366,15 +742,8 @@ func LoadRecoveredNodesIntoBackend(
 		return fmt.Errorf("failed to commit recovered nodes to SMT: %w", err)
 	}
 
-	log.WithContext(ctx).Info("Loaded recovered SMT nodes", "count", len(nodes))
+	log.WithContext(ctx).Info("Loaded recovered SMT nodes", "count", len(leaves))
 	return nil
-}
-func stateIDsToStrings(stateIDs []api.StateID) []string {
-	result := make([]string, len(stateIDs))
-	for i, stateID := range stateIDs {
-		result[i] = stateID.String()
-	}
-	return result
 }
 
 // CleanupProcessedPendingCommitments ACKs pending commitments that are already in AggregatorRecords.

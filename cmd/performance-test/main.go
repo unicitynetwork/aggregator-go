@@ -8,8 +8,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -43,6 +46,7 @@ const (
 	defaultStartupProbeWait  = 60 * time.Second
 	startupProbeInterval     = 250 * time.Millisecond
 	defaultBufferSeconds     = 10
+	defaultProofReadyMetric  = "aggregator_proof_readiness_seconds"
 )
 
 // Sharding modes for routing generated state IDs to shard endpoints.
@@ -63,11 +67,14 @@ var (
 	proofRetryDelay    = getEnvDuration("PROOF_RETRY_DELAY", defaultProofRetryDelay)
 	proofInitialDelay  = getEnvDuration("PROOF_INITIAL_DELAY", defaultProofInitialDelay)
 	startupProbeWait   = getEnvDuration("STARTUP_PROBE_WAIT", defaultStartupProbeWait)
+	requestWireFormat  = strings.ToLower(strings.TrimSpace(os.Getenv("CERTIFICATION_REQUEST_WIRE_FORMAT")))
 	commitmentBuffer   = getCommitmentBufferSize()
 	verifyProofs       = getEnvBool("VERIFY_PROOFS", true)
+	verifyProofCrypto  = getEnvBool("VERIFY_PROOF_CRYPTO", true)
 	shardingMode       = getShardingMode()
 	shardTargets       = getEnvShardTargets()
 	enableH2C          = os.Getenv("ENABLE_H2C") != "false"
+	proofReadyMetric   = getEnvString("SERVER_PROOF_READINESS_METRIC", defaultProofReadyMetric)
 )
 
 func getShardingMode() string {
@@ -118,6 +125,13 @@ func getEnvBool(key string, defaultVal bool) bool {
 		if b, err := strconv.ParseBool(val); err == nil {
 			return b
 		}
+	}
+	return defaultVal
+}
+
+func getEnvString(key string, defaultVal string) string {
+	if val := strings.TrimSpace(os.Getenv(key)); val != "" {
+		return val
 	}
 	return defaultVal
 }
@@ -324,6 +338,284 @@ func buildShardClients(aggregatorURL, authHeader string, metrics *Metrics) []*Sh
 	return clients
 }
 
+type proofReadinessHistogramSnapshot struct {
+	metricName string
+	buckets    map[float64]float64
+	targets    int
+}
+
+func metricsEndpoint(target string) (string, error) {
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("target URL must include scheme and host: %q", target)
+	}
+	parsed.Path = "/metrics"
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
+func scrapeProofReadinessHistogram(ctx context.Context, shardClients []*ShardClient, authHeader string) (*proofReadinessHistogramSnapshot, error) {
+	if len(shardClients) == 0 {
+		return nil, fmt.Errorf("no shard clients configured")
+	}
+
+	snapshot := &proofReadinessHistogramSnapshot{
+		metricName: proofReadyMetric,
+		buckets:    make(map[float64]float64),
+	}
+	var errors []string
+	for _, sc := range shardClients {
+		endpoint, err := metricsEndpoint(sc.url)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", sc.url, err))
+			continue
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", endpoint, err))
+			continue
+		}
+		if authHeader != "" {
+			req.Header.Set("Authorization", authHeader)
+		}
+
+		client := newHTTPClient(sc.url, nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", endpoint, err))
+			continue
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", endpoint, readErr))
+			continue
+		}
+		if closeErr != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", endpoint, closeErr))
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			errors = append(errors, fmt.Sprintf("%s: HTTP %d", endpoint, resp.StatusCode))
+			continue
+		}
+
+		buckets, err := parseProofReadinessBuckets(body, proofReadyMetric)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", endpoint, err))
+			continue
+		}
+		for le, value := range buckets {
+			snapshot.buckets[le] += value
+		}
+		snapshot.targets++
+	}
+
+	if snapshot.targets == 0 {
+		if len(errors) == 0 {
+			return nil, fmt.Errorf("no %s_bucket metrics found", proofReadyMetric)
+		}
+		return nil, fmt.Errorf("no %s_bucket metrics found (%s)", proofReadyMetric, strings.Join(errors, "; "))
+	}
+	if len(errors) > 0 {
+		fmt.Printf("Warning: skipped %d metrics target(s): %s\n", len(errors), strings.Join(errors, "; "))
+	}
+	return snapshot, nil
+}
+
+func parseProofReadinessBuckets(body []byte, metricName string) (map[float64]float64, error) {
+	bucketMetric := metricName + "_bucket"
+	buckets := make(map[float64]float64)
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !strings.HasPrefix(line, bucketMetric+"{") && !strings.HasPrefix(line, bucketMetric+" ") {
+			continue
+		}
+
+		le, ok := parseHistogramLE(line)
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		value, err := strconv.ParseFloat(fields[1], 64)
+		if err != nil {
+			continue
+		}
+		buckets[le] += value
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(buckets) == 0 {
+		return nil, fmt.Errorf("metric %s not present", bucketMetric)
+	}
+	return buckets, nil
+}
+
+func parseHistogramLE(line string) (float64, bool) {
+	idx := strings.Index(line, `le="`)
+	if idx < 0 {
+		return 0, false
+	}
+	rest := line[idx+len(`le="`):]
+	end := strings.IndexByte(rest, '"')
+	if end < 0 {
+		return 0, false
+	}
+	raw := rest[:end]
+	if raw == "+Inf" {
+		return math.Inf(1), true
+	}
+	le, err := strconv.ParseFloat(raw, 64)
+	return le, err == nil
+}
+
+func proofReadinessHistogramDelta(before, after *proofReadinessHistogramSnapshot) (*proofReadinessHistogramSnapshot, error) {
+	if before == nil || after == nil {
+		return nil, fmt.Errorf("missing before/after histogram snapshot")
+	}
+	if before.metricName != after.metricName {
+		return nil, fmt.Errorf("metric changed from %s to %s", before.metricName, after.metricName)
+	}
+	delta := &proofReadinessHistogramSnapshot{
+		metricName: after.metricName,
+		buckets:    make(map[float64]float64),
+		targets:    after.targets,
+	}
+	for le, afterValue := range after.buckets {
+		value := afterValue - before.buckets[le]
+		if value < 0 {
+			return nil, fmt.Errorf("histogram bucket %v decreased from %.0f to %.0f", le, before.buckets[le], afterValue)
+		}
+		delta.buckets[le] = value
+	}
+	return delta, nil
+}
+
+func histogramTotal(buckets map[float64]float64) float64 {
+	if total, ok := buckets[math.Inf(1)]; ok {
+		return total
+	}
+	var total float64
+	for le, value := range buckets {
+		if !math.IsInf(le, 1) && value > total {
+			total = value
+		}
+	}
+	return total
+}
+
+func histogramCountLE(buckets map[float64]float64, target float64) float64 {
+	var bestLE float64
+	var bestValue float64
+	found := false
+	for le, value := range buckets {
+		if math.IsInf(le, 1) || le > target {
+			continue
+		}
+		if !found || le > bestLE {
+			bestLE = le
+			bestValue = value
+			found = true
+		}
+	}
+	if !found {
+		return 0
+	}
+	return bestValue
+}
+
+func histogramQuantile(q float64, buckets map[float64]float64) float64 {
+	total := histogramTotal(buckets)
+	if total <= 0 {
+		return math.NaN()
+	}
+	rank := q * total
+	bounds := make([]float64, 0, len(buckets))
+	for le := range buckets {
+		if !math.IsInf(le, 1) {
+			bounds = append(bounds, le)
+		}
+	}
+	sort.Float64s(bounds)
+
+	var prevBound float64
+	var prevCount float64
+	for _, bound := range bounds {
+		count := buckets[bound]
+		if count >= rank {
+			bucketCount := count - prevCount
+			if bucketCount <= 0 {
+				return bound
+			}
+			fraction := (rank - prevCount) / bucketCount
+			return prevBound + (bound-prevBound)*fraction
+		}
+		prevBound = bound
+		prevCount = count
+	}
+	if len(bounds) > 0 {
+		return bounds[len(bounds)-1]
+	}
+	return math.NaN()
+}
+
+func formatSeconds(seconds float64) string {
+	if math.IsNaN(seconds) {
+		return "n/a"
+	}
+	if math.IsInf(seconds, 1) {
+		return "+Inf"
+	}
+	return time.Duration(seconds * float64(time.Second)).Truncate(time.Millisecond).String()
+}
+
+func printServerProofReadinessHistogram(before, after *proofReadinessHistogramSnapshot, beforeErr, afterErr error) {
+	fmt.Printf("\nSERVER PROOF READINESS HISTOGRAM:\n")
+	if beforeErr != nil {
+		fmt.Printf("  unavailable before test: %v\n", beforeErr)
+		return
+	}
+	if afterErr != nil {
+		fmt.Printf("  unavailable after test: %v\n", afterErr)
+		return
+	}
+
+	delta, err := proofReadinessHistogramDelta(before, after)
+	if err != nil {
+		fmt.Printf("  unavailable: %v\n", err)
+		return
+	}
+
+	total := histogramTotal(delta.buckets)
+	if total <= 0 {
+		fmt.Printf("  no samples in test window for %s_bucket\n", delta.metricName)
+		return
+	}
+	within1s := histogramCountLE(delta.buckets, 1.0)
+	fmt.Printf("  Source: direct /metrics scrape, %s_bucket, %d target(s)\n", delta.metricName, delta.targets)
+	fmt.Printf("  Samples: %.0f\n", total)
+	fmt.Printf("  <=1s: %.0f/%.0f (%.1f%%)\n", within1s, total, within1s/total*100)
+	fmt.Printf("  Global server proof readiness: p50 %s, p95 %s, p99 %s\n",
+		formatSeconds(histogramQuantile(0.50, delta.buckets)),
+		formatSeconds(histogramQuantile(0.95, delta.buckets)),
+		formatSeconds(histogramQuantile(0.99, delta.buckets)))
+}
+
 func selectShardIndex(stateID api.StateID, shardClients []*ShardClient) int {
 	shardCount := len(shardClients)
 	if shardCount <= 1 {
@@ -472,7 +764,7 @@ func generateCommitmentRequest() *api.CertificationRequest {
 	}
 
 	for {
-		calculated, err := api.CreateStateID(ownerPredicate, sourceStateHash)
+		calculated, err := createStateIDForWireFormat(ownerPredicate, sourceStateHash)
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create state ID: %v", err))
 		}
@@ -510,6 +802,49 @@ func generateCommitmentRequest() *api.CertificationRequest {
 		StateID:           stateID,
 		CertificationData: *certData,
 	}
+}
+
+// Wire-format hooks allow optional local overrides of request/response
+// encoding. When no hook is registered, the standard JSON/CBOR path is used.
+var (
+	stateIDWireFormatHook func(ownerPredicate api.Predicate, sourceStateHash api.SourceStateHash) (api.StateID, bool, error)
+	encodeParamsHook      func(method string, params interface{}) (interface{}, bool, error)
+	decodeProofHook       func(respBytes []byte) (*api.GetInclusionProofResponseV2, bool, error)
+)
+
+func createStateIDForWireFormat(ownerPredicate api.Predicate, sourceStateHash api.SourceStateHash) (api.StateID, error) {
+	if stateIDWireFormatHook != nil {
+		if id, handled, err := stateIDWireFormatHook(ownerPredicate, sourceStateHash); handled {
+			return id, err
+		}
+	}
+	return api.CreateStateID(ownerPredicate, sourceStateHash)
+}
+
+func encodeJSONRPCParams(method string, params interface{}) (interface{}, error) {
+	if encodeParamsHook != nil {
+		if out, handled, err := encodeParamsHook(method, params); handled {
+			return out, err
+		}
+	}
+	return params, nil
+}
+
+func decodeProofResponse(result interface{}) (*api.GetInclusionProofResponseV2, error) {
+	respBytes, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("marshal proof response: %w", err)
+	}
+	if decodeProofHook != nil {
+		if resp, handled, err := decodeProofHook(respBytes); handled {
+			return resp, err
+		}
+	}
+	var proofResp api.GetInclusionProofResponseV2
+	if err := json.Unmarshal(respBytes, &proofResp); err != nil {
+		return nil, err
+	}
+	return &proofResp, nil
 }
 
 func startCommitmentGenerator(ctx context.Context, total, bufferSize, workers, progressEvery int, label string) <-chan *api.CertificationRequest {
@@ -809,17 +1144,8 @@ func verifyProofJob(ctx context.Context, shardClients []*ShardClient, metrics *M
 			continue
 		}
 
-		var proofResp api.GetInclusionProofResponseV2
-		respBytes, err := json.Marshal(resp.Result)
+		proofResp, err := decodeProofResponse(resp.Result)
 		if err != nil {
-			metrics.recordError(fmt.Sprintf("Failed to marshal proof response: %v", err))
-			atomic.AddInt64(&metrics.proofFailed, 1)
-			if sm := metrics.shard(shardIdx); sm != nil {
-				sm.proofFailed.Add(1)
-			}
-			return
-		}
-		if err := json.Unmarshal(respBytes, &proofResp); err != nil {
 			metrics.recordError(fmt.Sprintf("Failed to parse proof response: %v", err))
 			atomic.AddInt64(&metrics.proofFailed, 1)
 			if sm := metrics.shard(shardIdx); sm != nil {
@@ -852,6 +1178,14 @@ func verifyProofJob(ctx context.Context, shardClients []*ShardClient, metrics *M
 			totalLatency = time.Since(startTime) + proofInitialDelay
 		}
 		metrics.addProofLatency(totalLatency)
+
+		if !verifyProofCrypto {
+			atomic.AddInt64(&metrics.proofVerified, 1)
+			if sm := metrics.shard(shardIdx); sm != nil {
+				sm.proofVerified.Add(1)
+			}
+			return
+		}
 
 		if err := proofverify.VerifyInclusionProofLocal(proofResp.InclusionProof, job.request); err != nil {
 			if attempt < proofMaxRetries-1 {
@@ -1087,15 +1421,16 @@ func parseAggregatorRoundLogs(path string, start, end time.Time) ([]aggregatorRo
 		if err := json.Unmarshal(line, &raw); err != nil {
 			continue
 		}
-		if raw.Msg != "PERF: Round completed" {
-			continue
-		}
 
 		timestamp, err := time.Parse(time.RFC3339Nano, raw.Time)
 		if err != nil {
 			continue
 		}
-		if timestamp.Before(start) || timestamp.After(end) {
+		if timestamp.Before(start) || timestamp.After(end) || raw.Block == "" {
+			continue
+		}
+
+		if raw.Msg != "Round completed" {
 			continue
 		}
 
@@ -1156,6 +1491,30 @@ func parseAggregatorRoundLogs(path string, start, end time.Time) ([]aggregatorRo
 		if err != nil {
 			continue
 		}
+		finalizeSmtCommitCollect, hasFinalizeSmtCommitCollect, err := parseOptionalLogDuration(raw.FinalizeSmtCommitCollect)
+		if err != nil {
+			continue
+		}
+		finalizeSmtCommitTombstone, hasFinalizeSmtCommitTombstone, err := parseOptionalLogDuration(raw.FinalizeSmtCommitTombstone)
+		if err != nil {
+			continue
+		}
+		finalizeSmtCommitBatchBuild, hasFinalizeSmtCommitBatchBuild, err := parseOptionalLogDuration(raw.FinalizeSmtCommitBatchBuild)
+		if err != nil {
+			continue
+		}
+		finalizeSmtCommitRootHash, hasFinalizeSmtCommitRootHash, err := parseOptionalLogDuration(raw.FinalizeSmtCommitRootHash)
+		if err != nil {
+			continue
+		}
+		finalizeSmtCommitEngineWrite, hasFinalizeSmtCommitEngineWrite, err := parseOptionalLogDuration(raw.FinalizeSmtCommitEngineWrite)
+		if err != nil {
+			continue
+		}
+		finalizeSmtCommitCacheUpdate, hasFinalizeSmtCommitCacheUpdate, err := parseOptionalLogDuration(raw.FinalizeSmtCommitCacheUpdate)
+		if err != nil {
+			continue
+		}
 		finalizeSetFinalized, hasFinalizeSetFinalized, err := parseOptionalLogDuration(raw.FinalizeSetFinalized)
 		if err != nil {
 			continue
@@ -1164,7 +1523,12 @@ func parseAggregatorRoundLogs(path string, start, end time.Time) ([]aggregatorRo
 		if err != nil {
 			continue
 		}
-		hasFinalizationBreakdown := hasFinalizeScan || hasFinalizeConvert || hasFinalizeStoreBlock || hasFinalizeStoreBlockDoc || hasFinalizeStoreBlockRecords || hasFinalizeStoreData || hasFinalizeStoreSmt || hasFinalizeStoreRecords || hasFinalizeLockWait || hasFinalizeSmtCommit || hasFinalizeSetFinalized || hasFinalizeAck
+		hasFinalizationBreakdown := hasFinalizeScan || hasFinalizeConvert || hasFinalizeStoreBlock || hasFinalizeStoreBlockDoc || hasFinalizeStoreBlockRecords || hasFinalizeStoreData || hasFinalizeStoreSmt || hasFinalizeStoreRecords || hasFinalizeLockWait || hasFinalizeSmtCommit || hasFinalizeSmtCommitCollect || hasFinalizeSmtCommitTombstone || hasFinalizeSmtCommitBatchBuild || hasFinalizeSmtCommitRootHash || hasFinalizeSmtCommitEngineWrite || hasFinalizeSmtCommitCacheUpdate || hasFinalizeSetFinalized || hasFinalizeAck
+
+		proposalToProofReadyDur, hasProposalToProofReady, err := parseOptionalLogDuration(raw.ProposalToProofReady)
+		if err != nil {
+			continue
+		}
 
 		medianDur, hasMedian, err := parseOptionalLogDuration(raw.ProofReadyMedian)
 		if err != nil {
@@ -1183,34 +1547,45 @@ func parseAggregatorRoundLogs(path string, start, end time.Time) ([]aggregatorRo
 			continue
 		}
 
-		summaries = append(summaries, aggregatorRoundSummary{
-			Timestamp:                 timestamp,
-			Block:                     raw.Block,
-			Commitments:               raw.Commitments,
-			RoundTime:                 roundDur,
-			Processing:                procDur,
-			BftWait:                   bftDur,
-			Finalization:              finalDur,
-			HasFinalizationBreakdown:  hasFinalizationBreakdown,
-			FinalizeScan:              finalizeScan,
-			FinalizeConvert:           finalizeConvert,
-			FinalizeStoreBlock:        finalizeStoreBlock,
-			FinalizeStoreBlockDoc:     finalizeStoreBlockDoc,
-			FinalizeStoreBlockRecords: finalizeStoreBlockRecords,
-			FinalizeStoreData:         finalizeStoreData,
-			FinalizeStoreSmt:          finalizeStoreSmt,
-			FinalizeStoreRecords:      finalizeStoreRecords,
-			FinalizeLockWait:          finalizeLockWait,
-			FinalizeSmtCommit:         finalizeSmtCommit,
-			FinalizeSetFinalized:      finalizeSetFinalized,
-			FinalizeAck:               finalizeAck,
-			HasProofReady:             hasProofReady,
-			ProofMedian:               medianDur,
-			ProofP95:                  p95Dur,
-			ProofP99:                  p99Dur,
-			RedisTotal:                raw.RedisTotal,
-			RedisPending:              raw.RedisPending,
-		})
+		summary := aggregatorRoundSummary{
+			Timestamp:                    timestamp,
+			Block:                        raw.Block,
+			Commitments:                  raw.Commitments,
+			RoundTime:                    roundDur,
+			Processing:                   procDur,
+			BftWait:                      bftDur,
+			Finalization:                 finalDur,
+			HasFinalizationBreakdown:     hasFinalizationBreakdown,
+			FinalizeScan:                 finalizeScan,
+			FinalizeConvert:              finalizeConvert,
+			FinalizeStoreBlock:           finalizeStoreBlock,
+			FinalizeStoreBlockDoc:        finalizeStoreBlockDoc,
+			FinalizeStoreBlockRecords:    finalizeStoreBlockRecords,
+			FinalizeStoreData:            finalizeStoreData,
+			FinalizeStoreSmt:             finalizeStoreSmt,
+			FinalizeStoreRecords:         finalizeStoreRecords,
+			FinalizeLockWait:             finalizeLockWait,
+			FinalizeSmtCommit:            finalizeSmtCommit,
+			FinalizeSmtCommitCollect:     finalizeSmtCommitCollect,
+			FinalizeSmtCommitTombstone:   finalizeSmtCommitTombstone,
+			FinalizeSmtCommitBatchBuild:  finalizeSmtCommitBatchBuild,
+			FinalizeSmtCommitRootHash:    finalizeSmtCommitRootHash,
+			FinalizeSmtCommitEngineWrite: finalizeSmtCommitEngineWrite,
+			FinalizeSmtCommitCacheUpdate: finalizeSmtCommitCacheUpdate,
+			FinalizeSmtCommitNodeWrites:  raw.FinalizeSmtCommitNodeWrites,
+			FinalizeSmtCommitNodeDeletes: raw.FinalizeSmtCommitNodeDeletes,
+			FinalizeSetFinalized:         finalizeSetFinalized,
+			FinalizeAck:                  finalizeAck,
+			HasProposalToProofReady:      hasProposalToProofReady,
+			ProposalToProofReady:         proposalToProofReadyDur,
+			HasProofReady:                hasProofReady,
+			ProofMedian:                  medianDur,
+			ProofP95:                     p95Dur,
+			ProofP99:                     p99Dur,
+			RedisTotal:                   raw.RedisTotal,
+			RedisPending:                 raw.RedisPending,
+		}
+		summaries = append(summaries, summary)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -1220,9 +1595,129 @@ func parseAggregatorRoundLogs(path string, start, end time.Time) ([]aggregatorRo
 	return summaries, nil
 }
 
+func parseAggregatorPrecollectorLogs(path string, start, end time.Time) ([]aggregatorPrecollectorSummary, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	if end.Before(start) {
+		start, end = end, start
+	}
+
+	scanner := bufio.NewScanner(file)
+	buf := make([]byte, 0, 1024*1024)
+	scanner.Buffer(buf, 10*1024*1024)
+
+	var summaries []aggregatorPrecollectorSummary
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+
+		var raw aggregatorLogRaw
+		if err := json.Unmarshal(line, &raw); err != nil {
+			continue
+		}
+		if raw.Msg != "Precollector prepared" && raw.Msg != "Precollector advanced" {
+			continue
+		}
+
+		timestamp, err := time.Parse(time.RFC3339Nano, raw.Time)
+		if err != nil {
+			continue
+		}
+		if timestamp.Before(start) || timestamp.After(end) {
+			continue
+		}
+
+		advanceFlush, _, err := parseOptionalLogDuration(raw.AdvanceFlush)
+		if err != nil {
+			continue
+		}
+		flushTotal, _, err := parseOptionalLogDuration(raw.FlushTotal)
+		if err != nil {
+			continue
+		}
+		flushMax, _, err := parseOptionalLogDuration(raw.FlushMax)
+		if err != nil {
+			continue
+		}
+		stageTotal, _, err := parseOptionalLogDuration(raw.StageTotal)
+		if err != nil {
+			continue
+		}
+		stageMax, _, err := parseOptionalLogDuration(raw.StageMax)
+		if err != nil {
+			continue
+		}
+		fork, _, err := parseOptionalLogDuration(raw.Fork)
+		if err != nil {
+			continue
+		}
+		total, _, err := parseOptionalLogDuration(raw.Total)
+		if err != nil {
+			continue
+		}
+
+		summaries = append(summaries, aggregatorPrecollectorSummary{
+			Timestamp:        timestamp,
+			Prepared:         raw.Msg == "Precollector prepared",
+			Advance:          raw.Msg == "Precollector advanced",
+			Commitments:      raw.Commitments,
+			Leaves:           raw.Leaves,
+			PendingAtAdvance: raw.PendingAtAdvance,
+			TailMerged:       raw.TailMerged,
+			TailRemaining:    raw.TailRemaining,
+			AlreadyPrepared:  raw.AlreadyPrepared,
+			AdvanceFlush:     advanceFlush,
+			FlushCalls:       raw.FlushCalls,
+			FlushAdded:       raw.FlushAdded,
+			FlushTotal:       flushTotal,
+			FlushMax:         flushMax,
+			StageCalls:       raw.StageCalls,
+			StageAdded:       raw.StageAdded,
+			StageTotal:       stageTotal,
+			StageMax:         stageMax,
+			Fork:             fork,
+			Total:            total,
+		})
+	}
+
+	if err := scanner.Err(); err != nil {
+		return summaries, err
+	}
+	return summaries, nil
+}
+
 type aggregatorLogSource struct {
 	label string
 	path  string
+}
+
+type aggregatorPrecollectorSummary struct {
+	Timestamp        time.Time
+	Prepared         bool
+	Advance          bool
+	Commitments      int
+	Leaves           int
+	PendingAtAdvance int
+	TailMerged       int
+	TailRemaining    int
+	AlreadyPrepared  bool
+	AdvanceFlush     time.Duration
+	FlushCalls       int
+	FlushAdded       int
+	FlushTotal       time.Duration
+	FlushMax         time.Duration
+	StageCalls       int
+	StageAdded       int
+	StageTotal       time.Duration
+	StageMax         time.Duration
+	Fork             time.Duration
+	Total            time.Duration
 }
 
 func parseAggregatorLogSourcesOverride(raw string) []aggregatorLogSource {
@@ -1339,6 +1834,9 @@ func printFinalizationBreakdownSummary(label string, entries []aggregatorRoundSu
 	var scanSum, convertSum, storeBlockSum, storeBlockDocSum, storeBlockRecordsSum, storeDataSum time.Duration
 	var storeSmtSum, storeRecordsSum, lockWaitSum time.Duration
 	var smtCommitSum, setFinalizedSum, ackSum time.Duration
+	var smtCommitCollectSum, smtCommitTombstoneSum, smtCommitBatchBuildSum time.Duration
+	var smtCommitRootHashSum, smtCommitEngineWriteSum, smtCommitCacheUpdateSum time.Duration
+	var smtCommitNodeWritesSum, smtCommitNodeDeletesSum int
 	for _, entry := range withBreakdown {
 		scanSum += entry.FinalizeScan
 		convertSum += entry.FinalizeConvert
@@ -1350,12 +1848,21 @@ func printFinalizationBreakdownSummary(label string, entries []aggregatorRoundSu
 		storeRecordsSum += entry.FinalizeStoreRecords
 		lockWaitSum += entry.FinalizeLockWait
 		smtCommitSum += entry.FinalizeSmtCommit
+		smtCommitCollectSum += entry.FinalizeSmtCommitCollect
+		smtCommitTombstoneSum += entry.FinalizeSmtCommitTombstone
+		smtCommitBatchBuildSum += entry.FinalizeSmtCommitBatchBuild
+		smtCommitRootHashSum += entry.FinalizeSmtCommitRootHash
+		smtCommitEngineWriteSum += entry.FinalizeSmtCommitEngineWrite
+		smtCommitCacheUpdateSum += entry.FinalizeSmtCommitCacheUpdate
+		smtCommitNodeWritesSum += entry.FinalizeSmtCommitNodeWrites
+		smtCommitNodeDeletesSum += entry.FinalizeSmtCommitNodeDeletes
 		setFinalizedSum += entry.FinalizeSetFinalized
 		ackSum += entry.FinalizeAck
 	}
 
 	count := time.Duration(len(withBreakdown))
-	fmt.Printf("%s finalization breakdown: scan=%v convert=%v storeBlock=%v (blockDoc=%v blockRecords=%v) storeData=%v (smt=%v records=%v) lockWait=%v smtCommit=%v setFinalized=%v ack=%v (%d rounds)\n",
+	intCount := len(withBreakdown)
+	fmt.Printf("%s finalization breakdown: scan=%v convert=%v storeBlock=%v (blockDoc=%v blockRecords=%v) storeData=%v (smt=%v records=%v) lockWait=%v smtCommit=%v (collect=%v tombstone=%v batchBuild=%v rootHash=%v engineWrite=%v cacheUpdate=%v nodeWrites=%d nodeDeletes=%d) setFinalized=%v ack=%v (%d rounds)\n",
 		prefix,
 		(scanSum / count).Truncate(time.Millisecond),
 		(convertSum / count).Truncate(time.Millisecond),
@@ -1367,9 +1874,116 @@ func printFinalizationBreakdownSummary(label string, entries []aggregatorRoundSu
 		(storeRecordsSum / count).Truncate(time.Millisecond),
 		(lockWaitSum / count).Truncate(time.Millisecond),
 		(smtCommitSum / count).Truncate(time.Millisecond),
+		(smtCommitCollectSum / count).Truncate(time.Millisecond),
+		(smtCommitTombstoneSum / count).Truncate(time.Millisecond),
+		(smtCommitBatchBuildSum / count).Truncate(time.Millisecond),
+		(smtCommitRootHashSum / count).Truncate(time.Millisecond),
+		(smtCommitEngineWriteSum / count).Truncate(time.Millisecond),
+		(smtCommitCacheUpdateSum / count).Truncate(time.Millisecond),
+		smtCommitNodeWritesSum/intCount,
+		smtCommitNodeDeletesSum/intCount,
 		(setFinalizedSum / count).Truncate(time.Millisecond),
 		(ackSum / count).Truncate(time.Millisecond),
 		len(withBreakdown))
+}
+
+func printPrecollectorBreakdownSummary(label string, entries []aggregatorPrecollectorSummary) {
+	prefix := "Average"
+	if label != "" {
+		prefix = label + " average"
+	}
+	if len(entries) == 0 {
+		return
+	}
+
+	var prepareCount, advanceCount int
+	var prepareTotal, prepareFlushTotal, prepareStageTotal, prepareFork time.Duration
+	var prepareCommitments, prepareLeaves, prepareFlushCalls, prepareFlushAdded, prepareStageCalls, prepareStageAdded int
+	var advanceTotal, advanceFlush, advanceFlushTotal, advanceFlushMax, advanceStageTotal, advanceStageMax, advanceFork time.Duration
+	var advanceCommitments, advanceLeaves, advancePending, advanceTailMerged, advanceTailRemaining int
+	var advanceFlushCalls, advanceFlushAdded, advanceStageCalls, advanceStageAdded, alreadyPrepared int
+
+	for _, entry := range entries {
+		if entry.Prepared {
+			prepareCount++
+			prepareTotal += entry.Total
+			prepareFlushTotal += entry.FlushTotal
+			prepareStageTotal += entry.StageTotal
+			prepareFork += entry.Fork
+			prepareCommitments += entry.Commitments
+			prepareLeaves += entry.Leaves
+			prepareFlushCalls += entry.FlushCalls
+			prepareFlushAdded += entry.FlushAdded
+			prepareStageCalls += entry.StageCalls
+			prepareStageAdded += entry.StageAdded
+		}
+		if entry.Advance {
+			advanceCount++
+			advanceTotal += entry.Total
+			advanceFlush += entry.AdvanceFlush
+			advanceFlushTotal += entry.FlushTotal
+			if entry.FlushMax > advanceFlushMax {
+				advanceFlushMax = entry.FlushMax
+			}
+			advanceStageTotal += entry.StageTotal
+			if entry.StageMax > advanceStageMax {
+				advanceStageMax = entry.StageMax
+			}
+			advanceFork += entry.Fork
+			advanceCommitments += entry.Commitments
+			advanceLeaves += entry.Leaves
+			advancePending += entry.PendingAtAdvance
+			advanceTailMerged += entry.TailMerged
+			advanceTailRemaining += entry.TailRemaining
+			advanceFlushCalls += entry.FlushCalls
+			advanceFlushAdded += entry.FlushAdded
+			advanceStageCalls += entry.StageCalls
+			advanceStageAdded += entry.StageAdded
+			if entry.AlreadyPrepared {
+				alreadyPrepared++
+			}
+		}
+	}
+
+	if prepareCount > 0 {
+		count := time.Duration(prepareCount)
+		fmt.Printf("%s precollector prepare: total=%v snapshotAdd/materialize=%v durableStage=%v fork=%v commitments=%.0f leaves=%.0f flushCalls=%.1f flushAdded=%.0f stageCalls=%.1f stageAdded=%.0f (%d prepares)\n",
+			prefix,
+			(prepareTotal / count).Truncate(time.Millisecond),
+			(prepareFlushTotal / count).Truncate(time.Millisecond),
+			(prepareStageTotal / count).Truncate(time.Millisecond),
+			(prepareFork / count).Truncate(time.Millisecond),
+			float64(prepareCommitments)/float64(prepareCount),
+			float64(prepareLeaves)/float64(prepareCount),
+			float64(prepareFlushCalls)/float64(prepareCount),
+			float64(prepareFlushAdded)/float64(prepareCount),
+			float64(prepareStageCalls)/float64(prepareCount),
+			float64(prepareStageAdded)/float64(prepareCount),
+			prepareCount)
+	}
+	if advanceCount > 0 {
+		count := time.Duration(advanceCount)
+		fmt.Printf("%s precollector advance: total=%v advanceFlush=%v cumulativeSnapshotAdd/materialize=%v flushMax=%v cumulativeDurableStage=%v stageMax=%v fork=%v commitments=%.0f pendingAtAdvance=%.0f tailMerged=%.0f tailRemaining=%.0f alreadyPrepared=%d/%d flushCalls=%.1f flushAdded=%.0f stageCalls=%.1f stageAdded=%.0f (%d advances)\n",
+			prefix,
+			(advanceTotal / count).Truncate(time.Millisecond),
+			(advanceFlush / count).Truncate(time.Millisecond),
+			(advanceFlushTotal / count).Truncate(time.Millisecond),
+			advanceFlushMax.Truncate(time.Millisecond),
+			(advanceStageTotal / count).Truncate(time.Millisecond),
+			advanceStageMax.Truncate(time.Millisecond),
+			(advanceFork / count).Truncate(time.Millisecond),
+			float64(advanceCommitments)/float64(advanceCount),
+			float64(advancePending)/float64(advanceCount),
+			float64(advanceTailMerged)/float64(advanceCount),
+			float64(advanceTailRemaining)/float64(advanceCount),
+			alreadyPrepared,
+			advanceCount,
+			float64(advanceFlushCalls)/float64(advanceCount),
+			float64(advanceFlushAdded)/float64(advanceCount),
+			float64(advanceStageCalls)/float64(advanceCount),
+			float64(advanceStageAdded)/float64(advanceCount),
+			advanceCount)
+	}
 }
 
 func printAggregatorAverages(label string, entries []aggregatorRoundSummary) {
@@ -1383,8 +1997,10 @@ func printAggregatorAverages(label string, entries []aggregatorRoundSummary) {
 	}
 
 	var roundSum, finalSum, procSum, bftSum time.Duration
+	var proposalToProofReadySum time.Duration
 	var proofMedSum, proofP95Sum, proofP99Sum time.Duration
 	totalCommitments := 0
+	proposalToProofReadyCount := 0
 	proofCount := 0
 	for _, entry := range entries {
 		roundSum += entry.RoundTime
@@ -1392,6 +2008,10 @@ func printAggregatorAverages(label string, entries []aggregatorRoundSummary) {
 		procSum += entry.Processing
 		bftSum += entry.BftWait
 		totalCommitments += entry.Commitments
+		if entry.HasProposalToProofReady {
+			proposalToProofReadySum += entry.ProposalToProofReady
+			proposalToProofReadyCount++
+		}
 		if entry.HasProofReady {
 			proofMedSum += entry.ProofMedian
 			proofP95Sum += entry.ProofP95
@@ -1420,6 +2040,15 @@ func printAggregatorAverages(label string, entries []aggregatorRoundSummary) {
 	fmt.Printf("%s commitments per round: %.0f\n", prefix, avgCommit)
 	fmt.Printf("%s processing time: %v (%.1f%% of round time)\n", prefix, avgProcessing.Truncate(time.Millisecond), procPct)
 	fmt.Printf("%s BFT wait: %v (%.1f%% of round time)\n", prefix, avgBft.Truncate(time.Millisecond), bftPct)
+	if proposalToProofReadyCount > 0 {
+		proposalToProofReadyCountDuration := time.Duration(proposalToProofReadyCount)
+		fmt.Printf("%s proposal to proof-ready: %v (%d rounds)\n",
+			prefix,
+			(proposalToProofReadySum / proposalToProofReadyCountDuration).Truncate(time.Millisecond),
+			proposalToProofReadyCount)
+	} else {
+		fmt.Printf("%s proposal to proof-ready: n/a (no proposal-to-proof-ready rounds in window)\n", prefix)
+	}
 	if proofCount > 0 {
 		proofCountDuration := time.Duration(proofCount)
 		fmt.Printf("%s proof readiness: median %v, p95 %v, p99 %v (%d rounds)\n",
@@ -1478,6 +2107,7 @@ func reportAggregatorServerStats(start, end time.Time, shardClients []*ShardClie
 
 	foundSources := 0
 	combined := make([]aggregatorRoundSummary, 0)
+	combinedPrecollector := make([]aggregatorPrecollectorSummary, 0)
 	readErrors := make([]string, 0)
 	noDataSources := make([]aggregatorLogSource, 0)
 	for _, source := range sources {
@@ -1496,9 +2126,16 @@ func reportAggregatorServerStats(start, end time.Time, shardClients []*ShardClie
 			continue
 		}
 
+		precollectorSummaries, err := parseAggregatorPrecollectorLogs(source.path, start, end)
+		if err != nil {
+			readErrors = append(readErrors, fmt.Sprintf("failed to read precollector logs from %s (%s): %v", source.path, source.label, err))
+		}
+
 		foundSources++
 		combined = append(combined, summaries...)
+		combinedPrecollector = append(combinedPrecollector, precollectorSummaries...)
 		printAggregatorServerStatsSummary(fmt.Sprintf("%s (%s)", source.label, source.path), summaries)
+		printPrecollectorBreakdownSummary(fmt.Sprintf("%s (%s)", source.label, source.path), precollectorSummaries)
 	}
 
 	if foundSources == 0 {
@@ -1525,6 +2162,7 @@ func reportAggregatorServerStats(start, end time.Time, shardClients []*ShardClie
 
 	if foundSources > 1 {
 		printAggregatorServerStatsSummary("combined", combined)
+		printPrecollectorBreakdownSummary("combined", combinedPrecollector)
 	}
 }
 
@@ -1573,8 +2211,15 @@ func main() {
 		fmt.Printf("Proof scheduling: exact per-submission timer (PROOF_WORKERS ignored, value=%d)\n", proofWorkerCount)
 		fmt.Printf("Proof initial delay: %v\n", proofInitialDelay)
 		fmt.Printf("Proof retry delay: %v\n", proofRetryDelay)
+		fmt.Printf("Server proof-readiness metric: %s_bucket (direct /metrics scrape)\n", proofReadyMetric)
+		if !verifyProofCrypto {
+			fmt.Printf("Proof crypto verification: disabled\n")
+		}
 	} else {
 		fmt.Printf("Proof verification: disabled\n")
+	}
+	if requestWireFormat != "" {
+		fmt.Printf("Certification request wire format: %s\n", requestWireFormat)
 	}
 	fmt.Printf("HTTP client pool size: %d\n", httpClientPoolSize)
 	if enableH2C {
@@ -1704,6 +2349,13 @@ func main() {
 	var wg sync.WaitGroup
 	var submissionWg sync.WaitGroup // Track outstanding submission requests
 
+	metricsScrapeCtx, metricsScrapeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	proofReadyBefore, proofReadyBeforeErr := scrapeProofReadinessHistogram(metricsScrapeCtx, shardClients, authHeader)
+	metricsScrapeCancel()
+	if proofReadyBeforeErr != nil {
+		fmt.Printf("Server proof-readiness histogram before test unavailable: %v\n", proofReadyBeforeErr)
+	}
+
 	// Record when submission actually starts
 	metrics.submissionStartTime = time.Now()
 
@@ -1761,6 +2413,10 @@ func main() {
 		proofJobsWg.Wait()     // Wait for delayed proof jobs to finish request/retry/verification
 	}
 	proofCancel()
+
+	metricsScrapeCtx, metricsScrapeCancel = context.WithTimeout(context.Background(), 10*time.Second)
+	proofReadyAfter, proofReadyAfterErr := scrapeProofReadinessHistogram(metricsScrapeCtx, shardClients, authHeader)
+	metricsScrapeCancel()
 
 	// Stop submission phase and get counts
 	fmt.Printf("\n----------------------------------------\n")
@@ -1870,6 +2526,8 @@ func main() {
 			fmt.Printf("\n⚠️  Verified %d/%d proofs (%.1f%%)\n", proofVerified, successful, float64(proofVerified)/float64(successful)*100)
 		}
 	}
+
+	printServerProofReadinessHistogram(proofReadyBefore, proofReadyAfter, proofReadyBeforeErr, proofReadyAfterErr)
 
 	fmt.Printf("========================================\n")
 

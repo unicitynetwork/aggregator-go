@@ -268,22 +268,16 @@ func (rm *RoundManager) replayDiskSMTGap(ctx context.Context, fromBlock, latestB
 		"latestBlock", latestBlock.String(),
 		"blocksBehind", diff.String())
 
-	current := new(big.Int).Set(fromBlock.Int)
-	for current.Cmp(latestBlock.Int) < 0 {
-		blockRecords, err := rm.storage.BlockRecordsStorage().GetNextBlock(ctx, api.NewBigInt(new(big.Int).Set(current)))
-		if err != nil {
-			return nil, recordDiskSMTStartupFailure(fmt.Errorf("failed to fetch next disk SMT replay block after %s: %w", current.String(), err))
-		}
-		if blockRecords == nil {
-			return nil, recordDiskSMTStartupFailure(fmt.Errorf("next finalized block record not found after %s before latest block %s", current.String(), latestBlock.String()))
-		}
-		if blockRecords.BlockNumber.Int.Cmp(latestBlock.Int) > 0 {
-			return nil, recordDiskSMTStartupFailure(fmt.Errorf("next block record %s is after latest finalized block %s", blockRecords.BlockNumber.String(), latestBlock.String()))
-		}
-		if err := rm.replayDiskSMTBlock(ctx, blockRecords.BlockNumber); err != nil {
+	from := api.NewBigInt(new(big.Int).Add(fromBlock.Int, big.NewInt(1)))
+	blocks, err := rm.storage.BlockStorage().GetRange(ctx, from, latestBlock)
+	if err != nil {
+		return nil, diskSMTStartupFailure("failed to fetch finalized blocks for disk SMT replay from %s to %s: %w",
+			from.String(), latestBlock.String(), err)
+	}
+	for _, block := range blocks {
+		if err := rm.replayDiskSMTBlock(ctx, block); err != nil {
 			return nil, recordDiskSMTStartupFailure(err)
 		}
-		current = new(big.Int).Set(blockRecords.BlockNumber.Int)
 	}
 
 	state, err := rm.smtBackend.CommittedState(ctx)
@@ -293,13 +287,13 @@ func (rm *RoundManager) replayDiskSMTGap(ctx context.Context, fromBlock, latestB
 	if state.BlockNumber == nil || state.BlockNumber.Cmp(latestBlock.Int) != 0 {
 		return nil, diskSMTStartupFailure("disk SMT replay ended at block %v, expected %s", state.BlockNumber, latestBlock.String())
 	}
-	latest, err := rm.storage.BlockStorage().GetLatest(ctx)
+	replayedTo, err := rm.storage.BlockStorage().GetByNumber(ctx, latestBlock)
 	if err != nil {
-		return nil, diskSMTStartupFailure("failed to reload latest block after disk SMT replay: %w", err)
+		return nil, diskSMTStartupFailure("failed to reload replay target block %s after disk SMT replay: %w", latestBlock.String(), err)
 	}
-	if latest == nil || !bytes.Equal(state.RootHash, latest.RootHash) {
-		return nil, diskSMTStartupFailure("disk SMT replay root mismatch: disk=%s latest=%v",
-			api.HexBytes(state.RootHash).String(), latest)
+	if replayedTo == nil || !bytes.Equal(state.RootHash, replayedTo.RootHash) {
+		return nil, diskSMTStartupFailure("disk SMT replay root mismatch: disk=%s replayTarget=%v",
+			api.HexBytes(state.RootHash).String(), replayedTo)
 	}
 	if rm.stateTracker != nil {
 		rm.stateTracker.SetLastSyncedBlock(latestBlock.Int)
@@ -311,18 +305,14 @@ func (rm *RoundManager) replayDiskSMTGap(ctx context.Context, fromBlock, latestB
 	return latestBlock, nil
 }
 
-func (rm *RoundManager) replayDiskSMTBlock(ctx context.Context, blockNumber *api.BigInt) error {
-	block, err := rm.storage.BlockStorage().GetByNumber(ctx, blockNumber)
-	if err != nil {
-		return fmt.Errorf("failed to load block %s for disk SMT replay: %w", blockNumber.String(), err)
-	}
+func (rm *RoundManager) replayDiskSMTBlock(ctx context.Context, block *models.Block) error {
 	if block == nil || !block.Finalized {
-		return fmt.Errorf("finalized block %s not found for disk SMT replay", blockNumber.String())
+		return fmt.Errorf("finalized block not found for disk SMT replay")
 	}
 
 	state, err := rm.smtBackend.CommittedState(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to read disk SMT committed state before replay block %s: %w", blockNumber.String(), err)
+		return fmt.Errorf("failed to read disk SMT committed state before replay block %s: %w", block.Index.String(), err)
 	}
 	if state.BlockNumber != nil && state.BlockNumber.Cmp(block.Index.Int) >= 0 {
 		if state.BlockNumber.Cmp(block.Index.Int) == 0 && bytes.Equal(state.RootHash, block.RootHash) {
@@ -332,80 +322,38 @@ func (rm *RoundManager) replayDiskSMTBlock(ctx context.Context, blockNumber *api
 			state.BlockNumber.String(), api.HexBytes(state.RootHash).String(), block.Index.String(), block.RootHash.String())
 	}
 
-	blockRecords, err := rm.storage.BlockRecordsStorage().GetByBlockNumber(ctx, blockNumber)
+	records, err := loadAggregatorRecordsForBlockAnyFinalization(ctx, rm.storage, block)
 	if err != nil {
-		return fmt.Errorf("failed to load block records for disk SMT replay block %s: %w", blockNumber.String(), err)
+		return fmt.Errorf("failed to load aggregator records for disk SMT replay block %s: %w", block.Index.String(), err)
 	}
-	if blockRecords == nil {
-		return fmt.Errorf("block records for disk SMT replay block %s not found", blockNumber.String())
-	}
-
-	leaves, err := rm.replayLeavesForStateIDs(ctx, blockRecords.StateIDs)
+	_, leaves, err := stateIDsAndLeavesFromAggregatorRecords(records)
 	if err != nil {
-		return fmt.Errorf("failed to load replay leaves for block %s: %w", blockNumber.String(), err)
+		return fmt.Errorf("failed to load replay leaves for block %s: %w", block.Index.String(), err)
 	}
 
 	snapshot, err := rm.smtBackend.CreateSnapshot(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to create disk SMT replay snapshot for block %s: %w", blockNumber.String(), err)
+		return fmt.Errorf("failed to create disk SMT replay snapshot for block %s: %w", block.Index.String(), err)
 	}
 	result, err := snapshot.AddLeavesClassified(ctx, leaves)
 	if err != nil {
 		snapshot.Discard(ctx)
-		return fmt.Errorf("failed to replay disk SMT leaves for block %s: %w", blockNumber.String(), err)
+		return fmt.Errorf("failed to replay disk SMT leaves for block %s: %w", block.Index.String(), err)
 	}
 	if err := result.ValidateAllAccepted(len(leaves)); err != nil {
 		snapshot.Discard(ctx)
-		return fmt.Errorf("failed to replay disk SMT leaves for block %s: %w", blockNumber.String(), err)
+		return fmt.Errorf("failed to replay disk SMT leaves for block %s: %w", block.Index.String(), err)
 	}
 	if !bytes.Equal(result.CandidateRoot, block.RootHash) {
 		snapshot.Discard(ctx)
 		return fmt.Errorf("disk SMT replay root mismatch at block %s: candidate=%s block=%s",
-			blockNumber.String(), api.HexBytes(result.CandidateRoot).String(), block.RootHash.String())
+			block.Index.String(), api.HexBytes(result.CandidateRoot).String(), block.RootHash.String())
 	}
 	if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: block.Index, RootHash: block.RootHash}); err != nil {
 		snapshot.Discard(ctx)
-		return fmt.Errorf("failed to commit disk SMT replay block %s: %w", blockNumber.String(), err)
+		return fmt.Errorf("failed to commit disk SMT replay block %s: %w", block.Index.String(), err)
 	}
 	return nil
-}
-
-func (rm *RoundManager) replayLeavesForStateIDs(ctx context.Context, stateIDs []api.StateID) ([]smtbackend.LeafInput, error) {
-	if len(stateIDs) == 0 {
-		return nil, nil
-	}
-
-	seen := make(map[string]struct{}, len(stateIDs))
-	keys := make([]api.HexBytes, 0, len(stateIDs))
-	for _, stateID := range stateIDs {
-		key := string(stateID)
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		keyBytes, err := stateID.GetTreeKey()
-		if err != nil {
-			return nil, fmt.Errorf("stateID %s tree key: %w", stateID.String(), err)
-		}
-		keys = append(keys, api.HexBytes(keyBytes))
-	}
-
-	nodes, err := rm.storage.SmtStorage().GetByKeys(ctx, keys)
-	if err != nil {
-		return nil, err
-	}
-	if len(nodes) != len(keys) {
-		return nil, fmt.Errorf("expected %d SMT nodes, found %d", len(keys), len(nodes))
-	}
-
-	leaves := make([]smtbackend.LeafInput, len(nodes))
-	for i, node := range nodes {
-		leaves[i] = smtbackend.LeafInput{
-			Key:   node.Key,
-			Value: node.Value,
-		}
-	}
-	return leaves, nil
 }
 
 func emptyStateRoot() []byte {

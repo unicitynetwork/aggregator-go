@@ -28,7 +28,6 @@ type Storage struct {
 	aggregatorRecordStorage *AggregatorRecordStorage
 	blockStorage            *BlockStorage
 	smtStorage              *SmtStorage
-	blockRecordsStorage     *BlockRecordsStorage
 	leadershipStorage       *LeadershipStorage
 	cachedTrustBaseStorage  *CachedTrustBaseStorage
 }
@@ -90,7 +89,6 @@ func NewStorage(ctx context.Context, config config.Config) (*Storage, error) {
 	storage.aggregatorRecordStorage = NewAggregatorRecordStorage(database, finalizationInsertOpts)
 	storage.blockStorage = NewBlockStorage(database)
 	storage.smtStorage = NewSmtStorage(database, finalizationInsertOpts)
-	storage.blockRecordsStorage = NewBlockRecordsStorage(database)
 	storage.leadershipStorage = NewLeadershipStorage(database, config.HA.LockTTLSeconds)
 	storage.cachedTrustBaseStorage = NewCachedTrustBaseStorage(NewTrustBaseStorage(database))
 
@@ -256,11 +254,6 @@ func (s *Storage) SmtStorage() interfaces.SmtStorage {
 	return s.smtStorage
 }
 
-// BlockRecordsStorage returns the block records storage implementation
-func (s *Storage) BlockRecordsStorage() interfaces.BlockRecordsStorage {
-	return s.blockRecordsStorage
-}
-
 // LeadershipStorage returns the leadership storage implementation
 func (s *Storage) LeadershipStorage() interfaces.LeadershipStorage {
 	return s.leadershipStorage
@@ -398,10 +391,6 @@ func (s *Storage) createIndexes(ctx context.Context) error {
 
 	if err := s.smtStorage.CreateIndexes(ctx); err != nil {
 		return fmt.Errorf("failed to create SMT indexes: %w", err)
-	}
-
-	if err := s.blockRecordsStorage.CreateIndexes(ctx); err != nil {
-		return fmt.Errorf("failed to create block records indexes: %w", err)
 	}
 
 	if err := s.leadershipStorage.CreateIndexes(ctx); err != nil {

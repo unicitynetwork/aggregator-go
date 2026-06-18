@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/bft"
@@ -35,7 +36,7 @@ const (
 	RoundStateFinalizing                   // Finalizing block
 )
 
-const miniBatchSize = 100 // Number of commitments to process per SMT mini-batch
+const defaultMiniBatchSize = 500 // Number of commitments to process per SMT mini-batch
 
 func (rs RoundState) String() string {
 	switch rs {
@@ -72,6 +73,10 @@ type Round struct {
 	// PreCollected is true when this round starts from a precollector snapshot.
 	// These rounds skip the fixed collect window.
 	PreCollected bool
+	// ProposalRecordsStaged is true when the precollector already wrote the
+	// round's proposed aggregator records before the certification request.
+	ProposalRecordsStaged bool
+	ProposalID            string
 	// Timing metrics for this round
 	ProcessingTime     time.Duration
 	ProposalTime       time.Time     // When block was proposed to BFT
@@ -289,7 +294,7 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 			// Nothing verified to publish yet; BlockSyncer refreshes the proof view per replayed block.
 			rm.logger.Info("Stale disk follower; skipping unfinalized-block recovery, BlockSyncer will catch up")
 		} else {
-			recoveryResult, err := RecoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue)
+			recoveryResult, err := recoverUnfinalizedBlock(ctx, rm.logger, rm.storage, rm.commitmentQueue, false)
 			if err != nil {
 				return fmt.Errorf("failed to recover unfinalized block: %w", err)
 			}
@@ -408,6 +413,17 @@ func (rm *RoundManager) GetSMTBackend() smtbackend.Backend {
 	return rm.smtBackend
 }
 
+func (rm *RoundManager) CommittedRoot(ctx context.Context) ([]byte, *api.BigInt, error) {
+	if rm.smtBackend == nil {
+		return nil, nil, fmt.Errorf("SMT backend is not initialized")
+	}
+	state, err := rm.smtBackend.CommittedState(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return state.RootHash, state.BlockNumber, nil
+}
+
 // FinalizationReadLock blocks only during the commit+finalize window to avoid root/block mismatches in proofs.
 func (rm *RoundManager) FinalizationReadLock() func() {
 	rm.finalizationMu.RLock()
@@ -491,8 +507,8 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 	defer rm.roundMutex.RUnlock()
 
 	stats := map[string]interface{}{
-		"totalRounds":      rm.totalRounds,
-		"totalCommitments": rm.totalCommitments,
+		"totalRounds":      atomic.LoadInt64(&rm.totalRounds),
+		"totalCommitments": atomic.LoadInt64(&rm.totalCommitments),
 		"roundDuration":    rm.roundDuration.String(),
 	}
 
@@ -513,13 +529,19 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
 	abandonPendingRound := rm.hasPendingRoundToAbandon(roundNumber)
 	if abandonPendingRound {
+		rm.roundMutex.Lock()
+		supersededSnapshot := rm.abandonSupersededRoundLocked(roundNumber)
+		rm.roundMutex.Unlock()
+		if supersededSnapshot != nil {
+			supersededSnapshot.Discard(ctx)
+		}
 		resetDone := rm.discardActivePrecollector(ctx)
 		if !resetDone {
 			rm.clearProofPending()
 			rm.resetRedisPendingSweep(ctx)
 		}
 	}
-	return rm.StartNewRoundWithSnapshot(ctx, roundNumber, nil, nil, nil)
+	return rm.StartNewRoundWithSnapshot(ctx, roundNumber, nil, nil, nil, false, "")
 }
 
 func (rm *RoundManager) hasPendingRoundToAbandon(roundNumber *api.BigInt) bool {
@@ -548,6 +570,8 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 	snapshot smtbackend.Snapshot,
 	commitments []*models.CertificationRequest,
 	leaves []smtbackend.LeafInput,
+	proposalRecordsStaged bool,
+	proposalID string,
 ) error {
 	rm.logger.WithContext(ctx).Info("StartNewRound called",
 		"roundNumber", roundNumber.String(),
@@ -632,24 +656,29 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 
 	supersededSnapshot := rm.abandonSupersededRoundLocked(roundNumber)
 	processCtx, processCancel := context.WithCancel(roundCtx)
+	if proposalID == "" {
+		proposalID = uuid.NewString()
+	}
 
 	round := &Round{
-		Number:             roundNumber,
-		StartTime:          time.Now(),
-		State:              RoundStateProcessing,
-		Commitments:        commitments,
-		Cancel:             processCancel,
-		Snapshot:           snapshot,
-		PendingLeaves:      leaves,
-		PendingCommitments: commitments, // In child mode, commitments are already filtered by pre-collection
-		PreCollected:       preCollected,
+		Number:                roundNumber,
+		StartTime:             time.Now(),
+		State:                 RoundStateProcessing,
+		Commitments:           commitments,
+		Cancel:                processCancel,
+		Snapshot:              snapshot,
+		PendingLeaves:         leaves,
+		PendingCommitments:    commitments, // In child mode, commitments are already filtered by pre-collection
+		PreCollected:          preCollected,
+		ProposalRecordsStaged: proposalRecordsStaged,
+		ProposalID:            proposalID,
 	}
 	rm.currentRound = round
 
 	// Start precollector on the first child-mode round so it begins collecting
 	// commitments into a chained snapshot while the current round processes.
 	if rm.config.Sharding.Mode.IsChild() && rm.precollector == nil && !rm.precollectorDisabled {
-		rm.startPrecollectorLocked(roundCtx, snapshot)
+		rm.startPrecollectorLocked(roundCtx, snapshot, nil)
 	}
 
 	rm.roundWG.Go(func() {
@@ -801,7 +830,15 @@ func (rm *RoundManager) processRound(ctx context.Context, round *Round) error {
 		if collectDuration <= 0 {
 			collectDuration = 200 * time.Millisecond
 		}
+		miniBatchSize := rm.collectMiniBatchSize()
 		deadline := time.Now().Add(collectDuration)
+		flushCalls := 0
+		flushAdded := 0
+		var flushTotal time.Duration
+		var flushMax time.Duration
+		var finalFlush time.Duration
+		finalFlushAdded := 0
+		collectedCount := 0
 
 		for time.Now().Before(deadline) {
 			select {
@@ -813,10 +850,20 @@ func (rm *RoundManager) processRound(ctx context.Context, round *Round) error {
 				}
 				round.Commitments = append(round.Commitments, commitment)
 				var dropped []interfaces.CertificationRequestAck
-				if len(round.Commitments)%100 == 0 {
-					batch := round.Commitments[len(round.Commitments)-100:]
+				if len(round.Commitments)%miniBatchSize == 0 {
+					batch := round.Commitments[len(round.Commitments)-miniBatchSize:]
 					var err error
+					pendingBefore := len(round.PendingCommitments)
+					flushStart := time.Now()
 					dropped, err = rm.processMiniBatchForRound(ctx, round, batch)
+					flushElapsed := time.Since(flushStart)
+					added := len(round.PendingCommitments) - pendingBefore
+					flushCalls++
+					flushAdded += added
+					flushTotal += flushElapsed
+					if flushElapsed > flushMax {
+						flushMax = flushElapsed
+					}
 					if err != nil {
 						rm.roundMutex.Unlock()
 						return err
@@ -836,19 +883,43 @@ func (rm *RoundManager) processRound(ctx context.Context, round *Round) error {
 			rm.roundMutex.Unlock()
 			return nil
 		}
-		remaining := len(round.Commitments) % 100
+		remaining := len(round.Commitments) % miniBatchSize
 		var dropped []interfaces.CertificationRequestAck
 		if remaining > 0 {
 			batch := round.Commitments[len(round.Commitments)-remaining:]
 			var err error
+			pendingBefore := len(round.PendingCommitments)
+			flushStart := time.Now()
 			dropped, err = rm.processMiniBatchForRound(ctx, round, batch)
+			finalFlush = time.Since(flushStart)
+			finalFlushAdded = len(round.PendingCommitments) - pendingBefore
+			flushCalls++
+			flushAdded += finalFlushAdded
+			flushTotal += finalFlush
+			if finalFlush > flushMax {
+				flushMax = finalFlush
+			}
 			if err != nil {
 				rm.roundMutex.Unlock()
 				return err
 			}
 		}
+		collectedCount = len(round.Commitments)
 		rm.roundMutex.Unlock()
 		ackDroppedCommitments(ctx, rm.logger, rm.commitmentQueue, dropped)
+		if flushCalls > 0 {
+			rm.logger.WithContext(ctx).Debug("Round collection flush",
+				"roundNumber", roundNumber.String(),
+				"commitments", collectedCount,
+				"miniBatchSize", miniBatchSize,
+				"flushCalls", flushCalls,
+				"flushAdded", flushAdded,
+				"flushTotal", flushTotal.String(),
+				"flushMax", flushMax.String(),
+				"finalFlush", finalFlush.String(),
+				"finalFlushAdded", finalFlushAdded,
+				"collectDuration", collectDuration.String())
+		}
 	}
 
 	rm.startActivePrecollectorIfNeeded(ctx, round)
@@ -888,8 +959,8 @@ func (rm *RoundManager) processRound(ctx context.Context, round *Round) error {
 	}
 	proposed = true
 
-	rm.totalRounds++
-	rm.totalCommitments += int64(commitmentCount)
+	atomic.AddInt64(&rm.totalRounds, 1)
+	atomic.AddInt64(&rm.totalCommitments, int64(commitmentCount))
 
 	rm.logger.WithContext(ctx).Info("Round completed",
 		"roundNumber", roundNumber.String(),
@@ -1140,6 +1211,16 @@ func (rm *RoundManager) restoreSmtFromStorage(ctx context.Context) (*api.BigInt,
 func (rm *RoundManager) Activate(ctx context.Context) error {
 	rm.logger.WithContext(ctx).Info("Activating round manager")
 
+	rm.roundMutex.RLock()
+	alreadyActive := rm.activeCancel != nil
+	rm.roundMutex.RUnlock()
+	if alreadyActive {
+		rm.logger.WithContext(ctx).Warn("Round manager already active, deactivating previous activation")
+		if err := rm.Deactivate(ctx); err != nil {
+			return fmt.Errorf("failed to deactivate previous activation: %w", err)
+		}
+	}
+
 	activeCtx, activeCancel := context.WithCancel(ctx)
 	activated := false
 	defer func() {
@@ -1147,18 +1228,13 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 			return
 		}
 		activeCancel()
-		rm.roundMutex.Lock()
-		if rm.activeCtx == activeCtx {
-			rm.activeCtx = nil
-			rm.activeCancel = nil
+		if err := rm.Deactivate(ctx); err != nil {
+			rm.logger.WithContext(ctx).Error("Failed to deactivate after activation failure",
+				"error", err.Error())
 		}
-		rm.roundMutex.Unlock()
 	}()
 
 	rm.roundMutex.Lock()
-	if rm.activeCancel != nil {
-		rm.activeCancel()
-	}
 	rm.activeCtx = activeCtx
 	rm.activeCancel = activeCancel
 	rm.precollectorDisabled = false
@@ -1168,7 +1244,7 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 	rm.roundMutex.Unlock()
 
 	if rm.config.HA.Enabled {
-		recoveryResult, err := RecoverUnfinalizedBlock(activeCtx, rm.logger, rm.storage, rm.commitmentQueue)
+		recoveryResult, err := recoverUnfinalizedBlock(activeCtx, rm.logger, rm.storage, rm.commitmentQueue, !rm.usesDiskSMTBackend())
 		if err != nil {
 			return fmt.Errorf("failed to recover unfinalized block on activation: %w", err)
 		}
@@ -1311,9 +1387,6 @@ func (rm *RoundManager) Deactivate(ctx context.Context) error {
 }
 
 func (rm *RoundManager) usesActivePrecollector() bool {
-	if rm.config.Processing.PrecollectorGracePeriod <= 0 {
-		return false
-	}
 	if !rm.config.Storage.UseRedisForCommitments {
 		return false
 	}
@@ -1397,7 +1470,7 @@ func (rm *RoundManager) startActivePrecollectorIfNeeded(ctx context.Context, rou
 	if rm.activeCtx != nil {
 		precollectorCtx = rm.activeCtx
 	}
-	rm.startPrecollectorLocked(precollectorCtx, round.Snapshot)
+	rm.startPrecollectorLocked(precollectorCtx, round.Snapshot, incrementRoundNumber(round.Number))
 	rm.roundMutex.Unlock()
 }
 
@@ -1405,30 +1478,56 @@ func (rm *RoundManager) startActivePrecollectorIfNeeded(ctx context.Context, rou
 // the owned fork. The fork is taken under roundMutex so the base snapshot cannot
 // be discarded while the precollector forks it. Caller must hold roundMutex; on
 // fork failure the precollector is not started.
-func (rm *RoundManager) startPrecollectorLocked(ctx context.Context, base smtbackend.Snapshot) {
+func (rm *RoundManager) startPrecollectorLocked(ctx context.Context, base smtbackend.Snapshot, blockNumber *api.BigInt) {
 	forked, err := base.Fork(ctx)
 	if err != nil {
 		rm.logger.WithContext(ctx).Error("Failed to fork precollector snapshot", "error", err.Error())
 		return
 	}
-	cp := rm.newActivePrecollector()
+	cp := rm.newActivePrecollector(blockNumber)
 	rm.precollector = cp
 	cp.Start(ctx, forked)
 }
 
-func (rm *RoundManager) newActivePrecollector() *childPrecollector {
+func (rm *RoundManager) newActivePrecollector(blockNumber *api.BigInt) *childPrecollector {
 	cp := newChildPrecollector(
 		rm.commitmentStream,
 		rm.commitmentQueue,
 		rm.logger,
 		rm.config.Processing.MaxCommitmentsPerRound,
 		rm.markProofsPending,
+		blockNumber,
+		"",
+		rm.stageProposedCommitments,
 	)
 	return cp
 }
 
+func (rm *RoundManager) collectMiniBatchSize() int {
+	if rm == nil || rm.config == nil || rm.config.Processing.CollectMiniBatchSize <= 0 {
+		return defaultMiniBatchSize
+	}
+	return rm.config.Processing.CollectMiniBatchSize
+}
+
 func (rm *RoundManager) advancePrecollectorForHandoff(cp *childPrecollector) (*preCollectionResult, error) {
 	return cp.AdvanceRound()
+}
+
+func validatePrecollectorBlockNumber(preResult *preCollectionResult, roundNumber *api.BigInt) error {
+	if preResult == nil || !preResult.recordsStaged {
+		return nil
+	}
+	if preResult.blockNumber == nil || preResult.blockNumber.Int == nil {
+		return fmt.Errorf("precollector staged records without a block number")
+	}
+	if roundNumber == nil || roundNumber.Int == nil {
+		return fmt.Errorf("precollector staged records for block %s cannot start a nil round", preResult.blockNumber.String())
+	}
+	if preResult.blockNumber.Cmp(roundNumber.Int) != 0 {
+		return fmt.Errorf("precollector staged records for block %s cannot start round %s", preResult.blockNumber.String(), roundNumber.String())
+	}
+	return nil
 }
 
 // StartNextRoundFromPrecollector starts the next standalone/bft-shard round
@@ -1484,19 +1583,35 @@ func (rm *RoundManager) StartNextRoundFromPrecollector(ctx context.Context, roun
 		rm.logger.WithContext(ctx).Warn("Failed to advance precollector, falling back to fixed collect round",
 			"error", err.Error(),
 			"advanceDuration", advanceDuration.String())
+		// The precollector failed to hand off; discard it here so a fresh one
+		// can start. StartNewRound only discards when abandoning a pending
+		// round, which is not the case on the post-finalization fallback path.
+		rm.discardActivePrecollector(ctx)
 		return rm.StartNewRound(ctx, roundNumber)
 	}
 
+	if err := validatePrecollectorBlockNumber(preResult, roundNumber); err != nil {
+		preResult.snapshot.Discard(ctx)
+		return err
+	}
 	if err := preResult.snapshot.SetCommitTarget(ctx, rm.smtBackend); err != nil {
+		preResult.snapshot.Discard(ctx)
 		return fmt.Errorf("failed to set precollector commit target: %w", err)
 	}
-	if err := rm.StartNewRoundWithSnapshot(ctx, roundNumber, preResult.snapshot, preResult.commitments, preResult.leaves); err != nil {
+	if err := rm.StartNewRoundWithSnapshot(ctx, roundNumber, preResult.snapshot, preResult.commitments, preResult.leaves, preResult.recordsStaged, preResult.proposalID); err != nil {
 		if errors.Is(err, ErrDeactivated) {
 			return nil
 		}
 		return err
 	}
 	return nil
+}
+
+func incrementRoundNumber(roundNumber *api.BigInt) *api.BigInt {
+	if roundNumber == nil || roundNumber.Int == nil {
+		return nil
+	}
+	return api.NewBigInt(new(big.Int).Add(roundNumber.Int, big.NewInt(1)))
 }
 
 func (rm *RoundManager) waitBeforePrecollectorHandoff(ctx context.Context, done <-chan struct{}) error {

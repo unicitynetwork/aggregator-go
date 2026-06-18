@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -19,6 +20,11 @@ type BFTClientStub struct {
 	roundManager    RoundManager
 	nextRoundNumber *api.BigInt
 	delay           time.Duration
+	mu              sync.Mutex
+	ctx             context.Context
+	cancel          context.CancelFunc
+	stopped         bool
+	wg              sync.WaitGroup
 }
 
 func NewBFTClientStub(logger *logger.Logger, roundManager RoundManager, nextRoundNumber *api.BigInt, delay time.Duration) *BFTClientStub {
@@ -33,11 +39,27 @@ func NewBFTClientStub(logger *logger.Logger, roundManager RoundManager, nextRoun
 
 func (n *BFTClientStub) Start(ctx context.Context) error {
 	n.logger.Info("Starting BFT Client Stub")
-	return n.roundManager.StartNewRound(ctx, n.nextRoundNumber)
+	stubCtx, cancel := context.WithCancel(ctx)
+	n.mu.Lock()
+	n.ctx = stubCtx
+	n.cancel = cancel
+	n.stopped = false
+	n.mu.Unlock()
+	return n.roundManager.StartNewRound(stubCtx, n.nextRoundNumber)
 }
 
 func (n *BFTClientStub) Stop() {
 	n.logger.Info("Stopping BFT Client Stub")
+	n.mu.Lock()
+	n.stopped = true
+	cancel := n.cancel
+	n.cancel = nil
+	n.ctx = nil
+	n.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	n.wg.Wait()
 }
 
 func (n *BFTClientStub) WaitForInitialized(ctx context.Context) error {
@@ -82,8 +104,21 @@ func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.
 	nextRoundNumber := api.NewBigInt(nil)
 	nextRoundNumber.Add(block.Index.Int, big.NewInt(1))
 
+	n.mu.Lock()
+	if n.stopped {
+		n.mu.Unlock()
+		return nil
+	}
+	nextCtx := n.ctx
+	if nextCtx == nil {
+		nextCtx = ctx
+	}
+	n.wg.Add(1)
+	n.mu.Unlock()
+
 	go func() {
-		if err := n.roundManager.StartNextRoundFromPrecollector(ctx, nextRoundNumber); err != nil {
+		defer n.wg.Done()
+		if err := n.roundManager.StartNextRoundFromPrecollector(nextCtx, nextRoundNumber); err != nil {
 			n.logger.Error("Failed to start next round", "error", err.Error())
 		}
 	}()

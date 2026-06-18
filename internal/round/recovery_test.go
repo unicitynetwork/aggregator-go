@@ -1,6 +1,7 @@
 package round
 
 import (
+	"bytes"
 	"context"
 	"math/big"
 	"testing"
@@ -13,6 +14,8 @@ import (
 	redisContainer "github.com/testcontainers/testcontainers-go/modules/redis"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/events"
+	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
@@ -147,11 +150,12 @@ func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, 
 	}
 	err := smtTree.AddLeaves(leaves)
 	require.NoError(t, err)
-	rootHashBytes := smtTree.GetRootHash()
+	rootHashBytes := smtTree.GetRootHashRaw()
 
 	// Create block (unfinalized)
 	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", api.HexBytes(rootHashBytes), nil, nil)
 	block.Finalized = false
+	block.ProposalID = "proposal-" + blockNumber.String()
 
 	return commitments, block, stateIDs
 }
@@ -181,10 +185,11 @@ func (s *RecoveryTestSuite) storeSmtNodes(commitments []*models.CertificationReq
 }
 
 // Helper to store aggregator records
-func (s *RecoveryTestSuite) storeAggregatorRecords(commitments []*models.CertificationRequest, blockNumber *api.BigInt) {
+func (s *RecoveryTestSuite) storeAggregatorRecords(commitments []*models.CertificationRequest, block *models.Block) {
 	records := make([]*models.AggregatorRecord, len(commitments))
 	for i, c := range commitments {
-		records[i] = models.NewAggregatorRecord(c, blockNumber, api.NewBigInt(big.NewInt(int64(i))))
+		records[i] = models.NewAggregatorRecord(c, block.Index, api.NewBigInt(big.NewInt(int64(i))))
+		records[i].ProposalID = block.ProposalID
 	}
 	err := s.storage.AggregatorRecordStorage().StoreBatch(s.ctx, records)
 	s.Require().NoError(err)
@@ -197,21 +202,16 @@ func (s *RecoveryTestSuite) Test01_NoUnfinalizedBlocks() {
 	t := s.T()
 
 	// Create a finalized block
-	commitments, block, stateIDs := s.createTestData(1, 3, "t01")
+	commitments, block, _ := s.createTestData(1, 3, "t01")
 	block.Finalized = true
 
 	// Store the finalized block
 	err := s.storage.BlockStorage().Store(s.ctx, block)
 	require.NoError(t, err)
 
-	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
-	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
-	require.NoError(t, err)
-
 	// Store SMT nodes and aggregator records
 	s.storeSmtNodes(commitments)
-	s.storeAggregatorRecords(commitments, block.Index)
+	s.storeAggregatorRecords(commitments, block)
 
 	// Run recovery
 	result, err := RecoverUnfinalizedBlock(s.ctx, s.testLogger, s.storage, s.commitmentQueue)
@@ -230,20 +230,15 @@ func (s *RecoveryTestSuite) Test02_AllDataPresent() {
 	t := s.T()
 
 	// Create unfinalized block with all data present
-	commitments, block, stateIDs := s.createTestData(2, 5, "t02")
+	commitments, block, _ := s.createTestData(2, 5, "t02")
 
 	// Store block (unfinalized)
 	err := s.storage.BlockStorage().Store(s.ctx, block)
 	require.NoError(t, err)
 
-	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
-	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
-	require.NoError(t, err)
-
 	// Store all SMT nodes and aggregator records
 	s.storeSmtNodes(commitments)
-	s.storeAggregatorRecords(commitments, block.Index)
+	s.storeAggregatorRecords(commitments, block)
 
 	// Store commitments in Redis (for acking)
 	s.storeCommitmentsInRedis(commitments)
@@ -264,72 +259,20 @@ func (s *RecoveryTestSuite) Test02_AllDataPresent() {
 }
 
 // ============================================================================
-// Test 3: Missing Aggregator Records (Recover from Redis)
-// ============================================================================
-func (s *RecoveryTestSuite) Test03_MissingAggregatorRecords() {
-	t := s.T()
-
-	// Create unfinalized block
-	commitments, block, stateIDs := s.createTestData(3, 4, "t03")
-
-	// Store block (unfinalized)
-	err := s.storage.BlockStorage().Store(s.ctx, block)
-	require.NoError(t, err)
-
-	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
-	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
-	require.NoError(t, err)
-
-	// Store ONLY SMT nodes (no aggregator records)
-	s.storeSmtNodes(commitments)
-
-	// Store commitments in Redis (for recovery)
-	s.storeCommitmentsInRedis(commitments)
-
-	// Verify no aggregator records exist
-	count, err := s.storage.AggregatorRecordStorage().Count(s.ctx)
-	require.NoError(t, err)
-	countBefore := count
-
-	// Run recovery
-	result, err := RecoverUnfinalizedBlock(s.ctx, s.testLogger, s.storage, s.commitmentQueue)
-	require.NoError(t, err)
-	require.True(t, result.Recovered)
-
-	// Verify aggregator records were recovered
-	countAfter, err := s.storage.AggregatorRecordStorage().Count(s.ctx)
-	require.NoError(t, err)
-	require.Equal(t, countBefore+int64(len(commitments)), countAfter, "Aggregator records should be recovered")
-
-	// Verify block is finalized
-	finalizedBlock, err := s.storage.BlockStorage().GetByNumber(s.ctx, block.Index)
-	require.NoError(t, err)
-	require.NotNil(t, finalizedBlock)
-
-	t.Log("✓ Test03_MissingAggregatorRecords passed")
-}
-
-// ============================================================================
-// Test 4: Missing SMT Nodes (Recover from Redis)
+// Test 3: Missing SMT Nodes (Recover from Durable Records)
 // ============================================================================
 func (s *RecoveryTestSuite) Test04_MissingSmtNodes() {
 	t := s.T()
 
 	// Create unfinalized block
-	commitments, block, stateIDs := s.createTestData(4, 4, "t04")
+	commitments, block, _ := s.createTestData(4, 4, "t04")
 
 	// Store block (unfinalized)
 	err := s.storage.BlockStorage().Store(s.ctx, block)
 	require.NoError(t, err)
 
-	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
-	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
-	require.NoError(t, err)
-
 	// Store ONLY aggregator records (no SMT nodes for this block's commitments)
-	s.storeAggregatorRecords(commitments, block.Index)
+	s.storeAggregatorRecords(commitments, block)
 
 	// Store commitments in Redis (for recovery)
 	s.storeCommitmentsInRedis(commitments)
@@ -356,76 +299,249 @@ func (s *RecoveryTestSuite) Test04_MissingSmtNodes() {
 	t.Log("✓ Test04_MissingSmtNodes passed")
 }
 
-// ============================================================================
-// Test 5: Missing Both (Recover from Redis)
-// ============================================================================
-func (s *RecoveryTestSuite) Test05_MissingBoth() {
+func (s *RecoveryTestSuite) Test04b_MissingSmtNodesRecoverFromDurableRecordsWithoutRedis() {
 	t := s.T()
 
-	// Create unfinalized block
-	commitments, block, stateIDs := s.createTestData(5, 5, "t05")
+	commitments, block, _ := s.createTestData(40, 4, "t04b")
 
-	// Store block (unfinalized)
 	err := s.storage.BlockStorage().Store(s.ctx, block)
 	require.NoError(t, err)
 
-	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
-	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
-	require.NoError(t, err)
+	// Durable proposal records must be sufficient to rebuild the certified SMT
+	// root even if Redis loses the original pending commitments.
+	s.storeAggregatorRecords(commitments, block)
 
-	// Store NO SMT nodes and NO aggregator records
-	// Store commitments in Redis (for recovery)
-	s.storeCommitmentsInRedis(commitments)
-
-	// Get counts before
 	smtCountBefore, err := s.storage.SmtStorage().Count(s.ctx)
 	require.NoError(t, err)
-	recordCountBefore, err := s.storage.AggregatorRecordStorage().Count(s.ctx)
-	require.NoError(t, err)
 
-	// Run recovery
 	result, err := RecoverUnfinalizedBlock(s.ctx, s.testLogger, s.storage, s.commitmentQueue)
 	require.NoError(t, err)
 	require.True(t, result.Recovered)
 
-	// Verify both were recovered
 	smtCountAfter, err := s.storage.SmtStorage().Count(s.ctx)
 	require.NoError(t, err)
-	require.Equal(t, smtCountBefore+int64(len(commitments)), smtCountAfter, "SMT nodes should be recovered")
+	require.Equal(t, smtCountBefore+int64(len(commitments)), smtCountAfter)
 
-	recordCountAfter, err := s.storage.AggregatorRecordStorage().Count(s.ctx)
-	require.NoError(t, err)
-	require.Equal(t, recordCountBefore+int64(len(commitments)), recordCountAfter, "Aggregator records should be recovered")
-
-	// Verify block is finalized
 	finalizedBlock, err := s.storage.BlockStorage().GetByNumber(s.ctx, block.Index)
 	require.NoError(t, err)
 	require.NotNil(t, finalizedBlock)
+}
 
-	t.Log("✓ Test05_MissingBoth passed")
+func (s *RecoveryTestSuite) Test04c_FinalizeCertifiedProposalFromDurableRecordsWithoutRedis() {
+	t := s.T()
+
+	commitments, block, stateIDs := s.createTestData(41, 4, "t04c")
+	block.Status = models.FinalityStatusProposed
+	block.Finalized = false
+	proposalUC := api.NewHexBytes([]byte{0x04, 0x0c})
+
+	records := make([]*models.AggregatorRecord, len(commitments))
+	for i, c := range commitments {
+		record := models.NewAggregatorRecord(c, block.Index, api.NewBigInt(big.NewInt(int64(i))))
+		record.ProposalID = block.ProposalID
+		records[i] = record
+	}
+
+	require.NoError(t, s.storage.WithTransaction(s.ctx, func(txCtx context.Context) error {
+		if err := s.storage.BlockStorage().Store(txCtx, block); err != nil {
+			return err
+		}
+		return s.storage.AggregatorRecordStorage().StoreBatch(txCtx, records)
+	}))
+	require.NoError(t, s.redisClient.FlushAll(s.ctx).Err())
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{Database: "test_durable_proposal_recovery"},
+		Processing: config.ProcessingConfig{
+			CommitmentStreamBufferSize: 16,
+			MaxCommitmentsPerRound:     1000,
+		},
+		Sharding: config.ShardingConfig{Mode: config.ShardingModeBFTShard},
+	}
+	rm, err := NewRoundManager(
+		s.ctx,
+		&cfg,
+		s.testLogger,
+		s.commitmentQueue,
+		s.storage,
+		nil,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(s.testLogger),
+		smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)),
+		nil,
+	)
+	require.NoError(t, err)
+
+	recovered, err := rm.FinalizeCertifiedProposal(s.ctx, block.Index, block.RootHash, proposalUC)
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	finalizedBlock, err := s.storage.BlockStorage().GetByNumber(s.ctx, block.Index)
+	require.NoError(t, err)
+	require.NotNil(t, finalizedBlock)
+	require.True(t, finalizedBlock.Finalized)
+	require.Equal(t, models.FinalityStatusFinalized, finalizedBlock.Status)
+	require.Equal(t, proposalUC, finalizedBlock.UnicityCertificate)
+
+	for _, stateID := range stateIDs {
+		record, err := s.storage.AggregatorRecordStorage().GetByStateID(s.ctx, stateID)
+		require.NoError(t, err)
+		require.NotNil(t, record)
+		require.Equal(t, block.ProposalID, record.ProposalID)
+	}
+}
+
+func (s *RecoveryTestSuite) Test04d_AbandonDurableProposalFreesStateIDsForRestage() {
+	t := s.T()
+
+	commitments, block, _ := s.createTestData(42, 2, "t04d")
+	block.Status = models.FinalityStatusProposed
+	block.Finalized = false
+	block.ProposalID = "proposal-42a"
+	neighborCommitments, _, _ := s.createTestData(42, 1, "t04d_neighbor")
+
+	records := make([]*models.AggregatorRecord, len(commitments))
+	for i, c := range commitments {
+		record := models.NewAggregatorRecord(c, block.Index, api.NewBigInt(big.NewInt(int64(i))))
+		record.ProposalID = block.ProposalID
+		records[i] = record
+	}
+	neighborRecord := models.NewAggregatorRecord(neighborCommitments[0], block.Index, api.NewBigInt(big.NewInt(99)))
+	neighborRecord.ProposalID = "proposal-42b"
+
+	require.NoError(t, s.storage.WithTransaction(s.ctx, func(txCtx context.Context) error {
+		if err := s.storage.BlockStorage().Store(txCtx, block); err != nil {
+			return err
+		}
+		if err := s.storage.AggregatorRecordStorage().StoreBatch(txCtx, records); err != nil {
+			return err
+		}
+		return s.storage.AggregatorRecordStorage().Store(txCtx, neighborRecord)
+	}))
+
+	rm := &RoundManager{storage: s.storage}
+	require.NoError(t, rm.AbandonDurableProposal(s.ctx, block.Index, block.RootHash))
+
+	abandonedBlock, err := getBlockAnyFinalization(s.ctx, s.storage, block.Index)
+	require.NoError(t, err)
+	require.NotNil(t, abandonedBlock)
+	require.Equal(t, models.FinalityStatusAbandoned, abandonedBlock.Status)
+
+	visibleRecords, err := s.storage.AggregatorRecordStorage().GetByBlockNumber(s.ctx, block.Index)
+	require.NoError(t, err)
+	require.Empty(t, visibleRecords)
+
+	oldRecords, err := getAggregatorRecordsByBlockAnyFinalization(s.ctx, s.storage, block.Index)
+	require.NoError(t, err)
+	require.Len(t, oldRecords, 1)
+	require.Equal(t, neighborRecord.ProposalID, oldRecords[0].ProposalID)
+
+	restaged := models.NewAggregatorRecord(commitments[0], api.NewBigInt(big.NewInt(43)), api.NewBigInt(big.NewInt(0)))
+	restaged.ProposalID = "proposal-43"
+	require.NoError(t, s.storage.AggregatorRecordStorage().Store(s.ctx, restaged))
+
+	storedRecords, err := getAggregatorRecordsByBlockAnyFinalization(s.ctx, s.storage, restaged.BlockNumber)
+	require.NoError(t, err)
+	require.Len(t, storedRecords, 1)
+	require.Equal(t, "43", storedRecords[0].BlockNumber.String())
+	require.Equal(t, restaged.ProposalID, storedRecords[0].ProposalID)
+}
+
+func (s *RecoveryTestSuite) Test04e_OrphanStagedRecordsDoNotAttachToReusedBlockNumber() {
+	t := s.T()
+
+	orphanCommitments, orphanBlock, orphanStateIDs := s.createTestData(45, 3, "t04e_orphan")
+	orphanBlock.ProposalID = "proposal-45-orphan"
+	s.storeAggregatorRecords(orphanCommitments, orphanBlock)
+
+	visibleOrphans, err := s.storage.AggregatorRecordStorage().GetByBlockNumber(s.ctx, orphanBlock.Index)
+	require.NoError(t, err)
+	require.Empty(t, visibleOrphans, "records without a finalized block must stay invisible")
+	for _, stateID := range orphanStateIDs {
+		record, err := s.storage.AggregatorRecordStorage().GetByStateID(s.ctx, stateID)
+		require.NoError(t, err)
+		require.Nil(t, record, "orphan staged record must not be visible by stateID")
+	}
+
+	result, err := RecoverUnfinalizedBlock(s.ctx, s.testLogger, s.storage, s.commitmentQueue)
+	require.NoError(t, err)
+	require.False(t, result.Recovered, "records without a proposed block are not recoverable proposals")
+
+	winnerCommitments, winnerBlock, winnerStateIDs := s.createTestData(45, 4, "t04e_winner")
+	winnerBlock.Status = models.FinalityStatusProposed
+	winnerBlock.Finalized = false
+	winnerBlock.ProposalID = "proposal-45-winner"
+	require.False(t, bytes.Equal(orphanBlock.RootHash, winnerBlock.RootHash), "test needs distinct proposal roots")
+
+	winnerRecords := make([]*models.AggregatorRecord, len(winnerCommitments))
+	for i, commitment := range winnerCommitments {
+		record := models.NewAggregatorRecord(commitment, winnerBlock.Index, api.NewBigInt(big.NewInt(int64(i))))
+		record.ProposalID = winnerBlock.ProposalID
+		winnerRecords[i] = record
+	}
+	require.NoError(t, s.storage.WithTransaction(s.ctx, func(txCtx context.Context) error {
+		if err := s.storage.BlockStorage().Store(txCtx, winnerBlock); err != nil {
+			return err
+		}
+		return s.storage.AggregatorRecordStorage().StoreBatch(txCtx, winnerRecords)
+	}))
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{Database: "test_durable_proposal_orphan_reuse"},
+		Processing: config.ProcessingConfig{
+			CommitmentStreamBufferSize: 16,
+			MaxCommitmentsPerRound:     1000,
+		},
+		Sharding: config.ShardingConfig{Mode: config.ShardingModeBFTShard},
+	}
+	rm, err := NewRoundManager(
+		s.ctx,
+		&cfg,
+		s.testLogger,
+		s.commitmentQueue,
+		s.storage,
+		nil,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(s.testLogger),
+		smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)),
+		nil,
+	)
+	require.NoError(t, err)
+
+	recovered, err := rm.FinalizeCertifiedProposal(s.ctx, winnerBlock.Index, winnerBlock.RootHash, api.NewHexBytes([]byte{0x04, 0x0e}))
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	visibleWinnerRecords, err := s.storage.AggregatorRecordStorage().GetByBlockNumber(s.ctx, winnerBlock.Index)
+	require.NoError(t, err)
+	require.Len(t, visibleWinnerRecords, len(winnerStateIDs))
+	for i, record := range visibleWinnerRecords {
+		require.Equal(t, winnerBlock.ProposalID, record.ProposalID)
+		require.Equal(t, winnerStateIDs[i], record.StateID)
+	}
+	for _, stateID := range orphanStateIDs {
+		record, err := s.storage.AggregatorRecordStorage().GetByStateID(s.ctx, stateID)
+		require.NoError(t, err)
+		require.Nil(t, record, "orphan stateID must remain invisible after same-number finalization")
+	}
 }
 
 // ============================================================================
-// Test 6: Multiple Unfinalized Blocks (FATAL Error)
+// Test 5: Multiple Unfinalized Blocks (FATAL Error)
 // ============================================================================
 func (s *RecoveryTestSuite) Test06_MultipleUnfinalizedBlocks() {
 	t := s.T()
 
 	// Create two unfinalized blocks
-	_, block1, stateIDs1 := s.createTestData(6, 2, "t06a")
-	_, block2, stateIDs2 := s.createTestData(7, 2, "t06b")
+	_, block1, _ := s.createTestData(6, 2, "t06a")
+	_, block2, _ := s.createTestData(7, 2, "t06b")
 
 	// Store both blocks as unfinalized
 	err := s.storage.BlockStorage().Store(s.ctx, block1)
 	require.NoError(t, err)
 	err = s.storage.BlockStorage().Store(s.ctx, block2)
-	require.NoError(t, err)
-
-	// Store block records for both
-	err = s.storage.BlockRecordsStorage().Store(s.ctx, models.NewBlockRecords(block1.Index, stateIDs1))
-	require.NoError(t, err)
-	err = s.storage.BlockRecordsStorage().Store(s.ctx, models.NewBlockRecords(block2.Index, stateIDs2))
 	require.NoError(t, err)
 
 	// Run recovery - should fail with FATAL error
@@ -443,149 +559,20 @@ func (s *RecoveryTestSuite) Test06_MultipleUnfinalizedBlocks() {
 }
 
 // ============================================================================
-// Test 7: Missing Block Records (FATAL Error)
-// ============================================================================
-func (s *RecoveryTestSuite) Test07_MissingBlockRecords() {
-	t := s.T()
-
-	// Create unfinalized block
-	_, block, _ := s.createTestData(8, 3, "t07")
-
-	// Store block (unfinalized) but NO block records
-	err := s.storage.BlockStorage().Store(s.ctx, block)
-	require.NoError(t, err)
-
-	// Run recovery - should fail with FATAL error
-	result, err := RecoverUnfinalizedBlock(s.ctx, s.testLogger, s.storage, s.commitmentQueue)
-	require.Error(t, err, "Should return error for missing block records")
-	require.Nil(t, result)
-	require.Contains(t, err.Error(), "FATAL")
-	require.Contains(t, err.Error(), "block records not found")
-
-	// Clean up
-	_ = s.storage.BlockStorage().SetFinalized(s.ctx, block.Index, true)
-
-	t.Log("✓ Test07_MissingBlockRecords passed")
-}
-
-// ============================================================================
-// Test 8: Certification Request Not Found (FATAL Error)
-// ============================================================================
-func (s *RecoveryTestSuite) Test08_CertificationRequestNotFound() {
-	t := s.T()
-
-	// Create unfinalized block
-	commitments, block, stateIDs := s.createTestData(9, 3, "t08")
-
-	// Store block (unfinalized)
-	err := s.storage.BlockStorage().Store(s.ctx, block)
-	require.NoError(t, err)
-
-	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
-	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
-	require.NoError(t, err)
-
-	// Store ONLY some commitments in Redis (not all)
-	// Only store first commitment, missing the rest
-	err = s.commitmentQueue.Store(s.ctx, commitments[0])
-	require.NoError(t, err)
-	time.Sleep(200 * time.Millisecond)
-
-	// Run recovery - should fail because certification request data not found
-	result, err := RecoverUnfinalizedBlock(s.ctx, s.testLogger, s.storage, s.commitmentQueue)
-	require.Error(t, err, "Should return error when certification request is not found")
-	require.Nil(t, result)
-	require.Contains(t, err.Error(), "FATAL")
-	require.Contains(t, err.Error(), "certification request not found")
-
-	// Clean up
-	_ = s.storage.BlockStorage().SetFinalized(s.ctx, block.Index, true)
-
-	t.Log("✓ Test08_CertificationRequestNotFound passed")
-}
-
-// ============================================================================
-// Test 9: Partial Aggregator Records - Verify LeafIndex Preservation
-// ============================================================================
-func (s *RecoveryTestSuite) Test09_PartialAggregatorRecords_LeafIndexPreserved() {
-	t := s.T()
-
-	// Create unfinalized block with 5 commitments
-	commitments, block, stateIDs := s.createTestData(10, 5, "t09partial")
-
-	// Store block (unfinalized)
-	err := s.storage.BlockStorage().Store(s.ctx, block)
-	require.NoError(t, err)
-
-	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
-	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
-	require.NoError(t, err)
-
-	// Store ONLY aggregator records at positions 0, 1, and 4 (missing 2 and 3)
-	existingIndices := []int{0, 1, 4}
-	existingRecords := make([]*models.AggregatorRecord, len(existingIndices))
-	for i, idx := range existingIndices {
-		existingRecords[i] = models.NewAggregatorRecord(commitments[idx], block.Index, api.NewBigInt(big.NewInt(int64(idx))))
-	}
-	err = s.storage.AggregatorRecordStorage().StoreBatch(s.ctx, existingRecords)
-	require.NoError(t, err)
-
-	// Store all SMT nodes (so only aggregator records need recovery)
-	s.storeSmtNodes(commitments)
-
-	// Store ALL commitments in Redis (for recovery)
-	s.storeCommitmentsInRedis(commitments)
-
-	// Run recovery
-	result, err := RecoverUnfinalizedBlock(s.ctx, s.testLogger, s.storage, s.commitmentQueue)
-	require.NoError(t, err)
-	require.True(t, result.Recovered)
-
-	// Verify the recovered records have correct leaf indices
-	// Record at position 2 should have leafIndex=2, record at position 3 should have leafIndex=3
-	missingIndices := []int{2, 3}
-	for _, idx := range missingIndices {
-		record, err := s.storage.AggregatorRecordStorage().GetByStateID(s.ctx, stateIDs[idx])
-		require.NoError(t, err)
-		require.NotNil(t, record, "Record at position %d should exist after recovery", idx)
-		require.Equal(t, int64(idx), record.LeafIndex.Int.Int64(),
-			"Record at position %d should have leafIndex=%d, got %d", idx, idx, record.LeafIndex.Int.Int64())
-	}
-
-	// Also verify existing records still have correct indices
-	for _, idx := range existingIndices {
-		record, err := s.storage.AggregatorRecordStorage().GetByStateID(s.ctx, stateIDs[idx])
-		require.NoError(t, err)
-		require.NotNil(t, record, "Existing record at position %d should still exist", idx)
-		require.Equal(t, int64(idx), record.LeafIndex.Int.Int64(),
-			"Existing record at position %d should still have leafIndex=%d", idx, idx)
-	}
-
-	t.Log("✓ Test09_PartialAggregatorRecords_LeafIndexPreserved passed")
-}
-
-// ============================================================================
-// Test 10: Partial SMT Nodes - Verify Correct Detection of Missing Nodes
+// Test 6: Partial SMT Nodes - Verify Correct Detection of Missing Nodes
 // ============================================================================
 func (s *RecoveryTestSuite) Test10_PartialSmtNodes_CorrectDetection() {
 	t := s.T()
 
 	// Create unfinalized block with 5 commitments
-	commitments, block, stateIDs := s.createTestData(10, 5, "t10partial")
+	commitments, block, _ := s.createTestData(10, 5, "t10partial")
 
 	// Store block (unfinalized)
 	err := s.storage.BlockStorage().Store(s.ctx, block)
 	require.NoError(t, err)
 
-	// Store block records
-	blockRecords := models.NewBlockRecords(block.Index, stateIDs)
-	err = s.storage.BlockRecordsStorage().Store(s.ctx, blockRecords)
-	require.NoError(t, err)
-
 	// Store ALL aggregator records (so only SMT nodes need recovery)
-	s.storeAggregatorRecords(commitments, block.Index)
+	s.storeAggregatorRecords(commitments, block)
 
 	// Store ONLY SMT nodes at positions 0, 1, and 4 (missing 2 and 3)
 	existingIndices := []int{0, 1, 4}
@@ -727,13 +714,16 @@ func (s *RecoveryTestSuite) Test14_CleanupAllProcessed() {
 
 	// Create commitments
 	commitments, block, _ := s.createTestData(14, 3, "t14")
+	block.Finalized = true
+	block.Status = models.FinalityStatusFinalized
 
 	// Store in Redis and make them pending
 	s.storeCommitmentsInRedis(commitments)
 	s.readPendingToMakeThemClaimed()
 
-	// Store AggregatorRecords (simulate block was finalized)
-	s.storeAggregatorRecords(commitments, block.Index)
+	// Store finalized block and records (simulate block was finalized).
+	require.NoError(t, s.storage.BlockStorage().Store(s.ctx, block))
+	s.storeAggregatorRecords(commitments, block)
 
 	// Verify we have 3 unprocessed
 	count, err := s.commitmentQueue.CountUnprocessed(s.ctx)
@@ -759,16 +749,18 @@ func (s *RecoveryTestSuite) Test15_CleanupMixed() {
 	t := s.T()
 
 	// Create 4 commitments
-	commitments := testutil.CreateTestCertificationRequests(t, 4, "t15")
-	blockNumber := api.NewBigInt(big.NewInt(15))
+	commitments, block, _ := s.createTestData(15, 4, "t15")
+	block.Finalized = true
+	block.Status = models.FinalityStatusFinalized
 
 	// Store all 4 in Redis and make them pending
 	s.storeCommitmentsInRedis(commitments)
 	s.readPendingToMakeThemClaimed()
 
-	// Store only first 2 in AggregatorRecords (simulate partial processing)
+	// Store only first 2 in finalized AggregatorRecords (simulate partial processing)
 	processedCommitments := commitments[:2]
-	s.storeAggregatorRecords(processedCommitments, blockNumber)
+	require.NoError(t, s.storage.BlockStorage().Store(s.ctx, block))
+	s.storeAggregatorRecords(processedCommitments, block)
 
 	// Verify we have 4 unprocessed
 	count, err := s.commitmentQueue.CountUnprocessed(s.ctx)
@@ -794,13 +786,12 @@ func (s *RecoveryTestSuite) Test16_RecoveryCallsCleanup() {
 	t := s.T()
 
 	// Create a FINALIZED block with records
-	commitments, block, stateIDs := s.createTestData(16, 3, "t16")
+	commitments, block, _ := s.createTestData(16, 3, "t16")
 	block.Finalized = true
+	block.Status = models.FinalityStatusFinalized
 	err := s.storage.BlockStorage().Store(s.ctx, block)
 	require.NoError(t, err)
-	err = s.storage.BlockRecordsStorage().Store(s.ctx, models.NewBlockRecords(block.Index, stateIDs))
-	require.NoError(t, err)
-	s.storeAggregatorRecords(commitments, block.Index)
+	s.storeAggregatorRecords(commitments, block)
 	s.storeSmtNodes(commitments)
 
 	// Store commitments in Redis as pending (simulating MarkProcessed failure)
