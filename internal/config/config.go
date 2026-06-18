@@ -423,7 +423,7 @@ func Load() (*Config, error) {
 			RocksDBSubcompactions:     getEnvIntOrDefault("SMT_ROCKSDB_SUBCOMPACTIONS", 4),
 			RocksDBBloomBits:          getEnvFloatOrDefault("SMT_ROCKSDB_BLOOM_BITS", 10),
 			RocksDBMemTableMB:         getEnvIntOrDefault("SMT_ROCKSDB_MEMTABLE_MB", 64),
-			MaterializeWorkers:        getEnvIntOrDefault("SMT_MATERIALIZE_WORKERS", 64),
+			MaterializeWorkers:        getEnvIntOrDefault("SMT_MATERIALIZE_WORKERS", 16),
 			StartupReplayLimitBlocks:  getEnvIntOrDefault("SMT_STARTUP_REPLAY_LIMIT_BLOCKS", 100),
 			PrecomputeProofs:          getEnvBoolOrDefault("SMT_PRECOMPUTE_PROOFS", false),
 			ProofMetadataCacheEntries: getEnvIntOrDefault("SMT_PROOF_METADATA_CACHE_ENTRIES", 250000),

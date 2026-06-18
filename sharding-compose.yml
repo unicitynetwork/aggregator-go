@@ -182,6 +182,7 @@ services:
       ENABLE_DOCS: "true"
       ENABLE_CORS: "true"
       ENABLE_TLS: "false"
+      MALLOC_ARENA_MAX: "${MALLOC_ARENA_MAX:-2}"
       TLS_CERT_FILE: "/app/certs/cert.pem"
       TLS_KEY_FILE: "/app/certs/key.pem"
 

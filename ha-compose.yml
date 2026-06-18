@@ -225,6 +225,7 @@ services:
       CONCURRENCY_LIMIT: "1000"
       ENABLE_DOCS: "true"
       ENABLE_CORS: "true"
+      MALLOC_ARENA_MAX: "${MALLOC_ARENA_MAX:-2}"
 
       # Database Configuration
       MONGODB_URI: "mongodb://mongo1:27017,mongo2:27017,mongo3:27017/aggregator?replicaSet=rs0"
