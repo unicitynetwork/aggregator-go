@@ -367,6 +367,15 @@ func (ars *AggregatorRecordStorage) Count(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
+// EstimatedCount returns an approximate record count from collection metadata (O(1), unlike Count's scan).
+func (ars *AggregatorRecordStorage) EstimatedCount(ctx context.Context) (int64, error) {
+	count, err := ars.collection.EstimatedDocumentCount(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to estimate aggregator record count: %w", err)
+	}
+	return count, nil
+}
+
 // CreateIndexes creates the necessary indexes needed by the submit, proof, and
 // block-record lookup paths.
 func (ars *AggregatorRecordStorage) CreateIndexes(ctx context.Context) error {

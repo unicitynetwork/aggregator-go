@@ -347,7 +347,7 @@ var (
 	SMTNodesPersistedTotal = promauto.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Name: "aggregator_smt_nodes_persisted_total",
-			Help: "Approximate persisted SMT node count from MongoDB EstimatedDocumentCount.",
+			Help: "Approximate finalized aggregator-record (SMT leaf) count per shard via Mongo EstimatedDocumentCount; a per-shard growth proxy (leaves, not RocksDB internal nodes).",
 		},
 		getSMTNodesPersistedCount,
 	)

@@ -78,6 +78,9 @@ type AggregatorRecordStorage interface {
 	// Count returns the total number of records
 	Count(ctx context.Context) (int64, error)
 
+	// EstimatedCount returns an approximate record count from collection metadata (O(1)).
+	EstimatedCount(ctx context.Context) (int64, error)
+
 	// GetExistingStateIDs returns which of the given state IDs already exist.
 	GetExistingStateIDs(ctx context.Context, stateIDs []string) (map[string]bool, error)
 }

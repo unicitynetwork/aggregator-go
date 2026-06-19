@@ -233,9 +233,11 @@ func NewRoundManagerWithBackend(
 		avgSMTUpdateTime:    5 * time.Millisecond,   // Initial estimate per batch
 	}
 
-	if rm.storage != nil && rm.storage.SmtStorage() != nil {
+	// Count records (SMT leaves) in Mongo; disk-backed SMT nodes live in RocksDB,
+	// so the SMT collection reads ~0.
+	if rm.storage != nil && rm.storage.AggregatorRecordStorage() != nil {
 		metrics.SetSMTNodesPersistedCountFunc(func(countCtx context.Context) (int64, error) {
-			return rm.storage.SmtStorage().EstimatedCount(countCtx)
+			return rm.storage.AggregatorRecordStorage().EstimatedCount(countCtx)
 		})
 	}
 	if rm.commitmentQueue != nil {
