@@ -701,6 +701,10 @@ func (s *diskStartupAggregatorRecordStorage) Count(context.Context) (int64, erro
 	return int64(len(s.records)), nil
 }
 
+func (s *diskStartupAggregatorRecordStorage) EstimatedCount(context.Context) (int64, error) {
+	return int64(len(s.records)), nil
+}
+
 func (s *diskStartupAggregatorRecordStorage) GetExistingStateIDs(_ context.Context, stateIDs []string) (map[string]bool, error) {
 	existing := make(map[string]bool, len(stateIDs))
 	for _, stateID := range stateIDs {

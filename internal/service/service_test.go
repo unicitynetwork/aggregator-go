@@ -1210,7 +1210,8 @@ func (s *testAggregatorRecordStorage) StoreBatch(context.Context, []*models.Aggr
 func (s *testAggregatorRecordStorage) GetByBlockNumber(context.Context, *api.BigInt) ([]*models.AggregatorRecord, error) {
 	return nil, nil
 }
-func (s *testAggregatorRecordStorage) Count(context.Context) (int64, error) { return 0, nil }
+func (s *testAggregatorRecordStorage) Count(context.Context) (int64, error)          { return 0, nil }
+func (s *testAggregatorRecordStorage) EstimatedCount(context.Context) (int64, error) { return 0, nil }
 func (s *testAggregatorRecordStorage) GetExistingStateIDs(context.Context, []string) (map[string]bool, error) {
 	return nil, nil
 }

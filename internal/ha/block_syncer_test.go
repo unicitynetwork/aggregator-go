@@ -557,6 +557,10 @@ func (s *blockSyncerTestAggregatorRecordStorage) Count(context.Context) (int64, 
 	return count, nil
 }
 
+func (s *blockSyncerTestAggregatorRecordStorage) EstimatedCount(ctx context.Context) (int64, error) {
+	return s.Count(ctx)
+}
+
 func (s *blockSyncerTestAggregatorRecordStorage) GetExistingStateIDs(_ context.Context, stateIDs []string) (map[string]bool, error) {
 	out := make(map[string]bool, len(stateIDs))
 	wanted := make(map[string]struct{}, len(stateIDs))
