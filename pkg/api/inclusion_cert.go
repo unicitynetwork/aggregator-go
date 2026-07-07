@@ -265,8 +265,13 @@ func RegionFromKeyBytes(key []byte, depth int) []byte {
 		byteLen = len(key)
 	}
 	copy(region[:byteLen], key[:byteLen])
-	if rem := depth % 8; rem != 0 && byteLen > 0 {
-		region[byteLen-1] &= byte(1<<uint(rem)) - 1
+	// Mask the byte containing the depth boundary. When the key is shorter
+	// than the depth's byte span, every copied bit is below depth and no
+	// masking applies.
+	if rem := depth % 8; rem != 0 {
+		if maskByte := (depth - 1) / 8; maskByte < byteLen {
+			region[maskByte] &= byte(1<<uint(rem)) - 1
+		}
 	}
 	return region
 }

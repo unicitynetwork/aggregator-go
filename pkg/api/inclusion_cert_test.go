@@ -521,3 +521,26 @@ func TestComposeInclusionCert_RejectsParentDeeperThanChild(t *testing.T) {
 		t.Fatalf("expected ErrCertDepthOrder, got %v", err)
 	}
 }
+
+func TestRegionFromKeyBytes_ShortKey(t *testing.T) {
+	// A key shorter than the depth's byte span contributes only bits below
+	// the depth boundary; none of them may be masked away.
+	region := RegionFromKeyBytes([]byte{0xFF}, 12)
+	if region[0] != 0xFF {
+		t.Fatalf("short-key region byte 0 = %#x, want 0xff", region[0])
+	}
+	for i := 1; i < len(region); i++ {
+		if region[i] != 0 {
+			t.Fatalf("region byte %d = %#x, want 0", i, region[i])
+		}
+	}
+
+	// Uncapped behavior is unchanged: depth 12 over a full-width key masks
+	// byte 1 to its low 4 bits.
+	full := make([]byte, 32)
+	full[0], full[1] = 0xFF, 0xFF
+	region = RegionFromKeyBytes(full, 12)
+	if region[0] != 0xFF || region[1] != 0x0F {
+		t.Fatalf("full-key region = %#x %#x, want 0xff 0x0f", region[0], region[1])
+	}
+}
