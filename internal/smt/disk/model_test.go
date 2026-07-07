@@ -125,7 +125,7 @@ func TestHashNodeMatchesMemoryAndGoldenRoot(t *testing.T) {
 		left, right = l2, l1
 	}
 
-	root, err := NewInternal(EmptyPath(), 0, left, right)
+	root, err := NewInternal(EmptyPath(), 0, PrefixBits{}, left, right)
 	require.NoError(t, err)
 	got, err := root.HashValue()
 	require.NoError(t, err)
@@ -135,7 +135,7 @@ func TestHashNodeMatchesMemoryAndGoldenRoot(t *testing.T) {
 		leafInput{key: k1, value: v1},
 		leafInput{key: k2, value: v2},
 	), got)
-	require.Equal(t, mustHash(t, "20563433422d651813394a07697b9c09f9c2ab2ddb95eaa8ed2dc3211de3e869"), got)
+	require.Equal(t, mustHash(t, "fb0b8b6efbb9861202b4f49ca9f2d596f6698d5645f7545b74caf9d8b5161fcc"), got)
 }
 
 func TestLeafSerializationRoundTrip(t *testing.T) {
@@ -164,7 +164,7 @@ func TestInternalSerializationRoundTrip(t *testing.T) {
 
 	left := NewLeaf(mustKey(t, "0000000000000000000000000000000000000000000000000000000000000000"), []byte("left"))
 	right := NewLeaf(mustKey(t, "0100000000000000000000000000000000000000000000000000000000000000"), []byte("right"))
-	branch, err := NewInternal(path, 13, left, right)
+	branch, err := NewInternal(path, 13, RegionFromKey(key, 13), left, right)
 	require.NoError(t, err)
 
 	encoded, err := MarshalInternal(branch.Internal)
@@ -179,7 +179,7 @@ func TestInternalSerializationRoundTrip(t *testing.T) {
 	expected = append(expected, rightHash[:]...)
 	require.Equal(t, expected, encoded)
 
-	decoded, err := UnmarshalInternal(encoded)
+	decoded, err := UnmarshalInternal(encoded, RootNodeKey())
 	require.NoError(t, err)
 	require.Equal(t, branch.Internal.Depth, decoded.Depth)
 	require.True(t, branch.Internal.Path.Equal(decoded.Path))
@@ -192,37 +192,37 @@ func TestInternalSerializationRoundTrip(t *testing.T) {
 	require.Equal(t, rightHash, decodedRightHash)
 
 	withTrailing := append(append([]byte(nil), encoded...), branch.Internal.Hash[:]...)
-	_, err = UnmarshalInternal(withTrailing)
+	_, err = UnmarshalInternal(withTrailing, RootNodeKey())
 	require.Error(t, err)
 }
 
 func TestUnmarshalInternalRejectsMalformedData(t *testing.T) {
 	left := NewLeaf(mustKey(t, "0000000000000000000000000000000000000000000000000000000000000000"), []byte("left"))
 	right := NewLeaf(mustKey(t, "0100000000000000000000000000000000000000000000000000000000000000"), []byte("right"))
-	branch, err := NewInternal(EmptyPath(), 0, left, right)
+	branch, err := NewInternal(EmptyPath(), 0, PrefixBits{}, left, right)
 	require.NoError(t, err)
 
 	encoded, err := MarshalInternal(branch.Internal)
 	require.NoError(t, err)
 
-	_, err = UnmarshalInternal(append([]byte(nil), encoded[:len(encoded)-1]...))
+	_, err = UnmarshalInternal(append([]byte(nil), encoded[:len(encoded)-1]...), RootNodeKey())
 	require.Error(t, err)
 
 	withTrailing := append(append([]byte(nil), encoded...), 0x00)
-	_, err = UnmarshalInternal(withTrailing)
+	_, err = UnmarshalInternal(withTrailing, RootNodeKey())
 	require.Error(t, err)
 
 	withWrongTag := append([]byte(nil), encoded...)
 	withWrongTag[0] = TagLeaf
-	_, err = UnmarshalInternal(withWrongTag)
+	_, err = UnmarshalInternal(withWrongTag, RootNodeKey())
 	require.Error(t, err)
 
 	nonCanonicalPath := []byte{TagInternal, 13, 13, 0xa5, 0xe1}
 	nonCanonicalPath = append(nonCanonicalPath, make([]byte, 2*HashSize)...)
-	_, err = UnmarshalInternal(nonCanonicalPath)
+	_, err = UnmarshalInternal(nonCanonicalPath, RootNodeKey())
 	require.Error(t, err)
 
-	_, err = UnmarshalInternal([]byte{TagInternal, 0, 1})
+	_, err = UnmarshalInternal([]byte{TagInternal, 0, 1}, RootNodeKey())
 	require.Error(t, err)
 }
 

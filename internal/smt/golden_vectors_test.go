@@ -20,7 +20,7 @@ func TestGoldenVector_RootMatches(t *testing.T) {
 	require.NoError(t, tree.AddLeaf(k1, []byte("value-one")))
 	require.NoError(t, tree.AddLeaf(k2, []byte("value-two")))
 
-	const expectedRoot = "20563433422d651813394a07697b9c09f9c2ab2ddb95eaa8ed2dc3211de3e869"
+	const expectedRoot = "fb0b8b6efbb9861202b4f49ca9f2d596f6698d5645f7545b74caf9d8b5161fcc"
 	require.Equal(t, expectedRoot, tree.GetRootHashHex())
 }
 
@@ -39,7 +39,7 @@ func TestGoldenVector_ProofBitmapAndSiblingsMatch(t *testing.T) {
 	require.NoError(t, tree.AddLeaf(k2, v2))
 	require.NoError(t, tree.AddLeaf(k3, v3))
 
-	const expectedRoot = "b08cae8f98a168a4b39dced99fc3ea2833291c8c53a0eb447e0056044dee598a"
+	const expectedRoot = "5dd3c11610f053b31a8e1e42b51a4b92940ce0ddf019bbb89e2f27d44e33c0bd"
 	require.Equal(t, expectedRoot, tree.GetRootHashHex())
 
 	path, err := tree.GetPath(k2)

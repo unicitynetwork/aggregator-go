@@ -15,10 +15,10 @@ func hashLeafRaw(t *testing.T, algo HashAlgorithm, key, value []byte) []byte {
 }
 
 // hashNodeRaw computes H(0x01 || depth || left || right) for test fixtures.
-func hashNodeRaw(t *testing.T, algo HashAlgorithm, depth byte, left, right []byte) []byte {
+func hashNodeRaw(t *testing.T, algo HashAlgorithm, depth byte, key, left, right []byte) []byte {
 	t.Helper()
 	h := NewDataHasher(algo)
-	h.AddData([]byte{0x01, depth}).AddData(left).AddData(right)
+	h.AddData([]byte{0x01, depth}).AddData(RegionFromKeyBytes(key, int(depth))).AddData(left).AddData(right)
 	return h.GetHash().RawHash
 }
 
@@ -43,7 +43,7 @@ func TestInclusionCertVerify_SingleSiblingAtDepth0(t *testing.T) {
 	siblingHash := bytes.Repeat([]byte{0xAB}, SiblingSize)
 
 	leafHash := hashLeafRaw(t, SHA256, key, value)
-	root := hashNodeRaw(t, SHA256, 0, leafHash, siblingHash)
+	root := hashNodeRaw(t, SHA256, 0, key, leafHash, siblingHash)
 
 	cert := &InclusionCert{}
 	cert.Bitmap[0] = 0x01 // depth 0
@@ -72,9 +72,9 @@ func TestInclusionCertVerify_TwoSiblingsRootToLeafWireOrder(t *testing.T) {
 
 	leaf := hashLeafRaw(t, SHA256, key, value)
 	// d=7: bit 7 = 0 → went left → sibling right
-	h7 := hashNodeRaw(t, SHA256, 7, leaf, sib7)
+	h7 := hashNodeRaw(t, SHA256, 7, key, leaf, sib7)
 	// d=3: bit 3 = 1 → went right → sibling left
-	h3 := hashNodeRaw(t, SHA256, 3, sib3, h7)
+	h3 := hashNodeRaw(t, SHA256, 3, key, sib3, h7)
 	root := h3
 
 	cert := &InclusionCert{}
@@ -101,8 +101,8 @@ func TestInclusionCertVerify_WrongSiblingOrderFails(t *testing.T) {
 	sib7 := bytes.Repeat([]byte{0x77}, SiblingSize)
 
 	leaf := hashLeafRaw(t, SHA256, key, value)
-	h7 := hashNodeRaw(t, SHA256, 7, leaf, sib7)
-	h3 := hashNodeRaw(t, SHA256, 3, sib3, h7)
+	h7 := hashNodeRaw(t, SHA256, 7, key, leaf, sib7)
+	h3 := hashNodeRaw(t, SHA256, 3, key, sib3, h7)
 	root := h3
 
 	cert := &InclusionCert{}
@@ -131,7 +131,7 @@ func TestInclusionCertVerify_DepthSpanning8Bytes(t *testing.T) {
 	siblingHash := bytes.Repeat([]byte{0x5A}, SiblingSize)
 	leafHash := hashLeafRaw(t, SHA256, key, value)
 	// bit 200 = 1 → went right → sibling is left
-	root := hashNodeRaw(t, SHA256, byte(depth), siblingHash, leafHash)
+	root := hashNodeRaw(t, SHA256, byte(depth), key, siblingHash, leafHash)
 
 	cert := &InclusionCert{}
 	cert.Bitmap[depth/8] = 1 << (depth % 8)
@@ -397,8 +397,8 @@ func TestComposeInclusionCert_Success(t *testing.T) {
 	parentSibling := bytes.Repeat([]byte{0x99}, SiblingSize)
 
 	leaf := hashLeafRaw(t, SHA256, key, value)
-	childRoot := hashNodeRaw(t, SHA256, 5, leaf, childSibling)
-	parentRoot := hashNodeRaw(t, SHA256, 1, childRoot, parentSibling)
+	childRoot := hashNodeRaw(t, SHA256, 5, key, leaf, childSibling)
+	parentRoot := hashNodeRaw(t, SHA256, 1, key, childRoot, parentSibling)
 
 	child := &InclusionCert{}
 	child.Bitmap[5/8] |= 1 << (5 % 8)

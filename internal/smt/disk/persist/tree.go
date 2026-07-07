@@ -484,7 +484,7 @@ func loadProofBranch(reader storage.ReadStore, key disk.NodeKey, expectedHash di
 	if !ok {
 		return nil, fmt.Errorf("disk SMT persist: node %x missing from store", key.Bytes())
 	}
-	branch, err := decodeBranch(encoded)
+	branch, err := decodeBranch(key, encoded)
 	if err != nil {
 		return nil, err
 	}
@@ -499,7 +499,7 @@ func loadProofBranch(reader storage.ReadStore, key disk.NodeKey, expectedHash di
 }
 
 func decodeAndValidateProofBranch(key disk.NodeKey, encoded []byte, expectedHash disk.Hash) (*disk.Branch, error) {
-	branch, err := decodeBranch(encoded)
+	branch, err := decodeBranch(key, encoded)
 	if err != nil {
 		return nil, err
 	}
@@ -1174,7 +1174,7 @@ func (s *Snapshot) loadBranchParallel(key disk.NodeKey, expectedHash disk.Hash) 
 		return nil, fmt.Errorf("disk SMT persist: node %x missing from store", key.Bytes())
 	}
 	decodeStart := time.Now()
-	branch, err := decodeBranch(encoded)
+	branch, err := decodeBranch(key, encoded)
 	decodeDuration := time.Since(decodeStart)
 	if err != nil {
 		return nil, err
@@ -1208,7 +1208,7 @@ func (s *Snapshot) loadBranchFromOverlay(key disk.NodeKey, expectedHash disk.Has
 	if entry.delete {
 		return nil, true, fmt.Errorf("disk SMT persist: node %x is tombstoned in snapshot overlay", key.Bytes())
 	}
-	branch, err := decodeBranch(entry.value)
+	branch, err := decodeBranch(key, entry.value)
 	if err != nil {
 		return nil, true, err
 	}
@@ -1526,7 +1526,7 @@ func (s *Snapshot) loadFrontierParallel(loads []frontierLoadReq) error {
 					results[idx].err = fmt.Errorf("disk SMT persist: node %x missing from store", miss.req.nodeKey.Bytes())
 					continue
 				}
-				branch, err := decodeBranch(encoded)
+				branch, err := decodeBranch(miss.req.nodeKey, encoded)
 				if err != nil {
 					results[idx].err = err
 					continue
@@ -1579,7 +1579,7 @@ func (s *Snapshot) attachLoadedBranch(req frontierReq, branch *disk.Branch) {
 
 func (s *Snapshot) decodeAndValidateLoadedBranch(key disk.NodeKey, encoded []byte, expectedHash disk.Hash) (*disk.Branch, disk.Hash, error) {
 	decodeStart := time.Now()
-	branch, err := decodeBranch(encoded)
+	branch, err := decodeBranch(key, encoded)
 	s.stats.MaterializeDecodeDuration += time.Since(decodeStart)
 	if err != nil {
 		return nil, disk.Hash{}, err
@@ -1794,7 +1794,7 @@ func (s *Snapshot) loadBranch(key disk.NodeKey, expectedHash disk.Hash) (*disk.B
 	return branch, nil
 }
 
-func decodeBranch(encoded []byte) (*disk.Branch, error) {
+func decodeBranch(key disk.NodeKey, encoded []byte) (*disk.Branch, error) {
 	tag, err := disk.SerializedTag(encoded)
 	if err != nil {
 		return nil, err
@@ -1807,7 +1807,7 @@ func decodeBranch(encoded []byte) (*disk.Branch, error) {
 		}
 		return &disk.Branch{Kind: disk.BranchKindLeaf, Leaf: leaf}, nil
 	case disk.TagInternal:
-		internal, err := disk.UnmarshalInternal(encoded)
+		internal, err := disk.UnmarshalInternal(encoded, key)
 		if err != nil {
 			return nil, err
 		}
@@ -1918,11 +1918,12 @@ func cacheBranchForPersistedNode(branch *disk.Branch) (*disk.Branch, disk.Hash, 
 		return &disk.Branch{
 			Kind: disk.BranchKindInternal,
 			Internal: &disk.InternalNode{
-				Path:  branch.Internal.Path,
-				Depth: branch.Internal.Depth,
-				Left:  disk.NewStub(leftHash),
-				Right: disk.NewStub(rightHash),
-				Hash:  branch.Internal.Hash,
+				Path:   branch.Internal.Path,
+				Depth:  branch.Internal.Depth,
+				Region: branch.Internal.Region,
+				Left:   disk.NewStub(leftHash),
+				Right:  disk.NewStub(rightHash),
+				Hash:   branch.Internal.Hash,
 			},
 		}, hash, nil
 	default:
@@ -1991,11 +1992,12 @@ func cloneBranch(branch *disk.Branch) *disk.Branch {
 	}
 	if branch.Internal != nil {
 		next.Internal = &disk.InternalNode{
-			Path:  branch.Internal.Path,
-			Depth: branch.Internal.Depth,
-			Left:  cloneBranch(branch.Internal.Left),
-			Right: cloneBranch(branch.Internal.Right),
-			Hash:  branch.Internal.Hash,
+			Path:   branch.Internal.Path,
+			Depth:  branch.Internal.Depth,
+			Region: branch.Internal.Region,
+			Left:   cloneBranch(branch.Internal.Left),
+			Right:  cloneBranch(branch.Internal.Right),
+			Hash:   branch.Internal.Hash,
 		}
 	}
 	return next

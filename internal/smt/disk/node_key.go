@@ -72,6 +72,12 @@ func (k NodeKey) DepthBits() int {
 	return int(k.depth)
 }
 
+// Prefix returns the node's absolute routing prefix with unused bits cleared.
+// For non-root keys this is exactly the v6a region operand at DepthBits.
+func (k NodeKey) Prefix() PrefixBits {
+	return k.prefix
+}
+
 func (k NodeKey) Bytes() []byte {
 	return k.AppendBytes(nil)
 }

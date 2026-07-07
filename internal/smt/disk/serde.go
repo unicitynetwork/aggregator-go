@@ -97,7 +97,30 @@ func MarshalInternal(node *InternalNode) ([]byte, error) {
 	return out, nil
 }
 
-func UnmarshalInternal(data []byte) (*InternalNode, error) {
+// RegionForNode derives an internal node's absolute v6a region from its
+// storage key and its serialized compressed path. The storage key covers key
+// bits [0, key.DepthBits()) — the branch slot: parent split plus direction
+// bit — and the compressed path extends it to the node's bifurcation depth,
+// so region = key prefix bits followed by path bits at offset DepthBits().
+func RegionForNode(key NodeKey, path CompressedPath) (PrefixBits, error) {
+	start := key.DepthBits()
+	if start+path.Len() > KeyBits {
+		return PrefixBits{}, fmt.Errorf("disk smt: node region exceeds key width: start=%d pathLen=%d", start, path.Len())
+	}
+	region := key.Prefix()
+	for i := 0; i < path.Len(); i++ {
+		if path.BitAt(i) != 0 {
+			region[(start+i)/8] |= 1 << (uint(start+i) % 8)
+		}
+	}
+	return region, nil
+}
+
+// UnmarshalInternal decodes a serialized internal node stored under the given
+// storage key. The node's absolute v6a region is derived from the key prefix
+// plus the serialized compressed path (see RegionForNode); it is a hash
+// operand and is not part of the serialized payload.
+func UnmarshalInternal(data []byte, key NodeKey) (*InternalNode, error) {
 	if len(data) < 1+1+1+2*HashSize {
 		return nil, fmt.Errorf("disk smt: serialized internal node too short: %d", len(data))
 	}
@@ -133,13 +156,22 @@ func UnmarshalInternal(data []byte) (*InternalNode, error) {
 	if len(data) != pos {
 		return nil, fmt.Errorf("disk smt: serialized internal node has trailing bytes: got %d, consumed %d", len(data), pos)
 	}
-	hash := HashNode(leftHash, rightHash, depth)
+	if key.DepthBits()+path.Len() != int(depth) {
+		return nil, fmt.Errorf("disk smt: node depth mismatch: key depth %d + path len %d != stored depth %d",
+			key.DepthBits(), path.Len(), depth)
+	}
+	region, err := RegionForNode(key, path)
+	if err != nil {
+		return nil, err
+	}
+	hash := HashNode(leftHash, rightHash, depth, region)
 
 	return &InternalNode{
-		Path:  path,
-		Depth: depth,
-		Left:  NewStub(leftHash),
-		Right: NewStub(rightHash),
-		Hash:  hash,
+		Path:   path,
+		Depth:  depth,
+		Region: region,
+		Left:   NewStub(leftHash),
+		Right:  NewStub(rightHash),
+		Hash:   hash,
 	}, nil
 }

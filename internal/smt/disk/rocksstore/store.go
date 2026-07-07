@@ -64,7 +64,7 @@ import (
 
 const (
 	SchemaVersion = "1"
-	TreeLayout    = "yellowpaper-rsmt-sha256-v1"
+	TreeLayout    = "yellowpaper-rsmt-sha256-v6a"
 	KeyBits       = "256"
 
 	maxCInt = int(^uint32(0) >> 1)

@@ -26,9 +26,15 @@ type LeafNode struct {
 type InternalNode struct {
 	Path  CompressedPath
 	Depth uint8
-	Left  *Branch
-	Right *Branch
-	Hash  Hash
+	// Region is the node's absolute key prefix at Depth (v6a hash operand).
+	// It is derived, not persisted: from a descendant key at creation and
+	// from the storage NodeKey prefix at load. Splitting an edge above a
+	// node changes neither its Depth nor its Region, so preserved subtrees
+	// keep their Region (and therefore their hash) across restructures.
+	Region PrefixBits
+	Left   *Branch
+	Right  *Branch
+	Hash   Hash
 }
 
 func NewLeaf(key Key, value []byte) *Branch {
@@ -43,7 +49,7 @@ func NewLeaf(key Key, value []byte) *Branch {
 	}
 }
 
-func NewInternal(path CompressedPath, depth uint8, left, right *Branch) (*Branch, error) {
+func NewInternal(path CompressedPath, depth uint8, region PrefixBits, left, right *Branch) (*Branch, error) {
 	if left == nil || right == nil {
 		return nil, fmt.Errorf("disk smt: internal node requires both children")
 	}
@@ -58,11 +64,12 @@ func NewInternal(path CompressedPath, depth uint8, left, right *Branch) (*Branch
 	return &Branch{
 		Kind: BranchKindInternal,
 		Internal: &InternalNode{
-			Path:  path,
-			Depth: depth,
-			Left:  left,
-			Right: right,
-			Hash:  HashNode(leftHash, rightHash, depth),
+			Path:   path,
+			Depth:  depth,
+			Region: region,
+			Left:   left,
+			Right:  right,
+			Hash:   HashNode(leftHash, rightHash, depth, region),
 		},
 	}, nil
 }

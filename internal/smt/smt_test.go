@@ -19,7 +19,7 @@ func TestSMTGetRoot(t *testing.T) {
 	// v2 reference values for basic tree shapes.
 	t.Run("EmptyTree", func(t *testing.T) {
 		smt := NewSparseMerkleTree(api.SHA256, 2)
-		expected := "47dc540c94ceb704a23875c11273e16bb0b8a87aed84de911f2133568115f254"
+		expected := "0000000000000000000000000000000000000000000000000000000000000000"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
@@ -44,7 +44,7 @@ func TestSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b100), []byte{0x61})
 		smt.AddLeaf(big.NewInt(0b111), []byte{0x62})
 
-		expected := "f0698f0230044b700c1e5e433f7776b8af113199905b6122b19504274dd77111"
+		expected := "737f21207992db605e9f894154720f5fc433ca7f5861dba576720633ad948dbd"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
@@ -55,7 +55,7 @@ func TestSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b1011), []byte{0x63})
 		smt.AddLeaf(big.NewInt(0b1111), []byte{0x64})
 
-		expected := "728a4e5f71d239df87b57bdf1e3bd5ca3383d2b0d16758a9b3f2aedff02e4c24"
+		expected := "2a937ba2bf8c934fa6474c3aea4d20f88a145425bd4874089ca298d2c10d7907"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 }
@@ -82,7 +82,7 @@ func TestChildSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b10010), []byte{0x61})
 		smt.AddLeaf(big.NewInt(0b11010), []byte{0x62})
 
-		expected := "564b213cf6cee27badc130c7b9c7f06c27b76e8bbe25149e1412646d24027d2d"
+		expected := "9cd027f96658b917f35ebab75d1051853c1cdb3adca3fe980ecb1db40cae6cbc"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
@@ -91,7 +91,7 @@ func TestChildSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b10101), []byte{0x63})
 		smt.AddLeaf(big.NewInt(0b11101), []byte{0x64})
 
-		expected := "c5f0538e97bb172a7e423848673faa84141b2201cc803b328f1824299f24dd7f"
+		expected := "b2f48e753b5e65d184354f831ed64e182d0f5d66ac9340c5541d5c9e15e453ce"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 }
@@ -104,7 +104,7 @@ func TestParentSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b10), left)
 		smt.AddLeaf(big.NewInt(0b11), right)
 
-		expected := "245915b6e866e0dfa36eb5c1323325c6663bd0ea7fe9ea7c60efe54700901577"
+		expected := "33e2a95b21f38f6e0caaded9d09ddeaf04812cd259faa9a9c3dc5990fbecf5d3"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 
@@ -115,7 +115,7 @@ func TestParentSMTGetRoot(t *testing.T) {
 		smt.AddLeaf(big.NewInt(0b110), left)
 		smt.AddLeaf(big.NewInt(0b101), right)
 
-		expected := "1f52283972b0b30de79673b0a889357af74859504f70a657c7516ab77b698302"
+		expected := "c3c148e3509bb9543801fde91e32e0784ec68ae4da06553f522d84cae2fcf6ab"
 		require.Equal(t, expected, smt.GetRootHashHex())
 	})
 }
@@ -227,7 +227,7 @@ func TestSMTBatchOperations(t *testing.T) {
 // TestSMTRootHashRegressionFixture pins an implementation reference root hash
 // for a fixed leaf set, so refactors cannot accidentally change hash behavior.
 func TestSMTRootHashRegressionFixture(t *testing.T) {
-	const expectedRoot = "8f12d069a0a8d02649dae4485d97ea1d98f2742b5c22de64a4f331b6f0b7b7dd"
+	const expectedRoot = "55470bd5b8f6a8a6ecb1bd669e87d8aedaae19c8b5aaed54aaced61704db7012"
 
 	leaves := []*Leaf{
 		NewLeaf(big.NewInt(0b110010000), []byte("value00010000")), // 400
@@ -254,9 +254,9 @@ func TestSMTRootHashRegressionFixture(t *testing.T) {
 // deterministic child-root inputs.
 func TestParentSMTRootHashRegressionFixture(t *testing.T) {
 	const (
-		expectedEmpty      = "cd123cd6893ea82539bbce16cd69f196ad3770a1a16806acd624061684f04c22"
-		expectedOneUpdate  = "b3bf509ebc9114647fd69f72b817b257b07b8bd32ed82f6b85b8f5b19dedcfc8"
-		expectedTwoUpdates = "0eb669e4b5572cd9c2cf3b4a18b491354f67c0591d549cc2879a63defe0a7759"
+		expectedEmpty      = "816c274f74eadcb829a94d5b91d9c49fbede03f4defde62a841a8d11f1045e89"
+		expectedOneUpdate  = "dc850f58f28646650f89a57cf1adee968e8643cf3b8283183975291137d8b6be"
+		expectedTwoUpdates = "c73c220c13ce846b64ad5b03431cbfb10495c0ec85488f9aee2dae5fedb59d50"
 	)
 
 	make32 := func(start byte) []byte {

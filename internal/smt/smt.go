@@ -129,8 +129,10 @@ func NewParentSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int) *Spar
 	// better to ensure all the leaves exist; otherwise the hash values
 	// of siblings of the missing nodes would not match the structure of
 	// the tree and the corresponding inclusion proofs would fail to verify
-	tree.root.Left = populate(0b10, keyLength, 1)
-	tree.root.Right = populate(0b11, keyLength, 1)
+	tree.root.Left = populate(0b10, keyLength, 1, make([]byte, 32))
+	rightRegion := make([]byte, 32)
+	rightRegion[0] |= 1
+	tree.root.Right = populate(0b11, keyLength, 1, rightRegion)
 
 	// Mutation above invalidated the root hash primed by NewSparseMerkleTree.
 	// We reset and re-prime.
@@ -140,13 +142,19 @@ func NewParentSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int) *Spar
 	return tree
 }
 
-func populate(path, levels, depth int) branch {
+// populate builds the fully-populated parent-mode tree. region carries the
+// node's absolute prefix (v6a); a child extends it with its direction bit at
+// position depth.
+func populate(path, levels, depth int, region []byte) branch {
 	if levels == 1 {
 		return newChildLeafBranch(big.NewInt(int64(path)), nil)
 	}
-	left := populate(0b10, levels-1, depth+1)
-	right := populate(0b11, levels-1, depth+1)
-	return newNodeBranchWithDepth(big.NewInt(int64(path)), left, right, depth)
+	leftRegion := append([]byte(nil), region...)
+	rightRegion := append([]byte(nil), region...)
+	rightRegion[depth/8] |= 1 << (uint(depth) % 8)
+	left := populate(0b10, levels-1, depth+1, leftRegion)
+	right := populate(0b11, levels-1, depth+1, rightRegion)
+	return newNodeBranchWithDepth(big.NewInt(int64(path)), left, right, depth, region)
 }
 
 // CreateSnapshot creates a snapshot of the current SMT state
@@ -235,7 +243,7 @@ func (smt *SparseMerkleTree) cloneBranch(branch branch) branch {
 		return cloned
 	} else {
 		nodeBranch := branch.(*NodeBranch)
-		return newNodeBranchWithDepth(nodeBranch.Path, nodeBranch.Left, nodeBranch.Right, int(nodeBranch.Depth))
+		return newNodeBranchWithDepth(nodeBranch.Path, nodeBranch.Left, nodeBranch.Right, int(nodeBranch.Depth), nodeBranch.Region)
 	}
 }
 
@@ -258,8 +266,14 @@ type LeafBranch struct {
 
 // NodeBranch represents an internal node
 type NodeBranch struct {
-	Path    *big.Int
-	Depth   uint8
+	Path  *big.Int
+	Depth uint8
+	// Region is the node's absolute Depth-bit key prefix packed in the
+	// canonical v6a 32-byte encoding. Derived at construction (from the
+	// inserted leaf key for new junctions, preserved for restructured
+	// nodes); splitting an edge above a node changes neither Depth nor
+	// Region, so cached hashes stay valid across restructures.
+	Region  []byte
 	Left    branch
 	Right   branch
 	rawHash [smtCachedHashBytes]byte // inline hash cache; valid when hashSet == true
@@ -340,16 +354,18 @@ func (l *LeafBranch) isLeaf() bool {
 
 // NewNodeBranch creates a regular node branch
 func newNodeBranch(path *big.Int, left, right branch) *NodeBranch {
-	return newNodeBranchWithDepth(path, left, right, path.BitLen()-1)
+	// Absolute-path variant: the region is derivable from the path itself.
+	return newNodeBranchWithDepth(path, left, right, path.BitLen()-1, regionFromPath(path, uint8(path.BitLen()-1)))
 }
 
-func newNodeBranchWithDepth(path *big.Int, left, right branch, depth int) *NodeBranch {
+func newNodeBranchWithDepth(path *big.Int, left, right branch, depth int, region []byte) *NodeBranch {
 	if depth < 0 || depth > 255 {
 		panic(fmt.Sprintf("smt: node depth %d out of uint8 range [0, 255]", depth))
 	}
 	return &NodeBranch{
 		Path:   new(big.Int).Set(path),
 		Depth:  uint8(depth),
+		Region: region,
 		Left:   left,
 		Right:  right,
 		isRoot: false,
@@ -364,6 +380,7 @@ func newRootBranch(path *big.Int, left, right branch, depth int) *NodeBranch {
 	return &NodeBranch{
 		Path:   new(big.Int).Set(path),
 		Depth:  uint8(depth),
+		Region: regionFromPath(path, uint8(depth)),
 		Left:   left,
 		Right:  right,
 		isRoot: true,
@@ -396,11 +413,27 @@ func (n *NodeBranch) calculateHash(hasher *api.DataHasher) []byte {
 		return n.rawHash[:]
 	}
 
-	// Keep root hash stable for empty trees by hashing domain+level when both
-	// children are empty.
+	// v6a empty-tree rule: the empty root is the all-zero hash (spec: root
+	// is bottom), matching the JS/Java SDK implementations.
+	if leftHash == nil && rightHash == nil {
+		for i := range n.rawHash {
+			n.rawHash[i] = 0
+		}
+		n.hashSet = true
+		return n.rawHash[:]
+	}
+
+	// v6a internal-node hash (yellowpaper C.3.2.2):
+	// H(0x01 || depth || region || left || right), where region is the
+	// node's absolute depth-bit key prefix packed LSB-in-byte into 32 bytes.
+	region := n.Region
+	if region == nil {
+		region = make([]byte, 32)
+	}
 	hasher.Reset().
 		AddData([]byte{0x01}).
-		AddData([]byte{n.Depth})
+		AddData([]byte{n.Depth}).
+		AddData(region)
 	if leftHash != nil {
 		hasher.AddData(leftHash)
 	}
@@ -411,6 +444,28 @@ func (n *NodeBranch) calculateHash(hasher *api.DataHasher) []byte {
 	hasher.SumRaw(n.rawHash[:0])
 	n.hashSet = true
 	return n.rawHash[:]
+}
+
+// regionFromPath packs the low depth bits of an absolute sentinel-prefixed
+// path into the canonical v6a 32-byte region encoding: path bit i lands at
+// bit (i mod 8) of byte (i / 8); all bits at positions >= depth are zero.
+// RegionFromKeyBytes is the canonical v6a region packing of an LSB-first key
+// prefix (see api.RegionFromKeyBytes).
+func RegionFromKeyBytes(key []byte, depth int) []byte {
+	return api.RegionFromKeyBytes(key, depth)
+}
+
+func regionFromPath(path *big.Int, depth uint8) []byte {
+	region := make([]byte, 32)
+	if path == nil {
+		return region
+	}
+	for i := 0; i < int(depth); i++ {
+		if path.Bit(i) != 0 {
+			region[i/8] |= 1 << (uint(i) % 8)
+		}
+	}
+	return region
 }
 
 func (n *NodeBranch) getPath() *big.Int {
@@ -765,11 +820,12 @@ func (smt *SparseMerkleTree) buildTree(branch branch, remainingPath *big.Int, le
 		newBranch := newLeafBranchWithKey(newBranchPath, leafKey, value)
 
 		nodeDepth := depthOffset + (commonPath.BitLen() - 1)
+		region := RegionFromKeyBytes(leafKey, nodeDepth)
 
 		if isRight {
-			return newNodeBranchWithDepth(commonPath, oldBranch, newBranch, nodeDepth), nil
+			return newNodeBranchWithDepth(commonPath, oldBranch, newBranch, nodeDepth, region), nil
 		} else {
-			return newNodeBranchWithDepth(commonPath, newBranch, oldBranch, nodeDepth), nil
+			return newNodeBranchWithDepth(commonPath, newBranch, oldBranch, nodeDepth, region), nil
 		}
 	}
 
@@ -780,14 +836,17 @@ func (smt *SparseMerkleTree) buildTree(branch branch, remainingPath *big.Int, le
 		newBranch := newLeafBranchWithKey(newBranchPath, leafKey, value)
 
 		oldBranchPath := new(big.Int).Rsh(nodeBranch.Path, uint(commonPath.BitLen()-1))
-		oldBranch := newNodeBranchWithDepth(oldBranchPath, nodeBranch.Left, nodeBranch.Right, int(nodeBranch.Depth))
+		// Preserved node: splitting the edge above it changes neither its
+		// depth nor its region (v6a), so its hash is unchanged.
+		oldBranch := newNodeBranchWithDepth(oldBranchPath, nodeBranch.Left, nodeBranch.Right, int(nodeBranch.Depth), nodeBranch.Region)
 
 		nodeDepth := depthOffset + (commonPath.BitLen() - 1)
+		region := RegionFromKeyBytes(leafKey, nodeDepth)
 
 		if isRight {
-			return newNodeBranchWithDepth(commonPath, oldBranch, newBranch, nodeDepth), nil
+			return newNodeBranchWithDepth(commonPath, oldBranch, newBranch, nodeDepth, region), nil
 		} else {
-			return newNodeBranchWithDepth(commonPath, newBranch, oldBranch, nodeDepth), nil
+			return newNodeBranchWithDepth(commonPath, newBranch, oldBranch, nodeDepth, region), nil
 		}
 	}
 
@@ -797,13 +856,13 @@ func (smt *SparseMerkleTree) buildTree(branch branch, remainingPath *big.Int, le
 		if err != nil {
 			return nil, err
 		}
-		return newNodeBranchWithDepth(nodeBranch.Path, nodeBranch.Left, newRight, int(nodeBranch.Depth)), nil
+		return newNodeBranchWithDepth(nodeBranch.Path, nodeBranch.Left, newRight, int(nodeBranch.Depth), nodeBranch.Region), nil
 	} else {
 		newLeft, err := smt.buildTree(nodeBranch.Left, new(big.Int).Rsh(remainingPath, uint(commonPath.BitLen()-1)), leafKey, value, nextDepthOffset)
 		if err != nil {
 			return nil, err
 		}
-		return newNodeBranchWithDepth(nodeBranch.Path, newLeft, nodeBranch.Right, int(nodeBranch.Depth)), nil
+		return newNodeBranchWithDepth(nodeBranch.Path, newLeft, nodeBranch.Right, int(nodeBranch.Depth), nodeBranch.Region), nil
 	}
 }
 
