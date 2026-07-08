@@ -149,7 +149,7 @@ func verifyBitmapPath(bitmap *[BitmapSize]byte, siblings [][SiblingSize]byte, ke
 		j--
 		sibling := siblings[j][:]
 
-		hasher.Reset().AddData([]byte{0x01, byte(d)})
+		hasher.Reset().AddData([]byte{0x01, byte(d)}).AddData(RegionFromKeyBytes(key, d))
 		if keyBitAt(key, d) == 1 {
 			// Descent went right at depth d → sibling is the left child.
 			hasher.AddData(sibling).AddData(h)
@@ -247,4 +247,31 @@ func bitmapPopcount(b *[BitmapSize]byte) int {
 // FixedBytesToPath in state_id.go.
 func keyBitAt(key []byte, d int) byte {
 	return (key[d/8] >> (uint(d) % 8)) & 1
+}
+
+// RegionFromKeyBytes packs the depth-bit prefix of an LSB-first SMT key into
+// the canonical v6a 32-byte region encoding: key bits 0..depth-1 in place,
+// all bits at positions >= depth cleared.
+func RegionFromKeyBytes(key []byte, depth int) []byte {
+	region := make([]byte, StateTreeKeyLengthBytes)
+	if depth <= 0 {
+		return region
+	}
+	if depth > StateTreeKeyLengthBits {
+		depth = StateTreeKeyLengthBits
+	}
+	byteLen := (depth + 7) / 8
+	if byteLen > len(key) {
+		byteLen = len(key)
+	}
+	copy(region[:byteLen], key[:byteLen])
+	// Mask the byte containing the depth boundary. When the key is shorter
+	// than the depth's byte span, every copied bit is below depth and no
+	// masking applies.
+	if rem := depth % 8; rem != 0 {
+		if maskByte := (depth - 1) / 8; maskByte < byteLen {
+			region[maskByte] &= byte(1<<uint(rem)) - 1
+		}
+	}
+	return region
 }

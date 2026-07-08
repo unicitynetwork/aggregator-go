@@ -145,8 +145,11 @@ func (m *MerkleTreePath) Verify(stateID *big.Int) (*PathVerificationResult, erro
 					return nil, fmt.Errorf("invalid node depth %d on step %d", depth, i+1)
 				}
 
+				// v6a: the node hash commits to its absolute region,
+				// derived from the proven path (never transmitted).
 				hasher.Reset().
-					AddData([]byte{0x01, byte(depth)})
+					AddData([]byte{0x01, byte(depth)}).
+					AddData(RegionFromPathBits(leafPath, depth))
 				if left != nil {
 					hasher.AddData(*left)
 				}
@@ -179,4 +182,24 @@ func (m *MerkleTreePath) Verify(stateID *big.Int) (*PathVerificationResult, erro
 		PathIncluded: pathIncluded,
 		Result:       pathValid && pathIncluded,
 	}, nil
+}
+
+// RegionFromPathBits packs bits 0..depth-1 of a sentinel-prefixed path into
+// the canonical v6a 32-byte region encoding (bit i at bit i mod 8 of byte
+// i / 8, all bits at positions >= depth zero). The low bits of a path are
+// absolutely aligned: bit i is the routing decision at tree depth i.
+func RegionFromPathBits(path *big.Int, depth int) []byte {
+	region := make([]byte, StateTreeKeyLengthBytes)
+	if path == nil || depth <= 0 {
+		return region
+	}
+	if depth > StateTreeKeyLengthBits {
+		depth = StateTreeKeyLengthBits
+	}
+	for i := 0; i < depth; i++ {
+		if path.Bit(i) != 0 {
+			region[i/8] |= 1 << (uint(i) % 8)
+		}
+	}
+	return region
 }

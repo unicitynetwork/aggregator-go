@@ -350,7 +350,7 @@ func TestSnapshotCommitPersistsNonRootLoadedNodeMovement(t *testing.T) {
 	rightKey, rightPrefix, rightStart, err := childNodeKey(disk.PrefixBits{}, 0, root.Path, 1)
 	require.NoError(t, err)
 	rightBefore := requireNodeExists(t, store, rightKey)
-	rightNodeBefore, err := disk.UnmarshalInternal(rightBefore)
+	rightNodeBefore, err := disk.UnmarshalInternal(rightBefore, rightKey)
 	require.NoError(t, err)
 	require.Equal(t, uint8(3), rightNodeBefore.Depth)
 
@@ -374,14 +374,14 @@ func TestSnapshotCommitPersistsNonRootLoadedNodeMovement(t *testing.T) {
 	require.NoError(t, snapshot.Commit(api.NewBigIntFromUint64(2)))
 
 	rightAfter := requireNodeExists(t, store, rightKey)
-	rightNodeAfter, err := disk.UnmarshalInternal(rightAfter)
+	rightNodeAfter, err := disk.UnmarshalInternal(rightAfter, rightKey)
 	require.NoError(t, err)
 	require.Equal(t, uint8(1), rightNodeAfter.Depth)
 
 	movedOldKey, _, _, err := childNodeKey(rightPrefix, rightStart, rightNodeAfter.Path, 1)
 	require.NoError(t, err)
 	movedOld := requireNodeExists(t, store, movedOldKey)
-	movedOldNode, err := disk.UnmarshalInternal(movedOld)
+	movedOldNode, err := disk.UnmarshalInternal(movedOld, movedOldKey)
 	require.NoError(t, err)
 	require.Equal(t, uint8(3), movedOldNode.Depth)
 	require.Equal(t, 1, movedOldNode.Path.Len())
@@ -800,7 +800,7 @@ func treeRootNode(t *testing.T, store *rocksstore.Store) *disk.InternalNode {
 	tag, err := disk.SerializedTag(encoded)
 	require.NoError(t, err)
 	require.Equal(t, disk.TagInternal, tag)
-	node, err := disk.UnmarshalInternal(encoded)
+	node, err := disk.UnmarshalInternal(encoded, disk.RootNodeKey())
 	require.NoError(t, err)
 	return node
 }

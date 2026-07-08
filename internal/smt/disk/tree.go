@@ -346,7 +346,7 @@ func batchInsert(branch *Branch, items []batchItem, start, end, startBit int, ct
 		if rightErr != nil {
 			return nil, rightErr
 		}
-		next, err := NewInternal(node.Path, node.Depth, left, right)
+		next, err := NewInternal(node.Path, node.Depth, node.Region, left, right)
 		if err != nil {
 			return nil, err
 		}
@@ -405,7 +405,7 @@ func buildSubtree(items []batchItem, start, end, startBit int, ctx *applyContext
 	if rightErr != nil {
 		return nil, rightErr
 	}
-	node, err := NewInternal(path, uint8(split), left, right)
+	node, err := NewInternal(path, uint8(split), RegionFromKey(items[start].Key, uint8(split)), left, right)
 	if err != nil {
 		return nil, err
 	}
@@ -425,7 +425,7 @@ func batchSplitInternal(node *InternalNode, items []batchItem, start, end, start
 	if err != nil {
 		return nil, err
 	}
-	oldNode, err := NewInternal(oldPath, node.Depth, node.Left, node.Right)
+	oldNode, err := NewInternal(oldPath, node.Depth, node.Region, node.Left, node.Right)
 	if err != nil {
 		return nil, err
 	}
@@ -471,7 +471,7 @@ func batchSplitInternal(node *InternalNode, items []batchItem, start, end, start
 	if rightErr != nil {
 		return nil, rightErr
 	}
-	next, err := NewInternal(newPath, uint8(newSplit), left, right)
+	next, err := NewInternal(newPath, uint8(newSplit), RegionFromKey(items[start].Key, uint8(newSplit)), left, right)
 	if err != nil {
 		return nil, err
 	}
@@ -584,7 +584,7 @@ func insertBranch(branch *Branch, key Key, value []byte, startBit int, ctx *appl
 		} else {
 			left, right = newLeaf, oldLeaf
 		}
-		node, err := NewInternal(path, uint8(div), left, right)
+		node, err := NewInternal(path, uint8(div), RegionFromKey(key, uint8(div)), left, right)
 		if err != nil {
 			return nil, insertAccepted, err
 		}
@@ -633,7 +633,7 @@ func insertBranch(branch *Branch, key Key, value []byte, startBit int, ctx *appl
 			left, right = nextLeft, node.Right
 		}
 
-		next, err := NewInternal(node.Path, node.Depth, left, right)
+		next, err := NewInternal(node.Path, node.Depth, node.Region, left, right)
 		if err != nil {
 			return nil, insertAccepted, err
 		}
@@ -658,7 +658,7 @@ func splitInternalNode(node *InternalNode, key Key, value []byte, startBit, firs
 	if err != nil {
 		return nil, err
 	}
-	oldNode, err := NewInternal(oldPath, node.Depth, node.Left, node.Right)
+	oldNode, err := NewInternal(oldPath, node.Depth, node.Region, node.Left, node.Right)
 	if err != nil {
 		return nil, err
 	}
@@ -678,7 +678,7 @@ func splitInternalNode(node *InternalNode, key Key, value []byte, startBit, firs
 	} else {
 		left, right = oldNode, newLeaf
 	}
-	next, err := NewInternal(newPath, uint8(newSplit), left, right)
+	next, err := NewInternal(newPath, uint8(newSplit), RegionFromKey(key, uint8(newSplit)), left, right)
 	if err != nil {
 		return nil, err
 	}

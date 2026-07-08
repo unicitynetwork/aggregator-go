@@ -91,7 +91,7 @@ func TestGetInclusionCert_GoldenVector(t *testing.T) {
 	addLeaf(t, tree, k2, v2)
 	addLeaf(t, tree, k3, v3)
 
-	const expectedRoot = "b08cae8f98a168a4b39dced99fc3ea2833291c8c53a0eb447e0056044dee598a"
+	const expectedRoot = "5dd3c11610f053b31a8e1e42b51a4b92940ce0ddf019bbb89e2f27d44e33c0bd"
 	require.Equal(t, expectedRoot, tree.GetRootHashHex())
 
 	cert, err := tree.GetInclusionCert(k2)

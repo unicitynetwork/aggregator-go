@@ -46,6 +46,7 @@ func TestNodeHash_BinaryDomainSeparated(t *testing.T) {
 	expectedHasher := api.NewDataHasher(api.SHA256)
 	expectedHasher.Reset().
 		AddData([]byte{0x01, node.Depth}).
+		AddData(regionFromPath(node.Path, node.Depth)).
 		AddData(leftLeaf.calculateHash(api.NewDataHasher(api.SHA256))).
 		AddData(rightLeaf.calculateHash(api.NewDataHasher(api.SHA256)))
 	expected := expectedHasher.GetHash().RawHash

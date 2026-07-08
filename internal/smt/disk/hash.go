@@ -46,11 +46,14 @@ func HashLeaf(key Key, value []byte) Hash {
 	return out
 }
 
-// HashNode implements the yellowpaper SMT internal-node hash:
-// H(0x01 || depth_1B || left_hash_32B || right_hash_32B).
-func HashNode(left, right Hash, depth uint8) Hash {
+// HashNode implements the yellowpaper v6a (Appendix C.3.2.2) internal-node
+// hash: H(0x01 || depth_1B || region_32B || left_hash_32B || right_hash_32B).
+// The region is the node's absolute key prefix at its bifurcation depth,
+// packed LSB-in-byte with all bits at positions >= depth cleared.
+func HashNode(left, right Hash, depth uint8, region PrefixBits) Hash {
 	h := sha256.New()
 	_, _ = h.Write([]byte{0x01, depth})
+	_, _ = h.Write(region[:])
 	_, _ = h.Write(left[:])
 	_, _ = h.Write(right[:])
 	var out Hash
@@ -58,14 +61,25 @@ func HashNode(left, right Hash, depth uint8) Hash {
 	return out
 }
 
-// EmptyRootHash matches the current Go v2 memory SMT empty-root rule:
-// H(0x01 || 0x00). Unary roots with one child use the child hash directly.
+// RegionFromKey packs the depth-bit prefix of a descendant key into the
+// canonical v6a region encoding: key bits 0..depth-1 in place, all bits at
+// positions >= depth cleared.
+func RegionFromKey(key Key, depth uint8) PrefixBits {
+	var region PrefixBits
+	d := int(depth)
+	byteLen := (d + 7) / 8
+	copy(region[:byteLen], key[:byteLen])
+	if rem := d % 8; rem != 0 {
+		region[byteLen-1] &= byte(1<<uint(rem)) - 1
+	}
+	return region
+}
+
+// EmptyRootHash is the v6a empty-tree root (spec: root is ⊥): the all-zero
+// hash, matching the JS/Java SDK v6a implementations. Unary roots with one
+// child use the child hash directly.
 func EmptyRootHash() Hash {
-	h := sha256.New()
-	_, _ = h.Write([]byte{0x01, 0x00})
-	var out Hash
-	h.Sum(out[:0])
-	return out
+	return Hash{}
 }
 
 // KeyBit returns bit d of key using the yellowpaper/Go v2 LSB-first key layout.
