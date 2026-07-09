@@ -83,10 +83,10 @@ func EmptyRootHash() Hash {
 
 // KeyBit returns bit d of key using the yellowpaper big-endian bit layout:
 // bit 0 is the MSB of byte 0, bit d = (key[d/8] >> (7 - d%8)) & 1. This is the
-// disk-typed accessor mirroring api.KeyBitBE.
+// bounds-checked disk-typed accessor over api.KeyBitBE.
 func KeyBit(key Key, d int) byte {
 	if d < 0 || d >= KeyBits {
 		panic(fmt.Sprintf("disk smt: key bit index out of range: %d", d))
 	}
-	return (key[d/8] >> (7 - uint(d)%8)) & 1
+	return api.KeyBitBE(key[:], d)
 }
