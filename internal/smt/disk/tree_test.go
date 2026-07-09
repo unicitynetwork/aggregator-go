@@ -96,15 +96,16 @@ func TestTreeApplySecondLeafSplitsSingleLeaf(t *testing.T) {
 	require.Positive(t, second.Stats.BranchBytesVisited)
 	require.GreaterOrEqual(t, second.Stats.OverlayEntries, 2)
 	require.NotNil(t, tree.Root().Internal)
-	require.Equal(t, uint8(1), tree.Root().Internal.Depth)
-	require.Equal(t, 1, tree.Root().Internal.Path.Len())
+	// Big-endian: 0x01 and 0x03 first diverge at depth 6.
+	require.Equal(t, uint8(6), tree.Root().Internal.Depth)
+	require.Equal(t, 6, tree.Root().Internal.Path.Len())
 }
 
 func TestTreeApplyThirdLeafSplitsInternalCompressedPath(t *testing.T) {
 	tree := NewTree()
-	k1 := keyWithFirstByte(0x07) // bits 1110...
-	k2 := keyWithFirstByte(0x0f) // bits 1111...
-	k3 := keyWithFirstByte(0x01) // bits 1000..., splits the root path at bit 1
+	k1 := keyWithFirstByte(0x07) // big-endian bits 00000111
+	k2 := keyWithFirstByte(0x0f) // big-endian bits 00001111
+	k3 := keyWithFirstByte(0x01) // big-endian bits 00000001, splits the root at depth 4
 	v1 := []byte("value-one")
 	v2 := []byte("value-two")
 	v3 := []byte("value-three")
@@ -119,8 +120,9 @@ func TestTreeApplyThirdLeafSplitsInternalCompressedPath(t *testing.T) {
 		leafInput{key: k2, value: v2},
 	), firstTwo.CandidateRoot)
 	require.NotNil(t, tree.Root().Internal)
-	require.Equal(t, uint8(3), tree.Root().Internal.Depth)
-	require.Equal(t, 3, tree.Root().Internal.Path.Len())
+	// Big-endian: 0x07 and 0x0f first diverge at depth 4.
+	require.Equal(t, uint8(4), tree.Root().Internal.Depth)
+	require.Equal(t, 4, tree.Root().Internal.Path.Len())
 
 	third, err := tree.ApplyLeaves([]LeafInput{treeInput(k3, v3)})
 	require.NoError(t, err)
@@ -136,8 +138,9 @@ func TestTreeApplyThirdLeafSplitsInternalCompressedPath(t *testing.T) {
 	), third.CandidateRoot)
 	require.Equal(t, third.CandidateRoot, tree.RootHash())
 	require.NotNil(t, tree.Root().Internal)
-	require.Equal(t, uint8(1), tree.Root().Internal.Depth)
-	require.Equal(t, 1, tree.Root().Internal.Path.Len())
+	// Big-endian: adding 0x01 moves the shallowest split to depth 4 (0x0f's bit 4).
+	require.Equal(t, uint8(4), tree.Root().Internal.Depth)
+	require.Equal(t, 4, tree.Root().Internal.Path.Len())
 }
 
 func TestTreeApplyDuplicateCommittedLeafIsNoOp(t *testing.T) {

@@ -322,10 +322,12 @@ func TestSnapshotCommitPersistsNonRootLoadedNodeMovement(t *testing.T) {
 	store := openTestStore(t, dir)
 	tree := openPersistTree(t, store)
 
-	k0 := keyWithFirstByte(0x00) // root-left leaf
-	k1 := keyWithFirstByte(0x07) // root-right subtree, bits 1110...
-	k2 := keyWithFirstByte(0x0f) // root-right subtree, bits 1111...
-	k3 := keyWithFirstByte(0x01) // root-right subtree, splits non-root path at bit 1
+	// Big-endian first bytes chosen so the tree shape matches the original
+	// LSB-first fixture (bytes are the bit-reversal of 0x00/0x07/0x0f/0x01).
+	k0 := keyWithFirstByte(0x00) // root-left leaf (big-endian bit 0 = 0)
+	k1 := keyWithFirstByte(0xE0) // root-right subtree, big-endian bits 111000...
+	k2 := keyWithFirstByte(0xF0) // root-right subtree, big-endian bits 111100...
+	k3 := keyWithFirstByte(0x80) // root-right subtree, splits non-root path at bit 1
 	v0 := []byte("value-zero")
 	v1 := []byte("value-one")
 	v2 := []byte("value-two")

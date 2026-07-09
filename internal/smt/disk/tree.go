@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/bits"
 	"runtime"
 	"sort"
 	"sync"
@@ -487,30 +488,27 @@ func xorKeys(a, b Key) Key {
 	return out
 }
 
+// firstSetBitFrom returns the position of the first set bit at or after startBit
+// under big-endian bit ordering (bit 0 is the MSB of byte 0), or KeyBits if
+// none. The first set bit of the XOR of two keys is their first diverging
+// depth, so this must scan most-significant bit first within each byte.
 func firstSetBitFrom(key Key, startBit int) int {
 	byteIdx := startBit / 8
 	bitOff := startBit % 8
 	if byteIdx < KeySize {
-		masked := key[byteIdx] >> bitOff
+		// Keep only bits at positions >= startBit within the byte: the low
+		// (8-bitOff) bits under big-endian ordering.
+		masked := key[byteIdx] & (0xFF >> uint(bitOff))
 		if masked != 0 {
-			return startBit + bitsTrailingZeros8(masked)
+			return byteIdx*8 + bits.LeadingZeros8(masked)
 		}
 	}
 	for i := byteIdx + 1; i < KeySize; i++ {
 		if key[i] != 0 {
-			return i*8 + bitsTrailingZeros8(key[i])
+			return i*8 + bits.LeadingZeros8(key[i])
 		}
 	}
 	return KeyBits
-}
-
-func bitsTrailingZeros8(value byte) int {
-	for i := 0; i < 8; i++ {
-		if value&(1<<uint(i)) != 0 {
-			return i
-		}
-	}
-	return 8
 }
 
 func partitionPoint(items []batchItem, start, end, split int) int {
@@ -526,15 +524,11 @@ func partitionPoint(items []batchItem, start, end, split int) int {
 	return lo
 }
 
+// keyPathLess orders keys by big-endian tree-traversal order. Under big-endian
+// bit ordering this is exactly unsigned lexicographic byte order
+// (rsmt_sort_key(k) = k), so a plain byte compare suffices.
 func keyPathLess(left, right Key) bool {
-	for depth := 0; depth < KeyBits; depth++ {
-		leftBit := KeyBit(left, depth)
-		rightBit := KeyBit(right, depth)
-		if leftBit != rightBit {
-			return leftBit < rightBit
-		}
-	}
-	return false
+	return bytes.Compare(left[:], right[:]) < 0
 }
 
 func tryAcquire(sem chan struct{}) bool {

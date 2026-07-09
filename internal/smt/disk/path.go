@@ -1,9 +1,14 @@
 package disk
 
-import "fmt"
+import (
+	"fmt"
 
-// CompressedPath stores an internal node's common-prefix bits. The bits are
-// navigation metadata only; they are not part of yellowpaper node hashes.
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
+)
+
+// CompressedPath stores an internal node's common-prefix bits, big-endian
+// packed and re-based to the path's own bit 0. The bits are navigation
+// metadata only; they are not part of yellowpaper node hashes.
 type CompressedPath struct {
 	len  uint8
 	bits [KeySize]byte
@@ -24,7 +29,7 @@ func NewCompressedPathFromKeyRange(key Key, startBit, bitLen int) (CompressedPat
 	path := CompressedPath{len: uint8(bitLen)}
 	for i := 0; i < bitLen; i++ {
 		if KeyBit(key, startBit+i) != 0 {
-			path.bits[i/8] |= 1 << (uint(i) % 8)
+			api.SetBitBE(path.bits[:], i)
 		}
 	}
 	return path, nil
@@ -58,7 +63,7 @@ func NewCompressedPathFromPathRange(src CompressedPath, start, bitLen int) (Comp
 	path := CompressedPath{len: uint8(bitLen)}
 	for i := 0; i < bitLen; i++ {
 		if src.BitAt(start+i) != 0 {
-			path.bits[i/8] |= 1 << (uint(i) % 8)
+			api.SetBitBE(path.bits[:], i)
 		}
 	}
 	return path, nil
@@ -72,7 +77,7 @@ func (p CompressedPath) BitAt(pos int) byte {
 	if pos < 0 || pos >= int(p.len) {
 		panic(fmt.Sprintf("disk smt: compressed path bit index out of range: %d", pos))
 	}
-	return (p.bits[pos/8] >> (uint(pos) % 8)) & 1
+	return api.KeyBitBE(p.bits[:], pos)
 }
 
 func (p CompressedPath) Bytes() []byte {
@@ -96,18 +101,10 @@ func (p CompressedPath) Equal(other CompressedPath) bool {
 }
 
 func (p CompressedPath) hasCanonicalUnusedBits() bool {
-	bitLen := int(p.len)
-	byteLen := prefixByteLen(bitLen)
-	for i := byteLen; i < len(p.bits); i++ {
-		if p.bits[i] != 0 {
-			return false
-		}
-	}
-	if rem := bitLen % 8; rem != 0 {
-		mask := byte(1<<uint(rem)) - 1
-		return p.bits[byteLen-1]&^mask == 0
-	}
-	return true
+	// Canonical iff clearing the big-endian suffix at p.len is a no-op.
+	cleared := p.bits
+	api.ClearSuffixBE(cleared[:], int(p.len))
+	return cleared == p.bits
 }
 
 func prefixByteLen(bitLen int) int {

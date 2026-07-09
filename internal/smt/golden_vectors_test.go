@@ -20,7 +20,7 @@ func TestGoldenVector_RootMatches(t *testing.T) {
 	require.NoError(t, tree.AddLeaf(k1, []byte("value-one")))
 	require.NoError(t, tree.AddLeaf(k2, []byte("value-two")))
 
-	const expectedRoot = "fb0b8b6efbb9861202b4f49ca9f2d596f6698d5645f7545b74caf9d8b5161fcc"
+	const expectedRoot = "edf6f7d3bcf43f5b4f70d5de0d7e83f5d6210b3cc685ad062d761c4965b3f449"
 	require.Equal(t, expectedRoot, tree.GetRootHashHex())
 }
 
@@ -39,7 +39,7 @@ func TestGoldenVector_ProofBitmapAndSiblingsMatch(t *testing.T) {
 	require.NoError(t, tree.AddLeaf(k2, v2))
 	require.NoError(t, tree.AddLeaf(k3, v3))
 
-	const expectedRoot = "5dd3c11610f053b31a8e1e42b51a4b92940ce0ddf019bbb89e2f27d44e33c0bd"
+	const expectedRoot = "284c81b299b24726dbb9a23c0bed9d57eec3229ea9212d7249a32066316e5db6"
 	require.Equal(t, expectedRoot, tree.GetRootHashHex())
 
 	path, err := tree.GetPath(k2)
@@ -55,7 +55,7 @@ func TestGoldenVector_ProofBitmapAndSiblingsMatch(t *testing.T) {
 	bitmap, siblings, err := pathToBitmapAndSiblings(path, k2.BitLen()-1)
 	require.NoError(t, err)
 
-	const expectedBitmap = "0300000000000000000000000000000000000000000000000000000000000000"
+	const expectedBitmap = "0a00000000000000000000000000000000000000000000000000000000000000"
 	require.Equal(t, expectedBitmap, hex.EncodeToString(bitmap[:]))
 
 	expectedSiblings := []string{
@@ -108,7 +108,7 @@ func pathToBitmapAndSiblings(path *api.MerkleTreePath, fullKeyBits int) ([32]byt
 			if len(sibling) != 32 {
 				return bitmap, nil, fmt.Errorf("invalid sibling length at index %d: %d", i, len(sibling))
 			}
-			bitmap[depth/8] |= 1 << (depth % 8)
+			api.SetBitBE(bitmap[:], depth)
 			siblings = append(siblings, sibling)
 		}
 

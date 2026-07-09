@@ -6,9 +6,13 @@ import (
 	"math/bits"
 )
 
-// MatchesShardPrefix checks whether the LSB-first bits of keyBytes match the
-// shard prefix defined by shardBitmask. The bitmask encodes a sentinel-prefixed
-// shard ID (e.g. 0b100 = shard 0 in a 2-bit tree). keyBytes must be at least
+// MatchesShardPrefix checks whether the big-endian key bits of keyBytes match
+// the shard prefix defined by shardBitmask. The bitmask encodes a
+// sentinel-prefixed shard ID (e.g. 0b100 = shard 0 in a 2-bit tree): bit d of
+// the mask is the routing decision at depth d, a path/shard-ID convention that
+// is independent of the key's byte layout. The key side is read big-endian
+// (bit d = MSB-first bit d), so under the yellowpaper big-endian layout a shard
+// selects a contiguous lexicographic key range. keyBytes must be at least
 // ceil(shardDepth/8) bytes long.
 func MatchesShardPrefix(keyBytes []byte, shardBitmask int) (bool, error) {
 	shardDepth := bits.Len(uint(shardBitmask)) - 1
@@ -21,7 +25,7 @@ func MatchesShardPrefix(keyBytes []byte, shardBitmask int) (bool, error) {
 
 	for d := 0; d < shardDepth; d++ {
 		expected := byte((uint(shardBitmask) >> uint(d)) & 1)
-		actual := (keyBytes[d/8] >> (uint(d) % 8)) & 1
+		actual := KeyBitBE(keyBytes, d)
 		if actual != expected {
 			return false, nil
 		}

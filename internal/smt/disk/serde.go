@@ -3,6 +3,8 @@ package disk
 import (
 	"encoding/binary"
 	"fmt"
+
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 const (
@@ -110,7 +112,7 @@ func RegionForNode(key NodeKey, path CompressedPath) (PrefixBits, error) {
 	region := key.Prefix()
 	for i := 0; i < path.Len(); i++ {
 		if path.BitAt(i) != 0 {
-			region[(start+i)/8] |= 1 << (uint(start+i) % 8)
+			api.SetBitBE(region[:], start+i)
 		}
 	}
 	return region, nil

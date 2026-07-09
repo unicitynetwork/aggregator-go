@@ -91,13 +91,13 @@ func TestGetInclusionCert_GoldenVector(t *testing.T) {
 	addLeaf(t, tree, k2, v2)
 	addLeaf(t, tree, k3, v3)
 
-	const expectedRoot = "5dd3c11610f053b31a8e1e42b51a4b92940ce0ddf019bbb89e2f27d44e33c0bd"
+	const expectedRoot = "284c81b299b24726dbb9a23c0bed9d57eec3229ea9212d7249a32066316e5db6"
 	require.Equal(t, expectedRoot, tree.GetRootHashHex())
 
 	cert, err := tree.GetInclusionCert(k2)
 	require.NoError(t, err)
 
-	const expectedBitmap = "0300000000000000000000000000000000000000000000000000000000000000"
+	const expectedBitmap = "0a00000000000000000000000000000000000000000000000000000000000000"
 	require.Equal(t, expectedBitmap, hex.EncodeToString(cert.Bitmap[:]),
 		"cert bitmap must match golden vector")
 

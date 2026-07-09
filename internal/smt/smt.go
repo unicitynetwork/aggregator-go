@@ -131,7 +131,7 @@ func NewParentSparseMerkleTree(algorithm api.HashAlgorithm, keyLength int) *Spar
 	// the tree and the corresponding inclusion proofs would fail to verify
 	tree.root.Left = populate(0b10, keyLength, 1, make([]byte, 32))
 	rightRegion := make([]byte, 32)
-	rightRegion[0] |= 1
+	api.SetBitBE(rightRegion, 0)
 	tree.root.Right = populate(0b11, keyLength, 1, rightRegion)
 
 	// Mutation above invalidated the root hash primed by NewSparseMerkleTree.
@@ -151,7 +151,7 @@ func populate(path, levels, depth int, region []byte) branch {
 	}
 	leftRegion := append([]byte(nil), region...)
 	rightRegion := append([]byte(nil), region...)
-	rightRegion[depth/8] |= 1 << (uint(depth) % 8)
+	api.SetBitBE(rightRegion, depth)
 	left := populate(0b10, levels-1, depth+1, leftRegion)
 	right := populate(0b11, levels-1, depth+1, rightRegion)
 	return newNodeBranchWithDepth(big.NewInt(int64(path)), left, right, depth, region)
@@ -425,7 +425,7 @@ func (n *NodeBranch) calculateHash(hasher *api.DataHasher) []byte {
 
 	// v6a internal-node hash (yellowpaper C.3.2.2):
 	// H(0x01 || depth || region || left || right), where region is the
-	// node's absolute depth-bit key prefix packed LSB-in-byte into 32 bytes.
+	// node's absolute depth-bit key prefix packed big-endian into 32 bytes.
 	region := n.Region
 	if region == nil {
 		region = make([]byte, 32)
@@ -448,9 +448,9 @@ func (n *NodeBranch) calculateHash(hasher *api.DataHasher) []byte {
 
 // regionFromPath packs the low depth bits of an absolute sentinel-prefixed
 // path into the canonical v6a 32-byte region encoding: path bit i lands at
-// bit (i mod 8) of byte (i / 8); all bits at positions >= depth are zero.
-// RegionFromKeyBytes is the canonical v6a region packing of an LSB-first key
-// prefix (see api.RegionFromKeyBytes).
+// big-endian position 7-(i%8) of byte i/8; all bits at positions >= depth are
+// zero. RegionFromKeyBytes is the canonical v6a region packing of a big-endian
+// key prefix (see api.RegionFromKeyBytes).
 func RegionFromKeyBytes(key []byte, depth int) []byte {
 	return api.RegionFromKeyBytes(key, depth)
 }
@@ -462,7 +462,7 @@ func regionFromPath(path *big.Int, depth uint8) []byte {
 	}
 	for i := 0; i < int(depth); i++ {
 		if path.Bit(i) != 0 {
-			region[i/8] |= 1 << (uint(i) % 8)
+			api.SetBitBE(region, i)
 		}
 	}
 	return region
@@ -711,7 +711,7 @@ func (smt *SparseMerkleTree) generateInclusionCertWithLeafValue(hasher *api.Data
 			return smt.generateInclusionCertWithLeafValue(hasher, key, child, cert)
 		}
 
-		cert.Bitmap[depth/8] |= 1 << (uint(depth) % 8)
+		api.SetBitBE(cert.Bitmap[:], depth)
 		if len(sibHash) != api.SiblingSize {
 			return nil, fmt.Errorf("smt: sibling hash unexpected length: got %d, want %d", len(sibHash), api.SiblingSize)
 		}
@@ -734,10 +734,10 @@ func (smt *SparseMerkleTree) generateInclusionCertWithLeafValue(hasher *api.Data
 	return nil, fmt.Errorf("smt: reached empty subtree in inclusion cert traversal")
 }
 
-// keyBit returns bit d of the raw key under LSB-first byte layout.
-// Matches api.keyBitAt.
+// keyBit returns bit d of the raw key under the yellowpaper big-endian bit
+// layout. Matches api.KeyBitBE.
 func keyBit(key []byte, d int) byte {
-	return (key[d/8] >> (uint(d) % 8)) & 1
+	return api.KeyBitBE(key, d)
 }
 
 // GetLeaf retrieves a leaf by path (for compatibility)

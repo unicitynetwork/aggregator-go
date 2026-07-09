@@ -3,6 +3,8 @@ package disk
 import (
 	"bytes"
 	"fmt"
+
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 const rootNodeKeyDepth = uint16(0xffff)
@@ -118,14 +120,5 @@ func (k *NodeKey) clearUnusedPrefixBits() {
 		k.prefix = PrefixBits{}
 		return
 	}
-	depth := int(k.depth)
-	byteLen := prefixByteLen(depth)
-	if byteLen < len(k.prefix) {
-		for i := byteLen; i < len(k.prefix); i++ {
-			k.prefix[i] = 0
-		}
-	}
-	if rem := depth % 8; rem != 0 {
-		k.prefix[byteLen-1] &= byte(1<<uint(rem)) - 1
-	}
+	api.ClearSuffixBE(k.prefix[:], int(k.depth))
 }
