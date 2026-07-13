@@ -46,7 +46,7 @@ func TestInclusionCertVerify_SingleSiblingAtDepth0(t *testing.T) {
 	root := hashNodeRaw(t, SHA256, 0, key, leafHash, siblingHash)
 
 	cert := &InclusionCert{}
-	cert.Bitmap[0] = 0x01 // depth 0
+	SetBitBE(cert.Bitmap[:], 0) // depth 0 (big-endian: MSB of byte 0)
 	var s [SiblingSize]byte
 	copy(s[:], siblingHash)
 	cert.Siblings = append(cert.Siblings, s)
@@ -62,9 +62,9 @@ func TestInclusionCertVerify_TwoSiblingsRootToLeafWireOrder(t *testing.T) {
 	// siblings[1] at depth 7. Verification consumes from the end:
 	// depth 7 first (sib7), then depth 3 (sib3).
 
-	// Key byte 0 = 0b0000_1000 → bit 3 = 1, bit 7 = 0.
+	// Key byte 0 = 0b0001_0000 → big-endian bit 3 = 1, bit 7 = 0.
 	key := make([]byte, StateTreeKeyLengthBytes)
-	key[0] = 0b0000_1000
+	key[0] = 0b0001_0000
 	value := []byte("v")
 
 	sib3 := bytes.Repeat([]byte{0x33}, SiblingSize)
@@ -78,7 +78,8 @@ func TestInclusionCertVerify_TwoSiblingsRootToLeafWireOrder(t *testing.T) {
 	root := h3
 
 	cert := &InclusionCert{}
-	cert.Bitmap[0] = 0b1000_1000 // bits 3 and 7
+	SetBitBE(cert.Bitmap[:], 3) // big-endian bits 3 and 7
+	SetBitBE(cert.Bitmap[:], 7)
 	var s3, s7 [SiblingSize]byte
 	copy(s3[:], sib3)
 	copy(s7[:], sib7)
@@ -94,7 +95,7 @@ func TestInclusionCertVerify_WrongSiblingOrderFails(t *testing.T) {
 	// Same setup as the two-sibling test but with siblings swapped
 	// into leaf-to-root order. Must fail.
 	key := make([]byte, StateTreeKeyLengthBytes)
-	key[0] = 0b0000_1000
+	key[0] = 0b0001_0000
 	value := []byte("v")
 
 	sib3 := bytes.Repeat([]byte{0x33}, SiblingSize)
@@ -106,7 +107,8 @@ func TestInclusionCertVerify_WrongSiblingOrderFails(t *testing.T) {
 	root := h3
 
 	cert := &InclusionCert{}
-	cert.Bitmap[0] = 0b1000_1000
+	SetBitBE(cert.Bitmap[:], 3)
+	SetBitBE(cert.Bitmap[:], 7)
 	var s3, s7 [SiblingSize]byte
 	copy(s3[:], sib3)
 	copy(s7[:], sib7)
@@ -125,7 +127,7 @@ func TestInclusionCertVerify_DepthSpanning8Bytes(t *testing.T) {
 
 	// Set bit 200 of the key so we went right at depth 200.
 	key := make([]byte, StateTreeKeyLengthBytes)
-	key[depth/8] |= 1 << (depth % 8)
+	SetBitBE(key, depth)
 	value := []byte("deep")
 
 	siblingHash := bytes.Repeat([]byte{0x5A}, SiblingSize)
@@ -134,7 +136,7 @@ func TestInclusionCertVerify_DepthSpanning8Bytes(t *testing.T) {
 	root := hashNodeRaw(t, SHA256, byte(depth), key, siblingHash, leafHash)
 
 	cert := &InclusionCert{}
-	cert.Bitmap[depth/8] = 1 << (depth % 8)
+	SetBitBE(cert.Bitmap[:], depth)
 	var s [SiblingSize]byte
 	copy(s[:], siblingHash)
 	cert.Siblings = append(cert.Siblings, s)
@@ -302,27 +304,6 @@ func TestBitmapPopcount(t *testing.T) {
 	}
 }
 
-func TestKeyBitAt(t *testing.T) {
-	key := make([]byte, StateTreeKeyLengthBytes)
-	key[0] = 0b1010_0101
-	key[1] = 0x01  // bit 8 set
-	key[31] = 0x80 // bit 255 set
-
-	checks := []struct {
-		pos  int
-		want byte
-	}{
-		{0, 1}, {1, 0}, {2, 1}, {5, 1}, {7, 1},
-		{8, 1}, {9, 0},
-		{255, 1},
-	}
-	for _, c := range checks {
-		if got := keyBitAt(key, c.pos); got != c.want {
-			t.Errorf("keyBitAt(%d) = %d, want %d", c.pos, got, c.want)
-		}
-	}
-}
-
 func TestExclusionCertRoundTrip(t *testing.T) {
 	cert := &ExclusionCert{}
 	for i := range cert.KL {
@@ -401,13 +382,13 @@ func TestComposeInclusionCert_Success(t *testing.T) {
 	parentRoot := hashNodeRaw(t, SHA256, 1, key, childRoot, parentSibling)
 
 	child := &InclusionCert{}
-	child.Bitmap[5/8] |= 1 << (5 % 8)
+	SetBitBE(child.Bitmap[:], 5)
 	var childS [SiblingSize]byte
 	copy(childS[:], childSibling)
 	child.Siblings = append(child.Siblings, childS)
 
 	parent := &InclusionCert{}
-	parent.Bitmap[1/8] |= 1 << (1 % 8)
+	SetBitBE(parent.Bitmap[:], 1)
 	var parentS [SiblingSize]byte
 	copy(parentS[:], parentSibling)
 	parent.Siblings = append(parent.Siblings, parentS)
@@ -472,12 +453,12 @@ func TestComposeInclusionCert_RejectsChildRootMismatch(t *testing.T) {
 
 func TestComposeInclusionCert_RejectsDepthOverlap(t *testing.T) {
 	child := &InclusionCert{}
-	child.Bitmap[5/8] |= 1 << (5 % 8)
+	SetBitBE(child.Bitmap[:], 5)
 	var childS [SiblingSize]byte
 	child.Siblings = append(child.Siblings, childS)
 
 	parent := &InclusionCert{}
-	parent.Bitmap[5/8] |= 1 << (5 % 8)
+	SetBitBE(parent.Bitmap[:], 5)
 	var parentS [SiblingSize]byte
 	parent.Siblings = append(parent.Siblings, parentS)
 	parentBytes, err := parent.MarshalBinary()
@@ -498,12 +479,12 @@ func TestComposeInclusionCert_RejectsDepthOverlap(t *testing.T) {
 
 func TestComposeInclusionCert_RejectsParentDeeperThanChild(t *testing.T) {
 	child := &InclusionCert{}
-	child.Bitmap[3/8] |= 1 << (3 % 8)
+	SetBitBE(child.Bitmap[:], 3)
 	var childS [SiblingSize]byte
 	child.Siblings = append(child.Siblings, childS)
 
 	parent := &InclusionCert{}
-	parent.Bitmap[7/8] |= 1 << (7 % 8)
+	SetBitBE(parent.Bitmap[:], 7)
 	var parentS [SiblingSize]byte
 	parent.Siblings = append(parent.Siblings, parentS)
 	parentBytes, err := parent.MarshalBinary()
@@ -535,12 +516,12 @@ func TestRegionFromKeyBytes_ShortKey(t *testing.T) {
 		}
 	}
 
-	// Uncapped behavior is unchanged: depth 12 over a full-width key masks
-	// byte 1 to its low 4 bits.
+	// Uncapped behavior: under big-endian ordering, depth 12 over a full-width
+	// key keeps byte 1's high 4 bits.
 	full := make([]byte, 32)
 	full[0], full[1] = 0xFF, 0xFF
 	region = RegionFromKeyBytes(full, 12)
-	if region[0] != 0xFF || region[1] != 0x0F {
-		t.Fatalf("full-key region = %#x %#x, want 0xff 0x0f", region[0], region[1])
+	if region[0] != 0xFF || region[1] != 0xF0 {
+		t.Fatalf("full-key region = %#x %#x, want 0xff 0xf0", region[0], region[1])
 	}
 }

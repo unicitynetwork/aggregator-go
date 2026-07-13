@@ -3,6 +3,8 @@
 package persist
 
 import (
+	"encoding/binary"
+	"math/rand"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -322,10 +324,12 @@ func TestSnapshotCommitPersistsNonRootLoadedNodeMovement(t *testing.T) {
 	store := openTestStore(t, dir)
 	tree := openPersistTree(t, store)
 
-	k0 := keyWithFirstByte(0x00) // root-left leaf
-	k1 := keyWithFirstByte(0x07) // root-right subtree, bits 1110...
-	k2 := keyWithFirstByte(0x0f) // root-right subtree, bits 1111...
-	k3 := keyWithFirstByte(0x01) // root-right subtree, splits non-root path at bit 1
+	// Big-endian first bytes chosen so the tree shape matches the original
+	// LSB-first fixture (bytes are the bit-reversal of 0x00/0x07/0x0f/0x01).
+	k0 := keyWithFirstByte(0x00) // root-left leaf (big-endian bit 0 = 0)
+	k1 := keyWithFirstByte(0xE0) // root-right subtree, big-endian bits 111000...
+	k2 := keyWithFirstByte(0xF0) // root-right subtree, big-endian bits 111100...
+	k3 := keyWithFirstByte(0x80) // root-right subtree, splits non-root path at bit 1
 	v0 := []byte("value-zero")
 	v1 := []byte("value-one")
 	v2 := []byte("value-two")
@@ -677,6 +681,67 @@ func TestGetInclusionCertsBatchMatchesSingleAfterReopen(t *testing.T) {
 		require.Equal(t, singleCert.Bitmap, batchCerts[i].Bitmap)
 		require.Equal(t, singleCert.Siblings, batchCerts[i].Siblings)
 		require.NoError(t, batchCerts[i].Verify(leaf.key[:], leaf.value, result.CandidateRoot[:], api.SHA256))
+	}
+}
+
+// Full-width randomized parity for the persisted proof path: splits land far
+// past byte 0, exercising keyPathLess ordering, cert bitmap packing, and
+// materialization across commits and a reopen for hash-distributed keys.
+func TestSnapshotRandomizedFullWidthParityWithMemory(t *testing.T) {
+	rng := rand.New(rand.NewSource(42))
+	dir := t.TempDir()
+	store := openTestStore(t, dir)
+	tree := openPersistTree(t, store)
+
+	leaves := make([]memoryLeaf, 0, 400)
+	seen := make(map[disk.Key]struct{})
+	var root disk.Hash
+
+	for batch := 0; batch < 20; batch++ {
+		inputs := make([]disk.LeafInput, 0, 20)
+		for i := 0; i < 20; i++ {
+			var key disk.Key
+			for {
+				_, err := rng.Read(key[:])
+				require.NoError(t, err)
+				if _, ok := seen[key]; !ok {
+					break
+				}
+			}
+			seen[key] = struct{}{}
+			value := make([]byte, 8)
+			binary.LittleEndian.PutUint64(value, uint64(batch*20+i))
+			inputs = append(inputs, leafInput(key, value))
+			leaves = append(leaves, memoryLeaf{key: key, value: value})
+		}
+
+		snapshot, err := tree.CreateSnapshot()
+		require.NoError(t, err)
+		result, err := snapshot.AddLeaves(inputs)
+		require.NoError(t, err)
+		require.Len(t, result.AcceptedIndexes, len(inputs))
+		require.Empty(t, result.DuplicateIndexes)
+		require.Empty(t, result.Rejected)
+		require.Equal(t, memoryRootAfterLeaves(t, leaves...), result.CandidateRoot)
+		require.NoError(t, snapshot.Commit(api.NewBigIntFromUint64(uint64(batch+1))))
+		root = result.CandidateRoot
+	}
+
+	require.NoError(t, store.Close())
+	store = openTestStore(t, dir)
+	defer store.Close()
+	tree = openPersistTree(t, store)
+	require.Equal(t, root, tree.RootHash())
+
+	memoryTree := memoryTreeAfterLeaves(t, leaves...)
+	for _, leaf := range leaves {
+		diskCert, err := tree.GetInclusionCert(leaf.key[:])
+		require.NoError(t, err)
+		memoryCert, err := memoryTree.GetInclusionCert(leaf.key[:])
+		require.NoError(t, err)
+		require.Equal(t, memoryCert.Bitmap, diskCert.Bitmap)
+		require.Equal(t, memoryCert.Siblings, diskCert.Siblings)
+		require.NoError(t, diskCert.Verify(leaf.key[:], leaf.value, root[:], api.SHA256))
 	}
 }
 

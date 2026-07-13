@@ -23,18 +23,18 @@ func TestNodeKeyEncodingMatchesRugregatorShape(t *testing.T) {
 	left, err := NewNodeKey(1, PrefixBits{})
 	require.NoError(t, err)
 	var rightPrefix PrefixBits
-	rightPrefix[0] = 0x01
+	rightPrefix[0] = 0x80 // big-endian: depth-1 direction bit is the MSB of byte 0
 	right, err := NewNodeKey(1, rightPrefix)
 	require.NoError(t, err)
 	require.Equal(t, []byte{0x01, 0x00, 0x00}, left.Bytes())
-	require.Equal(t, []byte{0x01, 0x00, 0x01}, right.Bytes())
+	require.Equal(t, []byte{0x01, 0x00, 0x80}, right.Bytes())
 
 	var deepPrefix PrefixBits
 	deepPrefix[0] = 0x01
-	deepPrefix[1] = 0x01
+	deepPrefix[1] = 0x80 // big-endian: bit 8 is the MSB of byte 1
 	deep, err := NewNodeKey(9, deepPrefix)
 	require.NoError(t, err)
-	require.Equal(t, []byte{0x09, 0x00, 0x01, 0x01}, deep.Bytes())
+	require.Equal(t, []byte{0x09, 0x00, 0x01, 0x80}, deep.Bytes())
 
 	parsed, err := ParseNodeKey(deep.Bytes())
 	require.NoError(t, err)
@@ -75,7 +75,7 @@ func TestCompressedPathFromKeyRange(t *testing.T) {
 	require.Equal(t, byte(1), path.BitAt(0))
 	require.Equal(t, byte(0), path.BitAt(1))
 	require.Equal(t, byte(1), path.BitAt(2))
-	require.Equal(t, []byte{0xa5, 0x01}, path.Bytes())
+	require.Equal(t, []byte{0xa5, 0x00}, path.Bytes())
 
 	roundTrip, err := NewCompressedPathFromRaw(path.Len(), path.Bytes())
 	require.NoError(t, err)
@@ -118,14 +118,18 @@ func TestHashNodeMatchesMemoryAndGoldenRoot(t *testing.T) {
 	l1 := NewLeaf(k1, v1)
 	l2 := NewLeaf(k2, v2)
 
+	// Under big-endian bit ordering, keys 0x01 and 0x02 first diverge at depth 6.
+	const splitDepth = 6
 	var left, right *Branch
-	if KeyBit(k1, 0) == 0 {
+	if KeyBit(k1, splitDepth) == 0 {
 		left, right = l1, l2
 	} else {
 		left, right = l2, l1
 	}
 
-	root, err := NewInternal(EmptyPath(), 0, PrefixBits{}, left, right)
+	path, err := NewCompressedPathFromKeyRange(k1, 0, splitDepth)
+	require.NoError(t, err)
+	root, err := NewInternal(path, splitDepth, RegionFromKey(k1, splitDepth), left, right)
 	require.NoError(t, err)
 	got, err := root.HashValue()
 	require.NoError(t, err)
@@ -135,7 +139,7 @@ func TestHashNodeMatchesMemoryAndGoldenRoot(t *testing.T) {
 		leafInput{key: k1, value: v1},
 		leafInput{key: k2, value: v2},
 	), got)
-	require.Equal(t, mustHash(t, "fb0b8b6efbb9861202b4f49ca9f2d596f6698d5645f7545b74caf9d8b5161fcc"), got)
+	require.Equal(t, mustHash(t, "edf6f7d3bcf43f5b4f70d5de0d7e83f5d6210b3cc685ad062d761c4965b3f449"), got)
 }
 
 func TestLeafSerializationRoundTrip(t *testing.T) {
@@ -174,7 +178,7 @@ func TestInternalSerializationRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	rightHash, err := right.HashValue()
 	require.NoError(t, err)
-	expected := []byte{TagInternal, 13, 13, 0xa5, 0x01}
+	expected := []byte{TagInternal, 13, 13, 0xa5, 0x00}
 	expected = append(expected, leftHash[:]...)
 	expected = append(expected, rightHash[:]...)
 	require.Equal(t, expected, encoded)

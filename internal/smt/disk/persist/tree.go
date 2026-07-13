@@ -1,6 +1,7 @@
 package persist
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"runtime"
@@ -570,7 +571,7 @@ func buildInclusionCert(branch *disk.Branch, key disk.Key, cert *api.InclusionCe
 		if err != nil {
 			return err
 		}
-		cert.Bitmap[depth/8] |= 1 << (uint(depth) % 8)
+		api.SetBitBE(cert.Bitmap[:], depth)
 		var siblingBytes [api.SiblingSize]byte
 		copy(siblingBytes[:], siblingHash[:])
 		cert.Siblings = append(cert.Siblings, siblingBytes)
@@ -1685,15 +1686,10 @@ func nodeKeyLess(left, right disk.NodeKey) bool {
 	return left.Less(right)
 }
 
+// keyPathLess orders keys by big-endian tree-traversal order, which equals
+// unsigned lexicographic byte order (rsmt_sort_key(k) = k).
 func keyPathLess(left, right disk.Key) bool {
-	for depth := 0; depth < disk.KeyBits; depth++ {
-		leftBit := disk.KeyBit(left, depth)
-		rightBit := disk.KeyBit(right, depth)
-		if leftBit != rightBit {
-			return leftBit < rightBit
-		}
-	}
-	return false
+	return bytes.Compare(left[:], right[:]) < 0
 }
 
 func (s *Snapshot) materializeKey(key disk.Key) error {
@@ -1960,7 +1956,7 @@ func setPrefixBit(prefix *disk.PrefixBits, pos int) {
 	if pos < 0 || pos >= disk.KeyBits {
 		panic(fmt.Sprintf("disk SMT persist: prefix bit index out of range: %d", pos))
 	}
-	prefix[pos/8] |= 1 << (uint(pos) % 8)
+	api.SetBitBE(prefix[:], pos)
 }
 
 func firstDivergenceInPath(path disk.CompressedPath, key disk.Key, startBit int) (int, error) {

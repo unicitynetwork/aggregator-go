@@ -161,67 +161,63 @@ func TestValidator_ShardID(t *testing.T) {
 		shardBitmask int
 		match        bool
 	}{
-		// === TWO SHARD CONFIG ===
-		// shard1=bitmask 0b10
-		// shard2=bitmask 0b11
+		// Big-endian bit ordering (issue #169): shard-prefix bits are read from
+		// the MSB of byte 0 downward, so a shard selects a contiguous key range
+		// by the high bits of the first byte.
 
-		// certification request with key bit 0 = 0 belongs to shard1
+		// === TWO SHARD CONFIG ===
+		// shard1=bitmask 0b10 (big-endian bit 0 = 0)
+		// shard2=bitmask 0b11 (big-endian bit 0 = 1)
+
+		// big-endian bit 0 = 0 (first byte < 0x80) belongs to shard1
 		{makeShardTestID(0x00, 0x00), 0b10, true},
 		{makeShardTestID(0x00, 0x00), 0b11, false},
+		{makeShardTestID(0x7F, 0x00), 0b10, true},
+		{makeShardTestID(0x7F, 0x00), 0b11, false},
 
-		// certification request with key bit 0 = 1 belongs to shard2
-		{makeShardTestID(0x01, 0x00), 0b10, false},
-		{makeShardTestID(0x01, 0x00), 0b11, true},
-
-		// certification request with first byte 0b00000010 still belongs to shard1
-		{makeShardTestID(0x02, 0x00), 0b10, true},
-		{makeShardTestID(0x02, 0x00), 0b11, false},
-
-		// certification request with first byte 0b00000011 belongs to shard2
-		{makeShardTestID(0x03, 0x00), 0b10, false},
-		{makeShardTestID(0x03, 0x00), 0b11, true},
-
-		// certification request with first byte 0b11111111 belongs to shard2
+		// big-endian bit 0 = 1 (first byte >= 0x80) belongs to shard2
+		{makeShardTestID(0x80, 0x00), 0b10, false},
+		{makeShardTestID(0x80, 0x00), 0b11, true},
 		{makeShardTestID(0xFF, 0x00), 0b10, false},
 		{makeShardTestID(0xFF, 0x00), 0b11, true},
 
-		// the last byte no longer affects shard routing under LSB-first byte order
+		// the last byte does not affect shard routing
 		{makeShardTestID(0x00, 0xFF), 0b10, true},
 		{makeShardTestID(0x00, 0xFF), 0b11, false},
 
 		// === END TWO SHARD CONFIG ===
 
 		// === FOUR SHARD CONFIG ===
-		// shard1=0b100
-		// shard2=0b110
-		// shard3=0b101
-		// shard4=0b111
+		// shard1=0b100 (big-endian bits 1:0 = 00)
+		// shard2=0b110 (big-endian bits 1:0 = 01)
+		// shard3=0b101 (big-endian bits 1:0 = 10)
+		// shard4=0b111 (big-endian bits 1:0 = 11)
 
-		// key bits 1:0 = 00 belong to shard1
+		// big-endian bits 1:0 = 00 belong to shard1
 		{makeShardTestID(0x00, 0x00), 0b111, false},
 		{makeShardTestID(0x00, 0x00), 0b101, false},
 		{makeShardTestID(0x00, 0x00), 0b110, false},
 		{makeShardTestID(0x00, 0x00), 0b100, true},
 
-		// key bits 1:0 = 10 belong to shard2
-		{makeShardTestID(0x02, 0x00), 0b111, false},
-		{makeShardTestID(0x02, 0x00), 0b100, false},
-		{makeShardTestID(0x02, 0x00), 0b101, false},
-		{makeShardTestID(0x02, 0x00), 0b110, true},
+		// big-endian bits 1:0 = 01 belong to shard2
+		{makeShardTestID(0x40, 0x00), 0b111, false},
+		{makeShardTestID(0x40, 0x00), 0b100, false},
+		{makeShardTestID(0x40, 0x00), 0b101, false},
+		{makeShardTestID(0x40, 0x00), 0b110, true},
 
-		// key bits 1:0 = 01 belong to shard3
-		{makeShardTestID(0x01, 0x00), 0b111, false},
-		{makeShardTestID(0x01, 0x00), 0b101, true},
-		{makeShardTestID(0x01, 0x00), 0b110, false},
-		{makeShardTestID(0x01, 0x00), 0b100, false},
+		// big-endian bits 1:0 = 10 belong to shard3
+		{makeShardTestID(0x80, 0x00), 0b111, false},
+		{makeShardTestID(0x80, 0x00), 0b101, true},
+		{makeShardTestID(0x80, 0x00), 0b110, false},
+		{makeShardTestID(0x80, 0x00), 0b100, false},
 
-		// key bits 1:0 = 11 belong to shard4
-		{makeShardTestID(0x03, 0x00), 0b111, true},
-		{makeShardTestID(0x03, 0x00), 0b101, false},
-		{makeShardTestID(0x03, 0x00), 0b110, false},
-		{makeShardTestID(0x03, 0x00), 0b100, false},
+		// big-endian bits 1:0 = 11 belong to shard4
+		{makeShardTestID(0xC0, 0x00), 0b111, true},
+		{makeShardTestID(0xC0, 0x00), 0b101, false},
+		{makeShardTestID(0xC0, 0x00), 0b110, false},
+		{makeShardTestID(0xC0, 0x00), 0b100, false},
 
-		// key bits 1:0 = 11 still belong to shard4 when the whole first byte is set
+		// bits 1:0 = 11 still belong to shard4 when the whole first byte is set
 		{makeShardTestID(0xFF, 0x00), 0b111, true},
 		{makeShardTestID(0xFF, 0x00), 0b101, false},
 		{makeShardTestID(0xFF, 0x00), 0b110, false},

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math/big"
+	"math/bits"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -61,8 +62,9 @@ func (r ImprintV2) GetTreeKey() ([]byte, error) {
 }
 
 // PathToFixedBytes converts a sentinel-prefixed SMT path into fixed-width key bytes.
-// Byte order follows the v2 SMT bit layout:
-// key bit d is bit (d%8) of key[d/8] (LSB-first across bytes).
+// Byte order follows the v2 SMT bit layout (yellowpaper big-endian bit strings):
+// key bit d is bit (7 - d%8) of key[d/8] (MSB-first within each byte). This is
+// the exact inverse of FixedBytesToPath: path bit d = big-endian key bit d.
 func PathToFixedBytes(path *big.Int, keyLengthBits int) ([]byte, error) {
 	if keyLengthBits <= 0 {
 		return nil, fmt.Errorf("invalid key length: %d", keyLengthBits)
@@ -87,10 +89,11 @@ func PathToFixedBytes(path *big.Int, keyLengthBits int) ([]byte, error) {
 	bePadded := make([]byte, keyLengthBytes)
 	copy(bePadded[keyLengthBytes-len(beKey):], beKey)
 
+	// Undo the full 256-bit reversal applied by FixedBytesToPath: reverse the
+	// byte order and the bits within each byte.
 	out := make([]byte, keyLengthBytes)
 	for i := range out {
-		// Convert from big-endian integer bytes to LSB-first SMT key byte order.
-		out[i] = bePadded[keyLengthBytes-1-i]
+		out[i] = bits.Reverse8(bePadded[keyLengthBytes-1-i])
 	}
 	return out, nil
 }
@@ -105,22 +108,24 @@ func FixedBytesToPath(key []byte, keyLengthBits int) (*big.Int, error) {
 		return nil, fmt.Errorf("invalid key length in bytes: expected %d, got %d", keyLengthBytes, len(key))
 	}
 
-	// For non-byte-aligned keys, ensure unused high bits are zero in the last
-	// (highest-index) byte under LSB-first key-byte ordering.
+	// For non-byte-aligned keys, ensure unused bits are zero. Under big-endian
+	// bit ordering the used bits are the high bits of the last byte, so the
+	// unused bits are the low (8-rem) bits.
 	if rem := keyLengthBits % 8; rem != 0 {
-		mask := byte(0xFF << rem)
+		mask := byte(0xFF >> rem)
 		if key[keyLengthBytes-1]&mask != 0 {
-			return nil, fmt.Errorf("invalid key: unused high bits must be zero")
+			return nil, fmt.Errorf("invalid key: unused low bits must be zero")
 		}
 	}
 
-	// Convert from LSB-first SMT key byte order to big-endian integer bytes.
-	be := make([]byte, keyLengthBytes)
-	for i := range be {
-		be[i] = key[keyLengthBytes-1-i]
+	// Map big-endian key bit d to big.Int bit d via a full 256-bit reversal:
+	// reverse the byte order and the bits within each byte.
+	rev := make([]byte, keyLengthBytes)
+	for i := range rev {
+		rev[i] = bits.Reverse8(key[keyLengthBytes-1-i])
 	}
 
-	path := new(big.Int).SetBytes(be)
+	path := new(big.Int).SetBytes(rev)
 	path.SetBit(path, keyLengthBits, 1)
 	return path, nil
 }

@@ -96,7 +96,7 @@ func (c *InclusionCert) UnmarshalBinary(data []byte) error {
 // algorithm.
 //
 // Parameters:
-//   - key:          32-byte SMT key, LSB-first layout.
+//   - key:          32-byte SMT key, big-endian bit layout.
 //   - value:        raw leaf value bytes (v2 inclusion proofs use the tx hash).
 //   - expectedRoot: raw 32-byte root hash, taken from UC.IR.h.
 //   - algo:         hash algorithm used by the SMT.
@@ -137,7 +137,7 @@ func verifyBitmapPath(bitmap *[BitmapSize]byte, siblings [][SiblingSize]byte, ke
 	h := append([]byte(nil), startHash...)
 	j := len(siblings)
 	for d := maxDepth - 1; d >= 0; d-- {
-		if ((*bitmap)[d/8]>>(uint(d)%8))&1 == 0 {
+		if KeyBitBE((*bitmap)[:], d) == 0 {
 			continue
 		}
 		if d/8 >= len(key) {
@@ -150,7 +150,7 @@ func verifyBitmapPath(bitmap *[BitmapSize]byte, siblings [][SiblingSize]byte, ke
 		sibling := siblings[j][:]
 
 		hasher.Reset().AddData([]byte{0x01, byte(d)}).AddData(RegionFromKeyBytes(key, d))
-		if keyBitAt(key, d) == 1 {
+		if KeyBitBE(key, d) == 1 {
 			// Descent went right at depth d → sibling is the left child.
 			hasher.AddData(sibling).AddData(h)
 		} else {
@@ -242,16 +242,11 @@ func bitmapPopcount(b *[BitmapSize]byte) int {
 	return total
 }
 
-// keyBitAt returns bit d of key under LSB-first byte layout:
-// bit d is bit (d mod 8) of key[d / 8]. Matches PathToFixedBytes /
-// FixedBytesToPath in state_id.go.
-func keyBitAt(key []byte, d int) byte {
-	return (key[d/8] >> (uint(d) % 8)) & 1
-}
-
-// RegionFromKeyBytes packs the depth-bit prefix of an LSB-first SMT key into
+// RegionFromKeyBytes packs the depth-bit prefix of a big-endian SMT key into
 // the canonical v6a 32-byte region encoding: key bits 0..depth-1 in place,
-// all bits at positions >= depth cleared.
+// all bits at positions >= depth cleared. The region shares the key's byte
+// layout, so it is the key bytes with the depth suffix masked off. Keys shorter
+// than the depth's byte span leave the uncovered prefix bytes zero.
 func RegionFromKeyBytes(key []byte, depth int) []byte {
 	region := make([]byte, StateTreeKeyLengthBytes)
 	if depth <= 0 {
@@ -260,18 +255,11 @@ func RegionFromKeyBytes(key []byte, depth int) []byte {
 	if depth > StateTreeKeyLengthBits {
 		depth = StateTreeKeyLengthBits
 	}
-	byteLen := (depth + 7) / 8
-	if byteLen > len(key) {
-		byteLen = len(key)
+	n := (depth + 7) / 8
+	if n > len(key) {
+		n = len(key)
 	}
-	copy(region[:byteLen], key[:byteLen])
-	// Mask the byte containing the depth boundary. When the key is shorter
-	// than the depth's byte span, every copied bit is below depth and no
-	// masking applies.
-	if rem := depth % 8; rem != 0 {
-		if maskByte := (depth - 1) / 8; maskByte < byteLen {
-			region[maskByte] &= byte(1<<uint(rem)) - 1
-		}
-	}
+	copy(region[:n], key[:n])
+	ClearSuffixBE(region, depth)
 	return region
 }

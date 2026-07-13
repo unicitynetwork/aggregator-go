@@ -18,12 +18,12 @@ import (
 //
 //	leaf: H(0x00 || key || value)
 //	node: H(0x01 || depth_1B || region_32B || left_32B || right_32B)
-//	region: key bits 0..depth-1 packed LSB-in-byte into 32 bytes, rest zero
+//	region: key bits 0..depth-1 packed big-endian into 32 bytes, rest zero
 //	empty tree root: all-zero 32 bytes
 //
-// TestV6AInterop_JSSDKParity asserts the JS SDK's published v6a root for the
-// same tree — a cross-implementation anchor in the reverse direction
-// (JS-generated, Go-reproduced).
+// The roots below are the big-endian (issue #169) construction. They are
+// additionally cross-checked structurally against an independent big-endian
+// reference implementation in TestBigEndianReferenceMatchesProduction.
 
 func interopKey(b ...byte) []byte {
 	key := make([]byte, 32)
@@ -51,12 +51,16 @@ func interopLeafHash(key, value []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// TestV6AInterop_JSSDKParity builds the identical sparse tree used by the JS
-// SDK v6a test suite (32-byte keys with only the first byte set) and asserts
-// the JS SDK's expected root, proving cross-implementation agreement.
+// TestV6AInterop_JSSDKParity builds the same sparse tree used by the JS SDK
+// big-endian test suite (32-byte keys with only the first byte set) and pins
+// the shared cross-implementation root. This value is cross-verified against
+// the JS SDK: its "should verify the tree" test (state-transition-sdk-js#135,
+// issue #134) computes the identical root imprint
+// 0000c854db11...166ede for byte-identical inputs, so Go and JS agree in both
+// directions on the big-endian construction.
 func TestV6AInterop_JSSDKParity(t *testing.T) {
-	// Keys and values mirror the JS SDK's SparseMerkleTree v6a test
-	// ("should verify the tree").
+	// Keys and values mirror the JS SDK's SparseMerkleTree test
+	// ("should verify the tree"): leavesSparse with values "value0".."value5".
 	firstBytes := []byte{0b10010000, 0b00000000, 0b00010000, 0b10000000, 0b01100000, 0b00010100}
 
 	tree := NewSparseMerkleTree(api.SHA256, 256)
@@ -64,11 +68,11 @@ func TestV6AInterop_JSSDKParity(t *testing.T) {
 		interopAddLeaf(t, tree, interopKey(b), []byte(fmt.Sprintf("value%d", i)), 256)
 	}
 
-	// Expected root published by the JS SDK v6a test (imprint prefix stripped).
+	// Shared cross-SDK big-endian root (JS SDK sdk-js#135 pins the same value).
 	require.Equal(t,
-		"cd23fc1265484a7173323cd862b85a61796b8e0af31149944a828e6c1734b846",
+		"c854db11e92d269e7a4dc558adb201da311604d0bcc9883a8f1f017862166ede",
 		interopRoot(t, tree),
-		"Go v6a root must match the JS SDK v6a root for the identical tree")
+		"Go root must match the JS SDK big-endian root for the identical tree")
 
 	for i, b := range firstBytes {
 		requireCertRoundTrip(t, tree, interopKey(b), []byte(fmt.Sprintf("value%d", i)))
@@ -96,7 +100,8 @@ func TestV6AInterop_OneLeaf(t *testing.T) {
 }
 
 func TestV6AInterop_ShallowSplit(t *testing.T) {
-	// Two keys differing at bit 0: one junction at depth 0 with a zero region.
+	// Two keys differing at big-endian bit 7 (the LSB of byte 0): one junction
+	// at depth 7 with a zero region.
 	a := interopKey(0x00)
 	b := interopKey(0x01)
 
@@ -110,11 +115,12 @@ func TestV6AInterop_ShallowSplit(t *testing.T) {
 }
 
 func TestV6AInterop_DeepSplit(t *testing.T) {
-	// Two keys identical except bit 255 (the high bit of the last byte):
-	// a single junction at depth 255 whose region is 255 shared zero bits.
+	// Two keys identical except big-endian bit 255 (the LSB of the last byte):
+	// a single junction at depth 255 whose region is 255 shared zero bits. Same
+	// inputs as the JS SDK "deep split at depth 255" test (sdk-js#135).
 	a := interopKey() // all zeros
 	b := interopKey()
-	b[31] = 0x80
+	b[31] = 0x01
 
 	valueA := interopKey()
 	valueA[0] = 1
@@ -131,14 +137,14 @@ func TestV6AInterop_DeepSplit(t *testing.T) {
 }
 
 func TestV6AInterop_MultiLeaf(t *testing.T) {
-	// Five keys producing junctions at several depths, including byte
-	// boundaries (bits 0, 2, 8, 16).
+	// Five keys producing junctions at several big-endian depths, including
+	// cross-byte boundaries.
 	keys := [][]byte{
-		interopKey(0x00),             // bits: all zero
-		interopKey(0x04),             // diverges at bit 2
-		interopKey(0x01),             // diverges at bit 0
-		interopKey(0x00, 0x01),       // diverges at bit 8
-		interopKey(0x00, 0x00, 0x01), // diverges at bit 16
+		interopKey(0x00),             // all zero
+		interopKey(0x04),             // diverges at big-endian bit 5
+		interopKey(0x01),             // diverges at big-endian bit 7
+		interopKey(0x00, 0x01),       // diverges at big-endian bit 15
+		interopKey(0x00, 0x00, 0x01), // diverges at big-endian bit 23
 	}
 
 	tree := NewSparseMerkleTree(api.SHA256, 256)
@@ -168,7 +174,7 @@ func requireCertRoundTrip(t *testing.T, tree *SparseMerkleTree, key, value []byt
 // cross-implementation checks. Per-SDK cross-verification status is tracked on
 // the issue, not here.
 const (
-	shallowSplitExpectedRoot = "8cc069f48345d8117664a31590eea28dae79cac066a4c457cd467c4d4d2648e2"
-	deepSplitExpectedRoot    = "789f3ba1c3b31402bef371ad3cb8a7a176589648d898cb792303a0e3fe128611"
-	multiLeafExpectedRoot    = "7fe744edd3bfe7e973675d773c49e159fccb54e27aa59972deb703fe466bbf2e"
+	shallowSplitExpectedRoot = "5a758eb5528a347e00b9c8346a3724afc81a5a061cb4b24217d904b8f31f2744"
+	deepSplitExpectedRoot    = "5ae94a6edf95904ebf8d3acbdd0e77c8a991ce6adb8999105325049613ba5580"
+	multiLeafExpectedRoot    = "aeee01fda31fe042467954e26a5788363db7201bbe49b667cdf06c187a6c586b"
 )

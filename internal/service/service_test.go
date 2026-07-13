@@ -310,8 +310,10 @@ func TestGetInclusionProofShardMismatch(t *testing.T) {
 	tree := smt.NewChildSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits, shardingCfg.Child.ShardID)
 	service := newAggregatorServiceForTest(t, shardingCfg, tree)
 
-	// Raw 32-byte v2 stateId whose shard-prefix bits don't match shard 4 (=0b100).
-	invalidShardID := api.RequireNewImprintV2("01" + strings.Repeat("00", api.StateTreeKeyLengthBytes-1))
+	// Raw 32-byte v2 stateId whose shard-prefix bits don't match shard 4
+	// (=0b100, big-endian bits 1:0 = 00). Byte 0 = 0x80 sets big-endian bit 0,
+	// so it routes to a different shard.
+	invalidShardID := api.RequireNewImprintV2("80" + strings.Repeat("00", api.StateTreeKeyLengthBytes-1))
 	_, err := service.GetInclusionProofV2(context.Background(), &api.GetInclusionProofRequestV2{StateID: invalidShardID})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "state ID validation failed")

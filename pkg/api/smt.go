@@ -185,9 +185,10 @@ func (m *MerkleTreePath) Verify(stateID *big.Int) (*PathVerificationResult, erro
 }
 
 // RegionFromPathBits packs bits 0..depth-1 of a sentinel-prefixed path into
-// the canonical v6a 32-byte region encoding (bit i at bit i mod 8 of byte
-// i / 8, all bits at positions >= depth zero). The low bits of a path are
-// absolutely aligned: bit i is the routing decision at tree depth i.
+// the canonical v6a 32-byte region encoding (big-endian: path bit i at in-byte
+// position 7-(i%8) of byte i/8, all bits at positions >= depth zero). The low
+// bits of a path are absolutely aligned: bit i is the routing decision at tree
+// depth i, which under the big-endian bijection equals big-endian key bit i.
 func RegionFromPathBits(path *big.Int, depth int) []byte {
 	region := make([]byte, StateTreeKeyLengthBytes)
 	if path == nil || depth <= 0 {
@@ -198,7 +199,7 @@ func RegionFromPathBits(path *big.Int, depth int) []byte {
 	}
 	for i := 0; i < depth; i++ {
 		if path.Bit(i) != 0 {
-			region[i/8] |= 1 << (uint(i) % 8)
+			SetBitBE(region, i)
 		}
 	}
 	return region

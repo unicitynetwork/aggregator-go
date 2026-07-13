@@ -86,7 +86,7 @@ func bitmapOverlap(a, b *[BitmapSize]byte) bool {
 func bitmapDepthRange(bitmap *[BitmapSize]byte) (ok bool, minDepth, maxDepthSeen int) {
 	minDepth = BitmapSize * 8
 	for depth := 0; depth < BitmapSize*8; depth++ {
-		if (bitmap[depth/8]>>(uint(depth)%8))&1 == 0 {
+		if KeyBitBE(bitmap[:], depth) == 0 {
 			continue
 		}
 		if !ok {
