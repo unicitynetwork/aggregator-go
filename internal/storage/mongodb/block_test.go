@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go/modules/mongodb"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
@@ -696,4 +697,29 @@ func TestBlockStorage_GetNextFinalizedAfter(t *testing.T) {
 	next, err = storage.GetNextFinalizedAfter(ctx, api.NewBigInt(big.NewInt(4)), api.NewBigInt(big.NewInt(4)))
 	require.NoError(t, err)
 	require.Nil(t, next)
+}
+
+// CreateIndexes runs on every startup, so it must not mutate documents: the
+// old finalized/status backfill migration COLLSCANed the whole collection on
+// boot and crash-looped large deployments (issue #171).
+func TestBlockStorage_CreateIndexes_DoesNotMutateDocuments(t *testing.T) {
+	db, cleanup := setupBlockTestDB(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), blockTestTimeout)
+	defer cancel()
+
+	storage := NewBlockStorage(db)
+
+	legacy := bson.M{"index": bigIntToDecimal128(api.NewBigInt(big.NewInt(1))), "chainId": "test"}
+	_, err := db.Collection(blockCollection).InsertOne(ctx, legacy)
+	require.NoError(t, err)
+
+	require.NoError(t, storage.CreateIndexes(ctx))
+
+	var doc bson.M
+	err = db.Collection(blockCollection).FindOne(ctx, bson.M{"chainId": "test"}).Decode(&doc)
+	require.NoError(t, err)
+	assert.NotContains(t, doc, "finalized")
+	assert.NotContains(t, doc, "status")
 }

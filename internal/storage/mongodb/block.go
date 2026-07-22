@@ -270,24 +270,6 @@ func (bs *BlockStorage) CreateIndexes(ctx context.Context) error {
 		return fmt.Errorf("failed to create block indexes: %w", err)
 	}
 
-	// Migration: Set finalized=true for old blocks without the field. Remove after deployment.
-	_, err = bs.collection.UpdateMany(ctx,
-		bson.M{"finalized": bson.M{"$exists": false}},
-		bson.M{"$set": bson.M{"finalized": true}},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to migrate blocks finalized field: %w", err)
-	}
-	_, err = bs.collection.UpdateMany(ctx,
-		bson.M{"status": bson.M{"$exists": false}},
-		[]bson.M{
-			{"$set": bson.M{"status": bson.M{"$cond": []interface{}{"$finalized", models.FinalityStatusFinalized, models.FinalityStatusFinalizing}}}},
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to migrate blocks status field: %w", err)
-	}
-
 	return nil
 }
 
