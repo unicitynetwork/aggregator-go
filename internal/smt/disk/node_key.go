@@ -84,6 +84,10 @@ func (k NodeKey) Bytes() []byte {
 	return k.AppendBytes(nil)
 }
 
+func (k NodeKey) PrefixMajorBytes() []byte {
+	return k.AppendPrefixMajorBytes(nil)
+}
+
 func (k NodeKey) AppendBytes(dst []byte) []byte {
 	if k.root {
 		return append(dst, 0xff, 0xff)
@@ -91,6 +95,19 @@ func (k NodeKey) AppendBytes(dst []byte) []byte {
 	depth := int(k.depth)
 	dst = append(dst, byte(k.depth), byte(k.depth>>8))
 	return append(dst, k.prefix[:prefixByteLen(depth)]...)
+}
+
+// AppendPrefixMajorBytes encodes a node key for stores that want routing-prefix
+// locality instead of depth-major locality. The leading tag keeps root distinct
+// from non-root nodes; non-root keys then sort by the canonical full-width
+// prefix, with depth as the final tie-breaker.
+func (k NodeKey) AppendPrefixMajorBytes(dst []byte) []byte {
+	if k.root {
+		return append(dst, 0x00)
+	}
+	dst = append(dst, 0x01)
+	dst = append(dst, k.prefix[:]...)
+	return append(dst, byte(k.depth>>8), byte(k.depth))
 }
 
 func (k NodeKey) Less(other NodeKey) bool {

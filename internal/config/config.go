@@ -90,6 +90,7 @@ type HAConfig struct {
 	LockTTLSeconds                int           `mapstructure:"lock_ttl_seconds"`
 	LeaderHeartbeatInterval       time.Duration `mapstructure:"leader_heartbeat_interval"`
 	LeaderElectionPollingInterval time.Duration `mapstructure:"leader_election_polling_interval"`
+	BlockSyncInterval             time.Duration `mapstructure:"block_sync_interval"`
 	LockID                        string        `mapstructure:"lock_id"`
 	ServerID                      string        `mapstructure:"server_id"`
 }
@@ -113,7 +114,6 @@ type LoggingConfig struct {
 // ProcessingConfig holds batch processing configuration
 type ProcessingConfig struct {
 	BatchLimit                 int           `mapstructure:"batch_limit"`
-	RoundDuration              time.Duration `mapstructure:"round_duration"`
 	PrecollectorGracePeriod    time.Duration `mapstructure:"precollector_grace_period"`     // Extra wait before cutting a precollected round snapshot
 	MaxCommitmentsPerRound     int           `mapstructure:"max_commitments_per_round"`     // Stop waiting once this many commitments collected
 	CollectPhaseDuration       time.Duration `mapstructure:"collect_phase_duration"`        // Non-child fixed collection window before proposing a round
@@ -184,7 +184,7 @@ type SMTConfig struct {
 	RocksDBBloomBits          float64    `mapstructure:"rocksdb_bloom_bits"`
 	RocksDBMemTableMB         int        `mapstructure:"rocksdb_memtable_mb"`
 	MaterializeWorkers        int        `mapstructure:"materialize_workers"`
-	StartupReplayLimitBlocks  int        `mapstructure:"startup_replay_limit_blocks"`
+	NodeKeyFormat             string     `mapstructure:"node_key_format"`
 	PrecomputeProofs          bool       `mapstructure:"precompute_proofs"`
 	ProofMetadataCacheEntries int        `mapstructure:"proof_metadata_cache_entries"`
 }
@@ -362,6 +362,7 @@ func Load() (*Config, error) {
 			LockTTLSeconds:                getEnvIntOrDefault("LOCK_TTL_SECONDS", 30),
 			LeaderHeartbeatInterval:       getEnvDurationOrDefault("LEADER_HEARTBEAT_INTERVAL", "10s"),
 			LeaderElectionPollingInterval: getEnvDurationOrDefault("LEADER_ELECTION_POLLING_INTERVAL", "5s"),
+			BlockSyncInterval:             getEnvDurationOrDefault("BLOCK_SYNC_INTERVAL", "1s"),
 			LockID:                        getEnvOrDefault("LOCK_ID", "aggregator_leader_lock"),
 			ServerID:                      getEnvOrDefault("SERVER_ID", generateServerID()),
 		},
@@ -381,7 +382,6 @@ func Load() (*Config, error) {
 		},
 		Processing: ProcessingConfig{
 			BatchLimit:                 getEnvIntOrDefault("BATCH_LIMIT", 1000),
-			RoundDuration:              getEnvDurationOrDefault("ROUND_DURATION", "1s"),
 			PrecollectorGracePeriod:    getEnvDurationOrDefault("PRECOLLECTOR_GRACE_PERIOD", "0s"),
 			MaxCommitmentsPerRound:     getEnvIntOrDefault("MAX_COMMITMENTS_PER_ROUND", 20000),
 			CollectPhaseDuration:       getEnvDurationOrDefault("COLLECT_PHASE_DURATION", "200ms"),
@@ -424,7 +424,7 @@ func Load() (*Config, error) {
 			RocksDBBloomBits:          getEnvFloatOrDefault("SMT_ROCKSDB_BLOOM_BITS", 10),
 			RocksDBMemTableMB:         getEnvIntOrDefault("SMT_ROCKSDB_MEMTABLE_MB", 64),
 			MaterializeWorkers:        getEnvIntOrDefault("SMT_MATERIALIZE_WORKERS", 16),
-			StartupReplayLimitBlocks:  getEnvIntOrDefault("SMT_STARTUP_REPLAY_LIMIT_BLOCKS", 100),
+			NodeKeyFormat:             getEnvOrDefault("SMT_NODE_KEY_FORMAT", "depth-major"),
 			PrecomputeProofs:          getEnvBoolOrDefault("SMT_PRECOMPUTE_PROOFS", false),
 			ProofMetadataCacheEntries: getEnvIntOrDefault("SMT_PROOF_METADATA_CACHE_ENTRIES", 250000),
 		},
@@ -508,6 +508,9 @@ func (c *Config) Validate() error {
 	if c.HA.Enabled && c.HA.ServerID == "" {
 		return fmt.Errorf("server ID cannot be empty when HA is enabled")
 	}
+	if c.HA.Enabled && c.HA.BlockSyncInterval <= 0 {
+		return fmt.Errorf("BLOCK_SYNC_INTERVAL must be positive when HA is enabled")
+	}
 
 	if c.Server.EnableTLS && (c.Server.TLSCertFile == "" || c.Server.TLSKeyFile == "") {
 		return fmt.Errorf("TLS cert and key files must be provided when TLS is enabled")
@@ -560,8 +563,10 @@ func (c *Config) Validate() error {
 	if c.SMT.MaterializeWorkers < 0 {
 		return fmt.Errorf("SMT_MATERIALIZE_WORKERS must be non-negative")
 	}
-	if c.SMT.StartupReplayLimitBlocks < 0 {
-		return fmt.Errorf("SMT_STARTUP_REPLAY_LIMIT_BLOCKS must be non-negative")
+	switch c.SMT.NodeKeyFormat {
+	case "", "depth-major", "prefix-major":
+	default:
+		return fmt.Errorf("SMT_NODE_KEY_FORMAT must be one of: depth-major, prefix-major")
 	}
 	if c.SMT.Backend.OrDefault() == SMTBackendRocksDB {
 		if c.SMT.DiskPath == "" {

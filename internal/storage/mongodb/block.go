@@ -173,44 +173,45 @@ func (bs *BlockStorage) Count(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
-// GetRange retrieves finalized blocks in a range
-func (bs *BlockStorage) GetRange(ctx context.Context, fromBlock, toBlock *api.BigInt) ([]*models.Block, error) {
-	fromDecimal := bigIntToDecimal128(fromBlock)
-	toDecimal := bigIntToDecimal128(toBlock)
+// GetFinalizedPage retrieves a bounded page of finalized blocks after afterBlock, up to toBlock.
+func (bs *BlockStorage) GetFinalizedPage(ctx context.Context, afterBlock, toBlock *api.BigInt, limit int) ([]*models.Block, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("finalized block page limit must be positive")
+	}
 
+	afterDecimal := bigIntToDecimal128(afterBlock)
+	toDecimal := bigIntToDecimal128(toBlock)
 	filter := bson.M{
 		"index": bson.M{
-			"$gte": fromDecimal,
+			"$gt":  afterDecimal,
 			"$lte": toDecimal,
 		},
 		"finalized": true,
 	}
-
-	opts := options.Find().SetSort(bson.M{"index": 1})
+	opts := options.Find().
+		SetSort(bson.M{"index": 1}).
+		SetLimit(int64(limit))
 	cursor, err := bs.collection.Find(ctx, filter, opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find blocks in range: %w", err)
+		return nil, fmt.Errorf("failed to find finalized block page after %s: %w", afterBlock.String(), err)
 	}
 	defer cursor.Close(ctx)
 
-	var blocks []*models.Block
+	blocks := make([]*models.Block, 0, limit)
 	for cursor.Next(ctx) {
 		var blockBSON models.BlockBSON
 		if err := cursor.Decode(&blockBSON); err != nil {
-			return nil, fmt.Errorf("failed to decode block: %w", err)
+			return nil, fmt.Errorf("failed to decode finalized block page: %w", err)
 		}
-
 		block, err := blockBSON.FromBSON()
 		if err != nil {
-			return nil, fmt.Errorf("failed to convert from BSON: %w", err)
+			return nil, fmt.Errorf("failed to convert finalized block page from BSON: %w", err)
 		}
 		blocks = append(blocks, block)
 	}
-
 	if err := cursor.Err(); err != nil {
-		return nil, fmt.Errorf("cursor error: %w", err)
+		return nil, fmt.Errorf("finalized block page cursor error: %w", err)
 	}
-
 	return blocks, nil
 }
 

@@ -1180,7 +1180,7 @@ func (s *testBlockStorage) GetByNumber(context.Context, *api.BigInt) (*models.Bl
 func (s *testBlockStorage) GetLatest(context.Context) (*models.Block, error)     { return s.latest, nil }
 func (s *testBlockStorage) GetLatestNumber(context.Context) (*api.BigInt, error) { return nil, nil }
 func (s *testBlockStorage) Count(context.Context) (int64, error)                 { return 0, nil }
-func (s *testBlockStorage) GetRange(context.Context, *api.BigInt, *api.BigInt) ([]*models.Block, error) {
+func (s *testBlockStorage) GetFinalizedPage(context.Context, *api.BigInt, *api.BigInt, int) ([]*models.Block, error) {
 	return nil, nil
 }
 func (s *testBlockStorage) GetNextFinalizedAfter(context.Context, *api.BigInt, *api.BigInt) (*models.Block, error) {

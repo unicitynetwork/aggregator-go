@@ -538,7 +538,7 @@ func startBFTShardAggregator(ctx context.Context, t *testing.T, opts bftAggregat
 		},
 		Signing: config.SigningConfig{KeyConf: keyConf},
 		Processing: config.ProcessingConfig{
-			RoundDuration: 2 * time.Second, BatchLimit: 1000, MaxCommitmentsPerRound: 1000,
+			BatchLimit: 1000, MaxCommitmentsPerRound: 1000,
 		},
 		Storage: config.StorageConfig{
 			UseRedisForCommitments: true,

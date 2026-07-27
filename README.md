@@ -143,6 +143,7 @@ The service is configured via environment variables:
 | `LOCK_TTL_SECONDS` | Leadership lock TTL | `30` |
 | `LEADER_HEARTBEAT_INTERVAL` | Leader heartbeat frequency | `10s` |
 | `LEADER_ELECTION_POLLING_INTERVAL` | Follower polling frequency | `5s` |
+| `BLOCK_SYNC_INTERVAL` | Follower finalized-block synchronization interval | `1s` |
 | `SERVER_ID` | Unique server identifier | `{hostname}-{pid}` |
 | `LOCK_ID`                          | Unique lock identifier     | `aggregator_leader_lock` |
 
@@ -160,7 +161,6 @@ The service is configured via environment variables:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `BATCH_LIMIT` | Maximum number of commitments to process per batch | `1000` |
-| `ROUND_DURATION` | Duration between block creation rounds | `1s` |
 
 ### Storage Configuration
 | Variable | Description | Default |
@@ -186,15 +186,16 @@ go build -tags rocksdb ./cmd/aggregator
 |----------|-------------|---------|
 | `SMT_BACKEND` | SMT backend: `memory` or `rocksdb` | `memory` |
 | `SMT_DISK_PATH` | RocksDB data directory when `SMT_BACKEND=rocksdb` | required |
+| `SMT_NODE_KEY_FORMAT` | RocksDB node-key layout: `depth-major` or `prefix-major` | `depth-major` |
 | `SMT_ROCKSDB_CACHE_MB` | RocksDB block cache size in MB | `1024` |
 | `SMT_ROCKSDB_BG_JOBS` | RocksDB background jobs | `8` |
 | `SMT_ROCKSDB_SUBCOMPACTIONS` | RocksDB subcompactions | `4` |
 | `SMT_ROCKSDB_BLOOM_BITS` | Bloom filter bits per key | `10` |
 | `SMT_ROCKSDB_MEMTABLE_MB` | RocksDB write buffer size in MB | `64` |
-| `SMT_MATERIALIZE_WORKERS` | Parallel workers for SMT materialization | `64` |
-| `SMT_STARTUP_REPLAY_LIMIT_BLOCKS` | Maximum finalized MongoDB blocks to replay into RocksDB on startup | `100` |
+| `SMT_MATERIALIZE_WORKERS` | Parallel workers for SMT materialization | `16` |
 
 RocksDB SMT with HA is supported only in `bft-shard` mode. It is rejected for application-level `parent`/`child` sharding modes; use `SMT_BACKEND=memory` there.
+Changing `SMT_NODE_KEY_FORMAT` requires a fresh or separately seeded `SMT_DISK_PATH`; an existing database opened with the wrong layout fails startup.
 
 #### Redis Sentinel (HA)
 

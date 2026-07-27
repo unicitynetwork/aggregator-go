@@ -285,8 +285,7 @@ func TestProcessMiniBatch_SkipsExistingDuplicateWithoutProofPending(t *testing.T
 	ctx := context.Background()
 	cfg := &config.Config{
 		Processing: config.ProcessingConfig{
-			RoundDuration: time.Second,
-			BatchLimit:    1000,
+			BatchLimit: 1000,
 		},
 		Sharding: config.ShardingConfig{
 			Mode: config.ShardingModeStandalone,
@@ -334,8 +333,7 @@ func TestReconcileRecoveredFinalization_CommitsMatchingSnapshotAndClearsProofPen
 	ctx := context.Background()
 	cfg := &config.Config{
 		Processing: config.ProcessingConfig{
-			RoundDuration: time.Second,
-			BatchLimit:    1000,
+			BatchLimit: 1000,
 		},
 		Sharding: config.ShardingConfig{
 			Mode: config.ShardingModeStandalone,
@@ -385,8 +383,7 @@ func TestReconcileRecoveredFinalization_MismatchedBlockClearsProofPendingOnly(t 
 	ctx := context.Background()
 	cfg := &config.Config{
 		Processing: config.ProcessingConfig{
-			RoundDuration: time.Second,
-			BatchLimit:    1000,
+			BatchLimit: 1000,
 		},
 		Sharding: config.ShardingConfig{
 			Mode: config.ShardingModeStandalone,
@@ -879,7 +876,6 @@ func TestChildPrecollector_DeactivateDuringInFlightRound(t *testing.T) {
 			Database: "test_child_deactivate_inflight",
 		},
 		Processing: config.ProcessingConfig{
-			RoundDuration:          100 * time.Millisecond,
 			MaxCommitmentsPerRound: 1000,
 		},
 		Sharding: config.ShardingConfig{
@@ -950,7 +946,6 @@ func TestChildRound_ReactivateCancelsInFlightRound(t *testing.T) {
 			Database: "test_child_reactivate_inflight",
 		},
 		Processing: config.ProcessingConfig{
-			RoundDuration:          100 * time.Millisecond,
 			MaxCommitmentsPerRound: 1000,
 		},
 		Sharding: config.ShardingConfig{
@@ -1018,7 +1013,6 @@ func TestChildRound_ParentProofTimeoutIsRetriable(t *testing.T) {
 			Database: "test_child_parent_proof_timeout_retriable",
 		},
 		Processing: config.ProcessingConfig{
-			RoundDuration:          100 * time.Millisecond,
 			MaxCommitmentsPerRound: 1000,
 		},
 		Sharding: config.ShardingConfig{
@@ -1092,7 +1086,6 @@ func TestStartNewRoundWithSnapshot(t *testing.T) {
 				Database: "test_start_round_snapshot",
 			},
 			Processing: config.ProcessingConfig{
-				RoundDuration:          100 * time.Millisecond,
 				MaxCommitmentsPerRound: 1000,
 			},
 			Sharding: config.ShardingConfig{
@@ -1151,7 +1144,6 @@ func TestStandalonePrecollectorGraceIncludesLateCommitment(t *testing.T) {
 	cfg := config.Config{
 		Database: config.DatabaseConfig{Database: "test_standalone_precollector_grace"},
 		Processing: config.ProcessingConfig{
-			RoundDuration:           100 * time.Millisecond,
 			PrecollectorGracePeriod: 150 * time.Millisecond,
 			MaxCommitmentsPerRound:  1000,
 		},
@@ -1258,7 +1250,6 @@ func TestStartNextRoundFromPrecollectorDiscardsFailedPrecollector(t *testing.T) 
 	cfg := config.Config{
 		Database: config.DatabaseConfig{Database: "test_precollector_handoff_failure_discard"},
 		Processing: config.ProcessingConfig{
-			RoundDuration:           100 * time.Millisecond,
 			PrecollectorGracePeriod: 150 * time.Millisecond,
 			MaxCommitmentsPerRound:  1000,
 		},
@@ -1364,7 +1355,6 @@ func TestStandaloneActivePrecollectorLifecycle(t *testing.T) {
 	cfg := config.Config{
 		Database: config.DatabaseConfig{Database: "test_standalone_active_precollector_lifecycle"},
 		Processing: config.ProcessingConfig{
-			RoundDuration:           100 * time.Millisecond,
 			PrecollectorGracePeriod: 50 * time.Millisecond,
 			MaxCommitmentsPerRound:  1000,
 			CollectPhaseDuration:    500 * time.Millisecond,
@@ -1456,7 +1446,6 @@ func TestPipelinedChildModeFlow(t *testing.T) {
 				Database: "test_pipelined_child_flow",
 			},
 			Processing: config.ProcessingConfig{
-				RoundDuration:          100 * time.Millisecond,
 				MaxCommitmentsPerRound: 1000,
 			},
 			Sharding: config.ShardingConfig{
@@ -1527,7 +1516,6 @@ func TestChildPreCollection_CommitmentAfterProofBeforeRoundEnd_ShouldBeInNextRou
 			Database: "test_child_precollection_tail_gap",
 		},
 		Processing: config.ProcessingConfig{
-			RoundDuration:          500 * time.Millisecond,
 			MaxCommitmentsPerRound: 1000,
 		},
 		Sharding: config.ShardingConfig{
@@ -1597,7 +1585,6 @@ func TestChildMode_RequiresFreshParentProof(t *testing.T) {
 			Database: "test_child_requires_fresh_parent_proof",
 		},
 		Processing: config.ProcessingConfig{
-			RoundDuration:          100 * time.Millisecond,
 			MaxCommitmentsPerRound: 1000,
 		},
 		Sharding: config.ShardingConfig{

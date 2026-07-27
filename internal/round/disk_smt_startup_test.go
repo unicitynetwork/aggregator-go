@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -114,7 +115,7 @@ func TestDiskSMTStartEmptyDiskHAFollowerSkipsRecovery(t *testing.T) {
 	require.Nil(t, state.BlockNumber, "stale follower must leave disk empty after startup")
 }
 
-func TestDiskSMTStartupBoundedReplay(t *testing.T) {
+func TestDiskSMTStartupPaginatedReplay(t *testing.T) {
 	ctx := context.Background()
 	backend := newTestDiskBackendForStartup(t)
 	leaf1 := diskStartupLeaf(1, 11)
@@ -135,7 +136,6 @@ func TestDiskSMTStartupBoundedReplay(t *testing.T) {
 		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block2, leaf2, 0)),
 	}
 	rm := newDiskStartupRoundManager(t, backend, storage)
-	rm.config.SMT.StartupReplayLimitBlocks = 1
 
 	block, err := rm.verifyDiskSMTStartup(ctx)
 	require.NoError(t, err)
@@ -147,7 +147,7 @@ func TestDiskSMTStartupBoundedReplay(t *testing.T) {
 	require.Equal(t, root2, state.RootHash)
 }
 
-func TestDiskSMTStartupBoundedReplayIgnoresLatestAdvanceDuringReplay(t *testing.T) {
+func TestDiskSMTStartupPaginatedReplayIgnoresLatestAdvanceDuringReplay(t *testing.T) {
 	ctx := context.Background()
 	backend := newTestDiskBackendForStartup(t)
 	leaf1 := diskStartupLeaf(1, 11)
@@ -173,7 +173,7 @@ func TestDiskSMTStartupBoundedReplayIgnoresLatestAdvanceDuringReplay(t *testing.
 	block3 := diskStartupBlock(3, root3)
 	blockStorage := newDiskStartupBlockStorage(diskStartupBlock(1, root1), block2)
 	blockStorage.blocks[block3.Index.String()] = block3
-	blockStorage.afterGetRange = func() {
+	blockStorage.afterGetFinalizedPage = func() {
 		blockStorage.latest = block3
 	}
 	storage := &diskStartupStorage{
@@ -182,7 +182,6 @@ func TestDiskSMTStartupBoundedReplayIgnoresLatestAdvanceDuringReplay(t *testing.
 		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block2, leaf2, 0)),
 	}
 	rm := newDiskStartupRoundManager(t, backend, storage)
-	rm.config.SMT.StartupReplayLimitBlocks = 1
 
 	block, err := rm.verifyDiskSMTStartup(ctx)
 	require.NoError(t, err)
@@ -195,7 +194,7 @@ func TestDiskSMTStartupBoundedReplayIgnoresLatestAdvanceDuringReplay(t *testing.
 	require.Equal(t, block3, blockStorage.latest, "test setup must advance latest while replay is in progress")
 }
 
-func TestDiskSMTStartupBoundedReplaySkipsMissingRepeatUCRounds(t *testing.T) {
+func TestDiskSMTStartupPaginatedReplaySkipsMissingRepeatUCRounds(t *testing.T) {
 	ctx := context.Background()
 	backend := newTestDiskBackendForStartup(t)
 	leaf1 := diskStartupLeaf(1, 11)
@@ -216,7 +215,6 @@ func TestDiskSMTStartupBoundedReplaySkipsMissingRepeatUCRounds(t *testing.T) {
 		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block3, leaf3, 0)),
 	}
 	rm := newDiskStartupRoundManager(t, backend, storage)
-	rm.config.SMT.StartupReplayLimitBlocks = 2
 
 	block, err := rm.verifyDiskSMTStartup(ctx)
 	require.NoError(t, err)
@@ -228,18 +226,85 @@ func TestDiskSMTStartupBoundedReplaySkipsMissingRepeatUCRounds(t *testing.T) {
 	require.Equal(t, root3, state.RootHash)
 }
 
-func TestDiskSMTStartupReplayLimitExceeded(t *testing.T) {
+func TestDiskSMTStartupPaginatedReplayBeyondFormerLimit(t *testing.T) {
 	ctx := context.Background()
 	backend := newTestDiskBackendForStartup(t)
-	root1 := commitDiskStartupLeaves(t, ctx, backend, 1, []smtbackend.LeafInput{diskStartupLeaf(1, 11)})
+	root := commitDiskStartupLeaves(t, ctx, backend, 1, []smtbackend.LeafInput{diskStartupLeaf(1, 11)})
+
+	blocks := make([]*models.Block, 0, diskSMTStartupReplayPageSize+2)
+	blocks = append(blocks, diskStartupBlock(1, root))
+	for i := 2; i <= diskSMTStartupReplayPageSize+2; i++ {
+		blocks = append(blocks, diskStartupBlock(uint64(i), root))
+	}
+	blockStorage := newDiskStartupBlockStorage(blocks...)
 	storage := &diskStartupStorage{
-		blocks: newDiskStartupBlockStorage(diskStartupBlock(1, root1), diskStartupBlock(3, root1)),
+		blocks: blockStorage,
 	}
 	rm := newDiskStartupRoundManager(t, backend, storage)
-	rm.config.SMT.StartupReplayLimitBlocks = 1
+
+	block, err := rm.verifyDiskSMTStartup(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(diskSMTStartupReplayPageSize+2), block.Uint64())
+	require.Equal(t, 2, blockStorage.finalizedPageCalls)
+
+	state, err := backend.CommittedState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(diskSMTStartupReplayPageSize+2), state.BlockNumber.Uint64())
+	require.Equal(t, root, state.RootHash)
+}
+
+func TestDiskSMTStartupPaginatedReplayResumesAfterPageFetchFailure(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackendForStartup(t)
+	root := commitDiskStartupLeaves(t, ctx, backend, 1, []smtbackend.LeafInput{diskStartupLeaf(1, 11)})
+
+	blocks := make([]*models.Block, 0, diskSMTStartupReplayPageSize+2)
+	blocks = append(blocks, diskStartupBlock(1, root))
+	for i := 2; i <= diskSMTStartupReplayPageSize+2; i++ {
+		blocks = append(blocks, diskStartupBlock(uint64(i), root))
+	}
+	blockStorage := newDiskStartupBlockStorage(blocks...)
+	blockStorage.finalizedPageErrorOnCall = 2
+	rm := newDiskStartupRoundManager(t, backend, &diskStartupStorage{blocks: blockStorage})
 
 	_, err := rm.verifyDiskSMTStartup(ctx)
-	require.ErrorContains(t, err, "exceeding SMT_STARTUP_REPLAY_LIMIT_BLOCKS")
+	require.ErrorContains(t, err, "injected finalized page failure")
+
+	state, err := backend.CommittedState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(diskSMTStartupReplayPageSize+1), state.BlockNumber.Uint64())
+
+	blockStorage.finalizedPageErrorOnCall = 0
+	blockStorage.finalizedPageCalls = 0
+	blockStorage.finalizedPageAfter = nil
+
+	block, err := rm.verifyDiskSMTStartup(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(diskSMTStartupReplayPageSize+2), block.Uint64())
+	require.Equal(t, []string{strconv.Itoa(diskSMTStartupReplayPageSize + 1)}, blockStorage.finalizedPageAfter)
+}
+
+func TestDiskSMTStartupPaginatedReplayRejectsBadRootBeforeCommit(t *testing.T) {
+	ctx := context.Background()
+	backend := newTestDiskBackendForStartup(t)
+	root := commitDiskStartupLeaves(t, ctx, backend, 1, []smtbackend.LeafInput{diskStartupLeaf(1, 11)})
+	wrongRoot := append([]byte(nil), root...)
+	wrongRoot[0] ^= 0xff
+	storage := &diskStartupStorage{
+		blocks: newDiskStartupBlockStorage(
+			diskStartupBlock(1, root),
+			diskStartupBlock(2, wrongRoot),
+		),
+	}
+	rm := newDiskStartupRoundManager(t, backend, storage)
+
+	_, err := rm.verifyDiskSMTStartup(ctx)
+	require.ErrorContains(t, err, "replay root mismatch at block 2")
+
+	state, err := backend.CommittedState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), state.BlockNumber.Uint64())
+	require.Equal(t, root, state.RootHash)
 }
 
 func TestDiskSMTStartupDiskAheadFails(t *testing.T) {
@@ -461,11 +526,7 @@ func newDiskStartupRoundManager(t *testing.T, backend smtbackend.Backend, storag
 	log, err := logger.New("error", "text", "stdout", false)
 	require.NoError(t, err)
 	return &RoundManager{
-		config: &config.Config{
-			SMT: config.SMTConfig{
-				StartupReplayLimitBlocks: 100,
-			},
-		},
+		config:       &config.Config{},
 		logger:       log,
 		storage:      storage,
 		smtBackend:   backend,
@@ -558,9 +619,12 @@ func (s *diskStartupStorage) WithTransaction(ctx context.Context, fn func(contex
 }
 
 type diskStartupBlockStorage struct {
-	blocks        map[string]*models.Block
-	latest        *models.Block
-	afterGetRange func()
+	blocks                   map[string]*models.Block
+	latest                   *models.Block
+	afterGetFinalizedPage    func()
+	finalizedPageCalls       int
+	finalizedPageErrorOnCall int
+	finalizedPageAfter       []string
 }
 
 func newDiskStartupBlockStorage(blocks ...*models.Block) *diskStartupBlockStorage {
@@ -603,10 +667,18 @@ func (s *diskStartupBlockStorage) GetLatestByRootHash(context.Context, api.HexBy
 func (s *diskStartupBlockStorage) Count(context.Context) (int64, error) {
 	return int64(len(s.blocks)), nil
 }
-func (s *diskStartupBlockStorage) GetRange(_ context.Context, fromBlock, toBlock *api.BigInt) ([]*models.Block, error) {
+func (s *diskStartupBlockStorage) GetFinalizedPage(_ context.Context, afterBlock, toBlock *api.BigInt, limit int) ([]*models.Block, error) {
+	s.finalizedPageCalls++
+	s.finalizedPageAfter = append(s.finalizedPageAfter, afterBlock.String())
+	if s.finalizedPageErrorOnCall == s.finalizedPageCalls {
+		return nil, errors.New("injected finalized page failure")
+	}
+	if limit <= 0 {
+		return nil, errors.New("finalized block page limit must be positive")
+	}
 	var blocks []*models.Block
 	for _, block := range s.blocks {
-		if !block.Finalized || block.Index.Cmp(fromBlock.Int) < 0 || block.Index.Cmp(toBlock.Int) > 0 {
+		if !block.Finalized || block.Index.Cmp(afterBlock.Int) <= 0 || block.Index.Cmp(toBlock.Int) > 0 {
 			continue
 		}
 		blocks = append(blocks, block)
@@ -614,8 +686,11 @@ func (s *diskStartupBlockStorage) GetRange(_ context.Context, fromBlock, toBlock
 	sort.Slice(blocks, func(i, j int) bool {
 		return blocks[i].Index.Cmp(blocks[j].Index.Int) < 0
 	})
-	if s.afterGetRange != nil {
-		s.afterGetRange()
+	if len(blocks) > limit {
+		blocks = blocks[:limit]
+	}
+	if s.afterGetFinalizedPage != nil {
+		s.afterGetFinalizedPage()
 	}
 	return blocks, nil
 }

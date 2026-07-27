@@ -63,9 +63,6 @@ func (suite *ParentServiceTestSuite) SetupSuite() {
 		BFT: config.BFTConfig{
 			Enabled: false, // Use BFT stub
 		},
-		Processing: config.ProcessingConfig{
-			RoundDuration: 100 * time.Millisecond,
-		},
 	}
 
 	suite.storage = testutil.SetupTestStorage(suite.T(), *suite.cfg)

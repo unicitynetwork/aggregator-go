@@ -553,117 +553,60 @@ func TestBlockStorage_Count(t *testing.T) {
 	})
 }
 
-func TestBlockStorage_GetRange(t *testing.T) {
+func TestBlockStorage_GetFinalizedPage(t *testing.T) {
 	db, cleanup := setupBlockTestDB(t)
 	defer cleanup()
 
 	storage := NewBlockStorage(db)
 	ctx := context.Background()
 
-	err := storage.CreateIndexes(ctx)
-	require.NoError(t, err)
-
-	// Store test blocks for range testing
-	blocks := createTestBlocksRange(1, 10) // blocks 1-10
+	require.NoError(t, storage.CreateIndexes(ctx))
+	blocks := createTestBlocksRange(1, 7)
+	blocks[1].Finalized = false
+	blocks[1].Status = models.FinalityStatusFinalizing
 	for _, block := range blocks {
-		err := storage.Store(ctx, block)
-		require.NoError(t, err, "Should store setup block")
+		require.NoError(t, storage.Store(ctx, block))
 	}
 
-	t.Run("should return empty range for non-existent blocks", func(t *testing.T) {
-		fromBlock := api.NewBigInt(big.NewInt(100))
-		toBlock := api.NewBigInt(big.NewInt(110))
+	page, err := storage.GetFinalizedPage(
+		ctx,
+		api.NewBigInt(big.NewInt(1)),
+		api.NewBigInt(big.NewInt(7)),
+		3,
+	)
+	require.NoError(t, err)
+	require.Len(t, page, 3)
+	require.Equal(t, int64(3), page[0].Index.Int64())
+	require.Equal(t, int64(4), page[1].Index.Int64())
+	require.Equal(t, int64(5), page[2].Index.Int64())
 
-		blocks, err := storage.GetRange(ctx, fromBlock, toBlock)
-		require.NoError(t, err, "GetRange should not return an error for non-existent range")
-		assert.Empty(t, blocks, "Should return empty slice for non-existent range")
-	})
+	page, err = storage.GetFinalizedPage(
+		ctx,
+		page[len(page)-1].Index,
+		api.NewBigInt(big.NewInt(7)),
+		3,
+	)
+	require.NoError(t, err)
+	require.Len(t, page, 2)
+	require.Equal(t, int64(6), page[0].Index.Int64())
+	require.Equal(t, int64(7), page[1].Index.Int64())
 
-	t.Run("should return single block in range", func(t *testing.T) {
-		fromBlock := api.NewBigInt(big.NewInt(5))
-		toBlock := api.NewBigInt(big.NewInt(5))
+	page, err = storage.GetFinalizedPage(
+		ctx,
+		api.NewBigInt(big.NewInt(7)),
+		api.NewBigInt(big.NewInt(7)),
+		3,
+	)
+	require.NoError(t, err)
+	require.Empty(t, page)
 
-		blocks, err := storage.GetRange(ctx, fromBlock, toBlock)
-		require.NoError(t, err, "GetRange should not return an error")
-		require.Len(t, blocks, 1, "Should return exactly one block")
-
-		assert.Equal(t, 0, fromBlock.Cmp(blocks[0].Index.Int), "Block index should match")
-	})
-
-	t.Run("should return multiple blocks in range", func(t *testing.T) {
-		fromBlock := api.NewBigInt(big.NewInt(3))
-		toBlock := api.NewBigInt(big.NewInt(7))
-
-		blocks, err := storage.GetRange(ctx, fromBlock, toBlock)
-		require.NoError(t, err, "GetRange should not return an error")
-		require.Len(t, blocks, 5, "Should return 5 blocks (3,4,5,6,7)")
-
-		// Verify blocks are returned in ascending order
-		for i, block := range blocks {
-			expectedIndex := api.NewBigInt(big.NewInt(int64(3 + i)))
-			assert.Equal(t, 0, expectedIndex.Cmp(block.Index.Int), "Block %d should have index %d", i, 3+i)
-		}
-	})
-
-	t.Run("should return all blocks when range covers all", func(t *testing.T) {
-		fromBlock := api.NewBigInt(big.NewInt(1))
-		toBlock := api.NewBigInt(big.NewInt(10))
-
-		blocks, err := storage.GetRange(ctx, fromBlock, toBlock)
-		require.NoError(t, err, "GetRange should not return an error")
-		require.Len(t, blocks, 10, "Should return all 10 blocks")
-
-		// Verify ascending order
-		for i, block := range blocks {
-			expectedIndex := api.NewBigInt(big.NewInt(int64(1 + i)))
-			assert.Equal(t, 0, expectedIndex.Cmp(block.Index.Int), "Block should be in ascending order")
-		}
-	})
-
-	t.Run("should handle partial overlap range", func(t *testing.T) {
-		fromBlock := api.NewBigInt(big.NewInt(8))
-		toBlock := api.NewBigInt(big.NewInt(15)) // extends beyond stored blocks
-
-		blocks, err := storage.GetRange(ctx, fromBlock, toBlock)
-		require.NoError(t, err, "GetRange should not return an error")
-		require.Len(t, blocks, 3, "Should return 3 blocks (8,9,10)")
-
-		expectedIndices := []int64{8, 9, 10}
-		for i, block := range blocks {
-			expectedIndex := api.NewBigInt(big.NewInt(expectedIndices[i]))
-			assert.Equal(t, 0, expectedIndex.Cmp(block.Index.Int), "Index should match")
-		}
-	})
-
-	t.Run("should handle inverted range (from > to)", func(t *testing.T) {
-		fromBlock := api.NewBigInt(big.NewInt(10))
-		toBlock := api.NewBigInt(big.NewInt(5))
-
-		blocks, err := storage.GetRange(ctx, fromBlock, toBlock)
-		require.NoError(t, err, "GetRange should not return an error for inverted range")
-		assert.Empty(t, blocks, "Should return empty slice for inverted range")
-	})
-
-	t.Run("should handle large number ranges", func(t *testing.T) {
-		// Store a block with a very large number
-		largeIndex := new(big.Int)
-		largeIndex.SetString("999999999999999999999", 10)
-		largeIndexBigInt := api.NewBigInt(largeIndex)
-
-		largeBlock := createTestBlock(largeIndexBigInt)
-		err := storage.Store(ctx, largeBlock)
-		require.NoError(t, err, "Should store large number block")
-
-		// Query range around the large number
-		fromBlock := largeIndexBigInt
-		toBlock := largeIndexBigInt
-
-		blocks, err := storage.GetRange(ctx, fromBlock, toBlock)
-		require.NoError(t, err, "GetRange should not return an error for large numbers")
-		require.Len(t, blocks, 1, "Should return the large number block")
-
-		assert.Equal(t, 0, largeIndexBigInt.Cmp(blocks[0].Index.Int), "Large index should match")
-	})
+	_, err = storage.GetFinalizedPage(
+		ctx,
+		api.NewBigInt(big.NewInt(1)),
+		api.NewBigInt(big.NewInt(7)),
+		0,
+	)
+	require.ErrorContains(t, err, "limit must be positive")
 }
 
 func TestBlockStorage_GetNextFinalizedAfter(t *testing.T) {

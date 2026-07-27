@@ -47,9 +47,11 @@ func TestBlockSyncer(t *testing.T) {
 	})
 
 	cfg := &config.Config{
-		Processing: config.ProcessingConfig{RoundDuration: 100 * time.Millisecond},
-		HA:         config.HAConfig{Enabled: true},
-		BFT:        config.BFTConfig{Enabled: false},
+		HA: config.HAConfig{
+			Enabled:           true,
+			BlockSyncInterval: 100 * time.Millisecond,
+		},
+		BFT: config.BFTConfig{Enabled: false},
 	}
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
@@ -58,7 +60,7 @@ func TestBlockSyncer(t *testing.T) {
 	mockLeader := &mockLeaderSelector{}
 	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
 	stateTracker := state.NewSyncStateTracker()
-	syncer := NewBlockSyncer(testLogger, mockLeader, storage, smtbackend.NewMemoryBackend(smtInstance), 0, cfg.Processing.RoundDuration, stateTracker)
+	syncer := NewBlockSyncer(testLogger, mockLeader, storage, smtbackend.NewMemoryBackend(smtInstance), 0, cfg.HA.BlockSyncInterval, stateTracker)
 
 	// simulate leader creating a block
 	rootHash := createBlock(t, storage, 1)
@@ -68,7 +70,7 @@ func TestBlockSyncer(t *testing.T) {
 	defer syncer.Stop()
 
 	// wait for block syncer to start
-	time.Sleep(2 * cfg.Processing.RoundDuration)
+	time.Sleep(2 * cfg.HA.BlockSyncInterval)
 
 	// SMT root hash should match persisted block root hash after block sync
 	require.Equal(t, rootHash.String(), api.HexBytes(smtInstance.GetRootHashRaw()).String())
@@ -77,7 +79,7 @@ func TestBlockSyncer(t *testing.T) {
 	// verify the blocks are not synced if node is leader
 	mockLeader.isLeader.Store(true)
 	createBlock(t, storage, 2)
-	time.Sleep(2 * cfg.Processing.RoundDuration)
+	time.Sleep(2 * cfg.HA.BlockSyncInterval)
 	require.Equal(t, rootHash.String(), api.HexBytes(smtInstance.GetRootHashRaw()).String())
 	require.Equal(t, big.NewInt(1), stateTracker.GetLastSyncedBlock())
 
@@ -454,13 +456,13 @@ func (s *blockSyncerTestBlockStorage) Count(context.Context) (int64, error) {
 	return int64(len(s.byNumber)), nil
 }
 
-func (s *blockSyncerTestBlockStorage) GetRange(_ context.Context, fromBlock, toBlock *api.BigInt) ([]*models.Block, error) {
+func (s *blockSyncerTestBlockStorage) GetFinalizedPage(_ context.Context, afterBlock, toBlock *api.BigInt, limit int) ([]*models.Block, error) {
 	var out []*models.Block
 	for _, block := range s.byNumber {
 		if !block.Finalized {
 			continue
 		}
-		if block.Index.Cmp(fromBlock.Int) < 0 || block.Index.Cmp(toBlock.Int) > 0 {
+		if block.Index.Cmp(afterBlock.Int) <= 0 || block.Index.Cmp(toBlock.Int) > 0 {
 			continue
 		}
 		out = append(out, block)
@@ -468,6 +470,9 @@ func (s *blockSyncerTestBlockStorage) GetRange(_ context.Context, fromBlock, toB
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].Index.Cmp(out[j].Index.Int) < 0
 	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
 	return out, nil
 }
 

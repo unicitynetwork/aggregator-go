@@ -132,8 +132,7 @@ func (s *FinalizeDuplicateTestSuite) SetupSuite() {
 	s.storage = testutil.SetupTestStorage(s.T(), conf)
 	s.cfg = &config.Config{
 		Processing: config.ProcessingConfig{
-			RoundDuration: time.Second,
-			BatchLimit:    1000,
+			BatchLimit: 1000,
 		},
 	}
 }

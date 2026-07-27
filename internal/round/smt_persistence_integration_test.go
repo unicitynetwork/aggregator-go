@@ -65,11 +65,7 @@ func TestSmtPersistenceAndRestoration(t *testing.T) {
 		t.Path = new(big.Int).SetBit(t.Path, keyLen, 1)
 	}
 
-	cfg := &config.Config{
-		Processing: config.ProcessingConfig{
-			RoundDuration: time.Second,
-		},
-	}
+	cfg := &config.Config{}
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
@@ -123,11 +119,7 @@ func TestLargeSmtRestoration(t *testing.T) {
 	testLogger, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	cfg := &config.Config{
-		Processing: config.ProcessingConfig{
-			RoundDuration: time.Second,
-		},
-	}
+	cfg := &config.Config{}
 	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)), nil)
 	require.NoError(t, err, "Should create RoundManager")
 
@@ -241,7 +233,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 	assert.Equal(t, int64(len(testCommitments)), count, "Should have persisted SMT nodes for all commitments")
 
 	// Simulate service restart with new round manager
-	cfg = &config.Config{Processing: config.ProcessingConfig{RoundDuration: time.Second}}
+	cfg = &config.Config{}
 	newRm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)), nil)
 	require.NoError(t, err, "NewRoundManager should succeed after restart")
 
@@ -314,9 +306,7 @@ func TestSmtRestorationWithBlockVerification(t *testing.T) {
 	require.NoError(t, err, "Should store test block")
 
 	// Create RoundManager and persist SMT nodes
-	cfg := &config.Config{
-		Processing: config.ProcessingConfig{RoundDuration: time.Second},
-	}
+	cfg := &config.Config{}
 	rm, err := NewRoundManager(ctx, cfg, testLogger, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil, events.NewEventBus(testLogger), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)), nil)
 	require.NoError(t, err, "Should create RoundManager")
 
