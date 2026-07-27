@@ -234,6 +234,16 @@ func isPrimaryTransitionError(err error) bool {
 	}
 }
 
+func hasMongoErrorLabel(err error, label string) bool {
+	var labeledErr mongo.LabeledError
+	return errors.As(err, &labeledErr) && labeledErr.HasErrorLabel(label)
+}
+
+func isMongoMaxTimeMSExpiredError(err error) bool {
+	var cmdErr mongo.CommandError
+	return errors.As(err, &cmdErr) && cmdErr.IsMaxTimeMSExpiredError()
+}
+
 // CommitmentQueue returns the commitment queue implementation
 func (s *Storage) CommitmentQueue() interfaces.CommitmentQueue {
 	return s.commitmentStorage
@@ -322,12 +332,12 @@ func (s *Storage) WithTransaction(ctx context.Context, fn func(context.Context) 
 			// Abort the transaction on error
 			_ = session.AbortTransaction(ctx)
 
-			// Check if this is a transient error that we should retry
-			if cmdErr, ok := err.(mongo.CommandError); ok {
-				if cmdErr.HasErrorLabel(labelTransientTransaction) && attempt < maxRetries {
-					lastErr = err
-					continue // Retry
-				}
+			// Check if this is a transient error that we should retry.
+			// Storage methods wrap driver errors with %w for context, so use
+			// errors.As instead of a direct type assertion.
+			if hasMongoErrorLabel(err, labelTransientTransaction) && attempt < maxRetries {
+				lastErr = err
+				continue // Retry
 			}
 			// Non-transient error or max retries reached
 			return fmt.Errorf("transaction failed (attempt %d/%d): %w", attempt, maxRetries, err)
@@ -340,19 +350,16 @@ func (s *Storage) WithTransaction(ctx context.Context, fn func(context.Context) 
 				return nil // Success
 			}
 
-			cmdErr, ok := err.(mongo.CommandError)
-			if !ok {
-				return fmt.Errorf("transaction commit failed (attempt %d/%d): %w", attempt, maxRetries, err)
-			}
-
 			// TransientTransactionError on commit - retry whole transaction
-			if cmdErr.HasErrorLabel(labelTransientTransaction) && attempt < maxRetries {
+			if hasMongoErrorLabel(err, labelTransientTransaction) && attempt < maxRetries {
 				lastErr = err
 				break // Break inner loop, continue outer loop to retry whole transaction
 			}
 
 			// UnknownTransactionCommitResult - retry just the commit
-			if cmdErr.HasErrorLabel(labelUnknownTransactionCommit) && commitAttempt < maxRetries {
+			if hasMongoErrorLabel(err, labelUnknownTransactionCommit) &&
+				!isMongoMaxTimeMSExpiredError(err) &&
+				commitAttempt < maxRetries {
 				lastErr = err
 				continue // Retry commit
 			}

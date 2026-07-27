@@ -39,6 +39,29 @@ func TestIsPrimaryTransitionError(t *testing.T) {
 	require.False(t, isPrimaryTransitionError(errors.New("plain error")))
 }
 
+func TestHasMongoErrorLabelMatchesWrappedLabeledErrors(t *testing.T) {
+	labeledErrors := []error{
+		mongo.CommandError{
+			Message: "WriteConflict",
+			Labels:  []string{labelTransientTransaction},
+		},
+		mongo.WriteException{
+			Labels: []string{labelTransientTransaction},
+		},
+		mongo.BulkWriteException{
+			Labels: []string{labelTransientTransaction},
+		},
+	}
+
+	for _, err := range labeledErrors {
+		wrapped := fmt.Errorf("failed to delete aggregator records by block and proposal: %w", err)
+		require.True(t, hasMongoErrorLabel(wrapped, labelTransientTransaction))
+		require.False(t, hasMongoErrorLabel(wrapped, labelUnknownTransactionCommit))
+	}
+
+	require.False(t, hasMongoErrorLabel(errors.New("plain error"), labelTransientTransaction))
+}
+
 func TestMongoWriteConcern(t *testing.T) {
 	t.Run("default majority journaled", func(t *testing.T) {
 		wc := mongoWriteConcern(config.DatabaseConfig{})
@@ -264,6 +287,7 @@ func TestWithTransaction_TransientError_Retries(t *testing.T) {
 				_, err := coll.UpdateOne(txCtx, bson.M{"_id": "conflict"}, bson.M{"$inc": bson.M{"value": 10}})
 				if err != nil {
 					firstAttemptFailed <- err
+					return fmt.Errorf("failed to delete aggregator records by block and proposal: %w", err)
 				}
 				return err
 			}

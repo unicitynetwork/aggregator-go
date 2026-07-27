@@ -383,6 +383,94 @@ func TestBFTClientInitializationFinalizesCertifiedDurableProposalBeforeStartingN
 	require.Equal(t, normal, client.status.Load().(status))
 }
 
+func TestBFTClientInitializationFinalizesMatchingInMemoryProposal(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+
+	committedRoot := bytes.Repeat([]byte{0x10}, api.SiblingSize)
+	proposalRoot := api.NewHexBytes(bytes.Repeat([]byte{0x20}, api.SiblingSize))
+	proposal := models.NewBlock(
+		api.NewBigIntFromUint64(12),
+		"unicity",
+		0,
+		"1.0",
+		"mainnet",
+		proposalRoot,
+		api.NewHexBytes(committedRoot),
+		nil,
+	)
+	proposal.Status = models.FinalityStatusProposed
+	rm := &stubRoundManager{
+		committedRoot:  committedRoot,
+		committedBlock: api.NewBigIntFromUint64(11),
+	}
+	client := &BFTClientImpl{
+		logger:        log,
+		roundManager:  rm,
+		proposedBlock: proposal,
+	}
+	client.status.Store(initializing)
+
+	err = client.handleUnicityCertificate(
+		t.Context(),
+		testUnicityCertificate(12, 21, proposalRoot, committedRoot),
+		&certification.TechnicalRecord{Round: 13, Epoch: 1},
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, 1, rm.finalizeBlockCallCnt)
+	require.Len(t, rm.finalizedBlocks, 1)
+	require.Same(t, proposal, rm.finalizedBlocks[0])
+	require.NotEmpty(t, proposal.UnicityCertificate)
+	require.Zero(t, rm.durableRecoveryCallCnt)
+	require.Zero(t, rm.durableLoadCallCnt)
+	require.Len(t, rm.startedRounds, 1)
+	require.EqualValues(t, 13, rm.startedRounds[0].Uint64())
+	require.Nil(t, client.proposedBlock)
+	require.Equal(t, normal, client.status.Load().(status))
+}
+
+func TestBFTClientInitializationRejectsMatchingRoundRootMismatch(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+
+	rm := &stubRoundManager{}
+	blockRoot := api.NewHexBytes(bytes.Repeat([]byte{0x11}, api.SiblingSize))
+	ucRoot := bytes.Repeat([]byte{0x22}, api.SiblingSize)
+	block := models.NewBlock(
+		api.NewBigIntFromUint64(7),
+		"unicity",
+		0,
+		"1.0",
+		"mainnet",
+		blockRoot,
+		nil,
+		nil,
+	)
+	client := &BFTClientImpl{
+		logger:        log,
+		roundManager:  rm,
+		proposedBlock: block,
+	}
+	client.status.Store(initializing)
+
+	err = client.handleUnicityCertificate(
+		t.Context(),
+		testUnicityCertificate(7, 8, ucRoot, nil),
+		&certification.TechnicalRecord{Round: 8},
+	)
+
+	require.ErrorIs(t, err, ErrCertifiedRootMismatch)
+	require.Empty(t, rm.finalizedBlocks)
+	require.Nil(t, client.proposedBlock)
+	require.Empty(t, block.UnicityCertificate)
+	require.Equal(t, 1, rm.durableAbandonCallCnt)
+	require.True(t, bytes.Equal(blockRoot, rm.durableAbandonRoot))
+	require.Zero(t, rm.durableRecoveryCallCnt)
+	require.Zero(t, rm.durableLoadCallCnt)
+	require.Equal(t, normal, client.status.Load().(status))
+}
+
 func TestBFTClientInitializationStartsRoundWhenNoDurableProposal(t *testing.T) {
 	log, err := logger.New("warn", "json", "", false)
 	require.NoError(t, err)

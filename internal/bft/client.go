@@ -412,40 +412,51 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 
 	wasInitializing := c.status.Load() == initializing
 	if wasInitializing {
-		c.logger.WithContext(ctx).Info("BFT client initialization finished, starting first round",
+		c.logger.WithContext(ctx).Info("BFT client initialization finished",
 			"nextRoundNumber", nextRoundNumber.String())
 		// First UC received after an initial handshake with a root node -> initialization finished.
 		c.status.Store(normal)
-		recovered, err := c.finalizeCertifiedDurableProposalLocked(ctx, uc)
-		if err != nil {
-			return err
-		}
-		if recovered {
-			c.logger.WithContext(ctx).Info("Durable proposal finalized from initialization UC",
-				"ucRound", uc.GetRoundNumber(),
+
+		// If startup already proposed a block and this UC certifies it, continue
+		// through the normal proposed-block finalization path below. Otherwise
+		// the initialization branch can skip finalization and start the next
+		// round with a live proposed block still in memory.
+		if c.proposedBlock != nil && c.proposedBlock.Index.Uint64() == uc.GetRoundNumber() {
+			c.logger.WithContext(ctx).Info("Initialization UC matches proposed block; finalizing normally",
+				"blockNumber", c.proposedBlock.Index.String(),
 				"nextRoundNumber", nextRoundNumber.String())
-			err := c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+		} else {
+			recovered, err := c.finalizeCertifiedDurableProposalLocked(ctx, uc)
 			if err != nil {
-				c.logger.WithContext(ctx).Error("Failed to start first round after durable proposal recovery",
+				return err
+			}
+			if recovered {
+				c.logger.WithContext(ctx).Info("Durable proposal finalized from initialization UC",
+					"ucRound", uc.GetRoundNumber(),
+					"nextRoundNumber", nextRoundNumber.String())
+				err := c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+				if err != nil {
+					c.logger.WithContext(ctx).Error("Failed to start first round after durable proposal recovery",
+						"nextRoundNumber", nextRoundNumber.String(),
+						"error", err.Error())
+				}
+				return err
+			}
+			resumed, err := c.resumeDurableProposalLocked(ctx, api.NewBigInt(nextRoundNumber))
+			if err != nil {
+				return err
+			}
+			if resumed {
+				return nil
+			}
+			err = c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+			if err != nil {
+				c.logger.WithContext(ctx).Error("Failed to start first round after initialization",
 					"nextRoundNumber", nextRoundNumber.String(),
 					"error", err.Error())
 			}
 			return err
 		}
-		resumed, err := c.resumeDurableProposalLocked(ctx, api.NewBigInt(nextRoundNumber))
-		if err != nil {
-			return err
-		}
-		if resumed {
-			return nil
-		}
-		err = c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
-		if err != nil {
-			c.logger.WithContext(ctx).Error("Failed to start first round after initialization",
-				"nextRoundNumber", nextRoundNumber.String(),
-				"error", err.Error())
-		}
-		return err
 	}
 
 	// Check if we have a proposed block that matches the UC round
