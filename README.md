@@ -196,6 +196,7 @@ go build -tags rocksdb ./cmd/aggregator
 
 RocksDB SMT with HA is supported only in `bft-shard` mode. It is rejected for application-level `parent`/`child` sharding modes; use `SMT_BACKEND=memory` there.
 Changing `SMT_NODE_KEY_FORMAT` requires a fresh or separately seeded `SMT_DISK_PATH`; an existing database opened with the wrong layout fails startup.
+When a non-empty RocksDB SMT is behind finalized MongoDB history, startup replays all missing finalized blocks in bounded pages. Replay has no block-count limit and may take significant time for a substantially stale node. Each block is committed independently, so interrupted replay resumes from the last committed RocksDB block.
 
 #### Redis Sentinel (HA)
 

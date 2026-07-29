@@ -9,11 +9,13 @@ import (
 	"strconv"
 	"testing"
 
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk/persist"
@@ -279,6 +281,43 @@ func TestDiskSMTStartupPaginatedReplayResumesAfterPageFetchFailure(t *testing.T)
 	blockStorage.finalizedPageAfter = nil
 
 	block, err := rm.verifyDiskSMTStartup(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(diskSMTStartupReplayPageSize+2), block.Uint64())
+	require.Equal(t, []string{strconv.Itoa(diskSMTStartupReplayPageSize + 1)}, blockStorage.finalizedPageAfter)
+}
+
+func TestDiskSMTStartupPaginatedReplayCancellationResumesWithoutFailureMetric(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	backend := newTestDiskBackendForStartup(t)
+	root := commitDiskStartupLeaves(t, ctx, backend, 1, []smtbackend.LeafInput{diskStartupLeaf(1, 11)})
+
+	blocks := make([]*models.Block, 0, diskSMTStartupReplayPageSize+2)
+	blocks = append(blocks, diskStartupBlock(1, root))
+	for i := 2; i <= diskSMTStartupReplayPageSize+2; i++ {
+		blocks = append(blocks, diskStartupBlock(uint64(i), root))
+	}
+	blockStorage := newDiskStartupBlockStorage(blocks...)
+	blockStorage.afterGetFinalizedPage = func() {
+		if blockStorage.finalizedPageCalls == 2 {
+			cancel()
+		}
+	}
+	rm := newDiskStartupRoundManager(t, backend, &diskStartupStorage{blocks: blockStorage})
+	failuresBefore := diskSMTStartupFailureMetric(t)
+
+	_, err := rm.verifyDiskSMTStartup(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, failuresBefore, diskSMTStartupFailureMetric(t))
+
+	state, err := backend.CommittedState(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, uint64(diskSMTStartupReplayPageSize+1), state.BlockNumber.Uint64())
+
+	blockStorage.afterGetFinalizedPage = nil
+	blockStorage.finalizedPageCalls = 0
+	blockStorage.finalizedPageAfter = nil
+
+	block, err := rm.verifyDiskSMTStartup(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, uint64(diskSMTStartupReplayPageSize+2), block.Uint64())
 	require.Equal(t, []string{strconv.Itoa(diskSMTStartupReplayPageSize + 1)}, blockStorage.finalizedPageAfter)
@@ -667,7 +706,10 @@ func (s *diskStartupBlockStorage) GetLatestByRootHash(context.Context, api.HexBy
 func (s *diskStartupBlockStorage) Count(context.Context) (int64, error) {
 	return int64(len(s.blocks)), nil
 }
-func (s *diskStartupBlockStorage) GetFinalizedPage(_ context.Context, afterBlock, toBlock *api.BigInt, limit int) ([]*models.Block, error) {
+func (s *diskStartupBlockStorage) GetFinalizedPage(ctx context.Context, afterBlock, toBlock *api.BigInt, limit int) ([]*models.Block, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.finalizedPageCalls++
 	s.finalizedPageAfter = append(s.finalizedPageAfter, afterBlock.String())
 	if s.finalizedPageErrorOnCall == s.finalizedPageCalls {
@@ -691,6 +733,9 @@ func (s *diskStartupBlockStorage) GetFinalizedPage(_ context.Context, afterBlock
 	}
 	if s.afterGetFinalizedPage != nil {
 		s.afterGetFinalizedPage()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return blocks, nil
 }
@@ -731,6 +776,13 @@ func (s *diskStartupBlockStorage) GetUnfinalized(context.Context) ([]*models.Blo
 		return blocks[i].Index.Cmp(blocks[j].Index.Int) < 0
 	})
 	return blocks, nil
+}
+
+func diskSMTStartupFailureMetric(t *testing.T) float64 {
+	t.Helper()
+	metric := &dto.Metric{}
+	require.NoError(t, metrics.SMTStartupRecoveryActions.WithLabelValues("fail").Write(metric))
+	return metric.GetCounter().GetValue()
 }
 
 type diskStartupAggregatorRecordStorage struct {
