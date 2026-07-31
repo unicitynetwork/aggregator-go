@@ -23,6 +23,9 @@ func validTestConfig() *Config {
 		Logging: LoggingConfig{
 			Level: "info",
 		},
+		HA: HAConfig{
+			BlockSyncInterval: time.Second,
+		},
 		Sharding: ShardingConfig{
 			Mode:          ShardingModeStandalone,
 			ShardIDLength: 4,
@@ -163,6 +166,21 @@ func TestConfigValidate_CollectMiniBatchSize(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "COLLECT_MINI_BATCH_SIZE") {
 		t.Fatalf("Validate() error = %q, want mini batch env name", err.Error())
+	}
+}
+
+func TestConfigValidate_BlockSyncInterval(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.HA.Enabled = true
+	cfg.HA.ServerID = "server-1"
+	cfg.HA.BlockSyncInterval = 0
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "BLOCK_SYNC_INTERVAL") {
+		t.Fatalf("Validate() error = %q, want block sync interval env name", err.Error())
 	}
 }
 
@@ -309,6 +327,19 @@ func TestCollectMiniBatchSizeEnv(t *testing.T) {
 	}
 }
 
+func TestBlockSyncIntervalEnv(t *testing.T) {
+	t.Setenv("BFT_ENABLED", "false")
+	t.Setenv("BLOCK_SYNC_INTERVAL", "250ms")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.HA.BlockSyncInterval != 250*time.Millisecond {
+		t.Fatalf("BlockSyncInterval = %s, want 250ms", cfg.HA.BlockSyncInterval)
+	}
+}
+
 func TestMongoWriteConcernEnvOverrides(t *testing.T) {
 	t.Setenv("BFT_ENABLED", "false")
 	t.Setenv("DISABLE_HIGH_AVAILABILITY", "true")
@@ -338,7 +369,7 @@ func TestSMTEnvParsing(t *testing.T) {
 	t.Setenv("SMT_ROCKSDB_BLOOM_BITS", "10.5")
 	t.Setenv("SMT_ROCKSDB_MEMTABLE_MB", "128")
 	t.Setenv("SMT_MATERIALIZE_WORKERS", "32")
-	t.Setenv("SMT_STARTUP_REPLAY_LIMIT_BLOCKS", "7")
+	t.Setenv("SMT_NODE_KEY_FORMAT", "prefix-major")
 
 	cfg, err := Load()
 	if err != nil {
@@ -354,7 +385,7 @@ func TestSMTEnvParsing(t *testing.T) {
 		cfg.SMT.RocksDBBloomBits != 10.5 ||
 		cfg.SMT.RocksDBMemTableMB != 128 ||
 		cfg.SMT.MaterializeWorkers != 32 ||
-		cfg.SMT.StartupReplayLimitBlocks != 7 {
+		cfg.SMT.NodeKeyFormat != "prefix-major" {
 		t.Fatalf("unexpected SMT config: %+v", cfg.SMT)
 	}
 }

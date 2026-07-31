@@ -51,9 +51,6 @@ func (suite *ParentRoundManagerTestSuite) SetupSuite() {
 		BFT: config.BFTConfig{
 			Enabled: false, // Will use BFT stub
 		},
-		Processing: config.ProcessingConfig{
-			RoundDuration: 100 * time.Millisecond, // Short duration for fast tests
-		},
 	}
 
 	// Create storage once for all tests (reuses same MongoDB container)
@@ -145,8 +142,7 @@ func (suite *ParentRoundManagerTestSuite) TestBasicRoundLifecycle() {
 	suite.Require().NoError(err, "Should submit shard 1 update")
 
 	// Process the round
-	// The BFT stub will automatically process the round after roundDuration (100ms)
-	// and start the next round
+	// The BFT stub finalizes the proposal and starts the next round.
 	time.Sleep(150 * time.Millisecond) // Wait for round to process
 
 	// Get the parent SMT root after processing

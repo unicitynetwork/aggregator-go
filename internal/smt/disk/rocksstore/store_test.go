@@ -69,6 +69,65 @@ func TestGetNodesUsesBatchedMultiGet(t *testing.T) {
 	require.Equal(t, int64(0), after.Iterators-before.Iterators)
 }
 
+func TestPrefixMajorGetNodesRestoresCallerOrder(t *testing.T) {
+	store := openTestStore(t, t.TempDir(), Options{
+		DisableWAL:    true,
+		NoSyncWrites:  true,
+		NodeKeyFormat: NodeKeyFormatPrefixMajor,
+	})
+	defer store.Close()
+
+	keyA, err := disk.NewNodeKey(9, disk.PrefixBits{0x01, 0x01})
+	require.NoError(t, err)
+	keyB := disk.RootNodeKey()
+	keyC, err := disk.NewNodeKey(1, disk.PrefixBits{})
+	require.NoError(t, err)
+
+	batch := store.NewBatch()
+	require.NoError(t, batch.SetNode(keyA, []byte("a")))
+	require.NoError(t, batch.SetNode(keyB, []byte("b")))
+	require.NoError(t, batch.SetNode(keyC, []byte("c")))
+	require.NoError(t, batch.SetCommittedState(disk.HashLeaf(mustKeyWithFirstByte(t, 0x03), []byte("value-three")), api.NewBigIntFromUint64(3)))
+	require.NoError(t, batch.Commit())
+
+	results, err := store.GetNodes([]disk.NodeKey{keyA, keyB, keyC}, true)
+	require.NoError(t, err)
+	require.Len(t, results, 3)
+	require.True(t, results[0].Found)
+	require.Equal(t, []byte("a"), results[0].Value)
+	require.True(t, results[1].Found)
+	require.Equal(t, []byte("b"), results[1].Value)
+	require.True(t, results[2].Found)
+	require.Equal(t, []byte("c"), results[2].Value)
+}
+
+func TestNodeKeyFormatLayoutMismatch(t *testing.T) {
+	dir := t.TempDir()
+	store := openTestStore(t, dir, Options{DisableWAL: true, NoSyncWrites: true})
+	require.NoError(t, store.Close())
+
+	_, err := Open(dir, Options{
+		DisableWAL:    true,
+		NoSyncWrites:  true,
+		NodeKeyFormat: NodeKeyFormatPrefixMajor,
+	})
+	require.Error(t, err)
+	require.True(t, IsLayoutMismatch(err), "got %v", err)
+}
+
+func TestValidateTreeLayoutMetadata(t *testing.T) {
+	expectedLayout := NodeKeyFormatDepthMajor.TreeLayout()
+
+	err := validateTreeLayoutMetadata(nil, false, expectedLayout)
+	require.EqualError(t, err, "disk SMT tree layout metadata missing")
+	require.False(t, IsLayoutMismatch(err))
+
+	err = validateTreeLayoutMetadata([]byte(NodeKeyFormatPrefixMajor.TreeLayout()), true, expectedLayout)
+	require.True(t, IsLayoutMismatch(err), "got %v", err)
+
+	require.NoError(t, validateTreeLayoutMetadata([]byte(expectedLayout), true, expectedLayout))
+}
+
 func TestReadSnapshotSeesStableViewAndCloses(t *testing.T) {
 	store := openTestStore(t, t.TempDir(), Options{DisableWAL: true, NoSyncWrites: true})
 	defer store.Close()

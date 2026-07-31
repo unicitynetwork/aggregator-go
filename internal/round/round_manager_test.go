@@ -26,8 +26,7 @@ func TestParentShardIntegration_GoodCase(t *testing.T) {
 	defer cancel()
 	cfg := config.Config{
 		Processing: config.ProcessingConfig{
-			RoundDuration: 100 * time.Millisecond,
-			BatchLimit:    1000,
+			BatchLimit: 1000,
 		},
 		Sharding: config.ShardingConfig{
 			Mode:          config.ShardingModeChild,
@@ -76,8 +75,7 @@ func TestParentShardIntegration_RoundProcessingError(t *testing.T) {
 	defer cancel()
 	cfg := config.Config{
 		Processing: config.ProcessingConfig{
-			RoundDuration: 100 * time.Millisecond,
-			BatchLimit:    1000,
+			BatchLimit: 1000,
 		},
 		Sharding: config.ShardingConfig{
 			Mode:          config.ShardingModeChild,

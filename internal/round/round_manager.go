@@ -124,9 +124,6 @@ type RoundManager struct {
 	latestProofReadyBlock *models.Block
 	proofMetadataCache    *proofMetadataCache
 
-	// Round duration (configurable, default 1 second)
-	roundDuration time.Duration
-
 	// Streaming support
 	commitmentStream chan *models.CertificationRequest
 	streamMutex      sync.RWMutex
@@ -224,7 +221,6 @@ func NewRoundManagerWithBackend(
 		rootClient:          rootAggregatorClient,
 		stateTracker:        stateTracker,
 		eventBus:            eventBus,
-		roundDuration:       cfg.Processing.RoundDuration,                                                       // Configurable round duration (default 1s)
 		commitmentStream:    make(chan *models.CertificationRequest, cfg.Processing.CommitmentStreamBufferSize), // Buffer for queue streamer
 		proofPending:        make(map[string]struct{}),
 		proofMetadataCache:  newProofMetadataCache(cfg.SMT.ProofMetadataCacheEntries),
@@ -277,7 +273,6 @@ func NewRoundManagerWithBackend(
 // Start begins the round manager operation
 func (rm *RoundManager) Start(ctx context.Context) error {
 	rm.logger.WithContext(ctx).Info("Starting Round Manager",
-		"roundDuration", rm.roundDuration.String(),
 		"batchLimit", rm.config.Processing.BatchLimit)
 
 	if rm.usesDiskSMTBackend() {
@@ -511,7 +506,6 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 	stats := map[string]interface{}{
 		"totalRounds":      atomic.LoadInt64(&rm.totalRounds),
 		"totalCommitments": atomic.LoadInt64(&rm.totalCommitments),
-		"roundDuration":    rm.roundDuration.String(),
 	}
 
 	if rm.currentRound != nil {

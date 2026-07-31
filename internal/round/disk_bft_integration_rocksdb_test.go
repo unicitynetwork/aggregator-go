@@ -206,7 +206,6 @@ func testDiskBFTShardConfig(t *testing.T, name string) config.Config {
 			MaxConnIdleTime:        time.Minute,
 		},
 		Processing: config.ProcessingConfig{
-			RoundDuration:              100 * time.Millisecond,
 			BatchLimit:                 1000,
 			MaxCommitmentsPerRound:     1000,
 			CollectPhaseDuration:       100 * time.Millisecond,
@@ -226,15 +225,14 @@ func testDiskBFTShardConfig(t *testing.T, name string) config.Config {
 			StubDelay: 0,
 		},
 		SMT: config.SMTConfig{
-			Backend:                  config.SMTBackendRocksDB,
-			DiskPath:                 t.TempDir(),
-			RocksDBCacheMB:           8,
-			RocksDBBGJobs:            2,
-			RocksDBSubcompactions:    1,
-			RocksDBBloomBits:         10,
-			RocksDBMemTableMB:        8,
-			MaterializeWorkers:       2,
-			StartupReplayLimitBlocks: 100,
+			Backend:               config.SMTBackendRocksDB,
+			DiskPath:              t.TempDir(),
+			RocksDBCacheMB:        8,
+			RocksDBBGJobs:         2,
+			RocksDBSubcompactions: 1,
+			RocksDBBloomBits:      10,
+			RocksDBMemTableMB:     8,
+			MaterializeWorkers:    2,
 		},
 	}
 }

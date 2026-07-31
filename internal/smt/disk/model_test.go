@@ -42,6 +42,22 @@ func TestNodeKeyEncodingMatchesRugregatorShape(t *testing.T) {
 	require.Equal(t, 9, parsed.DepthBits())
 }
 
+func TestNodeKeyPrefixMajorEncoding(t *testing.T) {
+	require.Equal(t, []byte{0x00}, RootNodeKey().PrefixMajorBytes())
+
+	left := mustNodeKey(t, 1, PrefixBits{})
+	right := mustNodeKey(t, 1, prefixBits(0x80))
+	require.Len(t, left.PrefixMajorBytes(), 1+KeySize+2)
+	require.Equal(t, byte(0x01), left.PrefixMajorBytes()[0])
+	require.Equal(t, []byte{0x00, 0x01}, left.PrefixMajorBytes()[1+KeySize:])
+	require.Equal(t, []byte{0x00, 0x01}, right.PrefixMajorBytes()[1+KeySize:])
+	require.Less(t, bytes.Compare(left.PrefixMajorBytes(), right.PrefixMajorBytes()), 0)
+
+	shallow := mustNodeKey(t, 1, PrefixBits{})
+	deep := mustNodeKey(t, 9, PrefixBits{})
+	require.Less(t, bytes.Compare(shallow.PrefixMajorBytes(), deep.PrefixMajorBytes()), 0)
+}
+
 func TestParseNodeKeyRejectsNonCanonicalPrefixBits(t *testing.T) {
 	_, err := ParseNodeKey([]byte{0x09, 0x00, 0x01, 0x03})
 	require.Error(t, err)
@@ -52,8 +68,8 @@ func TestNodeKeyLessMatchesEncodedOrder(t *testing.T) {
 		RootNodeKey(),
 		mustNodeKey(t, 0, PrefixBits{}),
 		mustNodeKey(t, 1, PrefixBits{}),
-		mustNodeKey(t, 1, prefixBits(0x01)),
-		mustNodeKey(t, 9, prefixBits(0x01, 0x01)),
+		mustNodeKey(t, 1, prefixBits(0x80)),
+		mustNodeKey(t, 9, prefixBits(0x80, 0x80)),
 		mustNodeKey(t, 16, prefixBits(0xff, 0x00)),
 		mustNodeKey(t, 256, prefixBits(0xff, 0xff, 0xff, 0xff)),
 	}

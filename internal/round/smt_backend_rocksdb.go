@@ -17,6 +17,7 @@ func newConfiguredRocksDBSMTBackend(cfg *config.Config) (smtbackend.Backend, err
 	}
 
 	store, err := rocksstore.Open(cfg.SMT.DiskPath, rocksstore.Options{
+		NodeKeyFormat:     rocksstore.NodeKeyFormat(cfg.SMT.NodeKeyFormat),
 		CacheSizeBytes:    int64(cfg.SMT.RocksDBCacheMB) * 1024 * 1024,
 		MaxBackgroundJobs: cfg.SMT.RocksDBBGJobs,
 		MaxSubcompactions: cfg.SMT.RocksDBSubcompactions,

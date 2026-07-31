@@ -105,8 +105,8 @@ type BlockStorage interface {
 	// Count returns the total number of blocks
 	Count(ctx context.Context) (int64, error)
 
-	// GetRange retrieves blocks in a range
-	GetRange(ctx context.Context, fromBlock, toBlock *api.BigInt) ([]*models.Block, error)
+	// GetFinalizedPage retrieves finalized blocks after afterBlock, through toBlock, in ascending order.
+	GetFinalizedPage(ctx context.Context, afterBlock, toBlock *api.BigInt, limit int) ([]*models.Block, error)
 
 	// GetNextFinalizedAfter retrieves the first finalized block after afterBlock, up to toBlock.
 	GetNextFinalizedAfter(ctx context.Context, afterBlock, toBlock *api.BigInt) (*models.Block, error)

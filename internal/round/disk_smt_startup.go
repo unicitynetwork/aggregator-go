@@ -13,6 +13,11 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
+const (
+	diskSMTStartupReplayPageSize    = 100
+	diskSMTStartupReplayLogInterval = 1000
+)
+
 func (rm *RoundManager) usesDiskSMTBackend() bool {
 	_, ok := rm.smtBackend.(*smtbackend.DiskBackend)
 	return ok
@@ -254,42 +259,90 @@ func (rm *RoundManager) syncDiskSMTAfterRecoveredBlock(ctx context.Context, reco
 
 func (rm *RoundManager) replayDiskSMTGap(ctx context.Context, fromBlock, latestBlock *api.BigInt) (*api.BigInt, error) {
 	diff := new(big.Int).Sub(latestBlock.Int, fromBlock.Int)
-	limit := big.NewInt(int64(rm.config.SMT.StartupReplayLimitBlocks))
 	if diff.Sign() < 0 {
 		return nil, diskSMTStartupFailure("invalid disk SMT replay range from %s to %s", fromBlock.String(), latestBlock.String())
 	}
-	if diff.Cmp(limit) > 0 {
-		return nil, diskSMTStartupFailure("disk SMT is behind by %s blocks, exceeding SMT_STARTUP_REPLAY_LIMIT_BLOCKS=%d; explicit rebuild required",
-			diff.String(), rm.config.SMT.StartupReplayLimitBlocks)
-	}
 
-	rm.logger.Info("Disk SMT is behind finalized history, starting bounded replay",
+	rm.logger.Info("Disk SMT is behind finalized history, starting paginated replay",
 		"fromBlock", fromBlock.String(),
 		"latestBlock", latestBlock.String(),
-		"blocksBehind", diff.String())
+		"blocksBehind", diff.String(),
+		"pageSize", diskSMTStartupReplayPageSize)
 
-	from := api.NewBigInt(new(big.Int).Add(fromBlock.Int, big.NewInt(1)))
-	blocks, err := rm.storage.BlockStorage().GetRange(ctx, from, latestBlock)
-	if err != nil {
-		return nil, diskSMTStartupFailure("failed to fetch finalized blocks for disk SMT replay from %s to %s: %w",
-			from.String(), latestBlock.String(), err)
-	}
-	for _, block := range blocks {
-		if err := rm.replayDiskSMTBlock(ctx, block); err != nil {
-			return nil, recordDiskSMTStartupFailure(err)
+	cursor := api.NewBigInt(new(big.Int).Set(fromBlock.Int))
+	replayed := 0
+	nextLogAt := diskSMTStartupReplayLogInterval
+	for cursor.Cmp(latestBlock.Int) < 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		blocks, err := rm.storage.BlockStorage().GetFinalizedPage(ctx, cursor, latestBlock, diskSMTStartupReplayPageSize)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			return nil, diskSMTStartupFailure("failed to fetch finalized block page after %s through %s: %w",
+				cursor.String(), latestBlock.String(), err)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if len(blocks) == 0 {
+			return nil, diskSMTStartupFailure("no finalized blocks found after %s while replay target is %s",
+				cursor.String(), latestBlock.String())
+		}
+		for _, block := range blocks {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if block == nil || block.Index == nil ||
+				block.Index.Cmp(cursor.Int) <= 0 ||
+				block.Index.Cmp(latestBlock.Int) > 0 {
+				return nil, diskSMTStartupFailure("invalid finalized block page after %s through %s",
+					cursor.String(), latestBlock.String())
+			}
+			if err := rm.replayDiskSMTBlock(ctx, block); err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, ctxErr
+				}
+				return nil, recordDiskSMTStartupFailure(err)
+			}
+			cursor = api.NewBigInt(new(big.Int).Set(block.Index.Int))
+			replayed++
+		}
+		if replayed >= nextLogAt || cursor.Cmp(latestBlock.Int) == 0 {
+			rm.logger.Info("Disk SMT paginated replay progress",
+				"blockNumber", cursor.String(),
+				"targetBlock", latestBlock.String(),
+				"blocksReplayed", replayed)
+			for nextLogAt <= replayed {
+				nextLogAt += diskSMTStartupReplayLogInterval
+			}
 		}
 	}
 
 	state, err := rm.smtBackend.CommittedState(ctx)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, diskSMTStartupFailure("failed to read disk SMT state after replay: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if state.BlockNumber == nil || state.BlockNumber.Cmp(latestBlock.Int) != 0 {
 		return nil, diskSMTStartupFailure("disk SMT replay ended at block %v, expected %s", state.BlockNumber, latestBlock.String())
 	}
 	replayedTo, err := rm.storage.BlockStorage().GetByNumber(ctx, latestBlock)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, diskSMTStartupFailure("failed to reload replay target block %s after disk SMT replay: %w", latestBlock.String(), err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if replayedTo == nil || !bytes.Equal(state.RootHash, replayedTo.RootHash) {
 		return nil, diskSMTStartupFailure("disk SMT replay root mismatch: disk=%s replayTarget=%v",
@@ -298,9 +351,10 @@ func (rm *RoundManager) replayDiskSMTGap(ctx context.Context, fromBlock, latestB
 	if rm.stateTracker != nil {
 		rm.stateTracker.SetLastSyncedBlock(latestBlock.Int)
 	}
-	rm.logger.Info("Disk SMT bounded replay complete",
+	rm.logger.Info("Disk SMT paginated replay complete",
 		"blockNumber", latestBlock.String(),
-		"rootHash", api.HexBytes(state.RootHash).String())
+		"rootHash", api.HexBytes(state.RootHash).String(),
+		"blocksReplayed", replayed)
 	metrics.SMTStartupRecoveryActions.WithLabelValues("replay").Inc()
 	return latestBlock, nil
 }

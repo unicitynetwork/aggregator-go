@@ -51,8 +51,10 @@ static void go_rocksdb_writebatch_delete_many_cf(
 import "C"
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -63,9 +65,12 @@ import (
 )
 
 const (
-	SchemaVersion = "1"
-	TreeLayout    = "yellowpaper-rsmt-sha256-v6a-be"
-	KeyBits       = "256"
+	SchemaVersion                          = "1"
+	TreeLayoutDepthMajor                   = "yellowpaper-rsmt-sha256-v6a-be"
+	TreeLayoutPrefixMajor                  = "yellowpaper-rsmt-sha256-v6a-be-prefix-major"
+	NodeKeyFormatDepthMajor  NodeKeyFormat = "depth-major"
+	NodeKeyFormatPrefixMajor NodeKeyFormat = "prefix-major"
+	KeyBits                                = "256"
 
 	maxCInt = int(^uint32(0) >> 1)
 )
@@ -84,6 +89,47 @@ const (
 	rocksDBTickerBloomFilterUseful    = 18
 )
 
+type NodeKeyFormat string
+
+func (f NodeKeyFormat) OrDefault() NodeKeyFormat {
+	if f == "" {
+		return NodeKeyFormatDepthMajor
+	}
+	return f
+}
+
+func (f NodeKeyFormat) IsValid() bool {
+	switch f.OrDefault() {
+	case NodeKeyFormatDepthMajor, NodeKeyFormatPrefixMajor:
+		return true
+	default:
+		return false
+	}
+}
+
+func (f NodeKeyFormat) TreeLayout() string {
+	switch f.OrDefault() {
+	case NodeKeyFormatPrefixMajor:
+		return TreeLayoutPrefixMajor
+	default:
+		return TreeLayoutDepthMajor
+	}
+}
+
+type LayoutMismatchError struct {
+	Got  string
+	Want string
+}
+
+func (e *LayoutMismatchError) Error() string {
+	return fmt.Sprintf("unsupported disk SMT tree layout %q, want %q", e.Got, e.Want)
+}
+
+func IsLayoutMismatch(err error) bool {
+	var mismatch *LayoutMismatchError
+	return errors.As(err, &mismatch)
+}
+
 const (
 	cfDefault = "default"
 	cfNodes   = "smt_nodes"
@@ -98,6 +144,7 @@ const (
 
 type Options struct {
 	ReadOnly                 bool
+	NodeKeyFormat            NodeKeyFormat
 	CacheSizeBytes           int64
 	NoSyncWrites             bool
 	DisableWAL               bool
@@ -124,6 +171,8 @@ type Store struct {
 	defaultCF *C.rocksdb_column_family_handle_t
 	nodesCF   *C.rocksdb_column_family_handle_t
 	metaCF    *C.rocksdb_column_family_handle_t
+
+	nodeKeyFormat NodeKeyFormat
 
 	// Guards RocksDB C handle lifetime. Read snapshots hold this for their
 	// whole lifetime so Close cannot free DB handles while RocksDB still uses
@@ -165,6 +214,11 @@ type storeCounters struct {
 }
 
 func Open(path string, opts Options) (*Store, error) {
+	nodeKeyFormat := opts.NodeKeyFormat.OrDefault()
+	if !nodeKeyFormat.IsValid() {
+		return nil, fmt.Errorf("invalid RocksDB SMT node key format %q", opts.NodeKeyFormat)
+	}
+
 	dbOpts := C.rocksdb_options_create()
 	if dbOpts == nil {
 		return nil, fmt.Errorf("create RocksDB options")
@@ -290,16 +344,17 @@ func Open(path string, opts Options) (*Store, error) {
 	}
 
 	s := &Store{
-		db:        db,
-		opts:      dbOpts,
-		readOpts:  readOpts,
-		writeOpts: writeOpts,
-		cache:     cache,
-		filter:    filter,
-		stats:     opts.EnableStatistics,
-		defaultCF: handles[0],
-		nodesCF:   handles[1],
-		metaCF:    handles[2],
+		db:            db,
+		opts:          dbOpts,
+		readOpts:      readOpts,
+		writeOpts:     writeOpts,
+		cache:         cache,
+		filter:        filter,
+		stats:         opts.EnableStatistics,
+		defaultCF:     handles[0],
+		nodesCF:       handles[1],
+		metaCF:        handles[2],
+		nodeKeyFormat: nodeKeyFormat,
 	}
 	if err := s.loadOrInitMetadata(opts.ReadOnly); err != nil {
 		_ = s.Close()
@@ -398,7 +453,7 @@ func (s *Store) CommittedState() (storage.CommittedState, error) {
 }
 
 func (s *Store) GetNode(key disk.NodeKey) ([]byte, bool, error) {
-	value, ok, err := s.getCF(columnFamilyNodes, nodeKey(key), readKindNode)
+	value, ok, err := s.getCF(columnFamilyNodes, s.nodeKey(key), readKindNode)
 	if err != nil {
 		return nil, false, err
 	}
@@ -475,7 +530,7 @@ func (r *ReadSnapshot) GetNode(key disk.NodeKey) ([]byte, bool, error) {
 	if r.readOpts == nil {
 		return nil, false, fmt.Errorf("closed RocksDB SMT read snapshot")
 	}
-	value, ok, err := r.store.getCFWithReadOptionsOpen(r.store.nodesCF, nodeKey(key), readKindNode, r.readOpts)
+	value, ok, err := r.store.getCFWithReadOptionsOpen(r.store.nodesCF, r.store.nodeKey(key), readKindNode, r.readOpts)
 	if err != nil {
 		return nil, false, err
 	}
@@ -519,7 +574,7 @@ func (s *Store) getNodesWithReadOptionsOpen(keys []disk.NodeKey, sortedInput boo
 		return results, nil
 	}
 	if len(keys) == 1 {
-		value, ok, err := s.getCFWithReadOptionsOpen(s.nodesCF, nodeKey(keys[0]), readKindNode, readOpts)
+		value, ok, err := s.getCFWithReadOptionsOpen(s.nodesCF, s.nodeKey(keys[0]), readKindNode, readOpts)
 		if err != nil {
 			return nil, err
 		}
@@ -530,8 +585,24 @@ func (s *Store) getNodesWithReadOptionsOpen(keys []disk.NodeKey, sortedInput boo
 	encodedKeys := make([][]byte, len(keys))
 	totalKeyBytes := 0
 	for i, key := range keys {
-		encodedKeys[i] = nodeKey(key)
+		encodedKeys[i] = s.nodeKey(key)
 		totalKeyBytes += len(encodedKeys[i])
+	}
+	var resultOrder []int
+	if s.nodeKeyFormat == NodeKeyFormatPrefixMajor {
+		resultOrder = make([]int, len(encodedKeys))
+		for i := range resultOrder {
+			resultOrder[i] = i
+		}
+		sort.SliceStable(resultOrder, func(i, j int) bool {
+			return bytes.Compare(encodedKeys[resultOrder[i]], encodedKeys[resultOrder[j]]) < 0
+		})
+		sortedKeys := make([][]byte, len(encodedKeys))
+		for i, originalIndex := range resultOrder {
+			sortedKeys[i] = encodedKeys[originalIndex]
+		}
+		encodedKeys = sortedKeys
+		sortedInput = true
 	}
 
 	keyBuf := C.malloc(C.size_t(totalKeyBytes))
@@ -584,6 +655,10 @@ func (s *Store) getNodesWithReadOptionsOpen(keys []disk.NodeKey, sortedInput boo
 
 	var firstErr error
 	for i := range keys {
+		resultIndex := i
+		if resultOrder != nil {
+			resultIndex = resultOrder[i]
+		}
 		errPtr := errs[i]
 		if errPtr != nil {
 			err := C.GoString(errPtr)
@@ -606,7 +681,7 @@ func (s *Store) getNodesWithReadOptionsOpen(keys []disk.NodeKey, sortedInput boo
 			continue
 		}
 		if firstErr == nil {
-			results[i] = storage.NodeReadResult{
+			results[resultIndex] = storage.NodeReadResult{
 				Value: C.GoBytes(unsafe.Pointer(valuePtr), C.int(valueLen)),
 				Found: true,
 			}
@@ -947,8 +1022,9 @@ func (s *Store) loadOrInitMetadata(readOnly bool) error {
 	if err != nil {
 		return err
 	}
-	if !ok || string(treeLayout) != TreeLayout {
-		return fmt.Errorf("unsupported disk SMT tree layout %q, want %q", string(treeLayout), TreeLayout)
+	expectedLayout := s.nodeKeyFormat.TreeLayout()
+	if err := validateTreeLayoutMetadata(treeLayout, ok, expectedLayout); err != nil {
+		return err
 	}
 
 	keyBits, ok, err := s.getCF(columnFamilyMeta, metaKey(metaKeyBits), readKindOpen)
@@ -989,6 +1065,16 @@ func (s *Store) loadOrInitMetadata(readOnly bool) error {
 	return nil
 }
 
+func validateTreeLayoutMetadata(treeLayout []byte, ok bool, expectedLayout string) error {
+	if !ok {
+		return fmt.Errorf("disk SMT tree layout metadata missing")
+	}
+	if string(treeLayout) != expectedLayout {
+		return &LayoutMismatchError{Got: string(treeLayout), Want: expectedLayout}
+	}
+	return nil
+}
+
 func (s *Store) initMetadata() error {
 	root := disk.EmptyRootHash()
 	s.closeMu.RLock()
@@ -1007,7 +1093,7 @@ func (s *Store) initMetadata() error {
 		value []byte
 	}{
 		{metaKey(metaSchemaVersion), []byte(SchemaVersion)},
-		{metaKey(metaTreeLayout), []byte(TreeLayout)},
+		{metaKey(metaTreeLayout), []byte(s.nodeKeyFormat.TreeLayout())},
 		{metaKey(metaKeyBits), []byte(KeyBits)},
 		{metaKey(metaRoot), root[:]},
 		{metaKey(metaRootBlock), []byte{}},
@@ -1032,7 +1118,14 @@ func metaKey(name string) []byte {
 	return []byte(name)
 }
 
-func nodeKey(key disk.NodeKey) []byte {
+func (s *Store) nodeKey(key disk.NodeKey) []byte {
+	return encodeNodeKey(s.nodeKeyFormat, key)
+}
+
+func encodeNodeKey(format NodeKeyFormat, key disk.NodeKey) []byte {
+	if format.OrDefault() == NodeKeyFormatPrefixMajor {
+		return key.PrefixMajorBytes()
+	}
 	return key.Bytes()
 }
 
@@ -1121,11 +1214,11 @@ func writeBatchDeleteCF(batch *C.rocksdb_writebatch_t, cf *C.rocksdb_column_fami
 	C.rocksdb_writebatch_delete_cf(batch, cf, keyPtr, keyLen)
 }
 
-func writeBatchPutEntriesCF(batch *C.rocksdb_writebatch_t, cf *C.rocksdb_column_family_handle_t, nodes []storage.NodeWrite) error {
+func writeBatchPutEntriesCF(batch *C.rocksdb_writebatch_t, cf *C.rocksdb_column_family_handle_t, format NodeKeyFormat, nodes []storage.NodeWrite) error {
 	if len(nodes) > maxCInt {
 		return fmt.Errorf("too many RocksDB batch put entries: %d", len(nodes))
 	}
-	keyPtrsMem, keyLensMem, keyBuf, valuePtrsMem, valueLensMem, valueBuf, err := encodeNodeEntriesForC(nodes)
+	keyPtrsMem, keyLensMem, keyBuf, valuePtrsMem, valueLensMem, valueBuf, err := encodeNodeEntriesForC(format, nodes)
 	if err != nil {
 		return err
 	}
@@ -1148,11 +1241,11 @@ func writeBatchPutEntriesCF(batch *C.rocksdb_writebatch_t, cf *C.rocksdb_column_
 	return nil
 }
 
-func writeBatchDeleteManyCF(batch *C.rocksdb_writebatch_t, cf *C.rocksdb_column_family_handle_t, keys []disk.NodeKey) error {
+func writeBatchDeleteManyCF(batch *C.rocksdb_writebatch_t, cf *C.rocksdb_column_family_handle_t, format NodeKeyFormat, keys []disk.NodeKey) error {
 	if len(keys) > maxCInt {
 		return fmt.Errorf("too many RocksDB batch delete entries: %d", len(keys))
 	}
-	keyPtrsMem, keyLensMem, keyBuf, err := encodeNodeKeysForC(keys)
+	keyPtrsMem, keyLensMem, keyBuf, err := encodeNodeKeysForC(format, keys)
 	if err != nil {
 		return err
 	}
@@ -1170,7 +1263,7 @@ func writeBatchDeleteManyCF(batch *C.rocksdb_writebatch_t, cf *C.rocksdb_column_
 	return nil
 }
 
-func encodeNodeEntriesForC(nodes []storage.NodeWrite) (unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, error) {
+func encodeNodeEntriesForC(format NodeKeyFormat, nodes []storage.NodeWrite) (unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, error) {
 	totalValueBytes := 0
 	keys := make([]disk.NodeKey, len(nodes))
 	for i, node := range nodes {
@@ -1178,7 +1271,7 @@ func encodeNodeEntriesForC(nodes []storage.NodeWrite) (unsafe.Pointer, unsafe.Po
 		totalValueBytes += len(node.Value)
 	}
 
-	keyPtrsMem, keyLensMem, keyBuf, err := encodeNodeKeysForC(keys)
+	keyPtrsMem, keyLensMem, keyBuf, err := encodeNodeKeysForC(format, keys)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, err
 	}
@@ -1211,11 +1304,11 @@ func encodeNodeEntriesForC(nodes []storage.NodeWrite) (unsafe.Pointer, unsafe.Po
 	return keyPtrsMem, keyLensMem, keyBuf, valuePtrsMem, valueLensMem, valueBuf, nil
 }
 
-func encodeNodeKeysForC(keys []disk.NodeKey) (unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, error) {
+func encodeNodeKeysForC(format NodeKeyFormat, keys []disk.NodeKey) (unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, error) {
 	totalKeyBytes := 0
 	encoded := make([][]byte, len(keys))
 	for i, key := range keys {
-		encoded[i] = nodeKey(key)
+		encoded[i] = encodeNodeKey(format, key)
 		totalKeyBytes += len(encoded[i])
 	}
 

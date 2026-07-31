@@ -134,7 +134,7 @@ func startAggregator(t *testing.T, ctx context.Context, name, port, mongoURI, re
 		Logging: config.LoggingConfig{Level: "debug", Format: "json"},
 		BFT:     config.BFTConfig{Enabled: false, StubDelay: 500 * time.Millisecond},
 		Processing: config.ProcessingConfig{
-			RoundDuration: 2 * time.Second, BatchLimit: 1000, MaxCommitmentsPerRound: 1000,
+			BatchLimit: 1000, MaxCommitmentsPerRound: 1000,
 		},
 		Storage: config.StorageConfig{
 			UseRedisForCommitments: true,
