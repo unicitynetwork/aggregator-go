@@ -45,6 +45,7 @@ func TestDiskBackendRocksDBNodeKeyFormatLifecycleParity(t *testing.T) {
 		})
 	}
 
+	require.Len(t, results, 2)
 	depth := results[rocksstore.NodeKeyFormatDepthMajor]
 	prefix := results[rocksstore.NodeKeyFormatPrefixMajor]
 	require.Equal(t, depth.roots, prefix.roots)

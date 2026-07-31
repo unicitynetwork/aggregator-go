@@ -1023,12 +1023,8 @@ func (s *Store) loadOrInitMetadata(readOnly bool) error {
 		return err
 	}
 	expectedLayout := s.nodeKeyFormat.TreeLayout()
-	if !ok || string(treeLayout) != expectedLayout {
-		got := ""
-		if ok {
-			got = string(treeLayout)
-		}
-		return &LayoutMismatchError{Got: got, Want: expectedLayout}
+	if err := validateTreeLayoutMetadata(treeLayout, ok, expectedLayout); err != nil {
+		return err
 	}
 
 	keyBits, ok, err := s.getCF(columnFamilyMeta, metaKey(metaKeyBits), readKindOpen)
@@ -1066,6 +1062,16 @@ func (s *Store) loadOrInitMetadata(readOnly bool) error {
 	s.root = root
 	s.block = append([]byte(nil), blockBytes...)
 	s.mu.Unlock()
+	return nil
+}
+
+func validateTreeLayoutMetadata(treeLayout []byte, ok bool, expectedLayout string) error {
+	if !ok {
+		return fmt.Errorf("disk SMT tree layout metadata missing")
+	}
+	if string(treeLayout) != expectedLayout {
+		return &LayoutMismatchError{Got: string(treeLayout), Want: expectedLayout}
+	}
 	return nil
 }
 

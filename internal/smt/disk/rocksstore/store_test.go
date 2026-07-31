@@ -115,6 +115,19 @@ func TestNodeKeyFormatLayoutMismatch(t *testing.T) {
 	require.True(t, IsLayoutMismatch(err), "got %v", err)
 }
 
+func TestValidateTreeLayoutMetadata(t *testing.T) {
+	expectedLayout := NodeKeyFormatDepthMajor.TreeLayout()
+
+	err := validateTreeLayoutMetadata(nil, false, expectedLayout)
+	require.EqualError(t, err, "disk SMT tree layout metadata missing")
+	require.False(t, IsLayoutMismatch(err))
+
+	err = validateTreeLayoutMetadata([]byte(NodeKeyFormatPrefixMajor.TreeLayout()), true, expectedLayout)
+	require.True(t, IsLayoutMismatch(err), "got %v", err)
+
+	require.NoError(t, validateTreeLayoutMetadata([]byte(expectedLayout), true, expectedLayout))
+}
+
 func TestReadSnapshotSeesStableViewAndCloses(t *testing.T) {
 	store := openTestStore(t, t.TempDir(), Options{DisableWAL: true, NoSyncWrites: true})
 	defer store.Close()
