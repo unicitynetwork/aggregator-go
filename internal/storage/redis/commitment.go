@@ -74,7 +74,9 @@ type CommitmentStorage struct {
 	// Restart recovery: on startup, exhaust all pending messages before reading new ones
 	// This ensures messages stuck in "pending" state (from crashed consumer) are recovered
 	// Once all pending are read, switch to new messages permanently
-	pendingExhausted atomic.Bool
+	pendingExhausted       atomic.Bool
+	pendingSweepMu         sync.Mutex
+	pendingSweepGeneration uint64
 
 	// Batching channels
 	pendingChan chan *pendingCommitment
@@ -106,6 +108,9 @@ func NewCommitmentStorage(client *redis.Client, streamName string, serverID stri
 // ResetPendingSweep re-enables the pending-entry sweep. A running streamer will
 // notice this before its next new-message read and reclaim entries left unacked.
 func (cs *CommitmentStorage) ResetPendingSweep() {
+	cs.pendingSweepMu.Lock()
+	defer cs.pendingSweepMu.Unlock()
+	cs.pendingSweepGeneration++
 	cs.pendingExhausted.Store(false)
 }
 
@@ -887,6 +892,10 @@ func (cs *CommitmentStorage) StreamCertificationRequests(ctx context.Context, co
 // and pushes each pending entry to commitmentChan exactly once, then sets
 // pendingExhausted so the caller switches to new-messages mode.
 func (cs *CommitmentStorage) drainPendingForConsumer(ctx context.Context, commitmentChan chan<- *models.CertificationRequest) error {
+	cs.pendingSweepMu.Lock()
+	sweepGeneration := cs.pendingSweepGeneration
+	cs.pendingSweepMu.Unlock()
+
 	nextPendingID := "0"
 	for {
 		select {
@@ -942,6 +951,10 @@ func (cs *CommitmentStorage) drainPendingForConsumer(ctx context.Context, commit
 		}
 	}
 
-	cs.pendingExhausted.Store(true)
+	cs.pendingSweepMu.Lock()
+	if cs.pendingSweepGeneration == sweepGeneration {
+		cs.pendingExhausted.Store(true)
+	}
+	cs.pendingSweepMu.Unlock()
 	return nil
 }

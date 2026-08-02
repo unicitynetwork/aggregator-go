@@ -330,7 +330,7 @@ func TestProcessMiniBatch_SkipsExistingDuplicateWithoutProofPending(t *testing.T
 	require.True(t, newPending)
 }
 
-func TestReconcileRecoveredFinalization_CommitsMatchingSnapshotAndClearsProofPending(t *testing.T) {
+func TestReconcileRecoveredFinalization_CommitsMatchingSnapshotAndMarksRoundFinalized(t *testing.T) {
 	ctx := context.Background()
 	cfg := &config.Config{
 		Processing: config.ProcessingConfig{
@@ -369,7 +369,19 @@ func TestReconcileRecoveredFinalization_CommitsMatchingSnapshotAndClearsProofPen
 	rm.proofCacheMu.RUnlock()
 	require.True(t, pendingBefore)
 
-	err = rm.reconcileRecoveredFinalization(ctx, &RecoveryResult{Recovered: true, BlockNumber: blockNumber})
+	nextRoundCommitment := testutil.CreateTestCertificationRequest(t, "next_round_pending")
+	rm.markProofsPending([]*models.CertificationRequest{nextRoundCommitment})
+	recoveredBlock := &models.Block{
+		Index:     blockNumber,
+		Finalized: true,
+		Status:    models.FinalityStatusFinalized,
+	}
+	err = rm.reconcileRecoveredFinalization(ctx, &RecoveryResult{
+		Recovered:   true,
+		BlockNumber: blockNumber,
+		Block:       recoveredBlock,
+		StateIDs:    []api.StateID{commitment.StateID},
+	})
 	require.NoError(t, err)
 
 	_, err = smtInstance.GetInclusionCert(key)
@@ -377,11 +389,14 @@ func TestReconcileRecoveredFinalization_CommitsMatchingSnapshotAndClearsProofPen
 
 	rm.proofCacheMu.RLock()
 	_, pendingAfter := rm.proofPending[commitment.StateID.String()]
+	_, nextRoundPending := rm.proofPending[nextRoundCommitment.StateID.String()]
 	rm.proofCacheMu.RUnlock()
 	require.False(t, pendingAfter)
+	require.True(t, nextRoundPending)
+	require.Same(t, recoveredBlock, rm.currentRound.Block)
 }
 
-func TestReconcileRecoveredFinalization_MismatchedBlockClearsProofPendingOnly(t *testing.T) {
+func TestReconcileRecoveredFinalization_MismatchedBlockClearsOnlyRecoveredProofPending(t *testing.T) {
 	ctx := context.Background()
 	cfg := &config.Config{
 		Processing: config.ProcessingConfig{
@@ -417,7 +432,18 @@ func TestReconcileRecoveredFinalization_MismatchedBlockClearsProofPendingOnly(t 
 	rm.proofCacheMu.RUnlock()
 	require.True(t, pendingBefore)
 
-	err = rm.reconcileRecoveredFinalization(ctx, &RecoveryResult{Recovered: true, BlockNumber: recoveredBlockNumber})
+	recoveredCommitment := testutil.CreateTestCertificationRequest(t, "recovered_previous_round")
+	rm.markProofsPending([]*models.CertificationRequest{recoveredCommitment})
+	err = rm.reconcileRecoveredFinalization(ctx, &RecoveryResult{
+		Recovered:   true,
+		BlockNumber: recoveredBlockNumber,
+		Block: &models.Block{
+			Index:     recoveredBlockNumber,
+			Finalized: true,
+			Status:    models.FinalityStatusFinalized,
+		},
+		StateIDs: []api.StateID{recoveredCommitment.StateID},
+	})
 	require.NoError(t, err)
 
 	require.Equal(t, originalRoot, smtInstance.GetRootHash())
@@ -428,8 +454,11 @@ func TestReconcileRecoveredFinalization_MismatchedBlockClearsProofPendingOnly(t 
 
 	rm.proofCacheMu.RLock()
 	_, pendingAfter := rm.proofPending[commitment.StateID.String()]
+	_, recoveredPending := rm.proofPending[recoveredCommitment.StateID.String()]
 	rm.proofCacheMu.RUnlock()
-	require.False(t, pendingAfter)
+	require.True(t, pendingAfter)
+	require.False(t, recoveredPending)
+	require.Nil(t, rm.currentRound.Block)
 }
 
 // --- Tests for childPrecollector ---

@@ -16,6 +16,7 @@ import (
 type RecoveryResult struct {
 	Recovered   bool
 	BlockNumber *api.BigInt
+	Block       *models.Block
 	StateIDs    []api.StateID
 }
 
@@ -270,11 +271,14 @@ func recoverUnfinalizedBlock(
 	if err != nil {
 		return nil, fmt.Errorf("failed to recover block %s: %w", block.Index.String(), err)
 	}
+	block.Finalized = true
+	block.Status = models.FinalityStatusFinalized
 
 	log.WithContext(ctx).Info("Block recovery completed successfully", "blockNumber", block.Index.String())
 	return &RecoveryResult{
 		Recovered:   true,
 		BlockNumber: block.Index,
+		Block:       block,
 		StateIDs:    stateIDs,
 	}, nil
 }

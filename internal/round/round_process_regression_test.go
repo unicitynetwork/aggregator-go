@@ -317,7 +317,7 @@ func (q *resetRecordingCommitmentQueue) ResetPendingSweep() {
 	q.resetCount++
 }
 
-func TestStartNewRoundWithSnapshotAbandonResetsRedisPendingSweep(t *testing.T) {
+func TestStartNewRoundWithSnapshotAbandonAfterSnapshotCleanupResetsRedisPendingSweep(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	cfg := config.Config{
@@ -359,14 +359,14 @@ func TestStartNewRoundWithSnapshotAbandonResetsRedisPendingSweep(t *testing.T) {
 
 	oldCommitment := testutil.CreateTestCertificationRequest(t, "abandoned_precollected_round")
 	oldCtx, oldCancel := context.WithCancel(ctx)
-	oldSnapshot := &discardCountingSnapshot{Snapshot: testRMSnapshot(t, ctx, rm)}
 	rm.currentRound = &Round{
-		Number:             api.NewBigInt(big.NewInt(1)),
-		StartTime:          time.Now(),
-		State:              RoundStateProcessing,
-		Commitments:        []*models.CertificationRequest{oldCommitment},
-		Cancel:             oldCancel,
-		Snapshot:           oldSnapshot,
+		Number:      api.NewBigInt(big.NewInt(1)),
+		StartTime:   time.Now(),
+		State:       RoundStateProcessing,
+		Commitments: []*models.CertificationRequest{oldCommitment},
+		Cancel:      oldCancel,
+		// processRound clears Snapshot when cancellation wins before proposal.
+		Snapshot:           nil,
 		PendingCommitments: []*models.CertificationRequest{oldCommitment},
 	}
 	rm.markProofsPending([]*models.CertificationRequest{oldCommitment})
@@ -379,6 +379,7 @@ func TestStartNewRoundWithSnapshotAbandonResetsRedisPendingSweep(t *testing.T) {
 	result, err := newSnapshot.AddLeavesClassified(ctx, []smtbackend.LeafInput{newLeaf})
 	require.NoError(t, err)
 	require.NoError(t, result.ValidateAllAccepted(1))
+	rm.markProofsPending([]*models.CertificationRequest{newCommitment})
 
 	require.NoError(t, rm.StartNewRoundWithSnapshot(
 		ctx,
@@ -390,7 +391,6 @@ func TestStartNewRoundWithSnapshotAbandonResetsRedisPendingSweep(t *testing.T) {
 		"",
 	))
 
-	require.Equal(t, 1, oldSnapshot.discards)
 	require.Equal(t, 1, resetQueue.resetCount)
 	select {
 	case <-oldCtx.Done():
@@ -399,6 +399,8 @@ func TestStartNewRoundWithSnapshotAbandonResetsRedisPendingSweep(t *testing.T) {
 	}
 	_, pending := rm.proofPending[oldCommitment.StateID.String()]
 	require.False(t, pending)
+	_, pending = rm.proofPending[newCommitment.StateID.String()]
+	require.True(t, pending)
 }
 
 func TestStartNewRoundWithSnapshotDoesNotReplayFinalizedRoundHistory(t *testing.T) {
@@ -447,9 +449,10 @@ func TestStartNewRoundWithSnapshotDoesNotReplayFinalizedRoundHistory(t *testing.
 		StartTime:   time.Now(),
 		State:       RoundStateFinalizing,
 		Commitments: []*models.CertificationRequest{oldCommitment},
+		Block:       &models.Block{},
 		Snapshot:    nil,
 		// A normally finalized round has historical Commitments left for
-		// diagnostics, but no unresolved snapshot or pending commitments.
+		// diagnostics, but Block is set and unresolved state is cleared.
 		PendingCommitments: nil,
 	}
 

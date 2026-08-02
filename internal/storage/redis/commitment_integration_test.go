@@ -1068,6 +1068,61 @@ CollectSecond:
 	}
 }
 
+func (suite *RedisTestSuite) TestPendingExhausted_ResetDuringActiveSweepIsNotLost() {
+	ctx := suite.ctx
+	t := suite.T()
+
+	commitments := []*models.CertificationRequest{
+		createTestCommitment(),
+		createTestCommitment(),
+		createTestCommitment(),
+	}
+	require.NoError(t, suite.storage.StoreBatch(ctx, commitments))
+
+	// Deliver the entries once so they are all in this consumer's PEL.
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	streamCh := make(chan *models.CertificationRequest, len(commitments))
+	streamDone := make(chan struct{})
+	go func() {
+		_ = suite.storage.StreamCertificationRequests(streamCtx, streamCh)
+		close(streamDone)
+	}()
+	require.Eventually(t, func() bool {
+		return len(streamCh) == len(commitments)
+	}, 2*time.Second, 25*time.Millisecond)
+	cancelStream()
+	<-streamDone
+
+	suite.storage.ResetPendingSweep()
+	firstDrainCh := make(chan *models.CertificationRequest, 1)
+	firstDrainDone := make(chan error, 1)
+	go func() {
+		firstDrainDone <- suite.storage.drainPendingForConsumer(ctx, firstDrainCh)
+	}()
+
+	// The one-slot channel blocks the active sweep after its first delivery.
+	require.Eventually(t, func() bool {
+		return len(firstDrainCh) == 1
+	}, 2*time.Second, 25*time.Millisecond)
+	suite.storage.ResetPendingSweep()
+
+	for range commitments {
+		select {
+		case <-firstDrainCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out draining first replay sweep")
+		}
+	}
+	require.NoError(t, <-firstDrainDone)
+	require.False(t, suite.storage.pendingExhausted.Load(),
+		"a reset requested during a sweep must remain visible after that sweep finishes")
+
+	secondDrainCh := make(chan *models.CertificationRequest, len(commitments))
+	require.NoError(t, suite.storage.drainPendingForConsumer(ctx, secondDrainCh))
+	require.Len(t, secondDrainCh, len(commitments))
+	require.True(t, suite.storage.pendingExhausted.Load())
+}
+
 // TestPendingExhausted_ResetAfterDiscardingLocalBuffer covers the precollector
 // discard path: entries already delivered into the local channel are stale when
 // Redis PEL is about to become the replay source again.

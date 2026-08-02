@@ -62,6 +62,18 @@ func TestHasMongoErrorLabelMatchesWrappedLabeledErrors(t *testing.T) {
 	require.False(t, hasMongoErrorLabel(errors.New("plain error"), labelTransientTransaction))
 }
 
+func TestIsMongoMaxTimeMSExpiredErrorMatchesWrappedCommandError(t *testing.T) {
+	err := fmt.Errorf("commit failed: %w", mongo.CommandError{
+		Code:   50,
+		Name:   "MaxTimeMSExpired",
+		Labels: []string{labelUnknownTransactionCommit},
+	})
+
+	require.True(t, isMongoMaxTimeMSExpiredError(err))
+	require.False(t, isMongoMaxTimeMSExpiredError(mongo.CommandError{Code: 51}))
+	require.False(t, isMongoMaxTimeMSExpiredError(errors.New("plain error")))
+}
+
 func TestMongoWriteConcern(t *testing.T) {
 	t.Run("default majority journaled", func(t *testing.T) {
 		wc := mongoWriteConcern(config.DatabaseConfig{})

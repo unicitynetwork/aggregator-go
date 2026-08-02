@@ -532,17 +532,23 @@ func (rm *RoundManager) reconcileRecoveredFinalization(ctx context.Context, reco
 		if err := rm.syncDiskSMTAfterRecoveredBlock(ctx, recoveryResult); err != nil {
 			return err
 		}
-		rm.clearProofPending()
-		return nil
-	}
-
-	if snapshot != nil {
+	} else if snapshot != nil {
 		if err := snapshot.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: blockNumber}); err != nil {
 			return fmt.Errorf("failed to commit recovered SMT snapshot: %w", err)
 		}
 	}
 
-	rm.clearProofPending()
+	rm.roundMutex.Lock()
+	if blockNumber != nil &&
+		recoveryResult.Block != nil &&
+		rm.currentRound != nil &&
+		rm.currentRound.Number != nil &&
+		rm.currentRound.Number.Cmp(blockNumber.Int) == 0 {
+		rm.currentRound.Block = recoveryResult.Block
+	}
+	rm.roundMutex.Unlock()
+
+	rm.clearProofStateIDsPending(recoveryResult.StateIDs)
 	return nil
 }
 

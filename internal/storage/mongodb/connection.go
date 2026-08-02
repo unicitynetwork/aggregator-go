@@ -306,10 +306,10 @@ const (
 	labelUnknownTransactionCommit = "UnknownTransactionCommitResult"
 )
 
-// WithTransaction executes a function within a MongoDB transaction with limited retries.
-// Only retries on transient errors (TransientTransactionError label).
+// WithTransaction executes a function within a MongoDB transaction with limited attempts.
+// Transient errors retry the transaction; unknown commit results retry only the commit.
 func (s *Storage) WithTransaction(ctx context.Context, fn func(context.Context) error) error {
-	const maxRetries = 3
+	const maxAttempts = 3
 
 	session, err := s.client.StartSession()
 	if err != nil {
@@ -318,7 +318,7 @@ func (s *Storage) WithTransaction(ctx context.Context, fn func(context.Context) 
 	defer session.EndSession(ctx)
 
 	var lastErr error
-	for attempt := 1; attempt <= maxRetries; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		err = session.StartTransaction()
 		if err != nil {
 			return fmt.Errorf("failed to start transaction: %w", err)
@@ -335,23 +335,23 @@ func (s *Storage) WithTransaction(ctx context.Context, fn func(context.Context) 
 			// Check if this is a transient error that we should retry.
 			// Storage methods wrap driver errors with %w for context, so use
 			// errors.As instead of a direct type assertion.
-			if hasMongoErrorLabel(err, labelTransientTransaction) && attempt < maxRetries {
+			if hasMongoErrorLabel(err, labelTransientTransaction) && attempt < maxAttempts {
 				lastErr = err
 				continue // Retry
 			}
-			// Non-transient error or max retries reached
-			return fmt.Errorf("transaction failed (attempt %d/%d): %w", attempt, maxRetries, err)
+			// Non-transient error or final attempt reached.
+			return fmt.Errorf("transaction failed (attempt %d/%d): %w", attempt, maxAttempts, err)
 		}
 
 		// Try to commit with retry for unknown commit result
-		for commitAttempt := 1; commitAttempt <= maxRetries; commitAttempt++ {
+		for commitAttempt := 1; commitAttempt <= maxAttempts; commitAttempt++ {
 			err = session.CommitTransaction(ctx)
 			if err == nil {
 				return nil // Success
 			}
 
 			// TransientTransactionError on commit - retry whole transaction
-			if hasMongoErrorLabel(err, labelTransientTransaction) && attempt < maxRetries {
+			if hasMongoErrorLabel(err, labelTransientTransaction) && attempt < maxAttempts {
 				lastErr = err
 				break // Break inner loop, continue outer loop to retry whole transaction
 			}
@@ -359,26 +359,20 @@ func (s *Storage) WithTransaction(ctx context.Context, fn func(context.Context) 
 			// UnknownTransactionCommitResult - retry just the commit
 			if hasMongoErrorLabel(err, labelUnknownTransactionCommit) &&
 				!isMongoMaxTimeMSExpiredError(err) &&
-				commitAttempt < maxRetries {
+				commitAttempt < maxAttempts {
 				lastErr = err
 				continue // Retry commit
 			}
 
 			return fmt.Errorf("transaction commit failed (attempt %d/%d, commit %d/%d): %w",
-				attempt, maxRetries, commitAttempt, maxRetries, err)
+				attempt, maxAttempts, commitAttempt, maxAttempts, err)
 		}
 
-		// If we broke out of commit loop due to transient error, continue to retry whole transaction
-		if lastErr != nil {
-			continue
-		}
-
-		// Success
-		return nil
+		// The commit loop reaches here only for a transient error that requires
+		// retrying the whole transaction.
 	}
 
-	// Should not reach here, but just in case
-	return fmt.Errorf("transaction failed after %d retries: %w", maxRetries, lastErr)
+	return fmt.Errorf("transaction failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // createIndexes creates all necessary database indexes
