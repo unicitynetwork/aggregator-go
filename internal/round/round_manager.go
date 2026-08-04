@@ -38,6 +38,10 @@ const (
 
 const defaultMiniBatchSize = 500 // Number of commitments to process per SMT mini-batch
 
+type pendingSweepResetter interface {
+	ResetPendingSweep()
+}
+
 func (rs RoundState) String() string {
 	switch rs {
 	case RoundStateCollecting:
@@ -498,6 +502,32 @@ func (rm *RoundManager) clearProofPending() {
 	rm.proofPending = make(map[string]struct{})
 }
 
+func (rm *RoundManager) clearProofsPending(commitments []*models.CertificationRequest) {
+	if len(commitments) == 0 {
+		return
+	}
+
+	rm.proofCacheMu.Lock()
+	defer rm.proofCacheMu.Unlock()
+	for _, commitment := range commitments {
+		if commitment != nil {
+			delete(rm.proofPending, commitment.StateID.String())
+		}
+	}
+}
+
+func (rm *RoundManager) clearProofStateIDsPending(stateIDs []api.StateID) {
+	if len(stateIDs) == 0 {
+		return
+	}
+
+	rm.proofCacheMu.Lock()
+	defer rm.proofCacheMu.Unlock()
+	for _, stateID := range stateIDs {
+		delete(rm.proofPending, stateID.String())
+	}
+}
+
 // GetStats returns round manager statistics
 func (rm *RoundManager) GetStats() map[string]interface{} {
 	rm.roundMutex.RLock()
@@ -523,34 +553,20 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 
 // StartNewRound starts a new round for processing commitments (delegates to unified function)
 func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
-	abandonPendingRound := rm.hasPendingRoundToAbandon(roundNumber)
-	if abandonPendingRound {
-		rm.roundMutex.Lock()
-		supersededSnapshot := rm.abandonSupersededRoundLocked(roundNumber)
-		rm.roundMutex.Unlock()
-		if supersededSnapshot != nil {
-			supersededSnapshot.Discard(ctx)
-		}
+	rm.roundMutex.Lock()
+	supersededSnapshot, resetPendingSweep, unresolved := rm.abandonSupersededRoundLocked(roundNumber)
+	rm.roundMutex.Unlock()
+	if supersededSnapshot != nil {
+		supersededSnapshot.Discard(ctx)
+	}
+	if unresolved {
 		resetDone := rm.discardActivePrecollector(ctx)
-		if !resetDone {
+		if resetPendingSweep && !resetDone {
 			rm.clearProofPending()
 			rm.resetRedisPendingSweep(ctx)
 		}
 	}
 	return rm.StartNewRoundWithSnapshot(ctx, roundNumber, nil, nil, nil, false, "")
-}
-
-func (rm *RoundManager) hasPendingRoundToAbandon(roundNumber *api.BigInt) bool {
-	if roundNumber == nil || roundNumber.Int == nil {
-		return false
-	}
-
-	rm.roundMutex.RLock()
-	defer rm.roundMutex.RUnlock()
-	return rm.currentRound != nil &&
-		rm.currentRound.Number != nil &&
-		rm.currentRound.Number.Cmp(roundNumber.Int) < 0 &&
-		rm.currentRound.Snapshot != nil
 }
 
 // StartNewRoundWithSnapshot starts a new round, optionally with pre-collected data.
@@ -650,7 +666,10 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 		leaves = make([]smtbackend.LeafInput, 0)
 	}
 
-	supersededSnapshot := rm.abandonSupersededRoundLocked(roundNumber)
+	supersededSnapshot, resetPendingSweep, _ := rm.abandonSupersededRoundLocked(roundNumber)
+	if resetPendingSweep {
+		rm.signalRedisPendingSweepReset()
+	}
 	processCtx, processCancel := context.WithCancel(roundCtx)
 	if proposalID == "" {
 		proposalID = uuid.NewString()
@@ -767,17 +786,24 @@ func (rm *RoundManager) retryRoundProposal(ctx context.Context, round *Round) er
 
 // abandonSupersededRoundLocked cancels the current round when it is being
 // superseded by a newer one and returns its unproposed snapshot (or nil) for the
-// caller to discard after releasing roundMutex. Proof-pending markers are cleared
-// separately via clearProofPending() at the abandon/deactivate/reset points.
-func (rm *RoundManager) abandonSupersededRoundLocked(roundNumber *api.BigInt) smtbackend.Snapshot {
+// caller to discard after releasing roundMutex. Proof-pending markers owned by
+// unresolved superseded commitments are removed without disturbing newer markers.
+func (rm *RoundManager) abandonSupersededRoundLocked(roundNumber *api.BigInt) (smtbackend.Snapshot, bool, bool) {
 	if rm.currentRound == nil {
-		return nil
+		return nil, false, false
 	}
 	if roundNumber == nil ||
 		roundNumber.Int == nil ||
 		rm.currentRound.Number == nil ||
 		rm.currentRound.Number.Cmp(roundNumber.Int) >= 0 {
-		return nil
+		return nil, false, false
+	}
+	unresolved := rm.currentRound.Block == nil
+	resetPendingSweep := unresolved &&
+		(len(rm.currentRound.PendingCommitments) > 0 || len(rm.currentRound.Commitments) > 0)
+	if resetPendingSweep {
+		rm.clearProofsPending(rm.currentRound.Commitments)
+		rm.clearProofsPending(rm.currentRound.PendingCommitments)
 	}
 	if rm.currentRound.Cancel != nil {
 		rm.currentRound.Cancel()
@@ -789,7 +815,8 @@ func (rm *RoundManager) abandonSupersededRoundLocked(roundNumber *api.BigInt) sm
 	rm.currentRound.PendingRootHash = nil
 	rm.currentRound.PendingLeaves = nil
 	rm.currentRound.PendingCommitments = nil
-	return superseded
+	rm.currentRound = nil
+	return superseded, resetPendingSweep, unresolved
 }
 
 func (rm *RoundManager) processRound(ctx context.Context, round *Round) error {
@@ -1416,7 +1443,7 @@ func (rm *RoundManager) discardActivePrecollector(ctx context.Context) bool {
 }
 
 func (rm *RoundManager) resetRedisPendingSweep(ctx context.Context) {
-	cs, ok := rm.commitmentQueue.(*redis.CommitmentStorage)
+	cs, ok := rm.commitmentQueue.(pendingSweepResetter)
 	if !ok {
 		return
 	}
@@ -1427,6 +1454,17 @@ func (rm *RoundManager) resetRedisPendingSweep(ctx context.Context) {
 	if restartPrefetcher {
 		rm.startCommitmentPrefetcher(ctx)
 	}
+}
+
+// signalRedisPendingSweepReset only resets the Redis PEL cursor. This path runs
+// under roundMutex and already owns the incoming precollected batch, so it must
+// not stop or drain the shared commitment prefetcher.
+func (rm *RoundManager) signalRedisPendingSweepReset() {
+	cs, ok := rm.commitmentQueue.(pendingSweepResetter)
+	if !ok {
+		return
+	}
+	cs.ResetPendingSweep()
 }
 
 func (rm *RoundManager) drainCommitmentStream() int {

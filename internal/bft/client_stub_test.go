@@ -9,14 +9,52 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	cmdbft "github.com/unicitynetwork/bft-core/cli/ubft/cmd"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/events"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
+
+func TestBFTClientStartFailureReturnsToIdleAndCanRetry(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+
+	authSigner, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	authKey, err := authSigner.MarshalPrivateKey()
+	require.NoError(t, err)
+
+	client := &BFTClientImpl{
+		logger: log,
+		conf: &config.BFTConfig{
+			Address: "/ip4/127.0.0.1/tcp/0",
+			KeyConf: &cmdbft.KeyConf{
+				SigKey: cmdbft.Key{
+					Algorithm:  cmdbft.KeyAlgorithmSecp256k1,
+					PrivateKey: []byte{1},
+				},
+				AuthKey: cmdbft.Key{
+					Algorithm:  cmdbft.KeyAlgorithmSecp256k1,
+					PrivateKey: authKey,
+				},
+			},
+		},
+	}
+	client.status.Store(idle)
+
+	for range 2 {
+		err = client.Start(t.Context())
+		require.Error(t, err)
+		require.Equal(t, idle, client.status.Load().(status))
+		require.Nil(t, client.Peer())
+	}
+}
 
 type stubRoundManager struct {
 	finalizedBlocks        []*models.Block
@@ -24,11 +62,14 @@ type stubRoundManager struct {
 	startedRounds          []*api.BigInt
 	committedRoot          []byte
 	committedBlock         *api.BigInt
+	committedRootStarted   chan<- struct{}
+	committedRootRelease   <-chan struct{}
 	durableRecovered       bool
 	durableRecoveryBlock   *api.BigInt
 	durableRecoveryRoot    api.HexBytes
 	durableRecoveryCert    api.HexBytes
 	durableRecoveryCallCnt int
+	durableRecoveryErr     error
 	durableLoadedBlock     *models.Block
 	durableLoadFound       bool
 	durableLoadBlock       *api.BigInt
@@ -59,6 +100,12 @@ func (m *stubRoundManager) StartNextRoundFromPrecollector(ctx context.Context, r
 }
 
 func (m *stubRoundManager) CommittedRoot(context.Context) ([]byte, *api.BigInt, error) {
+	if m.committedRootStarted != nil {
+		m.committedRootStarted <- struct{}{}
+	}
+	if m.committedRootRelease != nil {
+		<-m.committedRootRelease
+	}
 	return m.committedRoot, m.committedBlock, nil
 }
 
@@ -67,7 +114,7 @@ func (m *stubRoundManager) FinalizeCertifiedProposal(_ context.Context, blockNum
 	m.durableRecoveryBlock = api.NewBigInt(new(big.Int).Set(blockNumber.Int))
 	m.durableRecoveryRoot = append(api.HexBytes(nil), rootHash...)
 	m.durableRecoveryCert = append(api.HexBytes(nil), unicityCertificate...)
-	return m.durableRecovered, nil
+	return m.durableRecovered, m.durableRecoveryErr
 }
 
 func (m *stubRoundManager) LoadDurableProposal(_ context.Context, blockNumber *api.BigInt) (*models.Block, bool, error) {
@@ -343,9 +390,11 @@ func TestBFTClientInitializationResendsDurableProposal(t *testing.T) {
 	require.Equal(t, 1, rm.durableLoadCallCnt)
 	require.EqualValues(t, 12, rm.durableLoadBlock.Uint64())
 	require.Empty(t, rm.startedRounds)
-	require.Same(t, proposal, client.proposedBlock)
-	require.True(t, client.resumedDurableProposal)
-	require.Equal(t, normal, client.status.Load().(status))
+	require.Nil(t, client.proposedBlock)
+	require.False(t, client.resumedDurableProposal)
+	require.Equal(t, initializing, client.status.Load().(status))
+	require.Nil(t, client.luc.Load())
+	require.Zero(t, client.nextExpectedRound.Load())
 }
 
 func TestBFTClientInitializationFinalizesCertifiedDurableProposalBeforeStartingNextRound(t *testing.T) {
@@ -381,6 +430,348 @@ func TestBFTClientInitializationFinalizesCertifiedDurableProposalBeforeStartingN
 	require.EqualValues(t, 123, rm.startedRounds[0].Uint64())
 	require.Nil(t, client.proposedBlock)
 	require.Equal(t, normal, client.status.Load().(status))
+}
+
+func TestBFTClientStopClearsSessionProposalState(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+
+	client := &BFTClientImpl{
+		logger:                 log,
+		proposedBlock:          &models.Block{},
+		resumedDurableProposal: true,
+	}
+	client.status.Store(normal)
+	client.certRequestTime.Store(time.Now().UnixNano())
+
+	client.Stop()
+
+	require.Equal(t, idle, client.status.Load().(status))
+	require.Nil(t, client.proposedBlock)
+	require.False(t, client.resumedDurableProposal)
+	require.Zero(t, client.certRequestTime.Load())
+}
+
+func TestBFTClientStopWaitsForEventLoopExit(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+
+	loopCanceled := make(chan struct{})
+	loopDone := make(chan struct{})
+	client := &BFTClientImpl{
+		logger:      log,
+		msgLoopDone: loopDone,
+		msgLoopCancelFn: func() {
+			close(loopCanceled)
+		},
+	}
+	client.status.Store(normal)
+
+	stopDone := make(chan struct{})
+	go func() {
+		client.Stop()
+		close(stopDone)
+	}()
+
+	select {
+	case <-loopCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("stop did not cancel the event loop")
+	}
+	select {
+	case <-stopDone:
+		t.Fatal("stop returned before the event loop exited")
+	default:
+	}
+	require.Equal(t, stopping, client.status.Load().(status))
+	require.ErrorIs(t, client.Start(t.Context()), ErrBFTClientStopping)
+
+	secondStopDone := make(chan struct{})
+	go func() {
+		client.Stop()
+		close(secondStopDone)
+	}()
+	select {
+	case <-secondStopDone:
+		t.Fatal("concurrent stop returned before the active stop completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(loopDone)
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		t.Fatal("stop did not return after the event loop exited")
+	}
+	select {
+	case <-secondStopDone:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent stop did not join the active stop")
+	}
+	require.Equal(t, idle, client.status.Load().(status))
+}
+
+func TestBFTClientStopCancelsBeforeWaitingForUCProcessing(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+
+	loopCtx, cancelLoop := context.WithCancel(context.Background())
+	client := &BFTClientImpl{
+		logger:          log,
+		msgLoopCancelFn: cancelLoop,
+	}
+	client.status.Store(normal)
+
+	processingStarted := make(chan struct{})
+	processingDone := make(chan struct{})
+	go func() {
+		client.ucProcessingMutex.Lock()
+		close(processingStarted)
+		<-loopCtx.Done()
+		client.ucProcessingMutex.Unlock()
+		close(processingDone)
+	}()
+	<-processingStarted
+
+	stopDone := make(chan struct{})
+	go func() {
+		client.Stop()
+		close(stopDone)
+	}()
+
+	select {
+	case <-processingDone:
+	case <-time.After(time.Second):
+		t.Fatal("stop did not cancel UC processing before waiting for it")
+	}
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		t.Fatal("stop did not return after UC processing exited")
+	}
+	require.Equal(t, idle, client.status.Load().(status))
+}
+
+func TestBFTClientInitializationCannotOverwriteStopping(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+
+	root := bytes.Repeat([]byte{0x31}, api.SiblingSize)
+	committedRootStarted := make(chan struct{}, 1)
+	committedRootRelease := make(chan struct{})
+	rm := &stubRoundManager{
+		committedRoot:        root,
+		committedBlock:       api.NewBigIntFromUint64(11),
+		committedRootStarted: committedRootStarted,
+		committedRootRelease: committedRootRelease,
+	}
+	loopCanceled := make(chan struct{})
+	client := &BFTClientImpl{
+		logger:          log,
+		roundManager:    rm,
+		msgLoopCancelFn: func() { close(loopCanceled) },
+	}
+	client.status.Store(initializing)
+
+	handlerDone := make(chan error, 1)
+	go func() {
+		handlerDone <- client.handleUnicityCertificate(
+			context.Background(),
+			testUnicityCertificate(12, 21, root, root),
+			&certification.TechnicalRecord{Round: 13, Epoch: 1},
+		)
+	}()
+	<-committedRootStarted
+
+	stopDone := make(chan struct{})
+	go func() {
+		client.Stop()
+		close(stopDone)
+	}()
+	<-loopCanceled
+
+	// Hold mu after Stop publishes stopping, keeping Stop in cleanup while the
+	// initialization handler completes and attempts its status transition.
+	client.mu.Lock()
+	close(committedRootRelease)
+	require.NoError(t, <-handlerDone)
+	require.Equal(t, stopping, client.status.Load().(status))
+	client.mu.Unlock()
+
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		t.Fatal("stop did not complete after initialization handler exited")
+	}
+	require.Equal(t, idle, client.status.Load().(status))
+}
+
+func TestBFTClientInitializationFailureRemainsRetryable(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+
+	committedRoot := bytes.Repeat([]byte{0x10}, api.SiblingSize)
+	certifiedRoot := bytes.Repeat([]byte{0x20}, api.SiblingSize)
+	rm := &stubRoundManager{
+		committedRoot:      committedRoot,
+		committedBlock:     api.NewBigIntFromUint64(120),
+		durableRecoveryErr: errors.New("temporary recovery failure"),
+	}
+	client := &BFTClientImpl{
+		logger:       log,
+		roundManager: rm,
+	}
+	client.status.Store(initializing)
+	uc := testUnicityCertificate(121, 90, certifiedRoot, committedRoot)
+	tr := &certification.TechnicalRecord{Round: 123, Epoch: 1}
+
+	err = client.handleUnicityCertificate(t.Context(), uc, tr)
+	require.ErrorContains(t, err, "temporary recovery failure")
+	require.Equal(t, initializing, client.status.Load().(status))
+	require.Nil(t, client.luc.Load())
+	require.Zero(t, client.nextExpectedRound.Load())
+
+	rm.durableRecoveryErr = nil
+	rm.durableRecovered = true
+	require.NoError(t, client.handleUnicityCertificate(t.Context(), uc, tr))
+	require.Equal(t, normal, client.status.Load().(status))
+	require.Equal(t, 2, rm.durableRecoveryCallCnt)
+	require.Len(t, rm.startedRounds, 1)
+}
+
+func TestBFTClientRetainedDuplicateUCCompletesInitialization(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+
+	root := bytes.Repeat([]byte{0x31}, api.SiblingSize)
+	retainedUC := testUnicityCertificate(10, 20, root, nil)
+	rm := &stubRoundManager{
+		committedRoot:  root,
+		committedBlock: api.NewBigIntFromUint64(10),
+	}
+	client := &BFTClientImpl{
+		logger:       log,
+		roundManager: rm,
+	}
+	client.status.Store(initializing)
+	client.luc.Store(retainedUC)
+	client.lastRootRound.Store(retainedUC.GetRootRoundNumber())
+
+	require.NoError(t, client.handleUnicityCertificate(
+		t.Context(),
+		retainedUC,
+		&certification.TechnicalRecord{Round: 11, Epoch: 1},
+	))
+
+	require.Equal(t, normal, client.status.Load().(status))
+	require.Len(t, rm.startedRounds, 1)
+	require.EqualValues(t, 11, rm.startedRounds[0].Uint64())
+}
+
+func TestBFTClientRepeatUCCompletesInitialization(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+
+	root := bytes.Repeat([]byte{0x32}, api.SiblingSize)
+	previousUC := testUnicityCertificate(10, 20, root, nil)
+	repeatUC := testUnicityCertificate(10, 21, root, previousUC.InputRecord.PreviousHash)
+	rm := &stubRoundManager{}
+	client := &BFTClientImpl{
+		logger:       log,
+		roundManager: rm,
+	}
+	client.status.Store(initializing)
+	client.luc.Store(previousUC)
+	client.lastRootRound.Store(previousUC.GetRootRoundNumber())
+
+	require.NoError(t, client.handleUnicityCertificate(
+		t.Context(),
+		repeatUC,
+		&certification.TechnicalRecord{Round: 12, Epoch: 1},
+	))
+
+	require.Equal(t, normal, client.status.Load().(status))
+	require.Same(t, repeatUC, client.luc.Load())
+	require.Len(t, rm.startedRounds, 1)
+	require.EqualValues(t, 12, rm.startedRounds[0].Uint64())
+}
+
+func TestBFTClientCanceledFinalizationDoesNotPublishFatal(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+	eventBus := events.NewEventBus(log)
+	fatalEvents := eventBus.Subscribe(events.TopicFatalError)
+	client := &BFTClientImpl{logger: log, eventBus: eventBus}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client.publishFatalError(ctx, context.Canceled)
+
+	select {
+	case event := <-fatalEvents:
+		t.Fatalf("unexpected fatal event during intentional cancellation: %#v", event)
+	default:
+	}
+}
+
+func TestBFTClientCancellationDoesNotHideUnrelatedFatalError(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+	eventBus := events.NewEventBus(log)
+	fatalEvents := eventBus.Subscribe(events.TopicFatalError)
+	client := &BFTClientImpl{logger: log, eventBus: eventBus}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	corruptionErr := errors.New("certified root mismatch")
+	client.publishFatalError(ctx, corruptionErr)
+
+	select {
+	case event := <-fatalEvents:
+		fatal, ok := event.(events.FatalErrorEvent)
+		require.True(t, ok)
+		require.Equal(t, corruptionErr.Error(), fatal.Error)
+	default:
+		t.Fatal("expected unrelated fatal error to remain visible after cancellation")
+	}
+}
+
+func TestBFTClientCanceledSessionDoesNotProcessBufferedUC(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+
+	previousUC := testUnicityCertificate(10, 20, bytes.Repeat([]byte{0x10}, api.SiblingSize), nil)
+	client := &BFTClientImpl{
+		logger:       log,
+		roundManager: &stubRoundManager{},
+	}
+	client.luc.Store(previousUC)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = client.handleUnicityCertificate(
+		ctx,
+		testUnicityCertificate(11, 21, bytes.Repeat([]byte{0x11}, api.SiblingSize), previousUC.InputRecord.Hash),
+		&certification.TechnicalRecord{Round: 12, Epoch: 1},
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.Same(t, previousUC, client.luc.Load())
+}
+
+func TestBFTClientRetainedUCDoesNotBypassInitialization(t *testing.T) {
+	log, err := logger.New("warn", "json", "", false)
+	require.NoError(t, err)
+
+	client := &BFTClientImpl{logger: log}
+	client.status.Store(initializing)
+	client.luc.Store(testUnicityCertificate(10, 20, bytes.Repeat([]byte{0x10}, api.SiblingSize), nil))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err = client.ensureInitialized(ctx)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 func TestBFTClientInitializationStartsRoundWhenNoDurableProposal(t *testing.T) {

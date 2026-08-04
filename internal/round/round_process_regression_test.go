@@ -17,6 +17,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -254,6 +255,230 @@ func TestStartNewRoundAbandonsSupersededPendingRound(t *testing.T) {
 
 	_, pending := rm.proofPending[commitment.StateID.String()]
 	require.False(t, pending)
+}
+
+type resetRecordingCommitmentQueue struct {
+	resetCount int
+}
+
+func (q *resetRecordingCommitmentQueue) Store(context.Context, *models.CertificationRequest) error {
+	return nil
+}
+
+func (q *resetRecordingCommitmentQueue) GetByStateID(context.Context, api.StateID) (*models.CertificationRequest, error) {
+	return nil, nil
+}
+
+func (q *resetRecordingCommitmentQueue) GetUnprocessedBatch(context.Context, int) ([]*models.CertificationRequest, error) {
+	return nil, nil
+}
+
+func (q *resetRecordingCommitmentQueue) GetUnprocessedBatchWithCursor(context.Context, string, int) ([]*models.CertificationRequest, string, error) {
+	return nil, "", nil
+}
+
+func (q *resetRecordingCommitmentQueue) StreamCertificationRequests(context.Context, chan<- *models.CertificationRequest) error {
+	return nil
+}
+
+func (q *resetRecordingCommitmentQueue) MarkProcessed(context.Context, []interfaces.CertificationRequestAck) error {
+	return nil
+}
+
+func (q *resetRecordingCommitmentQueue) Delete(context.Context, []api.StateID) error {
+	return nil
+}
+
+func (q *resetRecordingCommitmentQueue) Count(context.Context) (int64, error) {
+	return 0, nil
+}
+
+func (q *resetRecordingCommitmentQueue) CountUnprocessed(context.Context) (int64, error) {
+	return 0, nil
+}
+
+func (q *resetRecordingCommitmentQueue) GetAllPending(context.Context) ([]*models.CertificationRequest, error) {
+	return nil, nil
+}
+
+func (q *resetRecordingCommitmentQueue) GetByStateIDs(context.Context, []api.StateID) (map[string]*models.CertificationRequest, error) {
+	return nil, nil
+}
+
+func (q *resetRecordingCommitmentQueue) Initialize(context.Context) error {
+	return nil
+}
+
+func (q *resetRecordingCommitmentQueue) Close(context.Context) error {
+	return nil
+}
+
+func (q *resetRecordingCommitmentQueue) ResetPendingSweep() {
+	q.resetCount++
+}
+
+func TestStartNewRoundWithSnapshotAbandonAfterSnapshotCleanupResetsRedisPendingSweep(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{
+			Database: "test_start_round_snapshot_abandon_resets_pending_sweep",
+		},
+		Processing: config.ProcessingConfig{
+			CollectPhaseDuration:       time.Hour,
+			CommitmentStreamBufferSize: 16,
+			MaxCommitmentsPerRound:     1000,
+		},
+		Storage:  config.StorageConfig{UseRedisForCommitments: true},
+		Sharding: config.ShardingConfig{Mode: config.ShardingModeBFTShard},
+	}
+	storage := testutil.SetupTestStorage(t, cfg)
+	testLogger := newTestLogger(t)
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		storage.CommitmentQueue(),
+		storage,
+		nil,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		threadSafeSMT,
+		nil,
+	)
+	require.NoError(t, err)
+	resetQueue := &resetRecordingCommitmentQueue{}
+	rm.commitmentQueue = resetQueue
+	rm.bftClient = newRecordingBFTClient()
+	defer func() {
+		cancel()
+		rm.roundWG.Wait()
+	}()
+
+	oldCommitment := testutil.CreateTestCertificationRequest(t, "abandoned_precollected_round")
+	oldCtx, oldCancel := context.WithCancel(ctx)
+	rm.currentRound = &Round{
+		Number:      api.NewBigInt(big.NewInt(1)),
+		StartTime:   time.Now(),
+		State:       RoundStateProcessing,
+		Commitments: []*models.CertificationRequest{oldCommitment},
+		Cancel:      oldCancel,
+		// processRound clears Snapshot when cancellation wins before proposal.
+		Snapshot:           nil,
+		PendingCommitments: []*models.CertificationRequest{oldCommitment},
+	}
+	rm.markProofsPending([]*models.CertificationRequest{oldCommitment})
+
+	newCommitment := testutil.CreateTestCertificationRequest(t, "new_precollected_round")
+	newLeaf, err := commitmentLeafInput(newCommitment)
+	require.NoError(t, err)
+	newSnapshot, err := rm.smtBackend.CreateSnapshot(ctx)
+	require.NoError(t, err)
+	result, err := newSnapshot.AddLeavesClassified(ctx, []smtbackend.LeafInput{newLeaf})
+	require.NoError(t, err)
+	require.NoError(t, result.ValidateAllAccepted(1))
+	rm.markProofsPending([]*models.CertificationRequest{newCommitment})
+
+	require.NoError(t, rm.StartNewRoundWithSnapshot(
+		ctx,
+		api.NewBigInt(big.NewInt(2)),
+		newSnapshot,
+		[]*models.CertificationRequest{newCommitment},
+		[]smtbackend.LeafInput{newLeaf},
+		false,
+		"",
+	))
+
+	require.Equal(t, 1, resetQueue.resetCount)
+	select {
+	case <-oldCtx.Done():
+	default:
+		t.Fatal("superseded round context was not cancelled")
+	}
+	_, pending := rm.proofPending[oldCommitment.StateID.String()]
+	require.False(t, pending)
+	_, pending = rm.proofPending[newCommitment.StateID.String()]
+	require.True(t, pending)
+}
+
+func TestStartNewRoundWithSnapshotDoesNotReplayFinalizedRoundHistory(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cfg := config.Config{
+		Database: config.DatabaseConfig{
+			Database: "test_start_round_snapshot_no_replay_finalized_history",
+		},
+		Processing: config.ProcessingConfig{
+			CollectPhaseDuration:       time.Hour,
+			CommitmentStreamBufferSize: 16,
+			MaxCommitmentsPerRound:     1000,
+		},
+		Storage:  config.StorageConfig{UseRedisForCommitments: true},
+		Sharding: config.ShardingConfig{Mode: config.ShardingModeBFTShard},
+	}
+	storage := testutil.SetupTestStorage(t, cfg)
+	testLogger := newTestLogger(t)
+	threadSafeSMT := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	rm, err := NewRoundManager(
+		ctx,
+		&cfg,
+		testLogger,
+		storage.CommitmentQueue(),
+		storage,
+		nil,
+		state.NewSyncStateTracker(),
+		nil,
+		events.NewEventBus(testLogger),
+		threadSafeSMT,
+		nil,
+	)
+	require.NoError(t, err)
+	resetQueue := &resetRecordingCommitmentQueue{}
+	rm.commitmentQueue = resetQueue
+	rm.bftClient = newRecordingBFTClient()
+	defer func() {
+		cancel()
+		rm.roundWG.Wait()
+	}()
+
+	oldCommitment := testutil.CreateTestCertificationRequest(t, "finalized_round_history")
+	rm.currentRound = &Round{
+		Number:      api.NewBigInt(big.NewInt(1)),
+		StartTime:   time.Now(),
+		State:       RoundStateFinalizing,
+		Commitments: []*models.CertificationRequest{oldCommitment},
+		Block:       &models.Block{},
+		Snapshot:    nil,
+		// A normally finalized round has historical Commitments left for
+		// diagnostics, but Block is set and unresolved state is cleared.
+		PendingCommitments: nil,
+	}
+
+	newCommitment := testutil.CreateTestCertificationRequest(t, "precollected_round_pending_marker")
+	newLeaf, err := commitmentLeafInput(newCommitment)
+	require.NoError(t, err)
+	newSnapshot, err := rm.smtBackend.CreateSnapshot(ctx)
+	require.NoError(t, err)
+	result, err := newSnapshot.AddLeavesClassified(ctx, []smtbackend.LeafInput{newLeaf})
+	require.NoError(t, err)
+	require.NoError(t, result.ValidateAllAccepted(1))
+	rm.markProofsPending([]*models.CertificationRequest{newCommitment})
+
+	require.NoError(t, rm.StartNewRoundWithSnapshot(
+		ctx,
+		api.NewBigInt(big.NewInt(2)),
+		newSnapshot,
+		[]*models.CertificationRequest{newCommitment},
+		[]smtbackend.LeafInput{newLeaf},
+		false,
+		"",
+	))
+
+	require.Zero(t, resetQueue.resetCount)
+	_, pending := rm.proofPending[newCommitment.StateID.String()]
+	require.True(t, pending)
 }
 
 func TestStaleCertificationRequestAbandonsStoredDurableProposal(t *testing.T) {
