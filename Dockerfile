@@ -6,7 +6,8 @@ FROM ${GO_IMAGE} AS rocksdb-builder
 ARG ROCKSDB_VERSION=8.10.0
 ARG ROCKSDB_SHA256=2dc107551cc864dbcf7908fdee96f2318cbb680df2b3fe1f85b0d545c2b5673b
 ARG ROCKSDB_BUILD_JOBS=4
-ARG ROCKSDB_PORTABLE=0
+# CI runners may expose CPU instructions unavailable on deployment hosts.
+ARG ROCKSDB_PORTABLE=1
 
 RUN apk add --no-cache \
     bash \
