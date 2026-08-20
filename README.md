@@ -115,7 +115,7 @@ The service is configured via environment variables:
 | `READ_TIMEOUT` | HTTP read timeout | `30s` |
 | `WRITE_TIMEOUT` | HTTP write timeout | `30s` |
 | `IDLE_TIMEOUT` | HTTP idle timeout | `120s` |
-| `DEFAULT_REQUEST_TTL` | Lifetime assigned to requests that omit a timeout | `1h` |
+| `DEFAULT_REQUEST_TTL` | Lifetime assigned to requests that omit `expiresAt` | `1h` |
 | `CONCURRENCY_LIMIT` | Max concurrent requests | `1000` |
 | `ENABLE_DOCS` | Enable /docs endpoint | `true` |
 | `ENABLE_CORS` | Enable CORS headers | `true` |
@@ -294,12 +294,14 @@ type CertificationData struct {
 	SourceStateHash SourceStateHash `json:"sourceStateHash"`
 
 	// TransactionHash is the raw 32-byte hash of the transaction data.
-	// Explicit-timeout transaction encodings commit to Timeout.
+	// It commits to ExpiresAt, so changing the deadline invalidates the witness.
 	TransactionHash TransactionHash `json:"transactionHash"`
 
-	// Timeout is an optional exclusive certification request timeout in Unix seconds.
-	// When omitted, the service derives one from consensus time and DEFAULT_REQUEST_TTL.
-	Timeout uint64 `json:"timeout,omitempty"`
+	// ExpiresAt is the exclusive certification request deadline in Unix seconds,
+	// or null when the requester left the deadline to the service. It occupies a
+	// fixed position in the encoding either way. When absent, the service derives
+	// a deadline from consensus time and DEFAULT_REQUEST_TTL.
+	ExpiresAt *uint64 `json:"expiresAt"`
 
 	// Witness is the "unlocking part" of owner predicate. In case of PayToPublicKey owner predicate the witness must be
 	// a signature created on the hash of CBOR array[SourceStateHash, TransactionHash],
@@ -328,7 +330,7 @@ type CertificationData struct {
 - `INVALID_SOURCE_STATE_HASH_FORMAT` - SourceStateHash is not exactly 32 bytes
 - `INVALID_TRANSACTION_HASH_FORMAT` - TransactionHash is not exactly 32 bytes
 - `INVALID_SHARD` - The certification request was sent to the wrong shard
-- `REQUEST_EXPIRED` - The round reference time has reached the request's exclusive timeout
+- `REQUEST_EXPIRED` - The round reference time has reached the request's exclusive deadline
 - `SERVICE_NOT_READY` - Consensus reference time is not yet available
 
 #### `get_inclusion_proof.v2`
@@ -359,7 +361,7 @@ The `stateId` must be exactly 64 hex characters (32 raw bytes).
 ```
 
 The `result` field is a hex-encoded CBOR array whose proof is tagged. Every inclusion proof carries
-the reference time at which its leaf was created, independently of request-timeout policy:
+the reference time at which its leaf was created, independently of request-deadline policy:
 ```
 [blockNumber, #39033([1, certificationData, referenceTime, certificateBytes, unicityCertificate])]
 ```
@@ -479,7 +481,7 @@ Retrieve all certification requests included in a specific block.
           "signature": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
           "sourceStateHash": "539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647",
           "transactionHash": "c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297",
-          "timeout": 1755003600
+          "expiresAt": 1755003600
         },
         "referenceTime": 1755000000,
         "blockNumber": "123",

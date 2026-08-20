@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	corecbor "github.com/unicitynetwork/aggregator-go/pkg/cbor"
 )
 
 // cborTagPrefix returns the raw CBOR bytes that encode `tag` as a tag head
@@ -203,4 +205,35 @@ func TestInclusionProofV2_RejectsWrongVersion(t *testing.T) {
 	err = types.Cbor.Unmarshal(b, &decoded)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "version")
+}
+
+// CborUint feeds hashing paths such as LeafValue, where the value is not always
+// ours to bound. It must therefore encode the whole uint64 range rather than
+// narrowing to int, which truncates above 2^31 on 32-bit platforms and wraps
+// negative above 2^63 anywhere.
+func TestCborUintCoversTheFullUnsignedRange(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   uint64
+		want []byte
+	}{
+		{"zero", 0, []byte{0x00}},
+		{"one byte inline", 23, []byte{0x17}},
+		{"one byte follows", 24, []byte{0x18, 0x18}},
+		{"max uint8", 0xff, []byte{0x18, 0xff}},
+		{"two bytes", 0x100, []byte{0x19, 0x01, 0x00}},
+		{"max uint16", 0xffff, []byte{0x19, 0xff, 0xff}},
+		{"four bytes", 0x10000, []byte{0x1a, 0x00, 0x01, 0x00, 0x00}},
+		{"max uint32", 0xffffffff, []byte{0x1a, 0xff, 0xff, 0xff, 0xff}},
+		{"eight bytes", 0x100000000, []byte{0x1b, 0, 0, 0, 1, 0, 0, 0, 0}},
+		{"above max int64", 1 << 63, []byte{0x1b, 0x80, 0, 0, 0, 0, 0, 0, 0}},
+		{"max uint64", ^uint64(0), []byte{0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CborUint(tc.in)
+			require.Equal(t, tc.want, got)
+			// Shortest-form encoding is what the canonical validator requires.
+			require.NoError(t, corecbor.ValidateCoreDeterministic(got))
+		})
+	}
 }

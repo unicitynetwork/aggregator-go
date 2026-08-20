@@ -117,7 +117,7 @@ type GetInclusionProofResponseV2 struct {
 //	#InclusionProofTag ([
 //	  version: uint,
 //	  certificationDataOrNull,
-//	  referenceTimeOrNull: uint,
+//	  referenceTime: uint | null,
 //	  certificateBytes: bstr,   // InclusionCert or ExclusionCert raw wire form
 //	  unicityCertificate: raw CBOR
 //	])

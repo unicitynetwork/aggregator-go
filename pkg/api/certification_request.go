@@ -246,7 +246,7 @@ func (c CertificationData) CreateStateID() (StateID, error) {
 
 // CertDataHash returns the data hash of certification data.
 // The hash is calculated as the CBOR array
-// [OwnerPredicate, SourceStateHash, TransactionHash, Timeout, Witness].
+// [OwnerPredicate, SourceStateHash, TransactionHash, ExpiresAt, Witness].
 func CertDataHash(ownerPredicate Predicate, sourceStateHash, transactionHash []byte, expiresAt *uint64, signature []byte) (*DataHash, error) {
 	if len(sourceStateHash) != StateTreeKeyLengthBytes {
 		return nil, fmt.Errorf("invalid source state hash length: expected %d bytes, got %d", StateTreeKeyLengthBytes, len(sourceStateHash))

@@ -20,7 +20,8 @@ type CertificationRequest struct {
 	// created in. Zero until the round that materialises the leaf pins it.
 	ReferenceTime uint64 `json:"referenceTime"`
 	// EffectiveTimeout is the absolute consensus-time deadline used for queue
-	// admission. It is assigned by the service when CertificationData.Timeout is zero.
+	// admission. It is assigned by the service when CertificationData.ExpiresAt
+	// is absent, and otherwise repeats that explicit deadline.
 	EffectiveTimeout uint64         `json:"effectiveTimeout"`
 	CreatedAt        *api.Timestamp `json:"createdAt"`
 	ProcessedAt      *api.Timestamp `json:"processedAt,omitempty"`
