@@ -307,7 +307,7 @@ func TestDiskBackendRocksDBPrecomputedProofResponsesRoundTrip(t *testing.T) {
 		InclusionProof: &api.InclusionProofV2{
 			Version: 1,
 			CertificationData: &api.CertificationData{
-				Version:         1,
+				Version:         2,
 				TransactionHash: api.TransactionHash(bytesOf(32, 7)),
 				Timeout:         testutil.RequestTimeout(),
 			},

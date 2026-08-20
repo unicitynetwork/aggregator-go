@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -19,11 +20,16 @@ type RootAggregatorClientStub struct {
 	submissions        map[int]*api.SubmitShardRootRequest // shardID => last request
 	submittedRootHash  api.HexBytes
 	submissionError    error
+	// referenceTime stands in for the seal timestamp a real parent returns: it
+	// advances by one per returned proof, so a child under this stub pins
+	// distinct, increasing reference times as it does against a live parent.
+	referenceTime uint64
 }
 
 func NewRootAggregatorClientStub() *RootAggregatorClientStub {
 	return &RootAggregatorClientStub{
-		submissions: make(map[int]*api.SubmitShardRootRequest),
+		submissions:   make(map[int]*api.SubmitShardRootRequest),
+		referenceTime: uint64(time.Now().Unix()),
 	}
 }
 
@@ -47,7 +53,8 @@ func (m *RootAggregatorClientStub) GetShardProof(ctx context.Context, request *a
 
 	if m.submissions[request.ShardID] != nil {
 		m.returnedProofCount++
-		ucBytes, err := stubProofUC(uint64(m.returnedProofCount), uint64(m.returnedProofCount), m.submittedRootHash)
+		m.referenceTime++
+		ucBytes, err := stubProofUC(uint64(m.returnedProofCount), uint64(m.returnedProofCount), m.referenceTime, m.submittedRootHash)
 		if err != nil {
 			return nil, err
 		}
@@ -94,14 +101,21 @@ func (m *RootAggregatorClientStub) SetSubmissionError(err error) {
 	m.submissionError = err
 }
 
-func stubProofUC(parentRound, rootRound uint64, rootHash api.HexBytes) (api.HexBytes, error) {
+// stubProofUC builds the certificate a parent returns with a shard proof. It
+// carries the same two timestamps a live parent does: the input record records
+// the reference time the certified round was built under, and the seal records
+// the time the child's next round will pin. Without them the child has no
+// reference time and rejects every request as not ready.
+func stubProofUC(parentRound, rootRound, referenceTime uint64, rootHash api.HexBytes) (api.HexBytes, error) {
 	uc := types.UnicityCertificate{
 		InputRecord: &types.InputRecord{
 			RoundNumber: parentRound,
 			Hash:        hex.Bytes(rootHash),
+			Timestamp:   referenceTime,
 		},
 		UnicitySeal: &types.UnicitySeal{
 			RootChainRoundNumber: rootRound,
+			Timestamp:            referenceTime + 1,
 		},
 	}
 

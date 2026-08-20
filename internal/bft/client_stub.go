@@ -92,14 +92,24 @@ func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.
 	if len(block.UnicityCertificate) == 0 {
 		// Emit a monotonic synthetic UC so child-mode freshness checks also work
 		// when the parent runs against the local BFT stub.
+		//
+		// The certificate carries the same two timestamps a live core returns:
+		// the input record records the reference time this round's leaves were
+		// built under, and the seal records the time the next round will pin,
+		// which is what the stub hands StartNextRoundFromPrecollector below. A
+		// certificate without them leaves every consumer of this UC, a child
+		// shard in particular, with no reference time at all, and the service
+		// then rejects every request as not ready.
 		roundNumber := block.Index.Uint64()
 		uc := types.UnicityCertificate{
 			InputRecord: &types.InputRecord{
 				RoundNumber: roundNumber,
 				Hash:        hex.Bytes(block.RootHash),
+				Timestamp:   block.ReferenceTime,
 			},
 			UnicitySeal: &types.UnicitySeal{
 				RootChainRoundNumber: roundNumber,
+				Timestamp:            block.ReferenceTime + 1,
 			},
 		}
 		ucBytes, err := types.Cbor.Marshal(uc)
