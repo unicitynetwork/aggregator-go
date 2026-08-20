@@ -408,7 +408,7 @@ func stateIDsAndLeavesFromAggregatorRecords(records []*models.AggregatorRecord) 
 		}
 		leaves[i] = smtbackend.LeafInput{
 			Key:   append([]byte(nil), key...),
-			Value: append([]byte(nil), record.CertificationData.TransactionHash...),
+			Value: api.LeafValue(record.CertificationData.TransactionHash.DataBytes(), record.ReferenceTime),
 		}
 	}
 	return stateIDs, leaves, nil

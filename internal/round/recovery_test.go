@@ -124,6 +124,25 @@ func (s *RecoveryTestSuite) SetupTest() {
 	_ = s.commitmentQueue.Initialize(s.ctx)
 }
 
+func TestStateIDsAndLeavesFromAggregatorRecordsBindsReferenceTime(t *testing.T) {
+	const referenceTime uint64 = 1755000000
+	stateID := api.ImprintV2(bytes.Repeat([]byte{0x11}, api.StateTreeKeyLengthBytes))
+	txHash := api.ImprintV2(bytes.Repeat([]byte{0x22}, api.StateTreeKeyLengthBytes))
+	record := &models.AggregatorRecord{
+		StateID:       stateID,
+		ReferenceTime: referenceTime,
+		CertificationData: models.CertificationData{
+			TransactionHash: txHash,
+		},
+	}
+
+	stateIDs, leaves, err := stateIDsAndLeavesFromAggregatorRecords([]*models.AggregatorRecord{record})
+	require.NoError(t, err)
+	require.Equal(t, []api.StateID{stateID}, stateIDs)
+	require.Len(t, leaves, 1)
+	require.Equal(t, api.LeafValue(txHash.DataBytes(), referenceTime), leaves[0].Value)
+}
+
 // Helper to create and store test data
 func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, prefix string) ([]*models.CertificationRequest, *models.Block, []api.StateID) {
 	t := s.T()
@@ -135,6 +154,7 @@ func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, 
 	// Create state IDs.
 	stateIDs := make([]api.StateID, len(commitments))
 	for i, c := range commitments {
+		c.ReferenceTime = 1755000000
 		stateIDs[i] = c.StateID
 	}
 

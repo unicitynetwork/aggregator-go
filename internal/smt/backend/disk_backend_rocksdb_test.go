@@ -13,6 +13,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk/persist"
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk/rocksstore"
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk/storage"
+	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 

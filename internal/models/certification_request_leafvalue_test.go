@@ -31,9 +31,18 @@ func TestCertificationRequestLeafValue_V2BindsTheReferenceTime(t *testing.T) {
 	require.NotEqual(t, leafRaw, laterLeaf)
 }
 
-// Materialising a leaf records the reference time it was built from, so the
-// record and the served proof report the same value.
-func TestCertificationRequestLeafValue_RecordsTheReferenceTime(t *testing.T) {
-	req := &CertificationRequest{Version: 2}
+// Computing a leaf value is pure. The round materialisation path records the
+// reference time only after it has admitted the request.
+func TestCertificationRequestLeafValue_DoesNotMutateReferenceTime(t *testing.T) {
+	const txRaw = "11223344556677889900aabbccddeeff00112233445566778899aabbccddeeff"
+	req := &CertificationRequest{
+		Version: 2,
+		CertificationData: CertificationData{
+			TransactionHash: api.RequireNewImprintV2(txRaw),
+		},
+	}
+	require.Zero(t, req.ReferenceTime)
+	_, err := req.LeafValue(1755000000)
+	require.NoError(t, err)
 	require.Zero(t, req.ReferenceTime)
 }

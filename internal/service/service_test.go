@@ -266,8 +266,10 @@ func validateInclusionProof(t *testing.T, proof *api.InclusionProofV2, req *api.
 	require.NoError(t, err, "UC.IR.h must be extractable")
 	key, err := req.StateID.GetTreeKey()
 	require.NoError(t, err)
+	require.NotNil(t, proof.ReferenceTime)
+	leafValue := api.LeafValue(req.CertificationData.TransactionHash.DataBytes(), *proof.ReferenceTime)
 	require.NoError(t,
-		cert.Verify(key, req.CertificationData.TransactionHash.DataBytes(), rootRaw, api.InclusionProofV2HashAlgorithm),
+		cert.Verify(key, leafValue, rootRaw, api.InclusionProofV2HashAlgorithm),
 		"v2 inclusion cert must verify against UC.IR.h")
 }
 
@@ -385,7 +387,8 @@ func TestGetInclusionProofV2Child_ComposesParentFragment(t *testing.T) {
 	childTree := smt.NewChildSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits, shardingCfg.Child.ShardID)
 	path, err := stateID.GetPath()
 	require.NoError(t, err)
-	require.NoError(t, childTree.AddLeaf(path, transactionHash.DataBytes()))
+	const referenceTime uint64 = 1755000000
+	require.NoError(t, childTree.AddLeaf(path, api.LeafValue(transactionHash.DataBytes(), referenceTime)))
 	childRoot := childTree.GetRootHashRaw()
 
 	parentTree := smt.NewParentSparseMerkleTree(api.SHA256, shardingCfg.ShardIDLength)
@@ -418,11 +421,13 @@ func TestGetInclusionProofV2Child_ComposesParentFragment(t *testing.T) {
 			OwnerPredicate:  api.Predicate{Engine: 1, Code: []byte{0x01}, Params: []byte{0x02}},
 			SourceStateHash: sourceStateHash,
 			TransactionHash: transactionHash,
+			Timeout:         referenceTime + 3600,
 			Witness:         []byte{0x01, 0x02},
 		},
-		BlockNumber: api.NewBigIntFromUint64(1),
-		LeafIndex:   api.NewBigIntFromUint64(0),
-		CreatedAt:   api.Now(),
+		ReferenceTime: referenceTime,
+		BlockNumber:   api.NewBigIntFromUint64(1),
+		LeafIndex:     api.NewBigIntFromUint64(0),
+		CreatedAt:     api.Now(),
 	}
 
 	service := newAggregatorServiceForTest(t, shardingCfg, childTree)
@@ -445,6 +450,7 @@ func TestGetInclusionProofV2Child_ComposesParentFragment(t *testing.T) {
 			OwnerPredicate:  record.CertificationData.OwnerPredicate,
 			SourceStateHash: record.CertificationData.SourceStateHash,
 			TransactionHash: record.CertificationData.TransactionHash,
+			Timeout:         record.CertificationData.Timeout,
 			Witness:         record.CertificationData.Witness,
 		},
 	}
@@ -695,7 +701,9 @@ func TestGetInclusionProofUsesCachedProofMetadata(t *testing.T) {
 	tree := smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
 	path, err := req.StateID.GetPath()
 	require.NoError(t, err)
-	require.NoError(t, tree.AddLeaf(path, req.CertificationData.TransactionHash.DataBytes()))
+	const referenceTime uint64 = 1755000000
+	require.NoError(t, tree.AddLeaf(path,
+		api.LeafValue(req.CertificationData.TransactionHash.DataBytes(), referenceTime)))
 
 	rootHash := api.HexBytes(tree.GetRootHashRaw())
 	uc := testChildProofUC(t, 9, rootHash)
@@ -718,11 +726,13 @@ func TestGetInclusionProofUsesCachedProofMetadata(t *testing.T) {
 			OwnerPredicate:  req.CertificationData.OwnerPredicate,
 			SourceStateHash: req.CertificationData.SourceStateHash,
 			TransactionHash: req.CertificationData.TransactionHash,
+			Timeout:         req.CertificationData.Timeout,
 			Witness:         req.CertificationData.Witness,
 		},
-		BlockNumber: api.NewBigIntFromUint64(9),
-		LeafIndex:   api.NewBigIntFromUint64(0),
-		CreatedAt:   api.Now(),
+		ReferenceTime: referenceTime,
+		BlockNumber:   api.NewBigIntFromUint64(9),
+		LeafIndex:     api.NewBigIntFromUint64(0),
+		CreatedAt:     api.Now(),
 	}
 
 	blockStorage := &testBlockStorage{latestByRoot: map[string]*models.Block{rootHash.String(): block}}

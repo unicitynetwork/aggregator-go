@@ -339,7 +339,7 @@ func replayLeavesForAggregatorRecords(records []*models.AggregatorRecord) ([]smt
 		}
 		leaves = append(leaves, smtbackend.LeafInput{
 			Key:   append([]byte(nil), keyBytes...),
-			Value: append([]byte(nil), record.CertificationData.TransactionHash...),
+			Value: api.LeafValue(record.CertificationData.TransactionHash.DataBytes(), record.ReferenceTime),
 		})
 	}
 	return leaves, nil
