@@ -405,6 +405,9 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 	) {
 		return errors.New("proof certification data transaction hash does not match certification request transaction hash")
 	}
+	if p.CertificationData.Timeout != v2.CertificationData.Timeout {
+		return errors.New("proof certification data timeout does not match certification request timeout")
+	}
 
 	rootRaw, err := p.UCInputRecordHashRaw()
 	if err != nil {
@@ -419,10 +422,11 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 	if err != nil {
 		return fmt.Errorf("failed to derive SMT key from stateId: %w", err)
 	}
-	// The v2 leaf value binds the reference time the request was validated
-	// under, not the transaction hash alone.
 	if p.ReferenceTime == nil {
 		return errors.New("missing inclusion proof reference time")
+	}
+	if timeout := v2.CertificationData.Timeout; timeout != 0 && *p.ReferenceTime >= timeout {
+		return errors.New("certification request expired")
 	}
 	value := LeafValue(v2.CertificationData.TransactionHash.DataBytes(), *p.ReferenceTime)
 	if err := cert.Verify(key, value, rootRaw, InclusionProofV2HashAlgorithm); err != nil {

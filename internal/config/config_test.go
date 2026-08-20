@@ -467,3 +467,13 @@ func TestGetEnvStringSliceOrDefault(t *testing.T) {
 		}
 	})
 }
+
+func TestProcessingConfigRequestTTL(t *testing.T) {
+	if got := (ProcessingConfig{}).RequestTTL(); got != time.Hour {
+		t.Fatalf("zero-value request TTL = %s, want 1h", got)
+	}
+	configured := ProcessingConfig{DefaultRequestTTL: 90 * time.Minute}
+	if got := configured.RequestTTL(); got != 90*time.Minute {
+		t.Fatalf("configured request TTL = %s, want 90m", got)
+	}
+}

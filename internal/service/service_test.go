@@ -626,7 +626,7 @@ func TestCertificationRequestDoesNotTouchSMTBackend(t *testing.T) {
 		},
 		logger:                        log,
 		commitmentQueue:               queue,
-		roundManager:                  &stubRoundManager{backend: backend},
+		roundManager:                  &stubRoundManager{backend: backend, referenceTime: 1},
 		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
 	}
 
@@ -636,6 +636,52 @@ func TestCertificationRequestDoesNotTouchSMTBackend(t *testing.T) {
 	require.Equal(t, "SUCCESS", resp.Status)
 	require.Len(t, queue.stored, 1)
 	require.Equal(t, 0, backend.calls, "submit path must not read or write the SMT")
+}
+
+func TestCertificationRequestAssignsDefaultTimeoutFromConsensusTime(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	const referenceTime uint64 = 1755000000
+	queue := &recordingCommitmentQueue{}
+	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+	req := createTestCertificationRequests(t, 1)[0]
+	req.CertificationData.Version = 0
+	req.CertificationData.Timeout = 0
+	service := &AggregatorService{
+		config: &config.Config{Processing: config.ProcessingConfig{
+			SkipDuplicateCheck: true, DefaultRequestTTL: 90 * time.Minute,
+		}, Sharding: shardingCfg},
+		logger: log, commitmentQueue: queue,
+		roundManager:                  &stubRoundManager{referenceTime: referenceTime},
+		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+	}
+
+	resp, err := service.CertificationRequest(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, "SUCCESS", resp.Status)
+	require.Len(t, queue.stored, 1)
+	require.Zero(t, queue.stored[0].CertificationData.Timeout)
+	require.Equal(t, referenceTime+5400, queue.stored[0].EffectiveTimeout)
+}
+
+func TestCertificationRequestWithoutConsensusTimeReturnsServiceNotReady(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+	queue := &recordingCommitmentQueue{}
+	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+	service := &AggregatorService{
+		config: &config.Config{Processing: config.ProcessingConfig{SkipDuplicateCheck: true}, Sharding: shardingCfg},
+		logger: log, commitmentQueue: queue, roundManager: &stubRoundManager{},
+		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+	}
+
+	resp, err := service.CertificationRequest(ctx, createTestCertificationRequests(t, 1)[0])
+	require.NoError(t, err)
+	require.Equal(t, api.CertificationStatusServiceNotReady, resp.Status)
+	require.Empty(t, queue.stored)
 }
 
 // A request whose timeout the current reference time has already reached is

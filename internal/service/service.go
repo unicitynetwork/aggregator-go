@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -167,19 +168,8 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 		Witness:         req.CertificationData.Witness,
 	}, aggregateCount)
 
-	// Fail fast on a request that is already expired against the reference time
-	// rounds are currently pinning. The authoritative check runs again where the
-	// leaf is materialised, against that round's pinned reference time.
-	if referenceTime := as.roundManager.CurrentReferenceTime(); referenceTime >= req.CertificationData.Timeout {
-		as.logger.WithContext(ctx).Warn("Certification request expired",
-			"stateId", req.StateID,
-			"timeout", req.CertificationData.Timeout,
-			"referenceTime", referenceTime)
-
-		return &api.CertificationResponse{Status: api.CertificationStatusRequestExpired}, nil
-	}
-
-	// Validate certificationRequest signature and state ID
+	// Validate certificationRequest signature and state ID before assigning any
+	// service-managed metadata.
 	validationResult := as.certificationRequestValidator.Validate(certificationRequest)
 	if validationResult.Status != signing.ValidationStatusSuccess {
 		errorMsg := ""
@@ -191,9 +181,33 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 			"validationStatus", validationResult.Status.String(),
 			"error", errorMsg)
 
-		return &api.CertificationResponse{
-			Status: validationResult.Status.String(),
-		}, nil
+		return &api.CertificationResponse{Status: validationResult.Status.String()}, nil
+	}
+
+	referenceTime := as.roundManager.CurrentReferenceTime()
+	if referenceTime == 0 {
+		return &api.CertificationResponse{Status: api.CertificationStatusServiceNotReady}, nil
+	}
+	effectiveTimeout := req.CertificationData.Timeout
+	if effectiveTimeout == 0 {
+		ttl := uint64(as.config.Processing.RequestTTL() / time.Second)
+		if referenceTime > math.MaxUint64-ttl {
+			return nil, errors.New("default request timeout overflows uint64")
+		}
+		effectiveTimeout = referenceTime + ttl
+	}
+	certificationRequest.EffectiveTimeout = effectiveTimeout
+
+	// Fail fast on a request that is already expired against the reference time
+	// rounds are currently pinning. The authoritative check runs again where the
+	// leaf is materialised, against that round's pinned reference time.
+	if referenceTime >= effectiveTimeout {
+		as.logger.WithContext(ctx).Warn("Certification request expired",
+			"stateId", req.StateID,
+			"timeout", effectiveTimeout,
+			"referenceTime", referenceTime)
+
+		return &api.CertificationResponse{Status: api.CertificationStatusRequestExpired}, nil
 	}
 
 	if !as.config.Processing.SkipDuplicateCheck {

@@ -115,6 +115,7 @@ The service is configured via environment variables:
 | `READ_TIMEOUT` | HTTP read timeout | `30s` |
 | `WRITE_TIMEOUT` | HTTP write timeout | `30s` |
 | `IDLE_TIMEOUT` | HTTP idle timeout | `120s` |
+| `DEFAULT_REQUEST_TTL` | Lifetime assigned to requests that omit a timeout | `1h` |
 | `CONCURRENCY_LIMIT` | Max concurrent requests | `1000` |
 | `ENABLE_DOCS` | Enable /docs endpoint | `true` |
 | `ENABLE_CORS` | Enable CORS headers | `true` |
@@ -293,12 +294,12 @@ type CertificationData struct {
 	SourceStateHash SourceStateHash `json:"sourceStateHash"`
 
 	// TransactionHash is the raw 32-byte hash of the transaction data.
-	// The transaction encoding commits to Timeout.
+	// Explicit-timeout transaction encodings commit to Timeout.
 	TransactionHash TransactionHash `json:"transactionHash"`
 
-	// Timeout is the exclusive certification request timeout in Unix seconds.
-	// A request is admitted only when the round reference time is below it.
-	Timeout uint64 `json:"timeout"`
+	// Timeout is an optional exclusive certification request timeout in Unix seconds.
+	// When omitted, the service derives one from consensus time and DEFAULT_REQUEST_TTL.
+	Timeout uint64 `json:"timeout,omitempty"`
 
 	// Witness is the "unlocking part" of owner predicate. In case of PayToPublicKey owner predicate the witness must be
 	// a signature created on the hash of CBOR array[SourceStateHash, TransactionHash],
@@ -328,6 +329,7 @@ type CertificationData struct {
 - `INVALID_TRANSACTION_HASH_FORMAT` - TransactionHash is not exactly 32 bytes
 - `INVALID_SHARD` - The certification request was sent to the wrong shard
 - `REQUEST_EXPIRED` - The round reference time has reached the request's exclusive timeout
+- `SERVICE_NOT_READY` - Consensus reference time is not yet available
 
 #### `get_inclusion_proof.v2`
 Retrieve the v2 inclusion proof for a submitted certification request.
@@ -356,18 +358,19 @@ The `stateId` must be exactly 64 hex characters (32 raw bytes).
 }
 ```
 
-The `result` field is a hex-encoded CBOR array whose proof is tagged:
+The `result` field is a hex-encoded CBOR array whose proof is tagged. Every inclusion proof carries
+the reference time at which its leaf was created, independently of request-timeout policy:
 ```
-[blockNumber, #39033([version, certificationData, referenceTime, certificateBytes, unicityCertificate])]
+[blockNumber, #39033([1, certificationData, referenceTime, certificateBytes, unicityCertificate])]
 ```
 
 - `certificationData` is the certification data for inclusion proofs, or `null` for non-inclusion proofs.
-- `referenceTime` is the round time fixed when the leaf was created. It is `null` for non-inclusion proofs.
+- `referenceTime` is the round time fixed when the leaf was created.
 - For inclusion proofs, `certificateBytes` is the binary inclusion certificate: `bitmap[32] || sibling_1[32] || ... || sibling_n[32]`, where `n = popcount(bitmap)`. Siblings are in root-to-leaf order. For non-inclusion proofs, `certificateBytes` is an exclusion certificate: `k_l[32] || h_l[32] || bitmap[32] || siblings...` (exclusion proof generation is not yet implemented).
 - The expected SMT root is always taken from `UC.IR.h` (input record hash of the Unicity Certificate). No root field appears in the certificate itself.
 
 **Hash rules (Yellowpaper-aligned):**
-- Value: `SHA-256(CBOR([transactionHash, referenceTime]))`
+- Value: `SHA-256(CBOR([transactionHash, referenceTime]))` for every inclusion proof
 - Leaf: `H(0x00 || key || value)`
 - Inner node (two children): `H(0x01 || depth_byte || left || right)`
 - Inner node (one child): passthrough (child hash unchanged)

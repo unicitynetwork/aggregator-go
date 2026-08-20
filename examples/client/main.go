@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -106,8 +105,7 @@ func createValidCertificationRequest() *api.CertificationRequest {
 		OwnerPredicate:  ownerPredicate,
 		SourceStateHash: stateHash,
 		TransactionHash: transactionHash,
-		// The timeout is exclusive and expressed in Unix seconds.
-		Timeout: uint64(time.Now().Add(time.Hour).Unix()),
+		// Timeout is omitted so the service derives it from consensus time.
 	}
 	if err := signingService.SignCertData(certData, privateKey.Serialize()); err != nil {
 		panic(fmt.Sprintf("Failed to sign certification request data: %v", err))

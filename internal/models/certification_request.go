@@ -18,10 +18,13 @@ type CertificationRequest struct {
 	AggregateRequestCount uint64             `json:"aggregateRequestCount"`
 	// ReferenceTime is the reference time of the round this request's leaf was
 	// created in. Zero until the round that materialises the leaf pins it.
-	ReferenceTime uint64         `json:"referenceTime"`
-	CreatedAt     *api.Timestamp `json:"createdAt"`
-	ProcessedAt   *api.Timestamp `json:"processedAt,omitempty"`
-	StreamID      string         `json:"-"` // Redis stream ID used for stream acknowledgements
+	ReferenceTime uint64 `json:"referenceTime"`
+	// EffectiveTimeout is the absolute consensus-time deadline used for queue
+	// admission. It is assigned by the service when CertificationData.Timeout is zero.
+	EffectiveTimeout uint64         `json:"effectiveTimeout"`
+	CreatedAt        *api.Timestamp `json:"createdAt"`
+	ProcessedAt      *api.Timestamp `json:"processedAt,omitempty"`
+	StreamID         string         `json:"-"` // Redis stream ID used for stream acknowledgements
 }
 
 // CertificationRequestBSON represents the BSON version of CertificationRequest for MongoDB storage
@@ -33,6 +36,7 @@ type CertificationRequestBSON struct {
 	CertificationData     CertificationDataBSON `bson:"certificationData"`
 	AggregateRequestCount uint64                `bson:"aggregateRequestCount"`
 	ReferenceTime         uint64                `bson:"referenceTime"`
+	EffectiveTimeout      uint64                `bson:"effectiveTimeout,omitempty"`
 	CreatedAt             time.Time             `bson:"createdAt"`
 	ProcessedAt           *time.Time            `bson:"processedAt,omitempty"`
 }
@@ -72,6 +76,7 @@ func (c *CertificationRequest) ToBSON() *CertificationRequestBSON {
 		CertificationData:     c.CertificationData.ToBSON(),
 		AggregateRequestCount: c.AggregateRequestCount,
 		ReferenceTime:         c.ReferenceTime,
+		EffectiveTimeout:      c.EffectiveTimeout,
 		CreatedAt:             c.CreatedAt.Time,
 		ProcessedAt:           processedAt,
 	}
@@ -99,6 +104,7 @@ func (cb *CertificationRequestBSON) FromBSON() (*CertificationRequest, error) {
 		CertificationData:     *certData,
 		AggregateRequestCount: cb.AggregateRequestCount,
 		ReferenceTime:         cb.ReferenceTime,
+		EffectiveTimeout:      cb.EffectiveTimeout,
 		CreatedAt:             api.NewTimestamp(cb.CreatedAt),
 		ProcessedAt:           processedAt,
 	}, nil

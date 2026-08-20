@@ -12,7 +12,7 @@ type CertificationData struct {
 	OwnerPredicate  api.Predicate       `json:"ownerPredicate"`
 	SourceStateHash api.SourceStateHash `json:"sourceStateHash"`
 	TransactionHash api.TransactionHash `json:"transactionHash"`
-	Timeout         uint64              `json:"timeout"`
+	Timeout         uint64              `json:"timeout,omitempty"`
 	Witness         api.HexBytes        `json:"witness"`
 }
 
@@ -20,7 +20,7 @@ type CertificationDataBSON struct {
 	OwnerPredicate  PredicateBSON `bson:"ownerPredicate"`
 	SourceStateHash string        `bson:"sourceStateHash"`
 	TransactionHash string        `bson:"transactionHash"`
-	Timeout         uint64        `bson:"timeout"`
+	Timeout         uint64        `bson:"timeout,omitempty"`
 	Witness         string        `bson:"witness"`
 }
 

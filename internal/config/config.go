@@ -114,12 +114,20 @@ type LoggingConfig struct {
 // ProcessingConfig holds batch processing configuration
 type ProcessingConfig struct {
 	BatchLimit                 int           `mapstructure:"batch_limit"`
+	DefaultRequestTTL          time.Duration `mapstructure:"default_request_ttl"`           // Consensus-time TTL assigned when a request omits an explicit timeout
 	PrecollectorGracePeriod    time.Duration `mapstructure:"precollector_grace_period"`     // Extra wait before cutting a precollected round snapshot
 	MaxCommitmentsPerRound     int           `mapstructure:"max_commitments_per_round"`     // Stop waiting once this many commitments collected
 	CollectPhaseDuration       time.Duration `mapstructure:"collect_phase_duration"`        // Non-child fixed collection window before proposing a round
 	CollectMiniBatchSize       int           `mapstructure:"collect_mini_batch_size"`       // SMT/proposal staging mini-batch size during collection
 	CommitmentStreamBufferSize int           `mapstructure:"commitment_stream_buffer_size"` // Buffer between queue streamer and round collection
 	SkipDuplicateCheck         bool          `mapstructure:"skip_duplicate_check"`          // Skip finalized record lookup on submit
+}
+
+func (c ProcessingConfig) RequestTTL() time.Duration {
+	if c.DefaultRequestTTL == 0 {
+		return time.Hour
+	}
+	return c.DefaultRequestTTL
 }
 
 // RedisConfig holds Redis connection configuration
@@ -382,6 +390,7 @@ func Load() (*Config, error) {
 		},
 		Processing: ProcessingConfig{
 			BatchLimit:                 getEnvIntOrDefault("BATCH_LIMIT", 1000),
+			DefaultRequestTTL:          getEnvDurationOrDefault("DEFAULT_REQUEST_TTL", "1h"),
 			PrecollectorGracePeriod:    getEnvDurationOrDefault("PRECOLLECTOR_GRACE_PERIOD", "0s"),
 			MaxCommitmentsPerRound:     getEnvIntOrDefault("MAX_COMMITMENTS_PER_ROUND", 20000),
 			CollectPhaseDuration:       getEnvDurationOrDefault("COLLECT_PHASE_DURATION", "200ms"),
@@ -520,6 +529,10 @@ func (c *Config) Validate() error {
 	}
 	if c.Processing.CommitmentStreamBufferSize <= 0 {
 		return fmt.Errorf("COMMITMENT_STREAM_BUFFER_SIZE must be positive")
+	}
+	if c.Processing.DefaultRequestTTL != 0 &&
+		(c.Processing.DefaultRequestTTL < time.Second || c.Processing.DefaultRequestTTL%time.Second != 0) {
+		return fmt.Errorf("DEFAULT_REQUEST_TTL must be a positive whole number of seconds")
 	}
 	if c.Processing.CollectPhaseDuration <= 0 {
 		return fmt.Errorf("COLLECT_PHASE_DURATION must be positive")

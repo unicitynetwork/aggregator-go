@@ -78,7 +78,24 @@ func TestCertificationData_WireFormat(t *testing.T) {
 
 	prefix := cborTagPrefix(t, CertificationDataTag, 6)
 	require.Equal(t, prefix, b[:len(prefix)])
-	require.Equal(t, byte(0x01), b[len(prefix)], "Version slot should be 1")
+	require.Equal(t, byte(0x02), b[len(prefix)], "Version slot should be 2")
+}
+
+func TestCertificationData_LegacyWireFormatOmitsTimeout(t *testing.T) {
+	cd := createCertData(t)
+	cd.Version = 0
+	cd.Timeout = 0
+
+	b, err := types.Cbor.Marshal(&cd)
+	require.NoError(t, err)
+	prefix := cborTagPrefix(t, CertificationDataTag, 5)
+	require.Equal(t, prefix, b[:len(prefix)])
+	require.Equal(t, byte(0x01), b[len(prefix)])
+
+	var decoded CertificationData
+	require.NoError(t, types.Cbor.Unmarshal(b, &decoded))
+	require.Zero(t, decoded.Timeout)
+	require.Equal(t, types.Version(1), decoded.GetVersion())
 }
 
 func TestCertificationData_RejectsWrongTag(t *testing.T) {
@@ -132,8 +149,10 @@ func TestPredicate_RejectsWrongTag(t *testing.T) {
 
 func TestInclusionProofV2_WireFormat(t *testing.T) {
 	cd := createCertData(t)
+	referenceTime := uint64(1755000000)
 	proof := &InclusionProofV2{
 		CertificationData: &cd,
+		ReferenceTime:     &referenceTime,
 		CertificateBytes:  HexBytes{0x01, 0x02},
 		// UnicityCertificate is raw CBOR; an empty byte-string is valid CBOR.
 		UnicityCertificate: types.RawCBOR{0x40},
@@ -149,8 +168,10 @@ func TestInclusionProofV2_WireFormat(t *testing.T) {
 
 func TestInclusionProofV2_RejectsWrongTag(t *testing.T) {
 	cd := createCertData(t)
+	referenceTime := uint64(1755000000)
 	proof := &InclusionProofV2{
 		CertificationData:  &cd,
+		ReferenceTime:      &referenceTime,
 		CertificateBytes:   HexBytes{0x01, 0x02},
 		UnicityCertificate: types.RawCBOR{0x40},
 	}
@@ -166,8 +187,10 @@ func TestInclusionProofV2_RejectsWrongTag(t *testing.T) {
 
 func TestInclusionProofV2_RejectsWrongVersion(t *testing.T) {
 	cd := createCertData(t)
+	referenceTime := uint64(1755000000)
 	proof := &InclusionProofV2{
 		CertificationData:  &cd,
+		ReferenceTime:      &referenceTime,
 		CertificateBytes:   HexBytes{0x01, 0x02},
 		UnicityCertificate: types.RawCBOR{0x40},
 	}

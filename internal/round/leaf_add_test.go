@@ -55,6 +55,21 @@ func TestCommitmentLeafInputDiffersAcrossRounds(t *testing.T) {
 	require.NotEqual(t, first.Value, second.Value)
 }
 
+func TestDefaultTimeoutCommitmentStillBindsReferenceTime(t *testing.T) {
+	const referenceTime uint64 = 1755000000
+	commitment := testCommitment(t)
+	commitment.CertificationData.Timeout = 0
+	commitment.EffectiveTimeout = referenceTime + 3600
+
+	leaf, err := commitmentLeafInput(commitment, referenceTime)
+	require.NoError(t, err)
+	require.Equal(t, api.LeafValue(commitment.CertificationData.TransactionHash.DataBytes(), referenceTime), leaf.Value)
+	require.NotEqual(t, commitment.CertificationData.TransactionHash.DataBytes(), leaf.Value)
+
+	_, err = commitmentLeafInput(commitment, commitment.EffectiveTimeout)
+	require.ErrorIs(t, err, ErrRequestExpired)
+}
+
 // A request may only be inserted in a round whose reference time is strictly
 // below its timeout; an expired one is reported so it can be acked out of the
 // queue rather than retried forever.

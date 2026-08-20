@@ -1047,12 +1047,14 @@ func (rm *RoundManager) storePrecomputedProofResponses(ctx context.Context, bloc
 		if err != nil {
 			return timing, fmt.Errorf("marshal inclusion cert %d: %w", i, err)
 		}
+		referenceTime := record.ReferenceTime
 		proofs[i] = smtbackend.PrecomputedProofResponse{
 			StateID: record.StateID,
 			Response: &api.GetInclusionProofResponseV2{
 				BlockNumber: responseBlockNumber,
 				InclusionProof: &api.InclusionProofV2{
 					CertificationData:  record.CertificationData.ToAPI(),
+					ReferenceTime:      &referenceTime,
 					CertificateBytes:   certBytes,
 					UnicityCertificate: types.RawCBOR(block.UnicityCertificate),
 				},

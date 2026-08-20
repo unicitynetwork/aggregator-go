@@ -21,6 +21,21 @@ func TestCertificationData_SerializeAndValidate(t *testing.T) {
 		require.NoError(t, types.Cbor.Unmarshal(certDataCborBytes, &deserializedCertData))
 		require.Equal(t, certData, deserializedCertData)
 	})
+
+	t.Run("rejects a version that does not match the field count", func(t *testing.T) {
+		certData := createCertData(t)
+		certData.Version = 2
+		certData.Timeout = 1_755_000_000
+		encoded, err := types.Cbor.Marshal(certData)
+		require.NoError(t, err)
+		require.Equal(t, byte(2), encoded[4], "fixture invariant: version follows tag and array header")
+
+		mismatched := append([]byte(nil), encoded...)
+		mismatched[4] = 1
+		var decoded CertificationData
+		require.ErrorContains(t, types.Cbor.Unmarshal(mismatched, &decoded),
+			"CertificationData v1: expected 5 fields, got 6")
+	})
 }
 
 func TestCertificationRequest_SerializeAndValidate(t *testing.T) {
@@ -245,7 +260,7 @@ func createCertData(t *testing.T) CertificationData {
 	require.NoError(t, err)
 
 	return CertificationData{
-		Version:         1,
+		Version:         2,
 		OwnerPredicate:  NewPayToPublicKeyPredicate(publicKey),
 		SourceStateHash: sourceStateHashHex,
 		TransactionHash: transactionHashHex,
@@ -292,6 +307,18 @@ func TestCertificationDataHashing_Compatibility(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, expectedHash.RawHash, gotHash.RawHash)
 	})
+}
+
+func TestCertificationDataLegacyCrossSDKVector(t *testing.T) {
+	encoded, err := hex.DecodeString("d998778501d9987883014101582103a19eef04b8856f50bf2d688b0d8804575115e53d2a7780da363628343f9635075820e4b183ff6b7a399983cee26e4feea85d517dede0142def5c838e593a9e6152415820df524cffc08a1dc30579a8a51f440a97b30630988084f8d12a4d8bd741c7791258419efb637f14dbdaada6e293e2182932d82265b04b1abf4f28bc4c285b32b5e2325140fe7f94bc9b705c568b4fcb7f9ea90cf0fadcacc1b4504275f81558aad1e700")
+	require.NoError(t, err)
+	var data CertificationData
+	require.NoError(t, types.Cbor.Unmarshal(encoded, &data))
+	require.Equal(t, types.Version(1), data.GetVersion())
+	require.Zero(t, data.Timeout)
+	roundTrip, err := types.Cbor.Marshal(&data)
+	require.NoError(t, err)
+	require.Equal(t, encoded, roundTrip)
 }
 
 func TestCertificationDataHashing_InvalidLengths(t *testing.T) {
