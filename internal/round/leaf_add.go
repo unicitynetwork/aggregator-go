@@ -2,6 +2,7 @@ package round
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
@@ -11,10 +12,24 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
+// ErrRequestExpired reports a request whose timeout the round's reference time
+// has already reached. The request can never be inserted in this or any later
+// round, so it is acked out of the queue rather than retried.
+var ErrRequestExpired = errors.New("certification request expired")
+
+// commitmentExpired reports whether the request may still be inserted in a
+// round with this reference time. The timeout is exclusive.
+func commitmentExpired(commitment *models.CertificationRequest, referenceTime uint64) bool {
+	return referenceTime >= commitment.CertificationData.Timeout
+}
+
 // commitmentLeafInput materialises a commitment's SMT leaf under the round's
 // pinned reference time, recording that time on the commitment so the record
 // and the served proof report the value the leaf was actually built from.
 func commitmentLeafInput(commitment *models.CertificationRequest, referenceTime uint64) (smtbackend.LeafInput, error) {
+	if commitmentExpired(commitment, referenceTime) {
+		return smtbackend.LeafInput{}, ErrRequestExpired
+	}
 	key, err := commitment.StateID.GetTreeKey()
 	if err != nil {
 		return smtbackend.LeafInput{}, err

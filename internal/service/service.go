@@ -163,8 +163,21 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 		OwnerPredicate:  req.CertificationData.OwnerPredicate,
 		SourceStateHash: req.CertificationData.SourceStateHash,
 		TransactionHash: req.CertificationData.TransactionHash,
+		Timeout:         req.CertificationData.Timeout,
 		Witness:         req.CertificationData.Witness,
 	}, aggregateCount)
+
+	// Fail fast on a request that is already expired against the reference time
+	// rounds are currently pinning. The authoritative check runs again where the
+	// leaf is materialised, against that round's pinned reference time.
+	if referenceTime := as.roundManager.CurrentReferenceTime(); referenceTime >= req.CertificationData.Timeout {
+		as.logger.WithContext(ctx).Warn("Certification request expired",
+			"stateId", req.StateID,
+			"timeout", req.CertificationData.Timeout,
+			"referenceTime", referenceTime)
+
+		return &api.CertificationResponse{Status: api.CertificationStatusRequestExpired}, nil
+	}
 
 	// Validate certificationRequest signature and state ID
 	validationResult := as.certificationRequestValidator.Validate(certificationRequest)

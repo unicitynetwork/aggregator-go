@@ -9,6 +9,10 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
+// testRequestTimeout is far enough ahead of the fixture reference times that
+// only the expiry tests reach it.
+const testRequestTimeout uint64 = 1755003600
+
 func testCommitment(t *testing.T) *models.CertificationRequest {
 	t.Helper()
 	return &models.CertificationRequest{
@@ -16,6 +20,7 @@ func testCommitment(t *testing.T) *models.CertificationRequest {
 		StateID: api.RequireNewImprintV2("1111111111111111111111111111111111111111111111111111111111111111"),
 		CertificationData: models.CertificationData{
 			TransactionHash: api.RequireNewImprintV2("2222222222222222222222222222222222222222222222222222222222222222"),
+			Timeout:         testRequestTimeout,
 		},
 	}
 }
@@ -48,4 +53,20 @@ func TestCommitmentLeafInputDiffersAcrossRounds(t *testing.T) {
 
 	require.Equal(t, first.Key, second.Key)
 	require.NotEqual(t, first.Value, second.Value)
+}
+
+// A request may only be inserted in a round whose reference time is strictly
+// below its timeout; an expired one is reported so it can be acked out of the
+// queue rather than retried forever.
+func TestCommitmentLeafInputRejectsAnExpiredRequest(t *testing.T) {
+	commitment := testCommitment(t)
+
+	_, err := commitmentLeafInput(commitment, testRequestTimeout-1)
+	require.NoError(t, err)
+
+	_, err = commitmentLeafInput(commitment, testRequestTimeout)
+	require.ErrorIs(t, err, ErrRequestExpired)
+
+	_, err = commitmentLeafInput(commitment, testRequestTimeout+1)
+	require.ErrorIs(t, err, ErrRequestExpired)
 }

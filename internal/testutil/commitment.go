@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/stretchr/testify/require"
@@ -12,6 +13,18 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
+
+// RequestTimeout is the exclusive certification request timeout test requests
+// carry: an hour ahead of the current wall clock, so no test run reaches it.
+func RequestTimeout() uint64 {
+	return uint64(time.Now().Unix()) + 3600
+}
+
+// ExpiredRequestTimeout is a timeout that has already passed, for exercising
+// the expiry path.
+func ExpiredRequestTimeout() uint64 {
+	return uint64(time.Now().Unix()) - 3600
+}
 
 // CreateTestCertificationRequest creates a valid, signed CertificationRequest for testing
 func CreateTestCertificationRequest(t *testing.T, baseData string) *models.CertificationRequest {
@@ -48,6 +61,7 @@ func CreateTestCertificationRequest(t *testing.T, baseData string) *models.Certi
 		OwnerPredicate:  ownerPredicate,
 		SourceStateHash: sourceStateHash,
 		TransactionHash: transactionHash,
+		Timeout:         RequestTimeout(),
 		Witness:         signatureBytes,
 	}
 	return models.NewCertificationRequest(stateID, certData)

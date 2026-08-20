@@ -39,6 +39,7 @@ import (
 	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
@@ -591,6 +592,7 @@ func createTestCertificationRequests(t *testing.T, count int) []*api.Certificati
 			OwnerPredicate:  ownerPredicate,
 			SourceStateHash: sourceStateHash,
 			TransactionHash: transactionHash,
+			Timeout:         testutil.RequestTimeout(),
 		}
 		require.NoError(t, signingService.SignCertData(certData, privateKey.Serialize()))
 
@@ -628,6 +630,60 @@ func TestCertificationRequestDoesNotTouchSMTBackend(t *testing.T) {
 	require.Equal(t, "SUCCESS", resp.Status)
 	require.Len(t, queue.stored, 1)
 	require.Equal(t, 0, backend.calls, "submit path must not read or write the SMT")
+}
+
+// A request whose timeout the current reference time has already reached is
+// rejected on arrival, distinctly from a double-spend, and never reaches the
+// queue.
+func TestCertificationRequestRejectsAnExpiredRequest(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	queue := &recordingCommitmentQueue{}
+	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+	req := createTestCertificationRequests(t, 1)[0]
+	service := &AggregatorService{
+		config: &config.Config{
+			Processing: config.ProcessingConfig{SkipDuplicateCheck: true},
+			Sharding:   shardingCfg,
+		},
+		logger:                        log,
+		commitmentQueue:               queue,
+		roundManager:                  &stubRoundManager{referenceTime: req.CertificationData.Timeout},
+		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+	}
+
+	resp, err := service.CertificationRequest(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, api.CertificationStatusRequestExpired, resp.Status)
+	require.Empty(t, queue.stored)
+}
+
+// The timeout is exclusive: a round one second short of it still admits.
+func TestCertificationRequestAcceptsOnTheTimeoutBoundary(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	queue := &recordingCommitmentQueue{}
+	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+	req := createTestCertificationRequests(t, 1)[0]
+	service := &AggregatorService{
+		config: &config.Config{
+			Processing: config.ProcessingConfig{SkipDuplicateCheck: true},
+			Sharding:   shardingCfg,
+		},
+		logger:                        log,
+		commitmentQueue:               queue,
+		roundManager:                  &stubRoundManager{referenceTime: req.CertificationData.Timeout - 1},
+		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+	}
+
+	resp, err := service.CertificationRequest(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, "SUCCESS", resp.Status)
+	require.Len(t, queue.stored, 1)
 }
 
 func TestGetInclusionProofUsesCachedProofMetadata(t *testing.T) {
@@ -944,11 +1000,12 @@ func TestGetInclusionProofUsesPrecomputedProofResponse(t *testing.T) {
 }
 
 type stubRoundManager struct {
-	smt          *smt.ThreadSafeSMT
-	backend      smtbackend.Backend
-	cachedRoot   api.HexBytes
-	cachedBlock  *models.Block
-	cachedRecord *models.AggregatorRecord
+	smt           *smt.ThreadSafeSMT
+	backend       smtbackend.Backend
+	cachedRoot    api.HexBytes
+	cachedBlock   *models.Block
+	cachedRecord  *models.AggregatorRecord
+	referenceTime uint64
 }
 
 func (s *stubRoundManager) Start(context.Context) error    { return nil }
@@ -990,6 +1047,8 @@ func (s *stubRoundManager) GetCachedProofMetadata(stateID api.StateID, rootHash 
 func (s *stubRoundManager) GetProofCacheStats() (pending int, records int, blocks int) {
 	return 0, 0, 0
 }
+
+func (s *stubRoundManager) CurrentReferenceTime() uint64 { return s.referenceTime }
 
 type countingSMTBackend struct {
 	calls int

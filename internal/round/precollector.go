@@ -2,6 +2,7 @@ package round
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"sync"
@@ -337,10 +338,22 @@ func (cp *childPrecollector) addBatch(
 
 	leavesToAdd := make([]smtbackend.LeafInput, 0, len(commitments))
 	valid := make([]*models.CertificationRequest, 0, len(commitments))
+	expired := make([]interfaces.CertificationRequestAck, 0)
 
 	for _, c := range commitments {
 		leaf, err := commitmentLeafInput(c, referenceTime)
 		if err != nil {
+			if errors.Is(err, ErrRequestExpired) {
+				cp.logger.WithContext(ctx).Debug("Dropping expired certification request",
+					"stateID", c.StateID.String(),
+					"timeout", c.CertificationData.Timeout,
+					"referenceTime", referenceTime)
+				expired = append(expired, interfaces.CertificationRequestAck{
+					StateID:  c.StateID,
+					StreamID: c.StreamID,
+				})
+				continue
+			}
 			cp.logger.WithContext(ctx).Error("Failed to create leaf input",
 				"stateID", c.StateID.String(), "error", err.Error())
 			continue
@@ -348,6 +361,8 @@ func (cp *childPrecollector) addBatch(
 		leavesToAdd = append(leavesToAdd, leaf)
 		valid = append(valid, c)
 	}
+
+	ackDroppedCommitments(ctx, cp.logger, cp.commitmentQueue, expired)
 
 	if len(leavesToAdd) == 0 {
 		return nil, nil, nil

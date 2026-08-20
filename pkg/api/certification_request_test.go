@@ -249,6 +249,7 @@ func createCertData(t *testing.T) CertificationData {
 		OwnerPredicate:  NewPayToPublicKeyPredicate(publicKey),
 		SourceStateHash: sourceStateHashHex,
 		TransactionHash: transactionHashHex,
+		Timeout:         1755003600,
 		Witness:         NewHexBytes(witness),
 	}
 }
@@ -260,11 +261,12 @@ func TestCertificationDataHashing_Compatibility(t *testing.T) {
 		predicateBytes, err := types.Cbor.Marshal(certData.OwnerPredicate)
 		require.NoError(t, err)
 
-		expectedBytes := append([]byte{0x84}, predicateBytes...)
+		expectedBytes := append([]byte{0x85}, predicateBytes...)
 		expectedBytes = append(expectedBytes, []byte{0x58, 0x20}...)
 		expectedBytes = append(expectedBytes, certData.SourceStateHash...)
 		expectedBytes = append(expectedBytes, []byte{0x58, 0x20}...)
 		expectedBytes = append(expectedBytes, certData.TransactionHash...)
+		expectedBytes = append(expectedBytes, CborUint(certData.Timeout)...)
 		expectedBytes = append(expectedBytes, append([]byte{0x58, byte(len(certData.Witness))}, certData.Witness...)...)
 		expectedHash := NewDataHasher(SHA256).AddData(expectedBytes).GetHash()
 
@@ -273,18 +275,20 @@ func TestCertificationDataHashing_Compatibility(t *testing.T) {
 			OwnerPredicate  Predicate
 			SourceStateHash []byte
 			TransactionHash []byte
+			Timeout         uint64
 			Witness         []byte
 		}
 		canonicalBytes, err := types.Cbor.Marshal(certDataInput{
 			OwnerPredicate:  certData.OwnerPredicate,
 			SourceStateHash: certData.SourceStateHash,
 			TransactionHash: certData.TransactionHash,
+			Timeout:         certData.Timeout,
 			Witness:         certData.Witness,
 		})
 		require.NoError(t, err)
 		assert.Equal(t, expectedBytes, canonicalBytes)
 
-		gotHash, err := CertDataHash(certData.OwnerPredicate, certData.SourceStateHash, certData.TransactionHash, certData.Witness)
+		gotHash, err := CertDataHash(certData.OwnerPredicate, certData.SourceStateHash, certData.TransactionHash, certData.Timeout, certData.Witness)
 		require.NoError(t, err)
 		assert.Equal(t, expectedHash.RawHash, gotHash.RawHash)
 	})
@@ -297,13 +301,13 @@ func TestCertificationDataHashing_InvalidLengths(t *testing.T) {
 	longHash := make([]byte, 64)
 
 	t.Run("CertDataHash should reject invalid hash lengths", func(t *testing.T) {
-		_, err := CertDataHash(validPredicate, shortHash, validHash, []byte{0x00})
+		_, err := CertDataHash(validPredicate, shortHash, validHash, 1755003600, []byte{0x00})
 		assert.ErrorContains(t, err, "invalid source state hash length")
 
-		_, err = CertDataHash(validPredicate, validHash, longHash, []byte{0x00})
+		_, err = CertDataHash(validPredicate, validHash, longHash, 1755003600, []byte{0x00})
 		assert.ErrorContains(t, err, "invalid transaction hash length")
 
-		_, err = CertDataHash(validPredicate, []byte{}, validHash, []byte{0x00})
+		_, err = CertDataHash(validPredicate, []byte{}, validHash, 1755003600, []byte{0x00})
 		assert.ErrorContains(t, err, "invalid source state hash length")
 	})
 
@@ -378,7 +382,7 @@ func TestCertificationDataHashing_InvalidHashLengths(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run("CertDataHash rejects "+tc.name, func(t *testing.T) {
-			_, err := CertDataHash(certData.OwnerPredicate, tc.sourceStateHash, tc.transactionHash, certData.Witness)
+			_, err := CertDataHash(certData.OwnerPredicate, tc.sourceStateHash, tc.transactionHash, 1755003600, certData.Witness)
 			require.ErrorContains(t, err, tc.expectedErrorPart)
 		})
 

@@ -308,6 +308,7 @@ func TestDiskBackendRocksDBPrecomputedProofResponsesRoundTrip(t *testing.T) {
 			CertificationData: &api.CertificationData{
 				Version:         1,
 				TransactionHash: api.TransactionHash(bytesOf(32, 7)),
+				Timeout:         testutil.RequestTimeout(),
 			},
 			CertificateBytes:   []byte{1, 2, 3},
 			UnicityCertificate: []byte{0x43, 4, 5, 6},

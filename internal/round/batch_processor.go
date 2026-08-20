@@ -41,9 +41,21 @@ func (rm *RoundManager) processMiniBatchForRound(ctx context.Context, round *Rou
 	// Convert commitments to backend leaf inputs, tracking valid commitments.
 	leaves := make([]smtbackend.LeafInput, 0, len(commitments))
 	validCommitments := make([]*models.CertificationRequest, 0, len(commitments))
+	expired := make([]interfaces.CertificationRequestAck, 0)
 	for _, commitment := range commitments {
 		leaf, err := commitmentLeafInput(commitment, round.ReferenceTime)
 		if err != nil {
+			if errors.Is(err, ErrRequestExpired) {
+				rm.logger.WithContext(ctx).Debug("Dropping expired certification request",
+					"stateID", commitment.StateID.String(),
+					"timeout", commitment.CertificationData.Timeout,
+					"referenceTime", round.ReferenceTime)
+				expired = append(expired, interfaces.CertificationRequestAck{
+					StateID:  commitment.StateID,
+					StreamID: commitment.StreamID,
+				})
+				continue
+			}
 			rm.logger.WithContext(ctx).Error("Failed to create leaf input",
 				"stateID", commitment.StateID.String(),
 				"error", err.Error())
@@ -65,10 +77,10 @@ func (rm *RoundManager) processMiniBatchForRound(ctx context.Context, round *Rou
 		round.PendingLeaves = append(round.PendingLeaves, addedLeaves...)
 		round.PendingCommitments = append(round.PendingCommitments, addedCommitments...)
 		rm.markProofsPending(addedCommitments)
-		return dropped, nil
+		return append(expired, dropped...), nil
 	}
 
-	return nil, nil
+	return expired, nil
 }
 
 // ProposeBlock creates and proposes a new block with the given data.

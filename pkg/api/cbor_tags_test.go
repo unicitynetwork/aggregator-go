@@ -76,7 +76,7 @@ func TestCertificationData_WireFormat(t *testing.T) {
 	b, err := types.Cbor.Marshal(&cd)
 	require.NoError(t, err)
 
-	prefix := cborTagPrefix(t, CertificationDataTag, 5)
+	prefix := cborTagPrefix(t, CertificationDataTag, 6)
 	require.Equal(t, prefix, b[:len(prefix)])
 	require.Equal(t, byte(0x01), b[len(prefix)], "Version slot should be 1")
 }

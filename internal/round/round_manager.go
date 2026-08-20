@@ -1408,6 +1408,11 @@ func (rm *RoundManager) lastReferenceTime() uint64 {
 	return rm.referenceTime.Load()
 }
 
+// CurrentReferenceTime implements Manager.
+func (rm *RoundManager) CurrentReferenceTime() uint64 {
+	return rm.lastReferenceTime()
+}
+
 func (rm *RoundManager) lastAcceptedParentUC() uint64 {
 	return rm.lastAcceptedParentUCRound.Load()
 }

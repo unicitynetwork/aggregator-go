@@ -33,6 +33,9 @@ type Manager interface {
 	GetProofReadyBlockByRoot(rootHash api.HexBytes) (*models.Block, bool)
 	GetCachedProofMetadata(stateID api.StateID, rootHash api.HexBytes) (*models.Block, *models.AggregatorRecord, bool)
 	GetProofCacheStats() (pending int, records int, blocks int)
+	// CurrentReferenceTime reports the reference time a round starting now
+	// would pin, for fail-fast rejection of already-expired requests.
+	CurrentReferenceTime() uint64
 }
 
 // NewManager creates the appropriate round manager based on sharding mode

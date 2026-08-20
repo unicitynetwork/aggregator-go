@@ -94,6 +94,11 @@ func UnmarshalCertificationRequestCBOR(data []byte, out *CertificationRequest) e
 	return nil
 }
 
+// CertificationStatusRequestExpired is returned when the round's reference time
+// had already reached the request's timeout. It is distinct from a double-spend
+// so a client can tell "too late" from "already spent".
+const CertificationStatusRequestExpired = "REQUEST_EXPIRED"
+
 // CertificationResponse represents the certification_request JSON-RPC response.
 type CertificationResponse struct {
 	Status string `json:"status"`
@@ -115,8 +120,15 @@ type CertificationData struct {
 	// SourceStateHash is the raw 32-byte hash of the source data.
 	SourceStateHash SourceStateHash `json:"sourceStateHash"`
 
-	// TransactionHash is the raw 32-byte hash of the transaction data.
+	// TransactionHash is the raw 32-byte hash of the transaction. It commits to
+	// Timeout, so the witness signs the timeout along with the rest of the
+	// transaction and it cannot be altered in flight.
 	TransactionHash TransactionHash `json:"transactionHash"`
+
+	// Timeout is the exclusive certification request timeout in Unix seconds.
+	// The request may only be inserted in a round whose reference time is
+	// strictly below it; certification and delivery may occur later.
+	Timeout uint64 `json:"timeout"`
 
 	// Witness is the "unlocking part" of owner predicate. In case of PayToPublicKey owner predicate the witness must be
 	// a signature created on the hash of CBOR array[SourceStateHash, TransactionHash],
@@ -171,9 +183,9 @@ func SigDataHash(sourceStateHash []byte, transactionHash []byte) *DataHash {
 
 // Hash returns the data hash of certification data.
 // The hash is calculated as the CBOR array
-// [OwnerPredicate, SourceStateHash, TransactionHash, Witness].
+// [OwnerPredicate, SourceStateHash, TransactionHash, Timeout, Witness].
 func (c CertificationData) Hash() ([]byte, error) {
-	dataHash, err := CertDataHash(c.OwnerPredicate, c.SourceStateHash, c.TransactionHash, c.Witness)
+	dataHash, err := CertDataHash(c.OwnerPredicate, c.SourceStateHash, c.TransactionHash, c.Timeout, c.Witness)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calculate certification data hash: %w", err)
 	}
@@ -186,8 +198,8 @@ func (c CertificationData) CreateStateID() (StateID, error) {
 
 // CertDataHash returns the data hash of certification data.
 // The hash is calculated as the CBOR array
-// [OwnerPredicate, SourceStateHash, TransactionHash, Witness].
-func CertDataHash(ownerPredicate Predicate, sourceStateHash, transactionHash, signature []byte) (*DataHash, error) {
+// [OwnerPredicate, SourceStateHash, TransactionHash, Timeout, Witness].
+func CertDataHash(ownerPredicate Predicate, sourceStateHash, transactionHash []byte, timeout uint64, signature []byte) (*DataHash, error) {
 	if len(sourceStateHash) != StateTreeKeyLengthBytes {
 		return nil, fmt.Errorf("invalid source state hash length: expected %d bytes, got %d", StateTreeKeyLengthBytes, len(sourceStateHash))
 	}
@@ -203,6 +215,7 @@ func CertDataHash(ownerPredicate Predicate, sourceStateHash, transactionHash, si
 		OwnerPredicate  Predicate
 		SourceStateHash []byte
 		TransactionHash []byte
+		Timeout         uint64
 		Witness         []byte
 	}
 
@@ -210,6 +223,7 @@ func CertDataHash(ownerPredicate Predicate, sourceStateHash, transactionHash, si
 		OwnerPredicate:  ownerPredicate,
 		SourceStateHash: sourceStateHash,
 		TransactionHash: transactionHash,
+		Timeout:         timeout,
 		Witness:         signature,
 	}
 

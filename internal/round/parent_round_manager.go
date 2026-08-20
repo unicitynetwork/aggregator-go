@@ -94,6 +94,11 @@ func (prm *ParentRoundManager) lastReferenceTime() uint64 {
 	return prm.referenceTime.Load()
 }
 
+// CurrentReferenceTime implements Manager.
+func (prm *ParentRoundManager) CurrentReferenceTime() uint64 {
+	return prm.lastReferenceTime()
+}
+
 const parentRoundRetryDelay = 1 * time.Second
 
 // NewParentRoundManager creates a new parent round manager
