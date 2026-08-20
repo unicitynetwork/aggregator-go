@@ -275,10 +275,11 @@ func finalizeManualDiskRound(
 	snapshot := testRMSnapshot(t, ctx, rm)
 	rm.roundMutex.Lock()
 	rm.currentRound = &Round{
-		Number:      api.NewBigIntFromUint64(blockNumber),
-		State:       RoundStateProcessing,
-		Commitments: commitments,
-		Snapshot:    snapshot,
+		Number:        api.NewBigIntFromUint64(blockNumber),
+		ReferenceTime: 1755000000,
+		State:         RoundStateProcessing,
+		Commitments:   commitments,
+		Snapshot:      snapshot,
 	}
 	rm.roundMutex.Unlock()
 

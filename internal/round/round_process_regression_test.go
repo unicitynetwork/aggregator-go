@@ -609,6 +609,7 @@ func TestStartNewRoundRetriesEqualFinalizingRoundProposal(t *testing.T) {
 
 	rm.currentRound = &Round{
 		Number:             api.NewBigInt(big.NewInt(7)),
+		ReferenceTime:      1755000000,
 		StartTime:          time.Now(),
 		State:              RoundStateFinalizing,
 		Commitments:        []*models.CertificationRequest{commitment},

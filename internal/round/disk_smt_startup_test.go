@@ -135,7 +135,7 @@ func TestDiskSMTStartupPaginatedReplay(t *testing.T) {
 	storage := &diskStartupStorage{
 		blocks:     newDiskStartupBlockStorage(diskStartupBlock(1, root1), block2),
 		smt:        newDiskStartupSMTStorage(models.NewSmtNode(leaf2.Key, leaf2.Value)),
-		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block2, leaf2, 0)),
+		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block2, leaf2, 22, 0)),
 	}
 	rm := newDiskStartupRoundManager(t, backend, storage)
 
@@ -181,7 +181,7 @@ func TestDiskSMTStartupPaginatedReplayIgnoresLatestAdvanceDuringReplay(t *testin
 	storage := &diskStartupStorage{
 		blocks:     blockStorage,
 		smt:        newDiskStartupSMTStorage(models.NewSmtNode(leaf2.Key, leaf2.Value)),
-		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block2, leaf2, 0)),
+		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block2, leaf2, 22, 0)),
 	}
 	rm := newDiskStartupRoundManager(t, backend, storage)
 
@@ -214,7 +214,7 @@ func TestDiskSMTStartupPaginatedReplaySkipsMissingRepeatUCRounds(t *testing.T) {
 	storage := &diskStartupStorage{
 		blocks:     newDiskStartupBlockStorage(diskStartupBlock(1, root1), block3),
 		smt:        newDiskStartupSMTStorage(models.NewSmtNode(leaf3.Key, leaf3.Value)),
-		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block3, leaf3, 0)),
+		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block3, leaf3, 33, 0)),
 	}
 	rm := newDiskStartupRoundManager(t, backend, storage)
 
@@ -411,7 +411,7 @@ func TestDiskSMTStartReplaysFinalizedBeforeRecoveringUnfinalizedBlock(t *testing
 			block3,
 		),
 		smt:        newDiskStartupSMTStorage(models.NewSmtNode(leaf2.Key, leaf2.Value), models.NewSmtNode(leaf3.Key, leaf3.Value)),
-		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block2, leaf2, 0), diskStartupAggregatorRecord(block3, leaf3, 0)),
+		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block2, leaf2, 22, 0), diskStartupAggregatorRecord(block3, leaf3, 33, 0)),
 	}
 	rm := newDiskStartupRoundManager(t, backend, storage)
 	rm.commitmentQueue = &diskStartupCommitmentQueue{}
@@ -440,7 +440,7 @@ func TestDiskSMTStartFinalizesAlreadyCommittedUnfinalizedBlock(t *testing.T) {
 	storage := &diskStartupStorage{
 		blocks:     newDiskStartupBlockStorage(diskStartupBlock(1, root1), block2),
 		smt:        newDiskStartupSMTStorage(models.NewSmtNode(leaf2.Key, leaf2.Value)),
-		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block2, leaf2, 0)),
+		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block2, leaf2, 22, 0)),
 	}
 	rm := newDiskStartupRoundManager(t, backend, storage)
 	rm.commitmentQueue = &diskStartupCommitmentQueue{}
@@ -466,7 +466,7 @@ func TestDiskSMTStartFinalizesAlreadyCommittedFirstBlock(t *testing.T) {
 	storage := &diskStartupStorage{
 		blocks:     newDiskStartupBlockStorage(block),
 		smt:        newDiskStartupSMTStorage(models.NewSmtNode(leaf.Key, leaf.Value)),
-		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block, leaf, 0)),
+		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block, leaf, 11, 0)),
 	}
 	rm := newDiskStartupRoundManager(t, backend, storage)
 	rm.commitmentQueue = &diskStartupCommitmentQueue{}
@@ -499,7 +499,7 @@ func TestDiskSMTStartAppliesUnfinalizedFirstBlockFromEmptyDisk(t *testing.T) {
 	storage := &diskStartupStorage{
 		blocks:     newDiskStartupBlockStorage(block),
 		smt:        newDiskStartupSMTStorage(models.NewSmtNode(leaf.Key, leaf.Value)),
-		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block, leaf, 0)),
+		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block, leaf, 11, 0)),
 	}
 	rm := newDiskStartupRoundManager(t, backend, storage)
 	rm.commitmentQueue = &diskStartupCommitmentQueue{}
@@ -525,7 +525,7 @@ func TestLoadRecoveredNodesIntoBackendRejectsRecoveredRootMismatch(t *testing.T)
 	block := diskStartupBlock(1, wrongRoot)
 	storage := &diskStartupStorage{
 		blocks:     newDiskStartupBlockStorage(block),
-		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block, leaf, 0)),
+		aggregator: newDiskStartupAggregatorRecordStorage(diskStartupAggregatorRecord(block, leaf, 11, 0)),
 	}
 	rm := newDiskStartupRoundManager(t, backend, storage)
 
@@ -576,9 +576,16 @@ func newDiskStartupRoundManager(t *testing.T, backend smtbackend.Backend, storag
 func diskStartupLeaf(keyByte, valueByte byte) smtbackend.LeafInput {
 	key := make([]byte, api.StateTreeKeyLengthBytes)
 	key[len(key)-1] = keyByte
-	value := make([]byte, 32)
+	return smtbackend.LeafInput{
+		Key:   key,
+		Value: api.LeafValue(diskStartupTransactionHash(valueByte).DataBytes(), 1755000000),
+	}
+}
+
+func diskStartupTransactionHash(valueByte byte) api.TransactionHash {
+	value := make([]byte, api.StateTreeKeyLengthBytes)
 	value[len(value)-1] = valueByte
-	return smtbackend.LeafInput{Key: key, Value: value}
+	return api.TransactionHash(value)
 }
 
 func commitDiskStartupLeaves(t *testing.T, ctx context.Context, backend smtbackend.Backend, blockNumber uint64, leaves []smtbackend.LeafInput) []byte {
@@ -613,11 +620,12 @@ func diskStartupBlock(number uint64, root []byte) *models.Block {
 	return block
 }
 
-func diskStartupAggregatorRecord(block *models.Block, leaf smtbackend.LeafInput, leafIndex uint64) *models.AggregatorRecord {
+func diskStartupAggregatorRecord(block *models.Block, leaf smtbackend.LeafInput, transactionHashByte byte, leafIndex uint64) *models.AggregatorRecord {
 	return &models.AggregatorRecord{
-		StateID: api.StateID(append([]byte(nil), leaf.Key...)),
+		StateID:       api.StateID(append([]byte(nil), leaf.Key...)),
+		ReferenceTime: 1755000000,
 		CertificationData: models.CertificationData{
-			TransactionHash: append([]byte(nil), leaf.Value...),
+			TransactionHash: diskStartupTransactionHash(transactionHashByte),
 		},
 		BlockNumber: block.Index,
 		LeafIndex:   api.NewBigIntFromUint64(leafIndex),
