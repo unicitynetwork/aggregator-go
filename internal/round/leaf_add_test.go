@@ -9,9 +9,9 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-// testRequestTimeout is far enough ahead of the fixture reference times that
+// testExpiresAt is far enough ahead of the fixture reference times that
 // only the expiry tests reach it.
-const testRequestTimeout uint64 = 1755003600
+const testExpiresAt uint64 = 1755003600
 
 func testCommitment(t *testing.T) *models.CertificationRequest {
 	t.Helper()
@@ -20,7 +20,7 @@ func testCommitment(t *testing.T) *models.CertificationRequest {
 		StateID: api.RequireNewImprintV2("1111111111111111111111111111111111111111111111111111111111111111"),
 		CertificationData: models.CertificationData{
 			TransactionHash: api.RequireNewImprintV2("2222222222222222222222222222222222222222222222222222222222222222"),
-			Timeout:         testRequestTimeout,
+			ExpiresAt:       ptr(testExpiresAt),
 		},
 	}
 }
@@ -55,10 +55,10 @@ func TestCommitmentLeafInputDiffersAcrossRounds(t *testing.T) {
 	require.NotEqual(t, first.Value, second.Value)
 }
 
-func TestDefaultTimeoutCommitmentStillBindsReferenceTime(t *testing.T) {
+func TestServiceAssignedDeadlineStillBindsReferenceTime(t *testing.T) {
 	const referenceTime uint64 = 1755000000
 	commitment := testCommitment(t)
-	commitment.CertificationData.Timeout = 0
+	commitment.CertificationData.ExpiresAt = nil
 	commitment.EffectiveTimeout = referenceTime + 3600
 
 	leaf, err := commitmentLeafInput(commitment, referenceTime)
@@ -76,12 +76,15 @@ func TestDefaultTimeoutCommitmentStillBindsReferenceTime(t *testing.T) {
 func TestCommitmentLeafInputRejectsAnExpiredRequest(t *testing.T) {
 	commitment := testCommitment(t)
 
-	_, err := commitmentLeafInput(commitment, testRequestTimeout-1)
+	_, err := commitmentLeafInput(commitment, testExpiresAt-1)
 	require.NoError(t, err)
 
-	_, err = commitmentLeafInput(commitment, testRequestTimeout)
+	_, err = commitmentLeafInput(commitment, testExpiresAt)
 	require.ErrorIs(t, err, ErrRequestExpired)
 
-	_, err = commitmentLeafInput(commitment, testRequestTimeout+1)
+	_, err = commitmentLeafInput(commitment, testExpiresAt+1)
 	require.ErrorIs(t, err, ErrRequestExpired)
 }
+
+// ptr returns a pointer to v, for the optional request deadline.
+func ptr(v uint64) *uint64 { return &v }

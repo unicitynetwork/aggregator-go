@@ -63,7 +63,7 @@ func TestDocumentationExamplePayload(t *testing.T) {
 			OwnerPredicate:  certData.OwnerPredicate,
 			SourceStateHash: certData.SourceStateHash,
 			TransactionHash: certData.TransactionHash,
-			Timeout:         certData.Timeout,
+			ExpiresAt:       certData.ExpiresAt,
 			Witness:         certData.Witness,
 		},
 	}

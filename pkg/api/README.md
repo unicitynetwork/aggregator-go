@@ -54,7 +54,7 @@ func main() {
 			OwnerPredicate:  api.NewPayToPublicKeyPredicate([]byte{0x03, 0x20, 0x44, 0xf2}),
 			SourceStateHash: api.RequireNewImprintV2("cd60000000000000000000000000000000000000000000000000000000000000"),
 			TransactionHash: api.RequireNewImprintV2("cd61000000000000000000000000000000000000000000000000000000000000"),
-			Timeout:         1755003600,
+			ExpiresAt:       api.Uint64Ptr(1755003600), // nil lets the service assign the deadline
 			Witness:         []byte{0x41, 0x67, 0x51, 0xe8}},
 	}
 

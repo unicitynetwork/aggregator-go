@@ -421,7 +421,7 @@ func TestGetInclusionProofV2Child_ComposesParentFragment(t *testing.T) {
 			OwnerPredicate:  api.Predicate{Engine: 1, Code: []byte{0x01}, Params: []byte{0x02}},
 			SourceStateHash: sourceStateHash,
 			TransactionHash: transactionHash,
-			Timeout:         referenceTime + 3600,
+			ExpiresAt:       ptr(referenceTime + 3600),
 			Witness:         []byte{0x01, 0x02},
 		},
 		ReferenceTime: referenceTime,
@@ -450,7 +450,7 @@ func TestGetInclusionProofV2Child_ComposesParentFragment(t *testing.T) {
 			OwnerPredicate:  record.CertificationData.OwnerPredicate,
 			SourceStateHash: record.CertificationData.SourceStateHash,
 			TransactionHash: record.CertificationData.TransactionHash,
-			Timeout:         record.CertificationData.Timeout,
+			ExpiresAt:       record.CertificationData.ExpiresAt,
 			Witness:         record.CertificationData.Witness,
 		},
 	}
@@ -598,7 +598,7 @@ func createTestCertificationRequests(t *testing.T, count int) []*api.Certificati
 			OwnerPredicate:  ownerPredicate,
 			SourceStateHash: sourceStateHash,
 			TransactionHash: transactionHash,
-			Timeout:         testutil.RequestTimeout(),
+			ExpiresAt:       testutil.ExpiresAt(),
 		}
 		require.NoError(t, signingService.SignCertData(certData, privateKey.Serialize()))
 
@@ -648,7 +648,7 @@ func TestCertificationRequestAssignsDefaultTimeoutFromConsensusTime(t *testing.T
 	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
 	req := createTestCertificationRequests(t, 1)[0]
 	req.CertificationData.Version = 0
-	req.CertificationData.Timeout = 0
+	req.CertificationData.ExpiresAt = nil
 	service := &AggregatorService{
 		config: &config.Config{Processing: config.ProcessingConfig{
 			SkipDuplicateCheck: true, DefaultRequestTTL: 90 * time.Minute,
@@ -662,7 +662,7 @@ func TestCertificationRequestAssignsDefaultTimeoutFromConsensusTime(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, "SUCCESS", resp.Status)
 	require.Len(t, queue.stored, 1)
-	require.Zero(t, queue.stored[0].CertificationData.Timeout)
+	require.Nil(t, queue.stored[0].CertificationData.ExpiresAt)
 	require.Equal(t, referenceTime+5400, queue.stored[0].EffectiveTimeout)
 }
 
@@ -702,7 +702,7 @@ func TestCertificationRequestRejectsAnExpiredRequest(t *testing.T) {
 		},
 		logger:                        log,
 		commitmentQueue:               queue,
-		roundManager:                  &stubRoundManager{referenceTime: req.CertificationData.Timeout},
+		roundManager:                  &stubRoundManager{referenceTime: *req.CertificationData.ExpiresAt},
 		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
 	}
 
@@ -728,7 +728,7 @@ func TestCertificationRequestAcceptsOnTheTimeoutBoundary(t *testing.T) {
 		},
 		logger:                        log,
 		commitmentQueue:               queue,
-		roundManager:                  &stubRoundManager{referenceTime: req.CertificationData.Timeout - 1},
+		roundManager:                  &stubRoundManager{referenceTime: *req.CertificationData.ExpiresAt - 1},
 		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
 	}
 
@@ -772,7 +772,7 @@ func TestGetInclusionProofUsesCachedProofMetadata(t *testing.T) {
 			OwnerPredicate:  req.CertificationData.OwnerPredicate,
 			SourceStateHash: req.CertificationData.SourceStateHash,
 			TransactionHash: req.CertificationData.TransactionHash,
-			Timeout:         req.CertificationData.Timeout,
+			ExpiresAt:       req.CertificationData.ExpiresAt,
 			Witness:         req.CertificationData.Witness,
 		},
 		ReferenceTime: referenceTime,
@@ -1362,3 +1362,6 @@ func testChildProofUC(t *testing.T, roundNumber uint64, rootHash []byte) api.Hex
 	require.NoError(t, err)
 	return api.NewHexBytes(ucBytes)
 }
+
+// ptr returns a pointer to v, for the optional request deadline.
+func ptr(v uint64) *uint64 { return &v }

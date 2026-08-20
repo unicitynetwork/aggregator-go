@@ -164,7 +164,7 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 		OwnerPredicate:  req.CertificationData.OwnerPredicate,
 		SourceStateHash: req.CertificationData.SourceStateHash,
 		TransactionHash: req.CertificationData.TransactionHash,
-		Timeout:         req.CertificationData.Timeout,
+		ExpiresAt:       req.CertificationData.ExpiresAt,
 		Witness:         req.CertificationData.Witness,
 	}, aggregateCount)
 
@@ -188,11 +188,17 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 	if referenceTime == 0 {
 		return &api.CertificationResponse{Status: api.CertificationStatusServiceNotReady}, nil
 	}
-	effectiveTimeout := req.CertificationData.Timeout
-	if effectiveTimeout == 0 {
+	// An explicit deadline is used verbatim and is covered by the witness. When
+	// the requester omitted one, the service derives a deadline from consensus
+	// reference time; that value is service metadata and is never recorded in the
+	// leaf, signed, or checked by a later verifier.
+	var effectiveTimeout uint64
+	if expiresAt := req.CertificationData.ExpiresAt; expiresAt != nil {
+		effectiveTimeout = *expiresAt
+	} else {
 		ttl := uint64(as.config.Processing.RequestTTL() / time.Second)
 		if referenceTime > math.MaxUint64-ttl {
-			return nil, errors.New("default request timeout overflows uint64")
+			return nil, errors.New("default request deadline overflows uint64")
 		}
 		effectiveTimeout = referenceTime + ttl
 	}

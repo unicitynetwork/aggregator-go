@@ -170,7 +170,7 @@ func GenerateDocsHTML() string {
         <div class="method-section">
             <div class="method-header">certification_request</div>
             <div class="method-content">
-                <div class="description">Submit a state transition certification request to the aggregator. The example below uses a real secp256k1 signature that will pass validation. In the v2 wire format, stateId, transactionHash, and sourceStateHash are raw 32-byte SHA-256 values with no algorithm-prefix bytes. The certification data has two profiles: version 1 omits the request timeout and the service assigns a deadline from consensus time, while version 2 (shown below) carries an exclusive timeout in Unix seconds that the transaction hash commits to. Either way the request is only inserted in a round whose reference time is strictly below its effective deadline.</div>
+                <div class="description">Submit a state transition certification request to the aggregator. The example below uses a real secp256k1 signature that will pass validation. In the v2 wire format, stateId, transactionHash, and sourceStateHash are raw 32-byte SHA-256 values with no algorithm-prefix bytes. The certification data carries expiresAt, an exclusive deadline in Unix seconds that the transaction hash commits to. It occupies a fixed position and is sent as CBOR null when the requester has no clock, in which case the service assigns a deadline from consensus time instead. Either way the request is only inserted in a round whose reference time is strictly below its effective deadline.</div>
                 
                 <div class="params-container">
                     <div class="params-section">

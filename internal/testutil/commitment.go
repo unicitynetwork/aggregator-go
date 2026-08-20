@@ -14,16 +14,18 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-// RequestTimeout is the exclusive certification request timeout test requests
-// carry: an hour ahead of the current wall clock, so no test run reaches it.
-func RequestTimeout() uint64 {
-	return uint64(time.Now().Unix()) + 3600
+// ExpiresAt is the exclusive certification request deadline test requests carry:
+// an hour ahead of the current wall clock, so no test run reaches it.
+func ExpiresAt() *uint64 {
+	v := uint64(time.Now().Unix()) + 3600
+	return &v
 }
 
-// ExpiredRequestTimeout is a timeout that has already passed, for exercising
-// the expiry path.
-func ExpiredRequestTimeout() uint64 {
-	return uint64(time.Now().Unix()) - 3600
+// ExpiredExpiresAt is a deadline that has already passed, for exercising the
+// expiry path.
+func ExpiredExpiresAt() *uint64 {
+	v := uint64(time.Now().Unix()) - 3600
+	return &v
 }
 
 // CreateTestCertificationRequest creates a valid, signed CertificationRequest for testing
@@ -61,7 +63,7 @@ func CreateTestCertificationRequest(t *testing.T, baseData string) *models.Certi
 		OwnerPredicate:  ownerPredicate,
 		SourceStateHash: sourceStateHash,
 		TransactionHash: transactionHash,
-		Timeout:         RequestTimeout(),
+		ExpiresAt:       ExpiresAt(),
 		Witness:         signatureBytes,
 	}
 	return models.NewCertificationRequest(stateID, certData)

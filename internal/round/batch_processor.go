@@ -48,7 +48,7 @@ func (rm *RoundManager) processMiniBatchForRound(ctx context.Context, round *Rou
 			if errors.Is(err, ErrRequestExpired) {
 				rm.logger.WithContext(ctx).Debug("Dropping expired certification request",
 					"stateID", commitment.StateID.String(),
-					"timeout", commitment.CertificationData.Timeout,
+					"expiresAt", commitment.CertificationData.ExpiresAt,
 					"referenceTime", round.ReferenceTime)
 				expired = append(expired, interfaces.CertificationRequestAck{
 					StateID:  commitment.StateID,

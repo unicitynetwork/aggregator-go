@@ -22,7 +22,7 @@ func canonicalCertificationRequestFixture(t testing.TB) (*CertificationRequest, 
 	req := &CertificationRequest{
 		StateID: RequireNewImprintV2("0000000000000000000000000000000000000000000000000000000000000000"),
 		CertificationData: CertificationData{
-			Version:         1,
+			Version:         2,
 			OwnerPredicate:  NewPayToPublicKeyPredicate(publicKey),
 			SourceStateHash: RequireNewImprintV2("0000000000000000000000000000000000000000000000000000000000000000"),
 			TransactionHash: RequireNewImprintV2("0000000000000000000000000000000000000000000000000000000000000001"),

@@ -22,19 +22,32 @@ func TestCertificationData_SerializeAndValidate(t *testing.T) {
 		require.Equal(t, certData, deserializedCertData)
 	})
 
-	t.Run("rejects a version that does not match the field count", func(t *testing.T) {
+	t.Run("round-trips an absent expiry as CBOR null", func(t *testing.T) {
 		certData := createCertData(t)
-		certData.Version = 2
-		certData.Timeout = 1_755_000_000
+		certData.ExpiresAt = nil
+		encoded, err := types.Cbor.Marshal(certData)
+		require.NoError(t, err)
+		require.Contains(t, encoded, byte(0xf6), "absent expiry occupies its slot as CBOR null")
+
+		var decoded CertificationData
+		require.NoError(t, types.Cbor.Unmarshal(encoded, &decoded))
+		require.Nil(t, decoded.ExpiresAt)
+		require.Equal(t, certData, decoded)
+	})
+
+	t.Run("rejects any version other than the current one", func(t *testing.T) {
+		certData := createCertData(t)
 		encoded, err := types.Cbor.Marshal(certData)
 		require.NoError(t, err)
 		require.Equal(t, byte(2), encoded[4], "fixture invariant: version follows tag and array header")
 
-		mismatched := append([]byte(nil), encoded...)
-		mismatched[4] = 1
-		var decoded CertificationData
-		require.ErrorContains(t, types.Cbor.Unmarshal(mismatched, &decoded),
-			"CertificationData v1: expected 5 fields, got 6")
+		for _, bad := range []byte{1, 3} {
+			mismatched := append([]byte(nil), encoded...)
+			mismatched[4] = bad
+			var decoded CertificationData
+			require.ErrorContains(t, types.Cbor.Unmarshal(mismatched, &decoded),
+				"unsupported CertificationData version")
+		}
 	})
 }
 
@@ -228,7 +241,7 @@ func TestCertificationRequestCBOR(t *testing.T) {
 		Version: 1,
 		StateID: RequireNewImprintV2("cfe84a1828e2edd0a7d9533b23e519f746069a938d549a150e07e14dc0f9cf00"),
 		CertificationData: CertificationData{
-			Version:         1,
+			Version:         2,
 			OwnerPredicate:  NewPayToPublicKeyPredicate([]byte{0x03, 0x20, 0x44, 0xf2}),
 			SourceStateHash: RequireNewImprintV2("cd60000000000000000000000000000000000000000000000000000000000000"),
 			TransactionHash: RequireNewImprintV2("8a51b5b84171e6c7c345bf3610cc18fa1b61bad33908e1522520c001b0e7fd1d"),
@@ -264,7 +277,7 @@ func createCertData(t *testing.T) CertificationData {
 		OwnerPredicate:  NewPayToPublicKeyPredicate(publicKey),
 		SourceStateHash: sourceStateHashHex,
 		TransactionHash: transactionHashHex,
-		Timeout:         1755003600,
+		ExpiresAt:       uint64Ptr(1755003600),
 		Witness:         NewHexBytes(witness),
 	}
 }
@@ -281,7 +294,7 @@ func TestCertificationDataHashing_Compatibility(t *testing.T) {
 		expectedBytes = append(expectedBytes, certData.SourceStateHash...)
 		expectedBytes = append(expectedBytes, []byte{0x58, 0x20}...)
 		expectedBytes = append(expectedBytes, certData.TransactionHash...)
-		expectedBytes = append(expectedBytes, CborUint(certData.Timeout)...)
+		expectedBytes = append(expectedBytes, CborUint(*certData.ExpiresAt)...)
 		expectedBytes = append(expectedBytes, append([]byte{0x58, byte(len(certData.Witness))}, certData.Witness...)...)
 		expectedHash := NewDataHasher(SHA256).AddData(expectedBytes).GetHash()
 
@@ -290,36 +303,35 @@ func TestCertificationDataHashing_Compatibility(t *testing.T) {
 			OwnerPredicate  Predicate
 			SourceStateHash []byte
 			TransactionHash []byte
-			Timeout         uint64
+			ExpiresAt       *uint64
 			Witness         []byte
 		}
 		canonicalBytes, err := types.Cbor.Marshal(certDataInput{
 			OwnerPredicate:  certData.OwnerPredicate,
 			SourceStateHash: certData.SourceStateHash,
 			TransactionHash: certData.TransactionHash,
-			Timeout:         certData.Timeout,
+			ExpiresAt:       certData.ExpiresAt,
 			Witness:         certData.Witness,
 		})
 		require.NoError(t, err)
 		assert.Equal(t, expectedBytes, canonicalBytes)
 
-		gotHash, err := CertDataHash(certData.OwnerPredicate, certData.SourceStateHash, certData.TransactionHash, certData.Timeout, certData.Witness)
+		gotHash, err := CertDataHash(certData.OwnerPredicate, certData.SourceStateHash, certData.TransactionHash, certData.ExpiresAt, certData.Witness)
 		require.NoError(t, err)
 		assert.Equal(t, expectedHash.RawHash, gotHash.RawHash)
 	})
 }
 
-func TestCertificationDataLegacyCrossSDKVector(t *testing.T) {
+func TestCertificationDataRejectsRetiredVersionOneVector(t *testing.T) {
+	// The pre-expiry v1 encoding is no longer a format: one version, one shape.
 	encoded, err := hex.DecodeString("d998778501d9987883014101582103a19eef04b8856f50bf2d688b0d8804575115e53d2a7780da363628343f9635075820e4b183ff6b7a399983cee26e4feea85d517dede0142def5c838e593a9e6152415820df524cffc08a1dc30579a8a51f440a97b30630988084f8d12a4d8bd741c7791258419efb637f14dbdaada6e293e2182932d82265b04b1abf4f28bc4c285b32b5e2325140fe7f94bc9b705c568b4fcb7f9ea90cf0fadcacc1b4504275f81558aad1e700")
 	require.NoError(t, err)
 	var data CertificationData
-	require.NoError(t, types.Cbor.Unmarshal(encoded, &data))
-	require.Equal(t, types.Version(1), data.GetVersion())
-	require.Zero(t, data.Timeout)
-	roundTrip, err := types.Cbor.Marshal(&data)
-	require.NoError(t, err)
-	require.Equal(t, encoded, roundTrip)
+	require.Error(t, types.Cbor.Unmarshal(encoded, &data))
 }
+
+// uint64Ptr returns a pointer to v, for the optional request deadline.
+func uint64Ptr(v uint64) *uint64 { return &v }
 
 func TestCertificationDataHashing_InvalidLengths(t *testing.T) {
 	validPredicate := NewPayToPublicKeyPredicate([]byte{0x01, 0x02, 0x03})
@@ -328,13 +340,13 @@ func TestCertificationDataHashing_InvalidLengths(t *testing.T) {
 	longHash := make([]byte, 64)
 
 	t.Run("CertDataHash should reject invalid hash lengths", func(t *testing.T) {
-		_, err := CertDataHash(validPredicate, shortHash, validHash, 1755003600, []byte{0x00})
+		_, err := CertDataHash(validPredicate, shortHash, validHash, uint64Ptr(1755003600), []byte{0x00})
 		assert.ErrorContains(t, err, "invalid source state hash length")
 
-		_, err = CertDataHash(validPredicate, validHash, longHash, 1755003600, []byte{0x00})
+		_, err = CertDataHash(validPredicate, validHash, longHash, uint64Ptr(1755003600), []byte{0x00})
 		assert.ErrorContains(t, err, "invalid transaction hash length")
 
-		_, err = CertDataHash(validPredicate, []byte{}, validHash, 1755003600, []byte{0x00})
+		_, err = CertDataHash(validPredicate, []byte{}, validHash, uint64Ptr(1755003600), []byte{0x00})
 		assert.ErrorContains(t, err, "invalid source state hash length")
 	})
 
@@ -409,7 +421,7 @@ func TestCertificationDataHashing_InvalidHashLengths(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run("CertDataHash rejects "+tc.name, func(t *testing.T) {
-			_, err := CertDataHash(certData.OwnerPredicate, tc.sourceStateHash, tc.transactionHash, 1755003600, certData.Witness)
+			_, err := CertDataHash(certData.OwnerPredicate, tc.sourceStateHash, tc.transactionHash, uint64Ptr(1755003600), certData.Witness)
 			require.ErrorContains(t, err, tc.expectedErrorPart)
 		})
 

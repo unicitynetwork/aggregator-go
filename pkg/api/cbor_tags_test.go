@@ -81,21 +81,22 @@ func TestCertificationData_WireFormat(t *testing.T) {
 	require.Equal(t, byte(0x02), b[len(prefix)], "Version slot should be 2")
 }
 
-func TestCertificationData_LegacyWireFormatOmitsTimeout(t *testing.T) {
+func TestCertificationData_AbsentExpiryKeepsTheSameShape(t *testing.T) {
 	cd := createCertData(t)
 	cd.Version = 0
-	cd.Timeout = 0
+	cd.ExpiresAt = nil
 
 	b, err := types.Cbor.Marshal(&cd)
 	require.NoError(t, err)
-	prefix := cborTagPrefix(t, CertificationDataTag, 5)
+	// Same tag, same element count, same version as a request that carries one.
+	prefix := cborTagPrefix(t, CertificationDataTag, 6)
 	require.Equal(t, prefix, b[:len(prefix)])
-	require.Equal(t, byte(0x01), b[len(prefix)])
+	require.Equal(t, byte(0x02), b[len(prefix)])
 
 	var decoded CertificationData
 	require.NoError(t, types.Cbor.Unmarshal(b, &decoded))
-	require.Zero(t, decoded.Timeout)
-	require.Equal(t, types.Version(1), decoded.GetVersion())
+	require.Nil(t, decoded.ExpiresAt)
+	require.Equal(t, CertificationDataVersion, decoded.GetVersion())
 }
 
 func TestCertificationData_RejectsWrongTag(t *testing.T) {

@@ -20,11 +20,16 @@ var ErrRequestExpired = errors.New("certification request expired")
 // commitmentExpired reports whether the request may still be inserted in a
 // round with this reference time. The timeout is exclusive.
 func commitmentExpired(commitment *models.CertificationRequest, referenceTime uint64) bool {
-	timeout := commitment.EffectiveTimeout
-	if timeout == 0 {
-		timeout = commitment.CertificationData.Timeout
+	deadline := commitment.EffectiveTimeout
+	if deadline == 0 {
+		// A record recovered from before the effective timeout was assigned falls
+		// back to the requester's own deadline, when the request carried one.
+		if commitment.CertificationData.ExpiresAt == nil {
+			return false
+		}
+		deadline = *commitment.CertificationData.ExpiresAt
 	}
-	return timeout != 0 && referenceTime >= timeout
+	return referenceTime >= deadline
 }
 
 // commitmentLeafInput materialises a commitment's SMT leaf under the round's

@@ -346,7 +346,7 @@ func (cp *childPrecollector) addBatch(
 			if errors.Is(err, ErrRequestExpired) {
 				cp.logger.WithContext(ctx).Debug("Dropping expired certification request",
 					"stateID", c.StateID.String(),
-					"timeout", c.CertificationData.Timeout,
+					"expiresAt", c.CertificationData.ExpiresAt,
 					"referenceTime", referenceTime)
 				expired = append(expired, interfaces.CertificationRequestAck{
 					StateID:  c.StateID,

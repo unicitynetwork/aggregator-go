@@ -405,8 +405,8 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 	) {
 		return errors.New("proof certification data transaction hash does not match certification request transaction hash")
 	}
-	if p.CertificationData.Timeout != v2.CertificationData.Timeout {
-		return errors.New("proof certification data timeout does not match certification request timeout")
+	if !equalExpiresAt(p.CertificationData.ExpiresAt, v2.CertificationData.ExpiresAt) {
+		return errors.New("proof certification data expiry does not match certification request expiry")
 	}
 
 	rootRaw, err := p.UCInputRecordHashRaw()
@@ -425,7 +425,9 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 	if p.ReferenceTime == nil {
 		return errors.New("missing inclusion proof reference time")
 	}
-	if timeout := v2.CertificationData.Timeout; timeout != 0 && *p.ReferenceTime >= timeout {
+	// A request without an explicit deadline was admitted under a service-assigned
+	// one, which is not recorded here and is not checked by a later verifier.
+	if expiresAt := v2.CertificationData.ExpiresAt; expiresAt != nil && *p.ReferenceTime >= *expiresAt {
 		return errors.New("certification request expired")
 	}
 	value := LeafValue(v2.CertificationData.TransactionHash.DataBytes(), *p.ReferenceTime)
@@ -467,4 +469,13 @@ func ucInputRecordHashRaw(raw []byte) ([]byte, error) {
 			len(ir), StateTreeKeyLengthBytes)
 	}
 	return append([]byte(nil), ir...), nil
+}
+
+// equalExpiresAt compares two optional request deadlines, treating "absent" as a
+// value in its own right rather than as zero.
+func equalExpiresAt(a, b *uint64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
