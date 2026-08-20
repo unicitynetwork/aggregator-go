@@ -118,7 +118,7 @@ func TestRoundProcessingUsesScheduledRoundSnapshot(t *testing.T) {
 	recorder := newRecordingBFTClient()
 	rm.bftClient = recorder
 
-	require.NoError(t, rm.StartNewRound(ctx, api.NewBigInt(big.NewInt(1))))
+	require.NoError(t, rm.StartNewRound(ctx, api.NewBigInt(big.NewInt(1)), 1755000000))
 
 	roundOneCommitment := testutil.CreateTestCertificationRequest(t, "scheduled_round_one")
 	rm.commitmentStream <- roundOneCommitment
@@ -131,7 +131,7 @@ func TestRoundProcessingUsesScheduledRoundSnapshot(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 
 	roundTwoCommitment := testutil.CreateTestCertificationRequest(t, "scheduled_round_two")
-	roundTwoLeaf, err := commitmentLeafInput(roundTwoCommitment)
+	roundTwoLeaf, err := commitmentLeafInput(roundTwoCommitment, 1755000000)
 	require.NoError(t, err)
 	roundTwoSnapshot, err := rm.smtBackend.CreateSnapshot(ctx)
 	require.NoError(t, err)
@@ -143,7 +143,7 @@ func TestRoundProcessingUsesScheduledRoundSnapshot(t *testing.T) {
 
 	require.NoError(t, rm.StartNewRoundWithSnapshot(
 		ctx,
-		api.NewBigInt(big.NewInt(2)),
+		api.NewBigInt(big.NewInt(2)), 1755000000,
 		roundTwoSnapshot,
 		[]*models.CertificationRequest{roundTwoCommitment},
 		[]smtbackend.LeafInput{roundTwoLeaf},
@@ -244,7 +244,7 @@ func TestStartNewRoundAbandonsSupersededPendingRound(t *testing.T) {
 	}
 	rm.markProofsPending([]*models.CertificationRequest{commitment})
 
-	require.NoError(t, rm.StartNewRound(ctx, api.NewBigInt(big.NewInt(2))))
+	require.NoError(t, rm.StartNewRound(ctx, api.NewBigInt(big.NewInt(2)), 1755000000))
 
 	require.Equal(t, 1, discardSpy.discards)
 	select {
@@ -372,7 +372,7 @@ func TestStartNewRoundWithSnapshotAbandonAfterSnapshotCleanupResetsRedisPendingS
 	rm.markProofsPending([]*models.CertificationRequest{oldCommitment})
 
 	newCommitment := testutil.CreateTestCertificationRequest(t, "new_precollected_round")
-	newLeaf, err := commitmentLeafInput(newCommitment)
+	newLeaf, err := commitmentLeafInput(newCommitment, 1755000000)
 	require.NoError(t, err)
 	newSnapshot, err := rm.smtBackend.CreateSnapshot(ctx)
 	require.NoError(t, err)
@@ -383,7 +383,7 @@ func TestStartNewRoundWithSnapshotAbandonAfterSnapshotCleanupResetsRedisPendingS
 
 	require.NoError(t, rm.StartNewRoundWithSnapshot(
 		ctx,
-		api.NewBigInt(big.NewInt(2)),
+		api.NewBigInt(big.NewInt(2)), 1755000000,
 		newSnapshot,
 		[]*models.CertificationRequest{newCommitment},
 		[]smtbackend.LeafInput{newLeaf},
@@ -457,7 +457,7 @@ func TestStartNewRoundWithSnapshotDoesNotReplayFinalizedRoundHistory(t *testing.
 	}
 
 	newCommitment := testutil.CreateTestCertificationRequest(t, "precollected_round_pending_marker")
-	newLeaf, err := commitmentLeafInput(newCommitment)
+	newLeaf, err := commitmentLeafInput(newCommitment, 1755000000)
 	require.NoError(t, err)
 	newSnapshot, err := rm.smtBackend.CreateSnapshot(ctx)
 	require.NoError(t, err)
@@ -468,7 +468,7 @@ func TestStartNewRoundWithSnapshotDoesNotReplayFinalizedRoundHistory(t *testing.
 
 	require.NoError(t, rm.StartNewRoundWithSnapshot(
 		ctx,
-		api.NewBigInt(big.NewInt(2)),
+		api.NewBigInt(big.NewInt(2)), 1755000000,
 		newSnapshot,
 		[]*models.CertificationRequest{newCommitment},
 		[]smtbackend.LeafInput{newLeaf},
@@ -521,7 +521,7 @@ func TestStaleCertificationRequestAbandonsStoredDurableProposal(t *testing.T) {
 	}()
 
 	commitment := testutil.CreateTestCertificationRequest(t, "stale_durable_proposal")
-	leaf, err := commitmentLeafInput(commitment)
+	leaf, err := commitmentLeafInput(commitment, 1755000000)
 	require.NoError(t, err)
 	snapshot, err := rm.smtBackend.CreateSnapshot(ctx)
 	require.NoError(t, err)
@@ -531,7 +531,7 @@ func TestStaleCertificationRequestAbandonsStoredDurableProposal(t *testing.T) {
 
 	require.NoError(t, rm.StartNewRoundWithSnapshot(
 		ctx,
-		api.NewBigInt(big.NewInt(1)),
+		api.NewBigInt(big.NewInt(1)), 1755000000,
 		snapshot,
 		[]*models.CertificationRequest{commitment},
 		[]smtbackend.LeafInput{leaf},
@@ -598,7 +598,7 @@ func TestStartNewRoundRetriesEqualFinalizingRoundProposal(t *testing.T) {
 	}()
 
 	commitment := testutil.CreateTestCertificationRequest(t, "repeat_uc_equal_round_retry")
-	leaf, err := commitmentLeafInput(commitment)
+	leaf, err := commitmentLeafInput(commitment, 1755000000)
 	require.NoError(t, err)
 	snapshot := testRMSnapshot(t, ctx, rm)
 	result, err := snapshot.AddLeavesClassified(ctx, []smtbackend.LeafInput{leaf})
@@ -619,7 +619,7 @@ func TestStartNewRoundRetriesEqualFinalizingRoundProposal(t *testing.T) {
 		ProposalTime:       time.Now(),
 	}
 
-	require.NoError(t, rm.StartNewRound(ctx, api.NewBigInt(big.NewInt(7))))
+	require.NoError(t, rm.StartNewRound(ctx, api.NewBigInt(big.NewInt(7)), 1755000000))
 
 	require.Eventually(t, func() bool {
 		return len(recorder.snapshot()) == 1
@@ -671,6 +671,7 @@ func TestProposeBlockLinksToLatestFinalizedBlockAcrossRoundGap(t *testing.T) {
 		parentRoot,
 		nil,
 		nil,
+		1755000000,
 	)
 	block1.Finalized = true
 	require.NoError(t, storage.BlockStorage().Store(ctx, block1))

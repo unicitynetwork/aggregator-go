@@ -309,6 +309,7 @@ func finalizeManualDiskRound(
 		rootHash,
 		api.HexBytes{},
 		uc,
+		1755000000,
 	)
 	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 	require.NoError(t, rm.FinalizeBlock(ctx, block))
@@ -345,7 +346,7 @@ func applyMemoryRound(
 	leaves := make([]smtbackend.LeafInput, 0, len(commitments))
 	validCommitments := make([]*models.CertificationRequest, 0, len(commitments))
 	for _, commitment := range commitments {
-		leaf, err := commitmentLeafInput(commitment)
+		leaf, err := commitmentLeafInput(commitment, 1755000000)
 		if err != nil {
 			continue
 		}

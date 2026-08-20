@@ -11,15 +11,19 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
-func commitmentLeafInput(commitment *models.CertificationRequest) (smtbackend.LeafInput, error) {
+// commitmentLeafInput materialises a commitment's SMT leaf under the round's
+// pinned reference time, recording that time on the commitment so the record
+// and the served proof report the value the leaf was actually built from.
+func commitmentLeafInput(commitment *models.CertificationRequest, referenceTime uint64) (smtbackend.LeafInput, error) {
 	key, err := commitment.StateID.GetTreeKey()
 	if err != nil {
 		return smtbackend.LeafInput{}, err
 	}
-	leafValue, err := commitment.LeafValue()
+	leafValue, err := commitment.LeafValue(referenceTime)
 	if err != nil {
 		return smtbackend.LeafInput{}, err
 	}
+	commitment.ReferenceTime = referenceTime
 	return smtbackend.LeafInput{
 		Key:   append([]byte(nil), key...),
 		Value: append([]byte(nil), leafValue...),

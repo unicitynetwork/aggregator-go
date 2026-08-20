@@ -404,6 +404,7 @@ func TestGetInclusionProofV2Child_ComposesParentFragment(t *testing.T) {
 		api.HexBytes(childRoot),
 		nil,
 		parentUC,
+		1755000000,
 	)
 	block.ParentFragment = parentFragment
 	block.ParentBlockNumber = 9
@@ -469,6 +470,7 @@ func TestGetInclusionProofV2Child_NonInclusionUsesParentBundleMetadata(t *testin
 		api.HexBytes(childTree.GetRootHashRaw()),
 		nil,
 		parentUC,
+		1755000000,
 	)
 	block.ParentBlockNumber = 12
 	block.Finalized = true
@@ -650,6 +652,7 @@ func TestGetInclusionProofUsesCachedProofMetadata(t *testing.T) {
 		rootHash,
 		nil,
 		uc,
+		1755000000,
 	)
 	block.Finalized = true
 	record := &models.AggregatorRecord{
@@ -711,6 +714,7 @@ func TestGetInclusionProofPublishedViewReturnsEmptyBeforeRecordRootIsPublished(t
 		publishedRoot,
 		nil,
 		testChildProofUC(t, 9, publishedRoot),
+		1755000000,
 	)
 	block.Finalized = true
 	backend := &publishedProofBackend{
@@ -766,6 +770,7 @@ func TestGetHealthStatusPublishedProofFollowerNotReadyDuringInitialDiskSync(t *t
 		latestRoot,
 		nil,
 		testChildProofUC(t, 9, latestRoot),
+		1755000000,
 	)
 	latestBlock.Finalized = true
 	backend := &publishedProofBackend{
@@ -814,6 +819,7 @@ func TestGetHealthStatusPublishedProofFollowerReadyAfterInitialDiskSync(t *testi
 		latestRoot,
 		nil,
 		testChildProofUC(t, 9, latestRoot),
+		1755000000,
 	)
 	latestBlock.Finalized = true
 	backend := &publishedProofBackend{
@@ -863,6 +869,7 @@ func TestGetInclusionProofPublishedViewRootChangeReturnsEmpty(t *testing.T) {
 		publishedRoot,
 		nil,
 		testChildProofUC(t, 9, publishedRoot),
+		1755000000,
 	)
 	block.Finalized = true
 	record := &models.AggregatorRecord{

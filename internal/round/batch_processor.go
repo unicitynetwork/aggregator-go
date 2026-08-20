@@ -34,12 +34,15 @@ func (rm *RoundManager) processMiniBatchForRound(ctx context.Context, round *Rou
 	if len(commitments) == 0 {
 		return nil, nil
 	}
+	if round == nil {
+		return nil, nil
+	}
 
 	// Convert commitments to backend leaf inputs, tracking valid commitments.
 	leaves := make([]smtbackend.LeafInput, 0, len(commitments))
 	validCommitments := make([]*models.CertificationRequest, 0, len(commitments))
 	for _, commitment := range commitments {
-		leaf, err := commitmentLeafInput(commitment)
+		leaf, err := commitmentLeafInput(commitment, round.ReferenceTime)
 		if err != nil {
 			rm.logger.WithContext(ctx).Error("Failed to create leaf input",
 				"stateID", commitment.StateID.String(),
@@ -133,6 +136,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 			rootHash,
 			parentHash,
 			nil,
+			round.ReferenceTime,
 		)
 		block.ProposalID = round.ProposalID
 		if err := rm.ensureDurableProposal(ctx, round, block); err != nil {
@@ -235,6 +239,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 			rootHash,
 			parentHash,
 			proof.UnicityCertificate,
+			round.ReferenceTime,
 			proof.ParentFragment,
 			proof.BlockNumber,
 		)
@@ -255,7 +260,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 		rm.roundMutex.RUnlock()
 
 		if cp != nil {
-			preResult, advErr := rm.advancePrecollectorForHandoff(cp)
+			preResult, advErr := rm.advancePrecollectorForHandoff(cp, rm.lastReferenceTime())
 			if advErr == nil {
 				nextRound := api.NewBigInt(nextRoundNumber)
 				if err := validatePrecollectorBlockNumber(preResult, nextRound); err != nil {
@@ -270,7 +275,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 				}
 				// StartNewRoundWithSnapshot atomically checks precollectorDisabled
 				// under roundMutex — no race with concurrent Deactivate.
-				if err := rm.StartNewRoundWithSnapshot(ctx, nextRound, preResult.snapshot, preResult.commitments, preResult.leaves, preResult.recordsStaged, preResult.proposalID); err != nil {
+				if err := rm.StartNewRoundWithSnapshot(ctx, nextRound, rm.lastReferenceTime(), preResult.snapshot, preResult.commitments, preResult.leaves, preResult.recordsStaged, preResult.proposalID); err != nil {
 					preResult.snapshot.Discard(ctx)
 					if !errors.Is(err, ErrDeactivated) {
 						rm.logger.WithContext(ctx).Error("Failed to start new round with snapshot.", "error", err.Error())
@@ -278,12 +283,12 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 				}
 			} else {
 				rm.logger.WithContext(ctx).Warn("Failed to advance precollector", "error", advErr.Error())
-				if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); err != nil && !errors.Is(err, ErrDeactivated) {
+				if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber), rm.lastReferenceTime()); err != nil && !errors.Is(err, ErrDeactivated) {
 					rm.logger.WithContext(ctx).Error("Failed to start new round after finalization.", "error", err.Error())
 				}
 			}
 		} else {
-			if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); err != nil && !errors.Is(err, ErrDeactivated) {
+			if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber), rm.lastReferenceTime()); err != nil && !errors.Is(err, ErrDeactivated) {
 				rm.logger.WithContext(ctx).Error("Failed to start new round after finalization.", "error", err.Error())
 			}
 		}

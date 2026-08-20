@@ -384,8 +384,10 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		return nil, fmt.Errorf("failed to marshal inclusion cert: %w", err)
 	}
 
+	referenceTime := record.ReferenceTime
 	proof := &api.InclusionProofV2{
 		CertificationData:  record.CertificationData.ToAPI(),
+		ReferenceTime:      &referenceTime,
 		CertificateBytes:   certBytes,
 		UnicityCertificate: types.RawCBOR(block.UnicityCertificate),
 	}

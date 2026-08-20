@@ -142,7 +142,7 @@ func TestInclusionProofV2_WireFormat(t *testing.T) {
 	b, err := types.Cbor.Marshal(proof)
 	require.NoError(t, err)
 
-	prefix := cborTagPrefix(t, InclusionProofTag, 4)
+	prefix := cborTagPrefix(t, InclusionProofTag, 5)
 	require.Equal(t, prefix, b[:len(prefix)])
 	require.Equal(t, byte(0x01), b[len(prefix)], "Version slot should be 1")
 }

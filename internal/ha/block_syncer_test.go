@@ -224,7 +224,7 @@ func createBlock(t *testing.T, storage *mongodb.Storage, blockNum int64) api.Hex
 		path, err := c.StateID.GetPath()
 		require.NoError(t, err)
 
-		val, err := c.LeafValue()
+		val, err := c.LeafValue(1755000000)
 		require.NoError(t, err)
 
 		leaves[i] = &smt.Leaf{Path: path, Value: val}
@@ -253,7 +253,7 @@ func createBlock(t *testing.T, storage *mongodb.Storage, blockNum int64) api.Hex
 	rootHash := api.HexBytes(tmpSMT.GetRootHashRaw())
 
 	// persist block
-	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", rootHash, nil, nil)
+	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", rootHash, nil, nil, 1755000000)
 	block.Finalized = true // Mark as finalized so GetLatestNumber finds it
 	block.ProposalID = proposalID
 	err = storage.BlockStorage().Store(ctx, block)
@@ -315,7 +315,7 @@ func (f *blockSyncerFixture) addBlock(t *testing.T, blockNum int64, commitmentCo
 		c := testutil.CreateTestCertificationRequest(t, fmt.Sprintf("block_%d_request_%d", blockNum, i))
 		path, err := c.StateID.GetPath()
 		require.NoError(t, err)
-		value, err := c.LeafValue()
+		value, err := c.LeafValue(1755000000)
 		require.NoError(t, err)
 		key, err := c.StateID.GetTreeKey()
 		require.NoError(t, err)
@@ -332,7 +332,7 @@ func (f *blockSyncerFixture) addBlock(t *testing.T, blockNum int64, commitmentCo
 	}
 	rootHash := api.HexBytes(f.tree.GetRootHashRaw())
 
-	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "test", rootHash, nil, nil)
+	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "test", rootHash, nil, nil, 1755000000)
 	block.Finalized = true
 	block.ProposalID = proposalID
 	require.NoError(t, f.storage.BlockStorage().Store(ctx, block))

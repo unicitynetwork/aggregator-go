@@ -25,7 +25,10 @@ type preCollectionResult struct {
 }
 
 type advanceRequest struct {
-	resultCh chan advanceResponse
+	// referenceTime is the round the collected commitments are being handed to.
+	// Leaves are materialised only here, because the leaf value binds it.
+	referenceTime uint64
+	resultCh      chan advanceResponse
 }
 
 type advanceResponse struct {
@@ -110,8 +113,8 @@ func (cp *childPrecollector) Start(ctx context.Context, snapshot smtbackend.Snap
 
 // AdvanceRound returns the current round's collected data and internally chains
 // a new collection from the current snapshot before returning.
-func (cp *childPrecollector) AdvanceRound() (*preCollectionResult, error) {
-	req := advanceRequest{resultCh: make(chan advanceResponse, 1)}
+func (cp *childPrecollector) AdvanceRound(referenceTime uint64) (*preCollectionResult, error) {
+	req := advanceRequest{referenceTime: referenceTime, resultCh: make(chan advanceResponse, 1)}
 	select {
 	case cp.advanceCh <- req:
 	case <-cp.doneCh:
@@ -156,6 +159,7 @@ func (cp *childPrecollector) run(ctx context.Context, snapshot smtbackend.Snapsh
 		blockNumber *api.BigInt,
 		proposalID string,
 		rawCommitments []*models.CertificationRequest,
+		referenceTime uint64,
 	) precollectorPrepareOutcome {
 		prepareStart := time.Now()
 		outcome := precollectorPrepareOutcome{}
@@ -165,7 +169,7 @@ func (cp *childPrecollector) run(ctx context.Context, snapshot smtbackend.Snapsh
 		if len(rawCommitments) > 0 {
 			start := time.Now()
 			var err error
-			added, addedLeaves, err = cp.addBatch(ctx, snapshot, rawCommitments)
+			added, addedLeaves, err = cp.addBatch(ctx, snapshot, rawCommitments, referenceTime)
 			elapsed := time.Since(start)
 			outcome.stats.flushCalls = 1
 			outcome.stats.flushAdded = len(added)
@@ -229,8 +233,8 @@ func (cp *childPrecollector) run(ctx context.Context, snapshot smtbackend.Snapsh
 		return outcome
 	}
 
-	prepareSynchronously := func() (precollectorPrepareOutcome, error) {
-		outcome := prepareRound(snapshot, cloneBigInt(cp.blockNumber), cp.proposalID, commitments)
+	prepareSynchronously := func(referenceTime uint64) (precollectorPrepareOutcome, error) {
+		outcome := prepareRound(snapshot, cloneBigInt(cp.blockNumber), cp.proposalID, commitments, referenceTime)
 		if outcome.err != nil {
 			return outcome, outcome.err
 		}
@@ -269,7 +273,7 @@ func (cp *childPrecollector) run(ctx context.Context, snapshot smtbackend.Snapsh
 		case req := <-cp.advanceCh:
 			advanceStart := time.Now()
 			pendingAtAdvance := len(commitments)
-			outcome, err := prepareSynchronously()
+			outcome, err := prepareSynchronously(req.referenceTime)
 			if err != nil {
 				cp.setStopErr(err)
 				req.resultCh <- advanceResponse{err: err}
@@ -325,6 +329,7 @@ func (cp *childPrecollector) addBatch(
 	ctx context.Context,
 	snapshot smtbackend.Snapshot,
 	commitments []*models.CertificationRequest,
+	referenceTime uint64,
 ) ([]*models.CertificationRequest, []smtbackend.LeafInput, error) {
 	if len(commitments) == 0 {
 		return nil, nil, nil
@@ -334,7 +339,7 @@ func (cp *childPrecollector) addBatch(
 	valid := make([]*models.CertificationRequest, 0, len(commitments))
 
 	for _, c := range commitments {
-		leaf, err := commitmentLeafInput(c)
+		leaf, err := commitmentLeafInput(c, referenceTime)
 		if err != nil {
 			cp.logger.WithContext(ctx).Error("Failed to create leaf input",
 				"stateID", c.StateID.String(), "error", err.Error())

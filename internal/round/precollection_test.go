@@ -480,7 +480,7 @@ func TestChildPrecollector_CollectsContinuouslyAcrossRound(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Advance round — should return both commitments
-	result, err := cp.AdvanceRound()
+	result, err := cp.AdvanceRound(1755000000)
 	require.NoError(t, err)
 	assert.Len(t, result.commitments, 2)
 	assert.Len(t, result.leaves, 2)
@@ -491,7 +491,7 @@ func TestChildPrecollector_CollectsContinuouslyAcrossRound(t *testing.T) {
 	stream <- c3
 	time.Sleep(50 * time.Millisecond)
 
-	result2, err := cp.AdvanceRound()
+	result2, err := cp.AdvanceRound(1755000000)
 	require.NoError(t, err)
 	assert.Len(t, result2.commitments, 1)
 	assert.Equal(t, c3, result2.commitments[0])
@@ -517,7 +517,7 @@ func TestChildPrecollector_AdvanceRound_FlushesPendingBatch(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	result, err := cp.AdvanceRound()
+	result, err := cp.AdvanceRound(1755000000)
 	require.NoError(t, err)
 	assert.Len(t, result.commitments, count, "AdvanceRound must flush pending batch")
 	assert.Len(t, result.leaves, count)
@@ -556,7 +556,7 @@ func TestChildPrecollector_AdvanceRoundStagesOneShotHandoff(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	result, err := cp.AdvanceRound()
+	result, err := cp.AdvanceRound(1755000000)
 	require.NoError(t, err)
 	require.True(t, result.recordsStaged)
 	require.EqualValues(t, 12, result.blockNumber.Uint64())
@@ -602,7 +602,7 @@ func TestChildPrecollector_AdvanceRound_NoDropAcrossBoundary(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	r1, err := cp.AdvanceRound()
+	r1, err := cp.AdvanceRound(1755000000)
 	require.NoError(t, err)
 	r1Count := len(r1.commitments)
 
@@ -613,7 +613,7 @@ func TestChildPrecollector_AdvanceRound_NoDropAcrossBoundary(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	r2, err := cp.AdvanceRound()
+	r2, err := cp.AdvanceRound(1755000000)
 	require.NoError(t, err)
 
 	// No commitments should be dropped across the boundary
@@ -637,14 +637,14 @@ func TestChildPrecollector_HonorsMaxCommitmentsWithoutConsumingAndDropping(t *te
 	}
 	time.Sleep(100 * time.Millisecond)
 
-	result, err := cp.AdvanceRound()
+	result, err := cp.AdvanceRound(1755000000)
 	require.NoError(t, err)
 	assert.Equal(t, maxPerRound, len(result.commitments), "should honor max per round")
 
 	// After advance, the overflow should still be in the stream (not consumed and dropped)
 	// The precollector should now collect the remaining 3 for the next round
 	time.Sleep(50 * time.Millisecond)
-	result2, err := cp.AdvanceRound()
+	result2, err := cp.AdvanceRound(1755000000)
 	require.NoError(t, err)
 	assert.Equal(t, 3, len(result2.commitments), "overflow should be collected in next round")
 }
@@ -667,7 +667,7 @@ func TestChildPrecollector_ControlMessagesProgressUnderBackpressure(t *testing.T
 	// AdvanceRound should still complete even under backpressure
 	done := make(chan struct{})
 	go func() {
-		_, err := cp.AdvanceRound()
+		_, err := cp.AdvanceRound(1755000000)
 		assert.NoError(t, err)
 		close(done)
 	}()
@@ -706,7 +706,7 @@ func TestChildPrecollector_StopCancelsCleanly(t *testing.T) {
 	}
 
 	// AdvanceRound after stop should fail
-	_, err := cp.AdvanceRound()
+	_, err := cp.AdvanceRound(1755000000)
 	assert.Error(t, err)
 }
 
@@ -721,7 +721,7 @@ func TestChildPrecollector_AdvanceRoundWithNoData(t *testing.T) {
 	defer cp.Stop()
 
 	// Advance with no data sent
-	result, err := cp.AdvanceRound()
+	result, err := cp.AdvanceRound(1755000000)
 	require.NoError(t, err)
 	assert.Empty(t, result.commitments)
 	assert.Empty(t, result.leaves)
@@ -744,7 +744,7 @@ func TestChildPrecollector_BatchWithBadLeafFallsBackToOneByOne(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Advance to lock in c1
-	r1, err := cp.AdvanceRound()
+	r1, err := cp.AdvanceRound(1755000000)
 	require.NoError(t, err)
 	assert.Len(t, r1.commitments, 1)
 
@@ -757,7 +757,7 @@ func TestChildPrecollector_BatchWithBadLeafFallsBackToOneByOne(t *testing.T) {
 	stream <- c2
 	time.Sleep(50 * time.Millisecond)
 
-	r2, err := cp.AdvanceRound()
+	r2, err := cp.AdvanceRound(1755000000)
 	require.NoError(t, err)
 	// modified should be rejected, c2 should succeed
 	assert.Len(t, r2.commitments, 1, "only valid commitment should be collected")
@@ -782,7 +782,7 @@ func TestChildPrecollector_AdvanceRoundFailsOnSnapshotAddError(t *testing.T) {
 	stream <- testutil.CreateTestCertificationRequest(t, "snapshot_add_error")
 	time.Sleep(50 * time.Millisecond)
 
-	result, err := cp.AdvanceRound()
+	result, err := cp.AdvanceRound(1755000000)
 	require.Error(t, err)
 	require.Nil(t, result)
 	require.ErrorContains(t, err, "snapshot hash mismatch")
@@ -860,7 +860,7 @@ func TestPreCollectionReparenting(t *testing.T) {
 		stream <- preCollectedCommitment
 		time.Sleep(50 * time.Millisecond)
 
-		result, err := cp.AdvanceRound()
+		result, err := cp.AdvanceRound(1755000000)
 		require.NoError(t, err)
 		require.Len(t, result.commitments, 1)
 
@@ -1150,7 +1150,7 @@ func TestStartNewRoundWithSnapshot(t *testing.T) {
 		preLeaves := []smtbackend.LeafInput{testLeafInputFromLegacyLeaf(t, leaf)}
 
 		startTime := time.Now()
-		err = rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(big.NewInt(1)), preSnapshot, preCommitments, preLeaves, false, "")
+		err = rm.StartNewRoundWithSnapshot(ctx, api.NewBigInt(big.NewInt(1)), 1755000000, preSnapshot, preCommitments, preLeaves, false, "")
 		require.NoError(t, err)
 
 		rm.roundMutex.RLock()
@@ -1234,7 +1234,7 @@ func TestStandalonePrecollectorGraceIncludesLateCommitment(t *testing.T) {
 	}()
 
 	start := time.Now()
-	require.NoError(t, rm.StartNextRoundFromPrecollector(ctx, api.NewBigInt(big.NewInt(2))))
+	require.NoError(t, rm.StartNextRoundFromPrecollector(ctx, api.NewBigInt(big.NewInt(2)), 1755000000))
 	assert.GreaterOrEqual(t, time.Since(start), cfg.Processing.PrecollectorGracePeriod)
 
 	rm.roundMutex.RLock()
@@ -1337,7 +1337,7 @@ func TestStartNextRoundFromPrecollectorDiscardsFailedPrecollector(t *testing.T) 
 	// period gives the collect loop time to pick it up before AdvanceRound.
 	rm.commitmentStream <- testutil.CreateTestCertificationRequest(t, "handoff_failure")
 
-	require.NoError(t, rm.StartNextRoundFromPrecollector(ctx, api.NewBigInt(big.NewInt(2))))
+	require.NoError(t, rm.StartNextRoundFromPrecollector(ctx, api.NewBigInt(big.NewInt(2)), 1755000000))
 
 	rm.roundMutex.RLock()
 	stillBlocking := rm.precollector == cp
@@ -1370,7 +1370,7 @@ func TestStartNextRoundFromPrecollectorDiscardsSnapshotOnSetCommitTargetError(t 
 	}
 	rm.precollector = cp
 
-	err := rm.StartNextRoundFromPrecollector(ctx, api.NewBigIntFromUint64(2))
+	err := rm.StartNextRoundFromPrecollector(ctx, api.NewBigIntFromUint64(2), 1755000000)
 
 	require.ErrorIs(t, err, setTargetErr)
 	require.Equal(t, 1, handoffSnapshot.discardCount)
@@ -1645,6 +1645,7 @@ func TestChildMode_RequiresFreshParentProof(t *testing.T) {
 		rootHash,
 		api.HexBytes{},
 		initialUC,
+		1755000000,
 	)
 	initialBlock.Finalized = true
 	require.NoError(t, storage.BlockStorage().Store(ctx, initialBlock))

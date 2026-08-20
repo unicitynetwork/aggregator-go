@@ -226,14 +226,16 @@ func buildSignedSingleLeafProof(t *testing.T, ownerShard types.ShardID) (
 		},
 	}
 
-	// Single-leaf root: H(0x00 || key || value) under the v2 hash algorithm.
+	// Single-leaf root: H(0x00 || key || value) under the v2 hash algorithm,
+	// where the leaf value binds the round's reference time.
 	key, err := stateID.GetTreeKey()
 	require.NoError(t, err)
+	const referenceTime uint64 = 1755000000
 	hasher := NewDataHasher(InclusionProofV2HashAlgorithm)
 	hasher.Reset().
 		AddData([]byte{0x00}).
 		AddData(key).
-		AddData(txHash.DataBytes())
+		AddData(LeafValue(txHash.DataBytes(), referenceTime))
 	leafRoot := append([]byte(nil), hasher.GetHash().RawHash...)
 
 	// Empty InclusionCert — single-leaf edge case, no siblings.
@@ -329,8 +331,10 @@ func buildSignedSingleLeafProof(t *testing.T, ownerShard types.ShardID) (
 	ucBytes, err := types.Cbor.Marshal(uc)
 	require.NoError(t, err)
 
+	certifiedAt := referenceTime
 	proof := &InclusionProofV2{
 		CertificationData:  &req.CertificationData,
+		ReferenceTime:      &certifiedAt,
 		CertificateBytes:   certBytes,
 		UnicityCertificate: ucBytes,
 	}

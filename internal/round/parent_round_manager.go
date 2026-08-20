@@ -69,6 +69,29 @@ type ParentRoundManager struct {
 	totalShardUpdates int64
 
 	ready atomic.Bool
+
+	// referenceTime is the BFT seal timestamp the next round will pin; see
+	// RoundManager.referenceTime.
+	referenceTime atomic.Uint64
+}
+
+// setReferenceTime records the reference time later rounds will pin. It never
+// moves backwards.
+func (prm *ParentRoundManager) setReferenceTime(referenceTime uint64) {
+	for {
+		current := prm.referenceTime.Load()
+		if referenceTime <= current {
+			return
+		}
+		if prm.referenceTime.CompareAndSwap(current, referenceTime) {
+			return
+		}
+	}
+}
+
+// lastReferenceTime returns the reference time a round started now would pin.
+func (prm *ParentRoundManager) lastReferenceTime() uint64 {
+	return prm.referenceTime.Load()
 }
 
 const parentRoundRetryDelay = 1 * time.Second
@@ -182,13 +205,14 @@ func (prm *ParentRoundManager) SubmitShardRoot(ctx context.Context, update *mode
 }
 
 // StartNewRound begins a new aggregation round (public method for BFT interface)
-func (prm *ParentRoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
+func (prm *ParentRoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt, referenceTime uint64) error {
+	prm.setReferenceTime(referenceTime)
 	return prm.startNewRound(ctx, roundNumber)
 }
 
 // StartNextRoundFromPrecollector exists to satisfy the BFT RoundManager
 // interface. Parent mode keeps its existing collect behavior.
-func (prm *ParentRoundManager) StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt) error {
+func (prm *ParentRoundManager) StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt, referenceTime uint64) error {
 	prm.roundMutex.Lock()
 	activeCtx := prm.activeCtx
 	if activeCtx == nil {
@@ -200,7 +224,7 @@ func (prm *ParentRoundManager) StartNextRoundFromPrecollector(ctx context.Contex
 	prm.roundMutex.Unlock()
 	go func() {
 		defer prm.roundWG.Done()
-		if err := prm.StartNewRound(activeCtx, roundNumber); err != nil && !errors.Is(err, ErrDeactivated) && !errors.Is(err, context.Canceled) {
+		if err := prm.StartNewRound(activeCtx, roundNumber, referenceTime); err != nil && !errors.Is(err, ErrDeactivated) && !errors.Is(err, context.Canceled) {
 			prm.logger.WithContext(ctx).Error("Failed to start next parent round",
 				"roundNumber", roundNumber.String(),
 				"error", err.Error())
@@ -383,6 +407,7 @@ func (prm *ParentRoundManager) processRound(ctx context.Context, round *ParentRo
 		parentRootHash,
 		previousBlockHash,
 		nil,
+		prm.lastReferenceTime(),
 	)
 
 	round.Block = block

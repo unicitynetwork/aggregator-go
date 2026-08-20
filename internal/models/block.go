@@ -11,12 +11,15 @@ import (
 
 // Block represents a blockchain block
 type Block struct {
-	Index               *api.BigInt                  `json:"index"`
-	ChainID             string                       `json:"chainId"`
-	ShardID             api.ShardID                  `json:"shardId"`
-	Version             string                       `json:"version"`
-	ForkID              string                       `json:"forkId"`
-	RootHash            api.HexBytes                 `json:"rootHash"`
+	Index    *api.BigInt  `json:"index"`
+	ChainID  string       `json:"chainId"`
+	ShardID  api.ShardID  `json:"shardId"`
+	Version  string       `json:"version"`
+	ForkID   string       `json:"forkId"`
+	RootHash api.HexBytes `json:"rootHash"`
+	// ReferenceTime is the reference time this round's leaves were built under,
+	// pinned when the round started and reported as the input record timestamp.
+	ReferenceTime       uint64                       `json:"referenceTime"`
 	PreviousBlockHash   api.HexBytes                 `json:"previousBlockHash"`
 	NoDeletionProofHash api.HexBytes                 `json:"noDeletionProofHash"`
 	CreatedAt           *api.Timestamp               `json:"createdAt"`
@@ -36,6 +39,7 @@ type BlockBSON struct {
 	Version             string               `bson:"version"`
 	ForkID              string               `bson:"forkId"`
 	RootHash            string               `bson:"rootHash"`
+	ReferenceTime       uint64               `bson:"referenceTime"`
 	PreviousBlockHash   string               `bson:"previousBlockHash"`
 	NoDeletionProofHash string               `bson:"noDeletionProofHash,omitempty"`
 	CreatedAt           time.Time            `bson:"createdAt"`
@@ -73,6 +77,7 @@ func (b *Block) ToBSON() (*BlockBSON, error) {
 		Version:             b.Version,
 		ForkID:              b.ForkID,
 		RootHash:            b.RootHash.String(),
+		ReferenceTime:       b.ReferenceTime,
 		PreviousBlockHash:   b.PreviousBlockHash.String(),
 		NoDeletionProofHash: b.NoDeletionProofHash.String(),
 		CreatedAt:           b.CreatedAt.Time,
@@ -127,6 +132,7 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 		Version:             bb.Version,
 		ForkID:              bb.ForkID,
 		RootHash:            rootHash,
+		ReferenceTime:       bb.ReferenceTime,
 		PreviousBlockHash:   previousBlockHash,
 		NoDeletionProofHash: noDeletionProofHash,
 		CreatedAt:           api.NewTimestamp(bb.CreatedAt),
@@ -140,7 +146,7 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 }
 
 // NewBlock creates a new block
-func NewBlock(index *api.BigInt, chainID string, shardID api.ShardID, version, forkID string, rootHash, previousBlockHash, uc api.HexBytes) *Block {
+func NewBlock(index *api.BigInt, chainID string, shardID api.ShardID, version, forkID string, rootHash, previousBlockHash, uc api.HexBytes, referenceTime uint64) *Block {
 	return &Block{
 		Index:              index,
 		ChainID:            chainID,
@@ -148,6 +154,7 @@ func NewBlock(index *api.BigInt, chainID string, shardID api.ShardID, version, f
 		Version:            version,
 		ForkID:             forkID,
 		RootHash:           rootHash,
+		ReferenceTime:      referenceTime,
 		PreviousBlockHash:  previousBlockHash,
 		CreatedAt:          api.Now(),
 		UnicityCertificate: uc,
@@ -155,8 +162,8 @@ func NewBlock(index *api.BigInt, chainID string, shardID api.ShardID, version, f
 }
 
 // NewChildBlock creates a block for child mode with required parent proof metadata.
-func NewChildBlock(index *api.BigInt, chainID string, shardID api.ShardID, version, forkID string, rootHash, previousBlockHash, uc api.HexBytes, parentFragment *api.ParentInclusionFragment, parentBlockNumber uint64) *Block {
-	block := NewBlock(index, chainID, shardID, version, forkID, rootHash, previousBlockHash, uc)
+func NewChildBlock(index *api.BigInt, chainID string, shardID api.ShardID, version, forkID string, rootHash, previousBlockHash, uc api.HexBytes, referenceTime uint64, parentFragment *api.ParentInclusionFragment, parentBlockNumber uint64) *Block {
+	block := NewBlock(index, chainID, shardID, version, forkID, rootHash, previousBlockHash, uc, referenceTime)
 	block.ParentFragment = parentFragment
 	block.ParentBlockNumber = parentBlockNumber
 	return block

@@ -605,6 +605,7 @@ func diskStartupBlock(number uint64, root []byte) *models.Block {
 		api.HexBytes(append([]byte(nil), root...)),
 		nil,
 		nil,
+		1755000000,
 	)
 	block.Finalized = true
 	block.Status = models.FinalityStatusFinalized

@@ -59,6 +59,7 @@ func TestBFTClientStartFailureReturnsToIdleAndCanRetry(t *testing.T) {
 type stubRoundManager struct {
 	finalizedBlocks        []*models.Block
 	finalizeBlockCallCnt   int
+	startedReferenceTimes  []uint64
 	startedRounds          []*api.BigInt
 	committedRoot          []byte
 	committedBlock         *api.BigInt
@@ -90,13 +91,14 @@ func (m *stubRoundManager) FinalizeBlockWithRetry(ctx context.Context, block *mo
 	return m.FinalizeBlock(ctx, block)
 }
 
-func (m *stubRoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
+func (m *stubRoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt, referenceTime uint64) error {
 	m.startedRounds = append(m.startedRounds, api.NewBigInt(new(big.Int).Set(roundNumber.Int)))
+	m.startedReferenceTimes = append(m.startedReferenceTimes, referenceTime)
 	return nil
 }
 
-func (m *stubRoundManager) StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt) error {
-	return m.StartNewRound(ctx, roundNumber)
+func (m *stubRoundManager) StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt, referenceTime uint64) error {
+	return m.StartNewRound(ctx, roundNumber, referenceTime)
 }
 
 func (m *stubRoundManager) CommittedRoot(context.Context) ([]byte, *api.BigInt, error) {
@@ -147,6 +149,7 @@ func TestBFTClientCertificationRequestDoesNotRewriteBlockNumber(t *testing.T) {
 		api.NewHexBytes(bytes.Repeat([]byte{0x11}, api.SiblingSize)),
 		nil,
 		nil,
+		testSealTimestamp,
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
@@ -182,6 +185,7 @@ func TestBFTClientCertificationRequestRejectsLocalRootMismatch(t *testing.T) {
 		blockRoot,
 		nil,
 		nil,
+		testSealTimestamp,
 	)
 
 	err = client.CertificationRequest(t.Context(), block)
@@ -255,6 +259,7 @@ func TestBFTClientCrashAfterProposalBeforeFinalizeWedgesWithoutDurableProposal(t
 		api.NewHexBytes(nextRoot),
 		nil,
 		nil,
+		testSealTimestamp,
 	)
 	err = client.CertificationRequest(t.Context(), block)
 
@@ -313,6 +318,7 @@ func TestBFTClientResumedDurableProposalFinalizesWithoutActiveRound(t *testing.T
 		proposalRoot,
 		api.NewHexBytes(committedRoot),
 		nil,
+		testSealTimestamp,
 	)
 	proposal.Status = models.FinalityStatusProposed
 	rm := &stubRoundManager{
@@ -365,6 +371,7 @@ func TestBFTClientInitializationResendsDurableProposal(t *testing.T) {
 		proposalRoot,
 		api.NewHexBytes(committedRoot),
 		nil,
+		testSealTimestamp,
 	)
 	proposal.Status = models.FinalityStatusProposed
 	rm := &stubRoundManager{
@@ -820,6 +827,7 @@ func TestBFTClientRejectsUCRootMismatch(t *testing.T) {
 		blockRoot,
 		nil,
 		nil,
+		testSealTimestamp,
 	)
 	client := &BFTClientImpl{
 		logger:        log,
@@ -869,6 +877,7 @@ func TestBFTClientUCRootMismatchPublishesFatalWhenAbandonFails(t *testing.T) {
 		blockRoot,
 		nil,
 		nil,
+		testSealTimestamp,
 	)
 	client := &BFTClientImpl{
 		logger:        log,
@@ -952,6 +961,7 @@ func TestBFTClientRepeatUCStartsFreshRound(t *testing.T) {
 		proposedRoot,
 		api.NewHexBytes(root),
 		nil,
+		testSealTimestamp,
 	)
 
 	err = client.handleUnicityCertificate(t.Context(), repeatUC, &certification.TechnicalRecord{Round: 55, Epoch: 1})
@@ -987,6 +997,7 @@ func TestBFTClientNewerUCAbandonsStaleProposalAndRecoversDurableProposal(t *test
 			staleRoot,
 			nil,
 			nil,
+			1755000000,
 		),
 	}
 	client.status.Store(normal)
@@ -1019,9 +1030,10 @@ func TestBFTClientCertificationInputRecordUsesTechnicalEpoch(t *testing.T) {
 	luc := testUnicityCertificate(7, 12, previousRoot, nil)
 	luc.InputRecord.Epoch = 2
 
-	ir, err := client.buildCertificationInputRecord(luc, newRoot, 8)
+	ir, err := client.buildCertificationInputRecord(luc, newRoot, 8, luc.UnicitySeal.Timestamp)
 
 	require.NoError(t, err)
+	require.EqualValues(t, luc.UnicitySeal.Timestamp, ir.Timestamp)
 	require.EqualValues(t, 8, ir.RoundNumber)
 	require.EqualValues(t, 3, ir.Epoch)
 	require.Equal(t, previousRoot, []byte(ir.PreviousHash))
@@ -1044,6 +1056,7 @@ func TestBFTClientStub_CertificationRequest_PopulatesSyntheticUC(t *testing.T) {
 		api.HexBytes("0123"),
 		nil,
 		nil,
+		testSealTimestamp,
 	)
 
 	err = client.CertificationRequest(t.Context(), block)
@@ -1056,6 +1069,10 @@ func TestBFTClientStub_CertificationRequest_PopulatesSyntheticUC(t *testing.T) {
 	require.EqualValues(t, 7, uc.GetRoundNumber())
 	require.EqualValues(t, 7, uc.GetRootRoundNumber())
 }
+
+// testSealTimestamp is the seal timestamp every fixture certificate carries;
+// a round proposing under it pins the same value as its reference time.
+const testSealTimestamp uint64 = 1755000000
 
 func testUnicityCertificate(round, rootRound uint64, root []byte, previous []byte) *types.UnicityCertificate {
 	if previous == nil {
@@ -1070,6 +1087,6 @@ func testUnicityCertificate(round, rootRound uint64, root []byte, previous []byt
 			Hash:         root,
 			BlockHash:    root,
 		},
-		UnicitySeal: &types.UnicitySeal{RootChainRoundNumber: rootRound},
+		UnicitySeal: &types.UnicitySeal{RootChainRoundNumber: rootRound, Timestamp: testSealTimestamp},
 	}
 }

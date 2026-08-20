@@ -144,7 +144,7 @@ func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, 
 	for i, c := range commitments {
 		path, err := c.StateID.GetPath()
 		require.NoError(t, err)
-		leafValue, err := c.LeafValue()
+		leafValue, err := c.LeafValue(1755000000)
 		require.NoError(t, err)
 		leaves[i] = smt.NewLeaf(path, leafValue)
 	}
@@ -153,7 +153,7 @@ func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, 
 	rootHashBytes := smtTree.GetRootHashRaw()
 
 	// Create block (unfinalized)
-	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", api.HexBytes(rootHashBytes), nil, nil)
+	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", api.HexBytes(rootHashBytes), nil, nil, 1755000000)
 	block.Finalized = false
 	block.ProposalID = "proposal-" + blockNumber.String()
 
@@ -176,7 +176,7 @@ func (s *RecoveryTestSuite) storeSmtNodes(commitments []*models.CertificationReq
 	for i, c := range commitments {
 		keyBytes, err := c.StateID.GetTreeKey()
 		s.Require().NoError(err)
-		leafValue, err := c.LeafValue()
+		leafValue, err := c.LeafValue(1755000000)
 		s.Require().NoError(err)
 		nodes[i] = models.NewSmtNode(api.HexBytes(keyBytes), leafValue)
 	}
@@ -580,7 +580,7 @@ func (s *RecoveryTestSuite) Test10_PartialSmtNodes_CorrectDetection() {
 	for i, idx := range existingIndices {
 		keyBytes, err := commitments[idx].StateID.GetTreeKey()
 		require.NoError(t, err)
-		leafValue, err := commitments[idx].LeafValue()
+		leafValue, err := commitments[idx].LeafValue(1755000000)
 		require.NoError(t, err)
 		existingNodes[i] = models.NewSmtNode(api.HexBytes(keyBytes), leafValue)
 	}
@@ -632,7 +632,7 @@ func (s *RecoveryTestSuite) Test11_LoadRecoveredNodesIntoBackend() {
 	for i, c := range commitments {
 		path, err := c.StateID.GetPath()
 		require.NoError(t, err)
-		leafValue, err := c.LeafValue()
+		leafValue, err := c.LeafValue(1755000000)
 		require.NoError(t, err)
 		leaves[i] = smt.NewLeaf(path, leafValue)
 	}

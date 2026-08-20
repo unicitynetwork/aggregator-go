@@ -108,6 +108,7 @@ func storeTestBlock(t *testing.T, ctx context.Context, db *mongo.Database, block
 		api.HexBytes(make([]byte, api.SiblingSize)),
 		nil,
 		nil,
+		1755000000,
 	)
 	block.Finalized = finalized
 	block.ProposalID = testProposalID(blockNumber)

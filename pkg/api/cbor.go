@@ -35,6 +35,11 @@ func CborArray(n int) []byte {
 	return cborTag(4, n)
 }
 
+// CborUint returns the CBOR encoding of an unsigned integer
+func CborUint(n uint64) []byte {
+	return cborTag(0, int(n))
+}
+
 // CborNull returns the CBOR tag for null
 func CborNull() []byte {
 	return cborTag(7, 22)

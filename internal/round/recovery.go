@@ -495,7 +495,8 @@ func recoverMissingSMTNodes(
 			if existingRecord == nil {
 				return fmt.Errorf("FATAL: durable aggregator record not found for SMT key %s", stateID)
 			}
-			nodes = append(nodes, models.NewSmtNode(keyBytes, append([]byte(nil), existingRecord.CertificationData.TransactionHash...)))
+			nodes = append(nodes, models.NewSmtNode(keyBytes,
+				api.LeafValue(existingRecord.CertificationData.TransactionHash.DataBytes(), existingRecord.ReferenceTime)))
 			continue
 		}
 
@@ -503,7 +504,7 @@ func recoverMissingSMTNodes(
 		if err != nil {
 			return fmt.Errorf("failed to get SMT key for commitment: %w", err)
 		}
-		leafValue, err := commitment.LeafValue()
+		leafValue, err := commitment.LeafValue(commitment.ReferenceTime)
 		if err != nil {
 			return fmt.Errorf("failed to create leaf value: %w", err)
 		}

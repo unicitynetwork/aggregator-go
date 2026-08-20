@@ -16,9 +16,12 @@ type CertificationRequest struct {
 	StateID               api.StateID        `json:"stateId"`
 	CertificationData     CertificationData  `json:"certificationData"`
 	AggregateRequestCount uint64             `json:"aggregateRequestCount"`
-	CreatedAt             *api.Timestamp     `json:"createdAt"`
-	ProcessedAt           *api.Timestamp     `json:"processedAt,omitempty"`
-	StreamID              string             `json:"-"` // Redis stream ID used for stream acknowledgements
+	// ReferenceTime is the reference time of the round this request's leaf was
+	// created in. Zero until the round that materialises the leaf pins it.
+	ReferenceTime uint64         `json:"referenceTime"`
+	CreatedAt     *api.Timestamp `json:"createdAt"`
+	ProcessedAt   *api.Timestamp `json:"processedAt,omitempty"`
+	StreamID      string         `json:"-"` // Redis stream ID used for stream acknowledgements
 }
 
 // CertificationRequestBSON represents the BSON version of CertificationRequest for MongoDB storage
@@ -29,6 +32,7 @@ type CertificationRequestBSON struct {
 	TransactionHash       string                `bson:"transactionHash"`
 	CertificationData     CertificationDataBSON `bson:"certificationData"`
 	AggregateRequestCount uint64                `bson:"aggregateRequestCount"`
+	ReferenceTime         uint64                `bson:"referenceTime"`
 	CreatedAt             time.Time             `bson:"createdAt"`
 	ProcessedAt           *time.Time            `bson:"processedAt,omitempty"`
 }
@@ -67,6 +71,7 @@ func (c *CertificationRequest) ToBSON() *CertificationRequestBSON {
 		StateID:               c.StateID.String(),
 		CertificationData:     c.CertificationData.ToBSON(),
 		AggregateRequestCount: c.AggregateRequestCount,
+		ReferenceTime:         c.ReferenceTime,
 		CreatedAt:             c.CreatedAt.Time,
 		ProcessedAt:           processedAt,
 	}
@@ -93,6 +98,7 @@ func (cb *CertificationRequestBSON) FromBSON() (*CertificationRequest, error) {
 		StateID:               stateID,
 		CertificationData:     *certData,
 		AggregateRequestCount: cb.AggregateRequestCount,
+		ReferenceTime:         cb.ReferenceTime,
 		CreatedAt:             api.NewTimestamp(cb.CreatedAt),
 		ProcessedAt:           processedAt,
 	}, nil
@@ -106,9 +112,12 @@ func (c *CertificationRequest) ToAPI() *api.CertificationRequest {
 	}
 }
 
-func (c *CertificationRequest) LeafValue() ([]byte, error) {
+// LeafValue returns the SMT leaf value for this request under the given round
+// reference time: H(txhash, referenceTime). The reference time is a property of
+// the leaf, not of whichever inclusion proof later establishes it.
+func (c *CertificationRequest) LeafValue(referenceTime uint64) ([]byte, error) {
 	if c.Version != 2 {
 		return nil, fmt.Errorf("invalid version: %d", c.Version)
 	}
-	return append([]byte(nil), c.CertificationData.TransactionHash...), nil
+	return api.LeafValue(c.CertificationData.TransactionHash.DataBytes(), referenceTime), nil
 }
