@@ -1587,10 +1587,21 @@ func TestChildPreCollection_CommitmentAfterProofBeforeRoundEnd_ShouldBeInNextRou
 	require.NoError(t, rm.Start(ctx))
 	require.NoError(t, rm.Activate(ctx))
 
+	// Waiting for block 1 to appear is not enough: finalization and the start of
+	// round 2 are concurrent, so a commitment injected on that signal alone can
+	// still reach round 2 and land in block 2. Wait for round 2 to be the
+	// current round, which is the precondition the assertion below describes.
 	require.Eventually(t, func() bool {
 		block, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigInt(big.NewInt(1)))
-		return err == nil && block != nil
-	}, 3*time.Second, 25*time.Millisecond, "block 1 should be finalized before injecting the late commitment")
+		if err != nil || block == nil {
+			return false
+		}
+		rm.roundMutex.RLock()
+		defer rm.roundMutex.RUnlock()
+		return rm.currentRound != nil &&
+			rm.currentRound.Number != nil &&
+			rm.currentRound.Number.Int64() == 2
+	}, 3*time.Second, 25*time.Millisecond, "round 2 should have started before injecting the late commitment")
 
 	lateCommitment := testutil.CreateTestCertificationRequest(t, "after_proof_before_round_end")
 	rm.commitmentStream <- lateCommitment
