@@ -1041,6 +1041,20 @@ func TestBFTClientCertificationInputRecordUsesTechnicalEpoch(t *testing.T) {
 	require.Equal(t, newRoot, []byte(ir.BlockHash))
 }
 
+func TestBFTClientCertificationInputRecordClassifiesReferenceTimeMismatchAsStale(t *testing.T) {
+	client := &BFTClientImpl{}
+	luc := testUnicityCertificate(7, 12, bytes.Repeat([]byte{0x11}, api.SiblingSize), nil)
+
+	_, err := client.buildCertificationInputRecord(
+		luc,
+		bytes.Repeat([]byte{0x22}, api.SiblingSize),
+		8,
+		luc.UnicitySeal.Timestamp-1,
+	)
+
+	require.ErrorIs(t, err, ErrStaleCertificationRound)
+}
+
 func TestBFTClientStub_CertificationRequest_PopulatesSyntheticUC(t *testing.T) {
 	rm := &stubRoundManager{}
 	log, err := logger.New("warn", "json", "", false)

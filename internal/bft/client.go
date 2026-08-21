@@ -938,7 +938,8 @@ func (c *BFTClientImpl) buildCertificationInputRecord(luc *types.UnicityCertific
 	// seal here instead would certify a root the leaves do not correspond to
 	// whenever a repeat certificate arrived mid-round.
 	if referenceTime != luc.UnicitySeal.Timestamp {
-		return nil, fmt.Errorf("round reference time %d does not match latest seal timestamp %d",
+		return nil, fmt.Errorf("%w: round reference time %d does not match latest seal timestamp %d",
+			ErrStaleCertificationRound,
 			referenceTime, luc.UnicitySeal.Timestamp)
 	}
 
