@@ -295,7 +295,7 @@ func recoverBlock(
 	if err != nil {
 		return nil, fmt.Errorf("failed to get aggregator records: %w", err)
 	}
-	stateIDs, _, err := stateIDsAndLeavesFromAggregatorRecords(records)
+	stateIDs, leaves, err := stateIDsAndLeavesFromAggregatorRecords(records)
 	if err != nil {
 		return nil, err
 	}
@@ -316,10 +316,10 @@ func recoverBlock(
 			return nil, fmt.Errorf("failed to check existing SMT nodes: %w", err)
 		}
 
-		var missingSmtKeys []api.StateID
-		for i, stateID := range stateIDs {
+		var missingSmtLeaves []smtbackend.LeafInput
+		for i := range stateIDs {
 			if !existingSmtKeys[smtKeyStrings[i]] {
-				missingSmtKeys = append(missingSmtKeys, stateID)
+				missingSmtLeaves = append(missingSmtLeaves, leaves[i])
 			}
 		}
 
@@ -328,10 +328,10 @@ func recoverBlock(
 			"existingRecords", len(records),
 			"existingSmtNodes", len(existingSmtKeys),
 			"missingRecords", 0,
-			"missingSmtNodes", len(missingSmtKeys))
+			"missingSmtNodes", len(missingSmtLeaves))
 
-		if len(missingSmtKeys) > 0 {
-			if err := recoverMissingSMTNodes(ctx, log, storage, commitmentQueue, missingSmtKeys); err != nil {
+		if len(missingSmtLeaves) > 0 {
+			if err := recoverMissingSMTNodes(ctx, log, storage, missingSmtLeaves); err != nil {
 				return nil, err
 			}
 		}
@@ -461,62 +461,21 @@ func recoverMissingSMTNodes(
 	ctx context.Context,
 	log *logger.Logger,
 	storage interfaces.Storage,
-	commitmentQueue interfaces.CommitmentQueue,
-	missingSmtKeys []api.StateID,
+	missingSmtLeaves []smtbackend.LeafInput,
 ) error {
-	if len(missingSmtKeys) == 0 {
+	if len(missingSmtLeaves) == 0 {
 		return nil
 	}
 
-	commitmentMap, err := commitmentQueue.GetByStateIDs(ctx, missingSmtKeys)
-	if err != nil {
-		return fmt.Errorf("failed to get commitments: %w", err)
+	nodes := make([]*models.SmtNode, len(missingSmtLeaves))
+	for i, leaf := range missingSmtLeaves {
+		nodes[i] = models.NewSmtNode(leaf.Key, leaf.Value)
 	}
 
-	var nodes []*models.SmtNode
-	for _, stateID := range missingSmtKeys {
-		commitment, ok := commitmentMap[stateID.String()]
-		if !ok {
-			keyBytes, err := stateID.GetTreeKey()
-			if err != nil {
-				return fmt.Errorf("failed to get SMT key for stateID: %w", err)
-			}
-			existingNode, err := storage.SmtStorage().GetByKey(ctx, keyBytes)
-			if err != nil {
-				return fmt.Errorf("failed to check existing SMT node: %w", err)
-			}
-			if existingNode != nil {
-				continue
-			}
-			existingRecord, err := getAggregatorRecordAnyFinalization(ctx, storage, stateID)
-			if err != nil {
-				return fmt.Errorf("failed to check existing aggregator record: %w", err)
-			}
-			if existingRecord == nil {
-				return fmt.Errorf("FATAL: durable aggregator record not found for SMT key %s", stateID)
-			}
-			nodes = append(nodes, models.NewSmtNode(keyBytes,
-				api.LeafValue(existingRecord.CertificationData.TransactionHash.DataBytes(), existingRecord.ReferenceTime)))
-			continue
-		}
-
-		keyBytes, err := commitment.StateID.GetTreeKey()
-		if err != nil {
-			return fmt.Errorf("failed to get SMT key for commitment: %w", err)
-		}
-		leafValue, err := commitment.LeafValue(commitment.ReferenceTime)
-		if err != nil {
-			return fmt.Errorf("failed to create leaf value: %w", err)
-		}
-		nodes = append(nodes, models.NewSmtNode(keyBytes, leafValue))
+	if err := storage.SmtStorage().StoreBatch(ctx, nodes); err != nil {
+		return fmt.Errorf("failed to store missing SMT nodes: %w", err)
 	}
-
-	if len(nodes) > 0 {
-		if err := storage.SmtStorage().StoreBatch(ctx, nodes); err != nil {
-			return fmt.Errorf("failed to store missing SMT nodes: %w", err)
-		}
-		log.WithContext(ctx).Info("Stored missing SMT nodes", "count", len(nodes))
-	}
+	log.WithContext(ctx).Info("Stored missing SMT nodes", "count", len(nodes))
 
 	return nil
 }

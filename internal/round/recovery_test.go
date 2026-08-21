@@ -607,10 +607,12 @@ func (s *RecoveryTestSuite) Test10_PartialSmtNodes_CorrectDetection() {
 	err = s.storage.SmtStorage().StoreBatch(s.ctx, existingNodes)
 	require.NoError(t, err)
 
-	// Store ONLY the commitments that need recovery (positions 2 and 3) in Redis
+	// Store pre-materialization queue copies; the round reference time is assigned later.
 	missingIndices := []int{2, 3}
 	for _, idx := range missingIndices {
-		err = s.commitmentQueue.Store(s.ctx, commitments[idx])
+		preMaterializationCommitment := *commitments[idx]
+		preMaterializationCommitment.ReferenceTime = 0
+		err = s.commitmentQueue.Store(s.ctx, &preMaterializationCommitment)
 		require.NoError(t, err)
 	}
 	time.Sleep(200 * time.Millisecond)
@@ -629,6 +631,17 @@ func (s *RecoveryTestSuite) Test10_PartialSmtNodes_CorrectDetection() {
 	smtCountAfter, err := s.storage.SmtStorage().Count(s.ctx)
 	require.NoError(t, err)
 	require.Equal(t, int64(5), smtCountAfter, "Should have 5 SMT nodes after recovery")
+	for _, idx := range missingIndices {
+		keyBytes, err := commitments[idx].StateID.GetTreeKey()
+		require.NoError(t, err)
+		node, err := s.storage.SmtStorage().GetByKey(s.ctx, keyBytes)
+		require.NoError(t, err)
+		require.NotNil(t, node)
+		require.Equal(t,
+			api.HexBytes(api.LeafValue(commitments[idx].CertificationData.TransactionHash.DataBytes(), commitments[idx].ReferenceTime)),
+			node.Value,
+		)
+	}
 
 	t.Log("✓ Test10_PartialSmtNodes_CorrectDetection passed")
 }
