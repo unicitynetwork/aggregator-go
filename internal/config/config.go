@@ -123,9 +123,15 @@ type ProcessingConfig struct {
 	SkipDuplicateCheck         bool          `mapstructure:"skip_duplicate_check"`          // Skip finalized record lookup on submit
 }
 
+// DefaultRequestTTLFallback is the lifetime assigned to a request that omits
+// expiresAt. It backs both the DEFAULT_REQUEST_TTL environment default and the
+// zero value, so a config built in code rather than from the environment gets
+// the same TTL the service documents.
+const DefaultRequestTTLFallback = time.Hour
+
 func (c ProcessingConfig) RequestTTL() time.Duration {
 	if c.DefaultRequestTTL == 0 {
-		return time.Hour
+		return DefaultRequestTTLFallback
 	}
 	return c.DefaultRequestTTL
 }
@@ -390,7 +396,7 @@ func Load() (*Config, error) {
 		},
 		Processing: ProcessingConfig{
 			BatchLimit:                 getEnvIntOrDefault("BATCH_LIMIT", 1000),
-			DefaultRequestTTL:          getEnvDurationOrDefault("DEFAULT_REQUEST_TTL", "1h"),
+			DefaultRequestTTL:          getEnvDurationOrDefault("DEFAULT_REQUEST_TTL", DefaultRequestTTLFallback.String()),
 			PrecollectorGracePeriod:    getEnvDurationOrDefault("PRECOLLECTOR_GRACE_PERIOD", "0s"),
 			MaxCommitmentsPerRound:     getEnvIntOrDefault("MAX_COMMITMENTS_PER_ROUND", 20000),
 			CollectPhaseDuration:       getEnvDurationOrDefault("COLLECT_PHASE_DURATION", "200ms"),
