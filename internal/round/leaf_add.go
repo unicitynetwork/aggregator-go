@@ -87,6 +87,7 @@ func addCommitmentLeaves(
 		if idx < 0 || idx >= len(commitments) {
 			return nil, nil, nil, fmt.Errorf("SMT backend returned invalid duplicate leaf index %d", idx)
 		}
+		metrics.CommitmentsDroppedDuplicate.Inc()
 		dropped = append(dropped, interfaces.CertificationRequestAck{
 			StateID:  commitments[idx].StateID,
 			StreamID: commitments[idx].StreamID,
@@ -104,6 +105,7 @@ func addCommitmentLeaves(
 			"stateID", commitments[rejected.Index].StateID.String(),
 			"reason", string(rejected.Reason),
 			"error", errText)
+		metrics.CommitmentsDroppedRejected.Inc()
 		dropped = append(dropped, interfaces.CertificationRequestAck{
 			StateID:  commitments[rejected.Index].StateID,
 			StreamID: commitments[rejected.Index].StreamID,

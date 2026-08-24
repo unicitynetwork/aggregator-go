@@ -545,6 +545,33 @@
           "values": false
         }
       }
+    },
+    {
+      "id": 19,
+      "title": "Commitments Dropped (never reach a block)",
+      "description": "Commitments the service accepted with SUCCESS that are acked out of the queue without being included in a block. 'expired' means the round's reference time reached the request deadline; a backlog exceeding DEFAULT_REQUEST_TTL drops in bulk.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 60
+      },
+      "targets": [
+        {
+          "expr": "rate(aggregator_commitments_dropped_total[1m])",
+          "legendFormat": "{{instance}} ({{shard}}) {{reason}}/sec",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
+        }
+      }
     }
   ]
 }

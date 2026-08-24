@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
@@ -344,10 +345,13 @@ func (cp *childPrecollector) addBatch(
 		leaf, err := materializeCommitmentLeaf(c, referenceTime)
 		if err != nil {
 			if errors.Is(err, ErrRequestExpired) {
-				cp.logger.WithContext(ctx).Debug("Dropping expired certification request",
+				// See the matching drop in batch_processor.go: Warn, not Debug.
+				cp.logger.WithContext(ctx).Warn("Dropping expired certification request",
 					"stateID", c.StateID.String(),
 					"expiresAt", c.CertificationData.ExpiresAt,
+					"effectiveTimeout", c.EffectiveTimeout,
 					"referenceTime", referenceTime)
+				metrics.CommitmentsDroppedExpired.Inc()
 				expired = append(expired, interfaces.CertificationRequestAck{
 					StateID:  c.StateID,
 					StreamID: c.StreamID,

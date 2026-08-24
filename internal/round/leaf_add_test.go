@@ -28,7 +28,7 @@ func testCommitment(t *testing.T) *models.CertificationRequest {
 // The leaf a round inserts is built from the round's pinned reference time, and
 // the commitment records that time so the record and the served proof report
 // the value the leaf was actually built from.
-func TestCommitmentLeafInputBindsTheRoundReferenceTime(t *testing.T) {
+func TestMaterializeCommitmentLeafBindsTheRoundReferenceTime(t *testing.T) {
 	const referenceTime uint64 = 1755000000
 	commitment := testCommitment(t)
 
@@ -43,7 +43,7 @@ func TestCommitmentLeafInputBindsTheRoundReferenceTime(t *testing.T) {
 }
 
 // A different round produces a different leaf for the same request.
-func TestCommitmentLeafInputDiffersAcrossRounds(t *testing.T) {
+func TestMaterializeCommitmentLeafDiffersAcrossRounds(t *testing.T) {
 	const referenceTime uint64 = 1755000000
 
 	first, err := materializeCommitmentLeaf(testCommitment(t), referenceTime)
@@ -73,7 +73,7 @@ func TestServiceAssignedDeadlineStillBindsReferenceTime(t *testing.T) {
 // A request may only be inserted in a round whose reference time is strictly
 // below its timeout; an expired one is reported so it can be acked out of the
 // queue rather than retried forever.
-func TestCommitmentLeafInputRejectsAnExpiredRequest(t *testing.T) {
+func TestMaterializeCommitmentLeafRejectsAnExpiredRequest(t *testing.T) {
 	commitment := testCommitment(t)
 
 	_, err := materializeCommitmentLeaf(commitment, testExpiresAt-1)

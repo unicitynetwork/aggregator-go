@@ -46,10 +46,15 @@ func (rm *RoundManager) processMiniBatchForRound(ctx context.Context, round *Rou
 		leaf, err := materializeCommitmentLeaf(commitment, round.ReferenceTime)
 		if err != nil {
 			if errors.Is(err, ErrRequestExpired) {
-				rm.logger.WithContext(ctx).Debug("Dropping expired certification request",
+				// Warn, not Debug: this discards work the service already
+				// answered SUCCESS, and a backlog exceeding DEFAULT_REQUEST_TTL
+				// drops requests in bulk.
+				rm.logger.WithContext(ctx).Warn("Dropping expired certification request",
 					"stateID", commitment.StateID.String(),
 					"expiresAt", commitment.CertificationData.ExpiresAt,
+					"effectiveTimeout", commitment.EffectiveTimeout,
 					"referenceTime", round.ReferenceTime)
+				metrics.CommitmentsDroppedExpired.Inc()
 				expired = append(expired, interfaces.CertificationRequestAck{
 					StateID:  commitment.StateID,
 					StreamID: commitment.StreamID,
