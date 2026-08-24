@@ -176,30 +176,19 @@ func (c *CertificationData) MarshalCBOR() ([]byte, error) {
 }
 
 func (c *CertificationData) UnmarshalCBOR(data []byte) error {
-	tag, arr, err := types.Cbor.UnmarshalTagged(data)
-	if err != nil {
-		return err
-	}
-	if tag != CertificationDataTag {
-		return errors.New("invalid CertificationData tag")
-	}
 	// One version, one element count. ExpiresAt holds its position even when it
-	// carries no value, so the array length never depends on the payload.
-	if len(arr) != certificationDataFieldCount {
-		return fmt.Errorf("CertificationData: expected %d fields, got %d",
-			certificationDataFieldCount, len(arr))
-	}
-	version, ok := arr[0].(uint64)
-	if !ok {
-		return errors.New("invalid CertificationData version")
-	}
-	if types.Version(version) != CertificationDataVersion {
-		return fmt.Errorf("unsupported CertificationData version: %d", version)
-	}
+	// carries no value, so the array length never depends on the payload, and
+	// the toarray decode below rejects a wrong tag or a wrong element count on
+	// its own. Decoding once and checking the version off the result costs
+	// about half of what a separate tag-and-length probe pass did, on the
+	// per-request path.
 	type alias CertificationData
 	var decoded alias
 	if err := types.Cbor.UnmarshalTaggedValue(CertificationDataTag, data, &decoded); err != nil {
-		return err
+		return fmt.Errorf("CertificationData: %w", err)
+	}
+	if decoded.Version != CertificationDataVersion {
+		return fmt.Errorf("unsupported CertificationData version: %d", decoded.Version)
 	}
 	*c = CertificationData(decoded)
 	return nil
