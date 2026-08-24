@@ -32,10 +32,12 @@ func commitmentExpired(commitment *models.CertificationRequest, referenceTime ui
 	return referenceTime >= deadline
 }
 
-// commitmentLeafInput materialises a commitment's SMT leaf under the round's
-// pinned reference time, recording that time on the commitment so the record
-// and the served proof report the value the leaf was actually built from.
-func commitmentLeafInput(commitment *models.CertificationRequest, referenceTime uint64) (smtbackend.LeafInput, error) {
+// materializeCommitmentLeaf materialises a commitment's SMT leaf under the
+// round's pinned reference time. It WRITES commitment.ReferenceTime, so the
+// record and the served proof report the value the leaf was actually built
+// from; the name says materialize rather than build because of that write.
+// models.CertificationRequest.LeafValue is the pure counterpart.
+func materializeCommitmentLeaf(commitment *models.CertificationRequest, referenceTime uint64) (smtbackend.LeafInput, error) {
 	if commitmentExpired(commitment, referenceTime) {
 		return smtbackend.LeafInput{}, ErrRequestExpired
 	}

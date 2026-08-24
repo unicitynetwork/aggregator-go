@@ -347,7 +347,7 @@ func applyMemoryRound(
 	leaves := make([]smtbackend.LeafInput, 0, len(commitments))
 	validCommitments := make([]*models.CertificationRequest, 0, len(commitments))
 	for _, commitment := range commitments {
-		leaf, err := commitmentLeafInput(commitment, 1755000000)
+		leaf, err := materializeCommitmentLeaf(commitment, 1755000000)
 		if err != nil {
 			continue
 		}

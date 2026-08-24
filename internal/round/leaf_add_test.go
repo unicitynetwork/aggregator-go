@@ -32,7 +32,7 @@ func TestCommitmentLeafInputBindsTheRoundReferenceTime(t *testing.T) {
 	const referenceTime uint64 = 1755000000
 	commitment := testCommitment(t)
 
-	leaf, err := commitmentLeafInput(commitment, referenceTime)
+	leaf, err := materializeCommitmentLeaf(commitment, referenceTime)
 	require.NoError(t, err)
 
 	require.Equal(t, referenceTime, commitment.ReferenceTime)
@@ -46,9 +46,9 @@ func TestCommitmentLeafInputBindsTheRoundReferenceTime(t *testing.T) {
 func TestCommitmentLeafInputDiffersAcrossRounds(t *testing.T) {
 	const referenceTime uint64 = 1755000000
 
-	first, err := commitmentLeafInput(testCommitment(t), referenceTime)
+	first, err := materializeCommitmentLeaf(testCommitment(t), referenceTime)
 	require.NoError(t, err)
-	second, err := commitmentLeafInput(testCommitment(t), referenceTime+1)
+	second, err := materializeCommitmentLeaf(testCommitment(t), referenceTime+1)
 	require.NoError(t, err)
 
 	require.Equal(t, first.Key, second.Key)
@@ -61,12 +61,12 @@ func TestServiceAssignedDeadlineStillBindsReferenceTime(t *testing.T) {
 	commitment.CertificationData.ExpiresAt = nil
 	commitment.EffectiveTimeout = referenceTime + 3600
 
-	leaf, err := commitmentLeafInput(commitment, referenceTime)
+	leaf, err := materializeCommitmentLeaf(commitment, referenceTime)
 	require.NoError(t, err)
 	require.Equal(t, api.LeafValue(commitment.CertificationData.TransactionHash.DataBytes(), referenceTime), leaf.Value)
 	require.NotEqual(t, commitment.CertificationData.TransactionHash.DataBytes(), leaf.Value)
 
-	_, err = commitmentLeafInput(commitment, commitment.EffectiveTimeout)
+	_, err = materializeCommitmentLeaf(commitment, commitment.EffectiveTimeout)
 	require.ErrorIs(t, err, ErrRequestExpired)
 }
 
@@ -76,13 +76,13 @@ func TestServiceAssignedDeadlineStillBindsReferenceTime(t *testing.T) {
 func TestCommitmentLeafInputRejectsAnExpiredRequest(t *testing.T) {
 	commitment := testCommitment(t)
 
-	_, err := commitmentLeafInput(commitment, testExpiresAt-1)
+	_, err := materializeCommitmentLeaf(commitment, testExpiresAt-1)
 	require.NoError(t, err)
 
-	_, err = commitmentLeafInput(commitment, testExpiresAt)
+	_, err = materializeCommitmentLeaf(commitment, testExpiresAt)
 	require.ErrorIs(t, err, ErrRequestExpired)
 
-	_, err = commitmentLeafInput(commitment, testExpiresAt+1)
+	_, err = materializeCommitmentLeaf(commitment, testExpiresAt+1)
 	require.ErrorIs(t, err, ErrRequestExpired)
 }
 

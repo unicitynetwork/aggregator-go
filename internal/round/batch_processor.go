@@ -43,7 +43,7 @@ func (rm *RoundManager) processMiniBatchForRound(ctx context.Context, round *Rou
 	validCommitments := make([]*models.CertificationRequest, 0, len(commitments))
 	expired := make([]interfaces.CertificationRequestAck, 0)
 	for _, commitment := range commitments {
-		leaf, err := commitmentLeafInput(commitment, round.ReferenceTime)
+		leaf, err := materializeCommitmentLeaf(commitment, round.ReferenceTime)
 		if err != nil {
 			if errors.Is(err, ErrRequestExpired) {
 				rm.logger.WithContext(ctx).Debug("Dropping expired certification request",

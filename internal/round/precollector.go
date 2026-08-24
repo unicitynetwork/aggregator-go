@@ -341,7 +341,7 @@ func (cp *childPrecollector) addBatch(
 	expired := make([]interfaces.CertificationRequestAck, 0)
 
 	for _, c := range commitments {
-		leaf, err := commitmentLeafInput(c, referenceTime)
+		leaf, err := materializeCommitmentLeaf(c, referenceTime)
 		if err != nil {
 			if errors.Is(err, ErrRequestExpired) {
 				cp.logger.WithContext(ctx).Debug("Dropping expired certification request",

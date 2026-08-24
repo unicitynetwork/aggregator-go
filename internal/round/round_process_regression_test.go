@@ -131,7 +131,7 @@ func TestRoundProcessingUsesScheduledRoundSnapshot(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 
 	roundTwoCommitment := testutil.CreateTestCertificationRequest(t, "scheduled_round_two")
-	roundTwoLeaf, err := commitmentLeafInput(roundTwoCommitment, 1755000000)
+	roundTwoLeaf, err := materializeCommitmentLeaf(roundTwoCommitment, 1755000000)
 	require.NoError(t, err)
 	roundTwoSnapshot, err := rm.smtBackend.CreateSnapshot(ctx)
 	require.NoError(t, err)
@@ -372,7 +372,7 @@ func TestStartNewRoundWithSnapshotAbandonAfterSnapshotCleanupResetsRedisPendingS
 	rm.markProofsPending([]*models.CertificationRequest{oldCommitment})
 
 	newCommitment := testutil.CreateTestCertificationRequest(t, "new_precollected_round")
-	newLeaf, err := commitmentLeafInput(newCommitment, 1755000000)
+	newLeaf, err := materializeCommitmentLeaf(newCommitment, 1755000000)
 	require.NoError(t, err)
 	newSnapshot, err := rm.smtBackend.CreateSnapshot(ctx)
 	require.NoError(t, err)
@@ -457,7 +457,7 @@ func TestStartNewRoundWithSnapshotDoesNotReplayFinalizedRoundHistory(t *testing.
 	}
 
 	newCommitment := testutil.CreateTestCertificationRequest(t, "precollected_round_pending_marker")
-	newLeaf, err := commitmentLeafInput(newCommitment, 1755000000)
+	newLeaf, err := materializeCommitmentLeaf(newCommitment, 1755000000)
 	require.NoError(t, err)
 	newSnapshot, err := rm.smtBackend.CreateSnapshot(ctx)
 	require.NoError(t, err)
@@ -521,7 +521,7 @@ func TestStaleCertificationRequestAbandonsStoredDurableProposal(t *testing.T) {
 	}()
 
 	commitment := testutil.CreateTestCertificationRequest(t, "stale_durable_proposal")
-	leaf, err := commitmentLeafInput(commitment, 1755000000)
+	leaf, err := materializeCommitmentLeaf(commitment, 1755000000)
 	require.NoError(t, err)
 	snapshot, err := rm.smtBackend.CreateSnapshot(ctx)
 	require.NoError(t, err)
@@ -598,7 +598,7 @@ func TestStartNewRoundRetriesEqualFinalizingRoundProposal(t *testing.T) {
 	}()
 
 	commitment := testutil.CreateTestCertificationRequest(t, "repeat_uc_equal_round_retry")
-	leaf, err := commitmentLeafInput(commitment, 1755000000)
+	leaf, err := materializeCommitmentLeaf(commitment, 1755000000)
 	require.NoError(t, err)
 	snapshot := testRMSnapshot(t, ctx, rm)
 	result, err := snapshot.AddLeavesClassified(ctx, []smtbackend.LeafInput{leaf})
