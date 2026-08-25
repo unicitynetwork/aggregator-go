@@ -477,11 +477,16 @@ Retrieve all certification requests included in a specific block.
       {
         "stateId": "c7aa6962316c0eeb1469dc3d7793e39e140c005e6eea0e188dcc73035d765937",
         "certificationData": {
-          "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
-          "signature": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
+          "version": 2,
+          "ownerPredicate": {
+            "engine": 1,
+            "code": "AQ==",
+            "params": "AnxP34noE4s2A5enKFypm4Y0mdJvPBZSJR/PaA9NZIgs"
+          },
           "sourceStateHash": "539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647",
           "transactionHash": "c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297",
-          "expiresAt": 1755003600
+          "expiresAt": 1755003600,
+          "witness": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00"
         },
         "referenceTime": 1755000000,
         "blockNumber": "123",

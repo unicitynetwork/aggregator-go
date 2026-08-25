@@ -57,13 +57,19 @@ func (t *Timestamp) UnmarshalJSON(data []byte) error {
 
 // AggregatorRecord represents a finalized certification request with proof data
 type AggregatorRecord struct {
-	StateID               StateID           `json:"stateId"`
-	CertificationData     CertificationData `json:"certificationData"`
-	AggregateRequestCount uint64            `json:"aggregateRequestCount,omitempty,string"`
-	BlockNumber           *BigInt           `json:"blockNumber"`
-	LeafIndex             *BigInt           `json:"leafIndex"`
-	CreatedAt             *Timestamp        `json:"createdAt"`
-	FinalizedAt           *Timestamp        `json:"finalizedAt"`
+	StateID           StateID           `json:"stateId"`
+	CertificationData CertificationData `json:"certificationData"`
+	// ReferenceTime is the reference time of the round this record's leaf was
+	// created in. A verifier needs it to reproduce the certified leaf value,
+	// LeafValue(CertificationData.TransactionHash, ReferenceTime), so it is part
+	// of the record rather than something to be recovered from a later proof.
+	ReferenceTime         uint64     `json:"referenceTime"`
+	AggregateRequestCount uint64     `json:"aggregateRequestCount,omitempty,string"`
+	BlockNumber           *BigInt    `json:"blockNumber"`
+	LeafIndex             *BigInt    `json:"leafIndex"`
+	CreatedAt             *Timestamp `json:"createdAt"`
+	// FinalizedAt is the creation time of the block this record was finalized in.
+	FinalizedAt *Timestamp `json:"finalizedAt"`
 }
 
 // Block represents a blockchain block
