@@ -374,10 +374,12 @@ the reference time at which its leaf was created, independently of request-deadl
 **Hash rules (Yellowpaper-aligned):**
 - Value: `SHA-256(CBOR([transactionHash, referenceTime]))` for every inclusion proof
 - Leaf: `H(0x00 || key || value)`
-- Inner node (two children): `H(0x01 || depth_byte || left || right)`
+- Inner node (two children): `H(0x01 || depth_byte || region(key, depth) || left || right)`
 - Inner node (one child): passthrough (child hash unchanged)
 
-**Key encoding:** 32 bytes, LSB-first bit addressing. `bit(key, d) = (key[d/8] >> (d%8)) & 1`.
+`region(key, depth)` is the 32-byte key prefix addressing the node: the first `depth` bits of the key with all lower-significance bits cleared. Omitting it verifies only for proofs with no siblings. See [docs/inclusion-proof-wire.md](docs/inclusion-proof-wire.md).
+
+**Key encoding:** 32 bytes, big-endian (MSB-first) bit addressing. `bit(key, d) = (key[d/8] >> (7 - d%8)) & 1`.
 
 **Verification pseudocode:**
 ```

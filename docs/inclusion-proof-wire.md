@@ -114,10 +114,31 @@ that position, under the same root-to-leaf ordering as `InclusionCert`.
 ## Hash rules
 
 - Leaf: `H(0x00 || key || value)`
-- Inner node, two children: `H(0x01 || depth_byte || left || right)`
+- Inner node, two children: `H(0x01 || depth_byte || region(key, depth) || left || right)`
 - Inner node, one child: passthrough, child hash unchanged
 
-Bit ordering is big-endian per the yellowpaper.
+`depth_byte` is the absolute branching depth as a single byte. `region(key, depth)`
+is the 32-byte key prefix addressing the node: the first `depth` bits of the key,
+with every bit at position ≥ `depth` cleared. At depth 0 it is 32 zero bytes; for
+key `0xFFFF…` at depth 12 it is `fff00000…`.
+
+**The region is not optional.** Omitting it reproduces the correct root only for a
+tree with no binary inner node — that is, a proof with zero siblings. Any proof
+carrying a sibling will verify against a different root. Inner nodes commit to
+their absolute depth *and* to the region addressing them, which is what pins each
+node to its position in the key space.
+
+## Bit ordering
+
+Big-endian (MSB-first) per the yellowpaper:
+
+```
+bit(key, d) = (key[d/8] >> (7 - d%8)) & 1
+```
+
+So bit 0 is the most significant bit of `key[0]`. Descent at depth `d` goes right
+when `bit(key, d) == 1`, and the sibling supplied at that depth is then the left
+child.
 
 ## Verification
 
