@@ -12,6 +12,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
@@ -202,7 +203,15 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 	// the requester omitted one, the service derives a deadline from consensus
 	// reference time; that value is service metadata and is never recorded in the
 	// leaf, signed, or checked by a later verifier.
+	//
+	// The yellowpaper defines the request as Q = (predicate, sourceStateHash,
+	// txhash, tau_Q, u) with tau_Q mandatory, and makes "tau < tau_Q" a step of
+	// verifying a certified transaction. A request certified without a deadline
+	// therefore leaves a later verifier unable to perform that check at all,
+	// rather than merely choosing not to. The absent form is accepted for
+	// migration; the counter below is what tells us when it can be retired.
 	var effectiveTimeout uint64
+	deadlineOrigin := metrics.DeadlineOriginExplicit
 	if expiresAt := req.CertificationData.ExpiresAt; expiresAt != nil {
 		effectiveTimeout = *expiresAt
 	} else {
@@ -211,6 +220,7 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 			return nil, errors.New("default request deadline overflows uint64")
 		}
 		effectiveTimeout = referenceTime + ttl
+		deadlineOrigin = metrics.DeadlineOriginServiceAssigned
 	}
 	certificationRequest.EffectiveTimeout = effectiveTimeout
 
@@ -244,6 +254,11 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 	if err := as.commitmentQueue.Store(ctx, certificationRequest); err != nil {
 		return nil, fmt.Errorf("failed to store certificationRequest: %w", err)
 	}
+
+	// Counted here rather than at assignment: expired, duplicate and
+	// failed-to-store requests are not accepted, and counting them would inflate
+	// the migration backlog with requests that never reach a leaf.
+	deadlineOrigin.Inc()
 
 	as.logger.WithContext(ctx).Log(ctx, logger.LevelTrace, "CertificationData submitted successfully", "stateId", req.StateID)
 

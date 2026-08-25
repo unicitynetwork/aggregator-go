@@ -1,14 +1,21 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"math/big"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+	bfttypes "github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/signing"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -75,4 +82,56 @@ func keysOf(m map[string]any) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// The deadline-origin counter is the migration signal for retiring absent
+// deadlines, so it must count only requests that were actually accepted. An
+// expired request is rejected and must not inflate the backlog.
+func TestDeadlineOriginCountsOnlyAcceptedRequests(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	const referenceTime uint64 = 1755000000
+	read := func(origin string) float64 {
+		return testutil.ToFloat64(metrics.CertificationRequestsByDeadline.WithLabelValues(origin))
+	}
+
+	newService := func(queue *recordingCommitmentQueue) *AggregatorService {
+		shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+		return &AggregatorService{
+			config: &config.Config{
+				Processing: config.ProcessingConfig{SkipDuplicateCheck: true, DefaultRequestTTL: time.Hour},
+				Sharding:   shardingCfg,
+			},
+			logger:                        log,
+			commitmentQueue:               queue,
+			roundManager:                  &stubRoundManager{referenceTime: referenceTime},
+			certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+		}
+	}
+
+	// An accepted request with no deadline counts as service_assigned.
+	before := read("service_assigned")
+	queue := &recordingCommitmentQueue{}
+	accepted := createTestCertificationRequests(t, 1)[0]
+	accepted.CertificationData.ExpiresAt = nil
+	resp, err := newService(queue).CertificationRequest(ctx, accepted)
+	require.NoError(t, err)
+	require.Equal(t, "SUCCESS", resp.Status)
+	require.Len(t, queue.stored, 1)
+	require.Equal(t, before+1, read("service_assigned"))
+
+	// An expired request is rejected and must not be counted at all.
+	beforeExplicit := read("explicit")
+	beforeAssigned := read("service_assigned")
+	queue = &recordingCommitmentQueue{}
+	expired := createTestCertificationRequests(t, 1)[0]
+	expired.CertificationData.ExpiresAt = api.Uint64Ptr(referenceTime)
+	resp, err = newService(queue).CertificationRequest(ctx, expired)
+	require.NoError(t, err)
+	require.Equal(t, api.CertificationStatusRequestExpired, resp.Status)
+	require.Empty(t, queue.stored)
+	require.Equal(t, beforeExplicit, read("explicit"), "a rejected request must not be counted")
+	require.Equal(t, beforeAssigned, read("service_assigned"))
 }
