@@ -372,3 +372,79 @@ func TestInclusionProofV2Verify_ShardMismatch_Rejected(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid shard ID")
 }
+
+// The request deadline is exclusive: a leaf created at exactly the deadline is
+// expired, one created a second earlier is not. The deadline does not enter the
+// leaf value, so the cryptographic chain is unaffected either way and this
+// isolates the boundary itself.
+func TestInclusionProofV2Verify_ExpiryBoundaryIsExclusive(t *testing.T) {
+	sid0, _ := types.ShardID{}.Split()
+
+	tests := []struct {
+		name      string
+		expiresAt func(referenceTime uint64) uint64
+		accept    bool
+	}{
+		{"deadline one past the reference time", func(rt uint64) uint64 { return rt + 1 }, true},
+		{"deadline equal to the reference time", func(rt uint64) uint64 { return rt }, false},
+		{"deadline before the reference time", func(rt uint64) uint64 { return rt - 1 }, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proof, req, partitionID, tb := buildSignedSingleLeafProof(t, sid0)
+			require.NotNil(t, proof.ReferenceTime)
+
+			// Both copies must agree or Verify rejects on the equality check
+			// before it ever reaches the deadline comparison.
+			deadline := tt.expiresAt(*proof.ReferenceTime)
+			proof.CertificationData.ExpiresAt = &deadline
+			req.CertificationData.ExpiresAt = &deadline
+
+			err := proof.Verify(req, &VerifierContext{
+				TrustBase:       tb,
+				PartitionID:     partitionID,
+				ExpectedShardID: sid0,
+			})
+			if tt.accept {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, "expired")
+		})
+	}
+}
+
+// A deadline present on one side and absent on the other is a mismatch, not a
+// silent pass: absence is a value in its own right, and zero is a legal instant.
+//
+// buildSignedSingleLeafProof aliases the proof's certification data to the
+// request's, so the two must be separated before they can disagree at all.
+func TestInclusionProofV2Verify_ExpiryPresenceMustMatch(t *testing.T) {
+	sid0, _ := types.ShardID{}.Split()
+
+	for _, tt := range []struct {
+		name               string
+		onProof, onRequest *uint64
+	}{
+		{"absent on the proof, present on the request", nil, Uint64Ptr(1755003600)},
+		{"present on the proof, absent on the request", Uint64Ptr(1755003600), nil},
+		{"present on both but different", Uint64Ptr(1755003600), Uint64Ptr(1755003601)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			proof, req, partitionID, tb := buildSignedSingleLeafProof(t, sid0)
+
+			detached := *proof.CertificationData
+			proof.CertificationData = &detached
+			proof.CertificationData.ExpiresAt = tt.onProof
+			req.CertificationData.ExpiresAt = tt.onRequest
+
+			err := proof.Verify(req, &VerifierContext{
+				TrustBase:       tb,
+				PartitionID:     partitionID,
+				ExpectedShardID: sid0,
+			})
+			require.ErrorContains(t, err, "expiry")
+		})
+	}
+}
