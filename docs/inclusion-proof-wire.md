@@ -16,6 +16,7 @@ correct -- it does not present an implementation gap as a specification.
 |-----|-----------|
 | 39030 | `CertificationRequest` |
 | 39031 | `CertificationData` |
+| 39032 | `Predicate` |
 | 39033 | `InclusionProofV2` |
 
 ## RPC response
@@ -49,16 +50,21 @@ A tagged 6-element array. The element count never varies with the payload:
 | Index | Field | Type |
 |-------|-------|------|
 | 0 | `version` | uint, `2` |
-| 1 | `ownerPredicate` | array |
+| 1 | `ownerPredicate` | `#39032([engine: uint, code: bstr, params: bstr])` |
 | 2 | `sourceStateHash` | bstr(32) |
 | 3 | `transactionHash` | bstr(32) |
 | 4 | `expiresAt` | uint \| null |
 | 5 | `witness` | bstr(65) |
 
+`ownerPredicate` is **tagged**, not a bare array: `Predicate.MarshalCBOR` emits
+tag 39032 and `Predicate.UnmarshalCBOR` requires it. A predicate with engine 1,
+code `0x01` and params `0x02` encodes as `d99878 83 01 4101 4102`.
+
 `expiresAt` is the exclusive request deadline τ_Q. It holds its position and is
 written as CBOR `null` when the requester supplied no deadline, so the array
 length never depends on the payload. Absence is distinct from zero: zero is a
-legal instant.
+legal instant. Both forms are specified — the yellowpaper's request timeout is
+optional, and `⊥` is written as CBOR null at a fixed position.
 
 ## Leaf value
 
