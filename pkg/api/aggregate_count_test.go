@@ -81,7 +81,6 @@ func TestAggregateRequestCountSerialization(t *testing.T) {
 			BlockNumber:           blockNumber,
 			LeafIndex:             leafIndex,
 			CreatedAt:             Now(),
-			FinalizedAt:           Now(),
 		}
 
 		// Marshal to JSON

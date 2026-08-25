@@ -86,11 +86,8 @@ type LeaderSelector interface {
 
 // Conversion functions between API and internal model types
 
-// modelToAPIAggregatorRecord converts a stored record for the wire. finalizedAt
-// is the creation time of the block the record was finalized in; records carry
-// no finalization timestamp of their own, so the caller supplies it and passes
-// nil when the block is not to hand.
-func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord, finalizedAt *api.Timestamp) *api.AggregatorRecord {
+// modelToAPIAggregatorRecord converts a stored record for the wire.
+func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.AggregatorRecord {
 	return &api.AggregatorRecord{
 		StateID: modelRecord.StateID,
 		CertificationData: api.CertificationData{
@@ -108,7 +105,6 @@ func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord, finalizedA
 		BlockNumber:           modelRecord.BlockNumber,
 		LeafIndex:             modelRecord.LeafIndex,
 		CreatedAt:             modelRecord.CreatedAt,
-		FinalizedAt:           finalizedAt,
 	}
 }
 
@@ -563,24 +559,10 @@ func (as *AggregatorService) GetBlockRecords(ctx context.Context, req *api.GetBl
 		return nil, fmt.Errorf("failed to get block commitments: %w", err)
 	}
 
-	// One block read for the whole page: every record here was finalized in it.
-	// A missing block leaves finalizedAt null rather than failing the request,
-	// which is what a record without its block already meant.
-	var finalizedAt *api.Timestamp
-	if len(records) > 0 {
-		block, err := as.storage.BlockStorage().GetByNumber(ctx, req.BlockNumber)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get block %s: %w", req.BlockNumber.String(), err)
-		}
-		if block != nil {
-			finalizedAt = block.CreatedAt
-		}
-	}
-
 	// Convert model records to API records
 	apiRecords := make([]*api.AggregatorRecord, len(records))
 	for i, record := range records {
-		apiRecords[i] = modelToAPIAggregatorRecord(record, finalizedAt)
+		apiRecords[i] = modelToAPIAggregatorRecord(record)
 	}
 
 	return &api.GetBlockRecordsResponse{

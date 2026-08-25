@@ -81,12 +81,10 @@ func TestGetBlockTotalCommitments(t *testing.T) {
 			CreatedAt:             api.Now(),
 		}
 
-		finalizedAt := api.Now()
-		apiRecord := modelToAPIAggregatorRecord(modelRecord, finalizedAt)
+		apiRecord := modelToAPIAggregatorRecord(modelRecord)
 		require.Equal(t, uint64(1000), apiRecord.AggregateRequestCount)
 		// The reference time is what a consumer needs to rebuild the leaf value,
 		// so it must survive the conversion rather than being dropped.
 		require.Equal(t, uint64(1755000000), apiRecord.ReferenceTime)
-		require.Equal(t, finalizedAt, apiRecord.FinalizedAt)
 	})
 }

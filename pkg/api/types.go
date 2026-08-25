@@ -68,8 +68,12 @@ type AggregatorRecord struct {
 	BlockNumber           *BigInt    `json:"blockNumber"`
 	LeafIndex             *BigInt    `json:"leafIndex"`
 	CreatedAt             *Timestamp `json:"createdAt"`
-	// FinalizedAt is the creation time of the block this record was finalized in.
-	FinalizedAt *Timestamp `json:"finalizedAt"`
+	// FinalizedAt is intentionally absent. Nothing persists a finalization
+	// timestamp: models.Block.CreatedAt is stamped when the block is
+	// constructed at proposal time, before the certification request is sent to
+	// BFT, so returning it would underreport finalization by the whole BFT
+	// round trip. Adding a real one means persisting it on the block at
+	// finalization; until then the field is omitted rather than wrong.
 }
 
 // Block represents a blockchain block

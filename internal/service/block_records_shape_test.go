@@ -40,15 +40,14 @@ func TestBlockRecordWireShape(t *testing.T) {
 		CreatedAt:     api.NewTimestamp(time.UnixMilli(1734435600000).UTC()),
 	}
 
-	finalizedAt := api.NewTimestamp(time.UnixMilli(1734435601000).UTC())
-	encoded, err := json.Marshal(modelToAPIAggregatorRecord(record, finalizedAt))
+	encoded, err := json.Marshal(modelToAPIAggregatorRecord(record))
 	require.NoError(t, err)
 
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal(encoded, &decoded))
 
 	require.ElementsMatch(t,
-		[]string{"stateId", "certificationData", "referenceTime", "blockNumber", "leafIndex", "createdAt", "finalizedAt"},
+		[]string{"stateId", "certificationData", "referenceTime", "blockNumber", "leafIndex", "createdAt"},
 		keysOf(decoded),
 		"get_block_records record keys changed; update README.md to match")
 
@@ -62,18 +61,19 @@ func TestBlockRecordWireShape(t *testing.T) {
 	require.EqualValues(t, 1755000000, decoded["referenceTime"])
 	require.EqualValues(t, 1755003600, certData["expiresAt"])
 	require.EqualValues(t, api.CertificationDataVersion, certData["version"])
-	require.Equal(t, "1734435601000", decoded["finalizedAt"])
+	// finalizedAt is deliberately not emitted: nothing persists a finalization
+	// timestamp, and the block's CreatedAt is proposal time.
+	require.NotContains(t, decoded, "finalizedAt")
 
 	// An absent deadline stays absent rather than becoming zero: the service
 	// assigns its own, but that value is not part of the certified record.
 	record.CertificationData.ExpiresAt = nil
-	encoded, err = json.Marshal(modelToAPIAggregatorRecord(record, nil))
+	encoded, err = json.Marshal(modelToAPIAggregatorRecord(record))
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(encoded, &decoded))
 	certData, ok = decoded["certificationData"].(map[string]any)
 	require.True(t, ok)
 	require.Nil(t, certData["expiresAt"])
-	require.Nil(t, decoded["finalizedAt"])
 }
 
 func keysOf(m map[string]any) []string {

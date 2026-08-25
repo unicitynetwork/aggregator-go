@@ -388,10 +388,11 @@ j = len(siblings)
 for d in 255..=0:
     if bitmap bit d is not set: continue
     j -= 1
-    if bit(key, d) == 1:
-        h = H(0x01 || d || siblings[j] || h)
+    r = region(key, d)          # 32 bytes: first d bits of key, rest cleared
+    if bit(key, d) == 1:        # descent went right, sibling is the left child
+        h = H(0x01 || d || r || siblings[j] || h)
     else:
-        h = H(0x01 || d || h || siblings[j])
+        h = H(0x01 || d || r || h || siblings[j])
 assert j == 0 and h == UC.IR.h
 ```
 
@@ -493,8 +494,7 @@ Retrieve all certification requests included in a specific block.
         "referenceTime": 1755000000,
         "blockNumber": "123",
         "leafIndex": "0",
-        "createdAt": "1734435600000",
-        "finalizedAt": "1734435601000"
+        "createdAt": "1734435600000"
       }
     ]
   },
