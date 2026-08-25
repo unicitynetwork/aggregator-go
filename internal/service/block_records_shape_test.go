@@ -84,9 +84,9 @@ func keysOf(m map[string]any) []string {
 	return out
 }
 
-// The deadline-origin counter is the migration signal for retiring absent
-// deadlines, so it must count only requests that were actually accepted. An
-// expired request is rejected and must not inflate the backlog.
+// The deadline-origin counter reports the share of traffic relying on the
+// service-assigned deadline, so it must count only requests that were actually
+// accepted. An expired request is rejected and must not be counted.
 func TestDeadlineOriginCountsOnlyAcceptedRequests(t *testing.T) {
 	ctx := context.Background()
 	log, err := logger.New("error", "text", "stdout", false)

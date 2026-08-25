@@ -195,17 +195,17 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 	if referenceTime == 0 {
 		return &api.CertificationResponse{Status: api.CertificationStatusServiceNotReady}, nil
 	}
-	// An explicit deadline is used verbatim and is covered by the witness. When
-	// the requester omitted one, the service derives a deadline from consensus
-	// reference time; that value is service metadata and is never recorded in the
-	// leaf, signed, or checked by a later verifier.
+	// This implements the yellowpaper's effective timeout: for a request
+	// Q = (predicate, sourceStateHash, txhash, tau_Q_bar, u) with an optional
+	// tau_Q_bar, the effective timeout is tau_a + Delta when the requester
+	// omitted one and tau_Q_bar otherwise, where tau_a is the latest
+	// consensus-derived reference time at admission and Delta the service's
+	// default request lifetime (DEFAULT_REQUEST_TTL). The assigned value is
+	// service metadata: it does not alter txhash and is not recorded in the leaf.
 	//
-	// The yellowpaper defines the request as Q = (predicate, sourceStateHash,
-	// txhash, tau_Q, u) with tau_Q mandatory, and makes "tau < tau_Q" a step of
-	// verifying a certified transaction. A request certified without a deadline
-	// therefore leaves a later verifier unable to perform that check at all,
-	// rather than merely choosing not to. The absent form is accepted for
-	// migration; the counter below is what tells us when it can be retired.
+	// The check below is the admission check, which the paper permits but does
+	// not accept as sufficient -- the authoritative one runs at leaf
+	// materialisation against that round's pinned reference time.
 	var effectiveTimeout uint64
 	deadlineOrigin := metrics.DeadlineOriginExplicit
 	if expiresAt := req.CertificationData.ExpiresAt; expiresAt != nil {
@@ -252,8 +252,8 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 	}
 
 	// Counted here rather than at assignment: expired, duplicate and
-	// failed-to-store requests are not accepted, and counting them would inflate
-	// the migration backlog with requests that never reach a leaf.
+	// failed-to-store requests are never admitted, and counting them would
+	// misreport the share of traffic relying on the service-assigned deadline.
 	deadlineOrigin.Inc()
 
 	as.logger.WithContext(ctx).Log(ctx, logger.LevelTrace, "CertificationData submitted successfully", "stateId", req.StateID)
