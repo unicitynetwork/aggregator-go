@@ -1,14 +1,14 @@
 # Inclusion proof wire specification (v2)
 
-Frozen wire format for `get_inclusion_proof.v2`. Three source comments cite this
+Wire format for `get_inclusion_proof.v2`. Three source comments cite this
 document as normative: `pkg/api/types.go` (`InclusionProofV2`), and
 `pkg/api/inclusion_cert.go` (`InclusionCert`, `ExclusionCert`).
 
 Corresponds to the Unicity yellowpaper's inclusion proof
-$\pi^{\mathsf{inc}} = (\mathsf{sid}, v, C^{\mathsf{inc}}, UC)$. Where this
-document and the yellowpaper disagree about intent, the yellowpaper wins; where
-they disagree about bytes, this document describes what the Go implementation
-actually emits.
+$\pi^{\mathsf{inc}} = (\mathsf{sid}, v, C^{\mathsf{inc}}, UC)$. **The yellowpaper
+is authoritative.** This document describes what the Go implementation actually
+emits, and where the two differ it says so explicitly and names the paper as
+correct -- it does not present an implementation gap as a specification.
 
 ## CBOR tags
 
@@ -38,9 +38,9 @@ The `result` field of `get_inclusion_proof.v2` is a hex-encoded CBOR array:
 
 **Discriminator.** `certificationData != null` ⇒ inclusion, and
 `certificateBytes` is an `InclusionCert`. `certificationData == null` ⇒
-non-inclusion, and `certificateBytes` is an `ExclusionCert`. Non-inclusion
-verification is not implemented in Go; the codec is frozen so clients can decode
-today.
+non-inclusion, and `certificateBytes` is an `ExclusionCert`. Non-inclusion is
+neither generated nor verified in Go, and the `ExclusionCert` layout below
+diverges from the yellowpaper -- do not build against it yet.
 
 ### `CertificationData`
 
@@ -101,15 +101,43 @@ outside it:
 Decoding rejects: fewer than 32 bytes (truncated), a remainder not a multiple of
 32 (misaligned), and a sibling count disagreeing with the bitmap popcount.
 
-## `ExclusionCert`
+## `ExclusionCert` — diverges from the yellowpaper, and is unimplemented
+
+The Go type encodes:
 
 ```
 k_l[32] || h_l[32] || bitmap[32] || s_1[32] || ... || s_n[32]
 ```
 
-`(k_l, h_l)` is the witness leaf present in the tree at the position reached when
-routing the query key. `bitmap` and siblings describe the path from the root to
-that position, under the same root-to-leaf ordering as `InclusionCert`.
+`appendix-hashtrees.tex` specifies the **opposite order**:
+
+```
+bitmap[32] || s_1[32] || ... || s_n[32] || k'[32] || v'
+```
+
+These are not interchangeable: one logical certificate encodes to two different
+byte strings, and the Go decoder rejects the spec layout with a bitmap/popcount
+mismatch. The spec puts `v'` last so the remainder after the fixed-size terminal
+key is the value; with the fixed 32-byte field leading, a variable-length `v'` is
+structurally unencodable here. The aggregation profile does permit
+`len(v') = 32`, so only the ordering diverges — but `h_l` names the leaf **value**
+`v'`, not a hash of it, which the field name obscures.
+
+The spec's empty-tree certificate `C^exc_empty` (the empty byte string) is also
+undecodable: `UnmarshalBinary(nil)` returns a truncation error, so a genesis tree
+has no encodable certificate.
+
+**Nothing generates or verifies these.** `internal/smt` exposes only
+`GetInclusionCert`; `ExclusionCert.Verify` returns `ErrExclusionNotImpl`; and a
+non-inclusion response carries `certificateBytes` as CBOR null (`f6`) rather than
+the spec's empty byte string (`40`). Neither of the two security-critical checks
+the spec names — `k' ≠ k`, and `k[d] = k'[d]` at every junction depth, with the
+region taken from the authenticated terminal key `k'` — exists in this repo.
+
+This is fail-closed: no forged absence proof is accepted because none is
+accepted. But absence and not-yet-certified are indistinguishable on the wire,
+and this layout should not be treated as frozen until it is reconciled with
+`appendix-hashtrees.tex`.
 
 ## Hash rules
 
@@ -160,7 +188,38 @@ child.
 The nil-guard error strings are part of the public contract so reference
 verifiers in other languages can pin them.
 
-`Verify` does **not** check that `sid` routes to the expected shard, though
-`api.MatchesShardPrefix` exists and the admission path applies it. A caller that
-derives `ExpectedShardID` from the proof's own UC would accept a leaf certified
-by the wrong shard; derive it from configuration instead.
+## Known divergence from the yellowpaper: the shard binding is not checked
+
+**This is a soundness gap, not a caller responsibility.** An earlier revision of
+this document told integrators to "derive `ExpectedShardID` from configuration".
+That is not the specified check and does not close the hole.
+
+`platform.tex` `VerifyInclusionProof` takes the partition description `CD_β` as
+an input and mandates, before any tree check:
+
+```
+ensure(UC.C^r.α = T.α)
+σ ← UC.C^shard.σ
+ensure(σ ∈ CD_β.SH)
+ensure(f_{CD_β.SH}(sid) = σ)      // Proof comes from the right shard
+```
+
+`f_SH` derives the expected shard **from the key itself**. `platform.tex`
+explicitly forecloses delegating this to certificate verification:
+`VerifyUnicityCert` "does not, by itself, prove that a particular state
+identifier belongs to the shard named in `C^shard`; that binding is checked by
+the proof verification functions below."
+
+`InclusionProofV2.Verify` implements the tree and certificate steps but not the
+binding: it compares the UC's shard against a caller-supplied
+`VerifierContext.ExpectedShardID` rather than computing `f_SH(sid)`. In a
+multi-shard deployment a leaf whose key routes to shard A, committed in shard
+B's SMT under shard B's validly signed UC, therefore verifies — reproduced in
+testing. That is cross-shard double-spend exposure. The network id
+`UC.C^r.α = T.α` is likewise unchecked, so a certificate sealed for one network
+verifies against another network's trust base.
+
+Until `VerifierContext` carries the sharding scheme and `Verify` derives the
+expected shard from `sid`, do not rely on this function alone for cross-shard
+safety. `api.MatchesShardPrefix` implements `f_SH` and the admission path
+applies it correctly.
