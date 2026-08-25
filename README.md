@@ -115,6 +115,7 @@ The service is configured via environment variables:
 | `READ_TIMEOUT` | HTTP read timeout | `30s` |
 | `WRITE_TIMEOUT` | HTTP write timeout | `30s` |
 | `IDLE_TIMEOUT` | HTTP idle timeout | `120s` |
+| `DEFAULT_REQUEST_TTL` | Lifetime assigned to requests that omit `expiresAt` | `1h` |
 | `CONCURRENCY_LIMIT` | Max concurrent requests | `1000` |
 | `ENABLE_DOCS` | Enable /docs endpoint | `true` |
 | `ENABLE_CORS` | Enable CORS headers | `true` |
@@ -293,7 +294,14 @@ type CertificationData struct {
 	SourceStateHash SourceStateHash `json:"sourceStateHash"`
 
 	// TransactionHash is the raw 32-byte hash of the transaction data.
+	// It commits to ExpiresAt, so changing the deadline invalidates the witness.
 	TransactionHash TransactionHash `json:"transactionHash"`
+
+	// ExpiresAt is the exclusive certification request deadline in Unix seconds,
+	// or null when the requester left the deadline to the service. It occupies a
+	// fixed position in the encoding either way. When absent, the service derives
+	// a deadline from consensus time and DEFAULT_REQUEST_TTL.
+	ExpiresAt *uint64 `json:"expiresAt"`
 
 	// Witness is the "unlocking part" of owner predicate. In case of PayToPublicKey owner predicate the witness must be
 	// a signature created on the hash of CBOR array[SourceStateHash, TransactionHash],
@@ -322,6 +330,8 @@ type CertificationData struct {
 - `INVALID_SOURCE_STATE_HASH_FORMAT` - SourceStateHash is not exactly 32 bytes
 - `INVALID_TRANSACTION_HASH_FORMAT` - TransactionHash is not exactly 32 bytes
 - `INVALID_SHARD` - The certification request was sent to the wrong shard
+- `REQUEST_EXPIRED` - The round reference time has reached the request's exclusive deadline
+- `SERVICE_NOT_READY` - Consensus reference time is not yet available
 
 #### `get_inclusion_proof.v2`
 Retrieve the v2 inclusion proof for a submitted certification request.
@@ -350,17 +360,20 @@ The `stateId` must be exactly 64 hex characters (32 raw bytes).
 }
 ```
 
-The `result` field is a hex-encoded CBOR array:
+The `result` field is a hex-encoded CBOR array whose proof is tagged. Every inclusion proof carries
+the reference time at which its leaf was created, independently of request-deadline policy:
 ```
-[blockNumber, [certificationData, certificateBytes, unicityCertificate]]
+[blockNumber, #39033([1, certificationData, referenceTime, certificateBytes, unicityCertificate])]
 ```
 
 - `certificationData` is the certification data for inclusion proofs, or `null` for non-inclusion proofs.
+- `referenceTime` is the round time fixed when the leaf was created.
 - For inclusion proofs, `certificateBytes` is the binary inclusion certificate: `bitmap[32] || sibling_1[32] || ... || sibling_n[32]`, where `n = popcount(bitmap)`. Siblings are in root-to-leaf order. For non-inclusion proofs, `certificateBytes` is an exclusion certificate: `k_l[32] || h_l[32] || bitmap[32] || siblings...` (exclusion proof generation is not yet implemented).
 - The expected SMT root is always taken from `UC.IR.h` (input record hash of the Unicity Certificate). No root field appears in the certificate itself.
 
 **Hash rules (Yellowpaper-aligned):**
-- Leaf: `H(0x00 || key || value)` where value is the raw transaction hash bytes
+- Value: `SHA-256(CBOR([transactionHash, referenceTime]))` for every inclusion proof
+- Leaf: `H(0x00 || key || value)`
 - Inner node (two children): `H(0x01 || depth_byte || left || right)`
 - Inner node (one child): passthrough (child hash unchanged)
 
@@ -467,8 +480,10 @@ Retrieve all certification requests included in a specific block.
           "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
           "signature": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
           "sourceStateHash": "539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647",
-          "transactionHash": "c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297"
+          "transactionHash": "c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297",
+          "expiresAt": 1755003600
         },
+        "referenceTime": 1755000000,
         "blockNumber": "123",
         "leafIndex": "0",
         "createdAt": "1734435600000",

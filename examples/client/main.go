@@ -105,6 +105,8 @@ func createValidCertificationRequest() *api.CertificationRequest {
 		OwnerPredicate:  ownerPredicate,
 		SourceStateHash: stateHash,
 		TransactionHash: transactionHash,
+		// ExpiresAt is omitted so the service derives the deadline from consensus
+		// time, which needs no clock on this side.
 	}
 	if err := signingService.SignCertData(certData, privateKey.Serialize()); err != nil {
 		panic(fmt.Sprintf("Failed to sign certification request data: %v", err))

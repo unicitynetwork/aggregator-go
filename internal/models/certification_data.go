@@ -12,6 +12,7 @@ type CertificationData struct {
 	OwnerPredicate  api.Predicate       `json:"ownerPredicate"`
 	SourceStateHash api.SourceStateHash `json:"sourceStateHash"`
 	TransactionHash api.TransactionHash `json:"transactionHash"`
+	ExpiresAt       *uint64             `json:"expiresAt"`
 	Witness         api.HexBytes        `json:"witness"`
 }
 
@@ -19,6 +20,7 @@ type CertificationDataBSON struct {
 	OwnerPredicate  PredicateBSON `bson:"ownerPredicate"`
 	SourceStateHash string        `bson:"sourceStateHash"`
 	TransactionHash string        `bson:"transactionHash"`
+	ExpiresAt       *uint64       `bson:"expiresAt"`
 	Witness         string        `bson:"witness"`
 }
 
@@ -33,6 +35,7 @@ func (a *CertificationData) ToAPI() *api.CertificationData {
 		OwnerPredicate:  a.OwnerPredicate,
 		SourceStateHash: a.SourceStateHash,
 		TransactionHash: a.TransactionHash,
+		ExpiresAt:       a.ExpiresAt,
 		Witness:         a.Witness,
 	}
 }
@@ -46,6 +49,7 @@ func (a *CertificationData) ToBSON() CertificationDataBSON {
 		},
 		SourceStateHash: a.SourceStateHash.String(),
 		TransactionHash: a.TransactionHash.String(),
+		ExpiresAt:       a.ExpiresAt,
 		Witness:         a.Witness.String(),
 	}
 }
@@ -72,6 +76,7 @@ func (ab *CertificationDataBSON) FromBSON() (*CertificationData, error) {
 		},
 		SourceStateHash: sourceStateHash,
 		TransactionHash: transactionHash,
+		ExpiresAt:       ab.ExpiresAt,
 		Witness:         signature,
 	}, nil
 }

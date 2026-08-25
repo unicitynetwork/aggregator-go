@@ -34,13 +34,33 @@ func (rm *RoundManager) processMiniBatchForRound(ctx context.Context, round *Rou
 	if len(commitments) == 0 {
 		return nil, nil
 	}
+	if round == nil {
+		return nil, nil
+	}
 
 	// Convert commitments to backend leaf inputs, tracking valid commitments.
 	leaves := make([]smtbackend.LeafInput, 0, len(commitments))
 	validCommitments := make([]*models.CertificationRequest, 0, len(commitments))
+	expired := make([]interfaces.CertificationRequestAck, 0)
 	for _, commitment := range commitments {
-		leaf, err := commitmentLeafInput(commitment)
+		leaf, err := materializeCommitmentLeaf(commitment, round.ReferenceTime)
 		if err != nil {
+			if errors.Is(err, ErrRequestExpired) {
+				// Warn, not Debug: this discards work the service already
+				// answered SUCCESS, and a backlog exceeding DEFAULT_REQUEST_TTL
+				// drops requests in bulk.
+				rm.logger.WithContext(ctx).Warn("Dropping expired certification request",
+					"stateID", commitment.StateID.String(),
+					"expiresAt", commitment.CertificationData.ExpiresAt,
+					"effectiveTimeout", commitment.EffectiveTimeout,
+					"referenceTime", round.ReferenceTime)
+				metrics.CommitmentsDroppedExpired.Inc()
+				expired = append(expired, interfaces.CertificationRequestAck{
+					StateID:  commitment.StateID,
+					StreamID: commitment.StreamID,
+				})
+				continue
+			}
 			rm.logger.WithContext(ctx).Error("Failed to create leaf input",
 				"stateID", commitment.StateID.String(),
 				"error", err.Error())
@@ -62,10 +82,10 @@ func (rm *RoundManager) processMiniBatchForRound(ctx context.Context, round *Rou
 		round.PendingLeaves = append(round.PendingLeaves, addedLeaves...)
 		round.PendingCommitments = append(round.PendingCommitments, addedCommitments...)
 		rm.markProofsPending(addedCommitments)
-		return dropped, nil
+		return append(expired, dropped...), nil
 	}
 
-	return nil, nil
+	return expired, nil
 }
 
 // ProposeBlock creates and proposes a new block with the given data.
@@ -133,6 +153,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 			rootHash,
 			parentHash,
 			nil,
+			round.ReferenceTime,
 		)
 		block.ProposalID = round.ProposalID
 		if err := rm.ensureDurableProposal(ctx, round, block); err != nil {
@@ -235,6 +256,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 			rootHash,
 			parentHash,
 			proof.UnicityCertificate,
+			round.ReferenceTime,
 			proof.ParentFragment,
 			proof.BlockNumber,
 		)
@@ -255,7 +277,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 		rm.roundMutex.RUnlock()
 
 		if cp != nil {
-			preResult, advErr := rm.advancePrecollectorForHandoff(cp)
+			preResult, advErr := rm.advancePrecollectorForHandoff(cp, rm.lastReferenceTime())
 			if advErr == nil {
 				nextRound := api.NewBigInt(nextRoundNumber)
 				if err := validatePrecollectorBlockNumber(preResult, nextRound); err != nil {
@@ -270,7 +292,7 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 				}
 				// StartNewRoundWithSnapshot atomically checks precollectorDisabled
 				// under roundMutex — no race with concurrent Deactivate.
-				if err := rm.StartNewRoundWithSnapshot(ctx, nextRound, preResult.snapshot, preResult.commitments, preResult.leaves, preResult.recordsStaged, preResult.proposalID); err != nil {
+				if err := rm.StartNewRoundWithSnapshot(ctx, nextRound, rm.lastReferenceTime(), preResult.snapshot, preResult.commitments, preResult.leaves, preResult.recordsStaged, preResult.proposalID); err != nil {
 					preResult.snapshot.Discard(ctx)
 					if !errors.Is(err, ErrDeactivated) {
 						rm.logger.WithContext(ctx).Error("Failed to start new round with snapshot.", "error", err.Error())
@@ -278,12 +300,12 @@ func (rm *RoundManager) proposeBlock(ctx context.Context, round *Round, blockNum
 				}
 			} else {
 				rm.logger.WithContext(ctx).Warn("Failed to advance precollector", "error", advErr.Error())
-				if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); err != nil && !errors.Is(err, ErrDeactivated) {
+				if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber), rm.lastReferenceTime()); err != nil && !errors.Is(err, ErrDeactivated) {
 					rm.logger.WithContext(ctx).Error("Failed to start new round after finalization.", "error", err.Error())
 				}
 			}
 		} else {
-			if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); err != nil && !errors.Is(err, ErrDeactivated) {
+			if err := rm.StartNewRound(ctx, api.NewBigInt(nextRoundNumber), rm.lastReferenceTime()); err != nil && !errors.Is(err, ErrDeactivated) {
 				rm.logger.WithContext(ctx).Error("Failed to start new round after finalization.", "error", err.Error())
 			}
 		}
@@ -1030,12 +1052,14 @@ func (rm *RoundManager) storePrecomputedProofResponses(ctx context.Context, bloc
 		if err != nil {
 			return timing, fmt.Errorf("marshal inclusion cert %d: %w", i, err)
 		}
+		referenceTime := record.ReferenceTime
 		proofs[i] = smtbackend.PrecomputedProofResponse{
 			StateID: record.StateID,
 			Response: &api.GetInclusionProofResponseV2{
 				BlockNumber: responseBlockNumber,
 				InclusionProof: &api.InclusionProofV2{
 					CertificationData:  record.CertificationData.ToAPI(),
+					ReferenceTime:      &referenceTime,
 					CertificateBytes:   certBytes,
 					UnicityCertificate: types.RawCBOR(block.UnicityCertificate),
 				},

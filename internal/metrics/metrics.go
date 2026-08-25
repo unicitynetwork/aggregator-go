@@ -167,6 +167,26 @@ var (
 		},
 	)
 
+	// CommitmentsDroppedTotal counts drop events for commitments that were
+	// accepted at submit but will never reach a block. Without it a node can
+	// discard an arbitrary volume of acknowledged work with nothing visible on
+	// a dashboard. It counts events rather than distinct commitments: if the
+	// queue ack fails, the commitment is retried and counted again next round.
+	CommitmentsDroppedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_commitments_dropped_total",
+			Help: "Cumulative drop events for commitments that will never be included in a block.",
+		},
+		[]string{"reason"},
+	)
+
+	// The drop reasons are resolved once, at init. The increments below happen
+	// while roundMutex is held, so they must not pay for a CounterVec label
+	// lookup (an RLock plus a map hash) on every dropped commitment.
+	CommitmentsDroppedExpired   = CommitmentsDroppedTotal.WithLabelValues("expired")
+	CommitmentsDroppedDuplicate = CommitmentsDroppedTotal.WithLabelValues("duplicate")
+	CommitmentsDroppedRejected  = CommitmentsDroppedTotal.WithLabelValues("rejected")
+
 	BFTCertificationDuration = promauto.NewHistogram(
 		prometheus.HistogramOpts{
 			Name:    "aggregator_bft_certification_duration_seconds",

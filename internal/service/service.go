@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -163,10 +164,12 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 		OwnerPredicate:  req.CertificationData.OwnerPredicate,
 		SourceStateHash: req.CertificationData.SourceStateHash,
 		TransactionHash: req.CertificationData.TransactionHash,
+		ExpiresAt:       req.CertificationData.ExpiresAt,
 		Witness:         req.CertificationData.Witness,
 	}, aggregateCount)
 
-	// Validate certificationRequest signature and state ID
+	// Validate certificationRequest signature and state ID before assigning any
+	// service-managed metadata.
 	validationResult := as.certificationRequestValidator.Validate(certificationRequest)
 	if validationResult.Status != signing.ValidationStatusSuccess {
 		errorMsg := ""
@@ -178,9 +181,39 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 			"validationStatus", validationResult.Status.String(),
 			"error", errorMsg)
 
-		return &api.CertificationResponse{
-			Status: validationResult.Status.String(),
-		}, nil
+		return &api.CertificationResponse{Status: validationResult.Status.String()}, nil
+	}
+
+	referenceTime := as.roundManager.CurrentReferenceTime()
+	if referenceTime == 0 {
+		return &api.CertificationResponse{Status: api.CertificationStatusServiceNotReady}, nil
+	}
+	// An explicit deadline is used verbatim and is covered by the witness. When
+	// the requester omitted one, the service derives a deadline from consensus
+	// reference time; that value is service metadata and is never recorded in the
+	// leaf, signed, or checked by a later verifier.
+	var effectiveTimeout uint64
+	if expiresAt := req.CertificationData.ExpiresAt; expiresAt != nil {
+		effectiveTimeout = *expiresAt
+	} else {
+		ttl := uint64(as.config.Processing.RequestTTL() / time.Second)
+		if referenceTime > math.MaxUint64-ttl {
+			return nil, errors.New("default request deadline overflows uint64")
+		}
+		effectiveTimeout = referenceTime + ttl
+	}
+	certificationRequest.EffectiveTimeout = effectiveTimeout
+
+	// Fail fast on a request that is already expired against the reference time
+	// rounds are currently pinning. The authoritative check runs again where the
+	// leaf is materialised, against that round's pinned reference time.
+	if referenceTime >= effectiveTimeout {
+		as.logger.WithContext(ctx).Warn("Certification request expired",
+			"stateId", req.StateID,
+			"timeout", effectiveTimeout,
+			"referenceTime", referenceTime)
+
+		return &api.CertificationResponse{Status: api.CertificationStatusRequestExpired}, nil
 	}
 
 	if !as.config.Processing.SkipDuplicateCheck {
@@ -384,8 +417,10 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 		return nil, fmt.Errorf("failed to marshal inclusion cert: %w", err)
 	}
 
+	referenceTime := record.ReferenceTime
 	proof := &api.InclusionProofV2{
 		CertificationData:  record.CertificationData.ToAPI(),
+		ReferenceTime:      &referenceTime,
 		CertificateBytes:   certBytes,
 		UnicityCertificate: types.RawCBOR(block.UnicityCertificate),
 	}

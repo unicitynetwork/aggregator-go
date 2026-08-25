@@ -221,6 +221,7 @@ func TestCompleteWorkflowWithRestart(t *testing.T) {
 		rootHashBytes,
 		api.HexBytes{},
 		nil,
+		1755000000,
 	)
 	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 

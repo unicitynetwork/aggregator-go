@@ -39,6 +39,7 @@ import (
 	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
@@ -265,8 +266,10 @@ func validateInclusionProof(t *testing.T, proof *api.InclusionProofV2, req *api.
 	require.NoError(t, err, "UC.IR.h must be extractable")
 	key, err := req.StateID.GetTreeKey()
 	require.NoError(t, err)
+	require.NotNil(t, proof.ReferenceTime)
+	leafValue := api.LeafValue(req.CertificationData.TransactionHash.DataBytes(), *proof.ReferenceTime)
 	require.NoError(t,
-		cert.Verify(key, req.CertificationData.TransactionHash.DataBytes(), rootRaw, api.InclusionProofV2HashAlgorithm),
+		cert.Verify(key, leafValue, rootRaw, api.InclusionProofV2HashAlgorithm),
 		"v2 inclusion cert must verify against UC.IR.h")
 }
 
@@ -384,7 +387,8 @@ func TestGetInclusionProofV2Child_ComposesParentFragment(t *testing.T) {
 	childTree := smt.NewChildSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits, shardingCfg.Child.ShardID)
 	path, err := stateID.GetPath()
 	require.NoError(t, err)
-	require.NoError(t, childTree.AddLeaf(path, transactionHash.DataBytes()))
+	const referenceTime uint64 = 1755000000
+	require.NoError(t, childTree.AddLeaf(path, api.LeafValue(transactionHash.DataBytes(), referenceTime)))
 	childRoot := childTree.GetRootHashRaw()
 
 	parentTree := smt.NewParentSparseMerkleTree(api.SHA256, shardingCfg.ShardIDLength)
@@ -404,6 +408,7 @@ func TestGetInclusionProofV2Child_ComposesParentFragment(t *testing.T) {
 		api.HexBytes(childRoot),
 		nil,
 		parentUC,
+		1755000000,
 	)
 	block.ParentFragment = parentFragment
 	block.ParentBlockNumber = 9
@@ -416,11 +421,13 @@ func TestGetInclusionProofV2Child_ComposesParentFragment(t *testing.T) {
 			OwnerPredicate:  api.Predicate{Engine: 1, Code: []byte{0x01}, Params: []byte{0x02}},
 			SourceStateHash: sourceStateHash,
 			TransactionHash: transactionHash,
+			ExpiresAt:       ptr(referenceTime + 3600),
 			Witness:         []byte{0x01, 0x02},
 		},
-		BlockNumber: api.NewBigIntFromUint64(1),
-		LeafIndex:   api.NewBigIntFromUint64(0),
-		CreatedAt:   api.Now(),
+		ReferenceTime: referenceTime,
+		BlockNumber:   api.NewBigIntFromUint64(1),
+		LeafIndex:     api.NewBigIntFromUint64(0),
+		CreatedAt:     api.Now(),
 	}
 
 	service := newAggregatorServiceForTest(t, shardingCfg, childTree)
@@ -443,6 +450,7 @@ func TestGetInclusionProofV2Child_ComposesParentFragment(t *testing.T) {
 			OwnerPredicate:  record.CertificationData.OwnerPredicate,
 			SourceStateHash: record.CertificationData.SourceStateHash,
 			TransactionHash: record.CertificationData.TransactionHash,
+			ExpiresAt:       record.CertificationData.ExpiresAt,
 			Witness:         record.CertificationData.Witness,
 		},
 	}
@@ -469,6 +477,7 @@ func TestGetInclusionProofV2Child_NonInclusionUsesParentBundleMetadata(t *testin
 		api.HexBytes(childTree.GetRootHashRaw()),
 		nil,
 		parentUC,
+		1755000000,
 	)
 	block.ParentBlockNumber = 12
 	block.Finalized = true
@@ -589,6 +598,7 @@ func createTestCertificationRequests(t *testing.T, count int) []*api.Certificati
 			OwnerPredicate:  ownerPredicate,
 			SourceStateHash: sourceStateHash,
 			TransactionHash: transactionHash,
+			ExpiresAt:       testutil.ExpiresAt(),
 		}
 		require.NoError(t, signingService.SignCertData(certData, privateKey.Serialize()))
 
@@ -616,7 +626,7 @@ func TestCertificationRequestDoesNotTouchSMTBackend(t *testing.T) {
 		},
 		logger:                        log,
 		commitmentQueue:               queue,
-		roundManager:                  &stubRoundManager{backend: backend},
+		roundManager:                  &stubRoundManager{backend: backend, referenceTime: 1},
 		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
 	}
 
@@ -628,6 +638,106 @@ func TestCertificationRequestDoesNotTouchSMTBackend(t *testing.T) {
 	require.Equal(t, 0, backend.calls, "submit path must not read or write the SMT")
 }
 
+func TestCertificationRequestAssignsDefaultTimeoutFromConsensusTime(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	const referenceTime uint64 = 1755000000
+	queue := &recordingCommitmentQueue{}
+	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+	req := createTestCertificationRequests(t, 1)[0]
+	req.CertificationData.Version = 0
+	req.CertificationData.ExpiresAt = nil
+	service := &AggregatorService{
+		config: &config.Config{Processing: config.ProcessingConfig{
+			SkipDuplicateCheck: true, DefaultRequestTTL: 90 * time.Minute,
+		}, Sharding: shardingCfg},
+		logger: log, commitmentQueue: queue,
+		roundManager:                  &stubRoundManager{referenceTime: referenceTime},
+		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+	}
+
+	resp, err := service.CertificationRequest(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, "SUCCESS", resp.Status)
+	require.Len(t, queue.stored, 1)
+	require.Nil(t, queue.stored[0].CertificationData.ExpiresAt)
+	require.Equal(t, referenceTime+5400, queue.stored[0].EffectiveTimeout)
+}
+
+func TestCertificationRequestWithoutConsensusTimeReturnsServiceNotReady(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+	queue := &recordingCommitmentQueue{}
+	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+	service := &AggregatorService{
+		config: &config.Config{Processing: config.ProcessingConfig{SkipDuplicateCheck: true}, Sharding: shardingCfg},
+		logger: log, commitmentQueue: queue, roundManager: &stubRoundManager{},
+		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+	}
+
+	resp, err := service.CertificationRequest(ctx, createTestCertificationRequests(t, 1)[0])
+	require.NoError(t, err)
+	require.Equal(t, api.CertificationStatusServiceNotReady, resp.Status)
+	require.Empty(t, queue.stored)
+}
+
+// A request whose timeout the current reference time has already reached is
+// rejected on arrival, distinctly from a double-spend, and never reaches the
+// queue.
+func TestCertificationRequestRejectsAnExpiredRequest(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	queue := &recordingCommitmentQueue{}
+	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+	req := createTestCertificationRequests(t, 1)[0]
+	service := &AggregatorService{
+		config: &config.Config{
+			Processing: config.ProcessingConfig{SkipDuplicateCheck: true},
+			Sharding:   shardingCfg,
+		},
+		logger:                        log,
+		commitmentQueue:               queue,
+		roundManager:                  &stubRoundManager{referenceTime: *req.CertificationData.ExpiresAt},
+		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+	}
+
+	resp, err := service.CertificationRequest(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, api.CertificationStatusRequestExpired, resp.Status)
+	require.Empty(t, queue.stored)
+}
+
+// The timeout is exclusive: a round one second short of it still admits.
+func TestCertificationRequestAcceptsOnTheTimeoutBoundary(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	queue := &recordingCommitmentQueue{}
+	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+	req := createTestCertificationRequests(t, 1)[0]
+	service := &AggregatorService{
+		config: &config.Config{
+			Processing: config.ProcessingConfig{SkipDuplicateCheck: true},
+			Sharding:   shardingCfg,
+		},
+		logger:                        log,
+		commitmentQueue:               queue,
+		roundManager:                  &stubRoundManager{referenceTime: *req.CertificationData.ExpiresAt - 1},
+		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+	}
+
+	resp, err := service.CertificationRequest(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, "SUCCESS", resp.Status)
+	require.Len(t, queue.stored, 1)
+}
+
 func TestGetInclusionProofUsesCachedProofMetadata(t *testing.T) {
 	ctx := context.Background()
 	log, err := logger.New("error", "text", "stdout", false)
@@ -637,7 +747,9 @@ func TestGetInclusionProofUsesCachedProofMetadata(t *testing.T) {
 	tree := smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)
 	path, err := req.StateID.GetPath()
 	require.NoError(t, err)
-	require.NoError(t, tree.AddLeaf(path, req.CertificationData.TransactionHash.DataBytes()))
+	const referenceTime uint64 = 1755000000
+	require.NoError(t, tree.AddLeaf(path,
+		api.LeafValue(req.CertificationData.TransactionHash.DataBytes(), referenceTime)))
 
 	rootHash := api.HexBytes(tree.GetRootHashRaw())
 	uc := testChildProofUC(t, 9, rootHash)
@@ -650,6 +762,7 @@ func TestGetInclusionProofUsesCachedProofMetadata(t *testing.T) {
 		rootHash,
 		nil,
 		uc,
+		1755000000,
 	)
 	block.Finalized = true
 	record := &models.AggregatorRecord{
@@ -659,11 +772,13 @@ func TestGetInclusionProofUsesCachedProofMetadata(t *testing.T) {
 			OwnerPredicate:  req.CertificationData.OwnerPredicate,
 			SourceStateHash: req.CertificationData.SourceStateHash,
 			TransactionHash: req.CertificationData.TransactionHash,
+			ExpiresAt:       req.CertificationData.ExpiresAt,
 			Witness:         req.CertificationData.Witness,
 		},
-		BlockNumber: api.NewBigIntFromUint64(9),
-		LeafIndex:   api.NewBigIntFromUint64(0),
-		CreatedAt:   api.Now(),
+		ReferenceTime: referenceTime,
+		BlockNumber:   api.NewBigIntFromUint64(9),
+		LeafIndex:     api.NewBigIntFromUint64(0),
+		CreatedAt:     api.Now(),
 	}
 
 	blockStorage := &testBlockStorage{latestByRoot: map[string]*models.Block{rootHash.String(): block}}
@@ -711,6 +826,7 @@ func TestGetInclusionProofPublishedViewReturnsEmptyBeforeRecordRootIsPublished(t
 		publishedRoot,
 		nil,
 		testChildProofUC(t, 9, publishedRoot),
+		1755000000,
 	)
 	block.Finalized = true
 	backend := &publishedProofBackend{
@@ -766,6 +882,7 @@ func TestGetHealthStatusPublishedProofFollowerNotReadyDuringInitialDiskSync(t *t
 		latestRoot,
 		nil,
 		testChildProofUC(t, 9, latestRoot),
+		1755000000,
 	)
 	latestBlock.Finalized = true
 	backend := &publishedProofBackend{
@@ -814,6 +931,7 @@ func TestGetHealthStatusPublishedProofFollowerReadyAfterInitialDiskSync(t *testi
 		latestRoot,
 		nil,
 		testChildProofUC(t, 9, latestRoot),
+		1755000000,
 	)
 	latestBlock.Finalized = true
 	backend := &publishedProofBackend{
@@ -863,6 +981,7 @@ func TestGetInclusionProofPublishedViewRootChangeReturnsEmpty(t *testing.T) {
 		publishedRoot,
 		nil,
 		testChildProofUC(t, 9, publishedRoot),
+		1755000000,
 	)
 	block.Finalized = true
 	record := &models.AggregatorRecord{
@@ -937,11 +1056,12 @@ func TestGetInclusionProofUsesPrecomputedProofResponse(t *testing.T) {
 }
 
 type stubRoundManager struct {
-	smt          *smt.ThreadSafeSMT
-	backend      smtbackend.Backend
-	cachedRoot   api.HexBytes
-	cachedBlock  *models.Block
-	cachedRecord *models.AggregatorRecord
+	smt           *smt.ThreadSafeSMT
+	backend       smtbackend.Backend
+	cachedRoot    api.HexBytes
+	cachedBlock   *models.Block
+	cachedRecord  *models.AggregatorRecord
+	referenceTime uint64
 }
 
 func (s *stubRoundManager) Start(context.Context) error    { return nil }
@@ -983,6 +1103,8 @@ func (s *stubRoundManager) GetCachedProofMetadata(stateID api.StateID, rootHash 
 func (s *stubRoundManager) GetProofCacheStats() (pending int, records int, blocks int) {
 	return 0, 0, 0
 }
+
+func (s *stubRoundManager) CurrentReferenceTime() uint64 { return s.referenceTime }
 
 type countingSMTBackend struct {
 	calls int
@@ -1240,3 +1362,6 @@ func testChildProofUC(t *testing.T, roundNumber uint64, rootHash []byte) api.Hex
 	require.NoError(t, err)
 	return api.NewHexBytes(ucBytes)
 }
+
+// ptr returns a pointer to v, for the optional request deadline.
+func ptr(v uint64) *uint64 { return &v }

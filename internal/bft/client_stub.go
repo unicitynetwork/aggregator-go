@@ -25,6 +25,10 @@ type BFTClientStub struct {
 	cancel          context.CancelFunc
 	stopped         bool
 	wg              sync.WaitGroup
+	// referenceTime stands in for the seal timestamp a real BFT Core would
+	// return: it advances by one per stub round, so successive rounds pin
+	// distinct, increasing reference times as they do against a live core.
+	referenceTime uint64
 }
 
 func NewBFTClientStub(logger *logger.Logger, roundManager RoundManager, nextRoundNumber *api.BigInt, delay time.Duration) *BFTClientStub {
@@ -34,6 +38,7 @@ func NewBFTClientStub(logger *logger.Logger, roundManager RoundManager, nextRoun
 		roundManager:    roundManager,
 		nextRoundNumber: nextRoundNumber,
 		delay:           delay,
+		referenceTime:   uint64(time.Now().Unix()),
 	}
 }
 
@@ -45,7 +50,14 @@ func (n *BFTClientStub) Start(ctx context.Context) error {
 	n.cancel = cancel
 	n.stopped = false
 	n.mu.Unlock()
-	return n.roundManager.StartNewRound(stubCtx, n.nextRoundNumber)
+	return n.roundManager.StartNewRound(stubCtx, n.nextRoundNumber, n.nextReferenceTime())
+}
+
+// nextReferenceTime returns the reference time the next stub round pins.
+func (n *BFTClientStub) nextReferenceTime() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.referenceTime
 }
 
 func (n *BFTClientStub) Stop() {
@@ -80,14 +92,24 @@ func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.
 	if len(block.UnicityCertificate) == 0 {
 		// Emit a monotonic synthetic UC so child-mode freshness checks also work
 		// when the parent runs against the local BFT stub.
+		//
+		// The certificate carries the same two timestamps a live core returns:
+		// the input record records the reference time this round's leaves were
+		// built under, and the seal records the time the next round will pin,
+		// which is what the stub hands StartNextRoundFromPrecollector below. A
+		// certificate without them leaves every consumer of this UC, a child
+		// shard in particular, with no reference time at all, and the service
+		// then rejects every request as not ready.
 		roundNumber := block.Index.Uint64()
 		uc := types.UnicityCertificate{
 			InputRecord: &types.InputRecord{
 				RoundNumber: roundNumber,
 				Hash:        hex.Bytes(block.RootHash),
+				Timestamp:   block.ReferenceTime,
 			},
 			UnicitySeal: &types.UnicitySeal{
 				RootChainRoundNumber: roundNumber,
+				Timestamp:            block.ReferenceTime + 1,
 			},
 		}
 		ucBytes, err := types.Cbor.Marshal(uc)
@@ -113,12 +135,14 @@ func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.
 	if nextCtx == nil {
 		nextCtx = ctx
 	}
+	n.referenceTime++
+	referenceTime := n.referenceTime
 	n.wg.Add(1)
 	n.mu.Unlock()
 
 	go func() {
 		defer n.wg.Done()
-		if err := n.roundManager.StartNextRoundFromPrecollector(nextCtx, nextRoundNumber); err != nil {
+		if err := n.roundManager.StartNextRoundFromPrecollector(nextCtx, nextRoundNumber, referenceTime); err != nil {
 			n.logger.Error("Failed to start next round", "error", err.Error())
 		}
 	}()

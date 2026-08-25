@@ -91,7 +91,7 @@ func BenchmarkSMTMemoryUsageRealistic(b *testing.B) {
 					b.Fatalf("Failed to get path: %v", err)
 				}
 
-				leafValue, err := commitment.LeafValue()
+				leafValue, err := commitment.LeafValue(1755000000)
 				if err != nil {
 					b.Fatalf("Failed to create leaf value: %v", err)
 				}
@@ -153,7 +153,7 @@ func BenchmarkSMTOperationsWithLoad(b *testing.B) {
 		}
 
 		path, _ := commitment.StateID.GetPath()
-		leafValue, _ := commitment.LeafValue()
+		leafValue, _ := commitment.LeafValue(1755000000)
 
 		leaves[i] = &Leaf{Path: path, Value: leafValue}
 		paths[i] = path
@@ -190,7 +190,7 @@ func BenchmarkSMTOperationsWithLoad(b *testing.B) {
 				b.Fatalf("Failed to generate commitment: %v", err)
 			}
 			path, _ := commitment.StateID.GetPath()
-			leafValue, _ := commitment.LeafValue()
+			leafValue, _ := commitment.LeafValue(1755000000)
 			b.StartTimer()
 
 			err = snapshot.AddLeaf(path, leafValue)

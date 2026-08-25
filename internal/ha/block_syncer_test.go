@@ -32,6 +32,24 @@ func (m *mockLeaderSelector) IsLeader(_ context.Context) (bool, error) {
 	return m.isLeader.Load(), nil
 }
 
+func TestReplayLeavesForAggregatorRecordsBindsReferenceTime(t *testing.T) {
+	const referenceTime uint64 = 1755000000
+	txHash := api.ImprintV2(bytesOf(api.StateTreeKeyLengthBytes, 0x22))
+	record := &models.AggregatorRecord{
+		StateID:       api.ImprintV2(bytesOf(api.StateTreeKeyLengthBytes, 0x11)),
+		ReferenceTime: referenceTime,
+		CertificationData: models.CertificationData{
+			TransactionHash: txHash,
+		},
+	}
+
+	leaves, err := replayLeavesForAggregatorRecords([]*models.AggregatorRecord{record})
+	require.NoError(t, err)
+	require.Len(t, leaves, 1)
+	require.Equal(t, api.LeafValue(txHash.DataBytes(), referenceTime), leaves[0].Value)
+	require.NotEqual(t, txHash.DataBytes(), leaves[0].Value)
+}
+
 func TestBlockSyncer(t *testing.T) {
 	ctx := t.Context()
 	storage := testutil.SetupTestStorage(t, config.Config{
@@ -221,10 +239,11 @@ func createBlock(t *testing.T, storage *mongodb.Storage, blockNum int64) api.Hex
 	records := make([]*models.AggregatorRecord, len(testCommitments))
 	proposalID := fmt.Sprintf("proposal-%s", blockNumber.String())
 	for i, c := range testCommitments {
+		c.ReferenceTime = 1755000000
 		path, err := c.StateID.GetPath()
 		require.NoError(t, err)
 
-		val, err := c.LeafValue()
+		val, err := c.LeafValue(1755000000)
 		require.NoError(t, err)
 
 		leaves[i] = &smt.Leaf{Path: path, Value: val}
@@ -253,7 +272,7 @@ func createBlock(t *testing.T, storage *mongodb.Storage, blockNum int64) api.Hex
 	rootHash := api.HexBytes(tmpSMT.GetRootHashRaw())
 
 	// persist block
-	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", rootHash, nil, nil)
+	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", rootHash, nil, nil, 1755000000)
 	block.Finalized = true // Mark as finalized so GetLatestNumber finds it
 	block.ProposalID = proposalID
 	err = storage.BlockStorage().Store(ctx, block)
@@ -313,9 +332,10 @@ func (f *blockSyncerFixture) addBlock(t *testing.T, blockNum int64, commitmentCo
 
 	for i := 0; i < commitmentCount; i++ {
 		c := testutil.CreateTestCertificationRequest(t, fmt.Sprintf("block_%d_request_%d", blockNum, i))
+		c.ReferenceTime = 1755000000
 		path, err := c.StateID.GetPath()
 		require.NoError(t, err)
-		value, err := c.LeafValue()
+		value, err := c.LeafValue(1755000000)
 		require.NoError(t, err)
 		key, err := c.StateID.GetTreeKey()
 		require.NoError(t, err)
@@ -332,7 +352,7 @@ func (f *blockSyncerFixture) addBlock(t *testing.T, blockNum int64, commitmentCo
 	}
 	rootHash := api.HexBytes(f.tree.GetRootHashRaw())
 
-	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "test", rootHash, nil, nil)
+	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "test", rootHash, nil, nil, 1755000000)
 	block.Finalized = true
 	block.ProposalID = proposalID
 	require.NoError(t, f.storage.BlockStorage().Store(ctx, block))

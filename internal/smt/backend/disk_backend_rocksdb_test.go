@@ -13,6 +13,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk/persist"
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk/rocksstore"
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk/storage"
+	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -306,8 +307,9 @@ func TestDiskBackendRocksDBPrecomputedProofResponsesRoundTrip(t *testing.T) {
 		InclusionProof: &api.InclusionProofV2{
 			Version: 1,
 			CertificationData: &api.CertificationData{
-				Version:         1,
+				Version:         2,
 				TransactionHash: api.TransactionHash(bytesOf(32, 7)),
+				ExpiresAt:       testutil.ExpiresAt(),
 			},
 			CertificateBytes:   []byte{1, 2, 3},
 			UnicityCertificate: []byte{0x43, 4, 5, 6},

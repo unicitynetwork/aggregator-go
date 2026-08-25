@@ -88,11 +88,35 @@ func UnmarshalCertificationRequestCBOR(data []byte, out *CertificationRequest) e
 	if out.Version != 1 {
 		return fmt.Errorf("unsupported CertificationRequest version: %d", out.Version)
 	}
-	if out.CertificationData.Version != 1 {
+	if out.CertificationData.Version != CertificationDataVersion {
 		return fmt.Errorf("unsupported CertificationData version: %d", out.CertificationData.Version)
 	}
 	return nil
 }
+
+// Uint64Ptr returns a pointer to v. Go has no optional arguments, so an absent
+// CertificationData.ExpiresAt is a nil pointer; this makes supplying a present
+// one a single expression at the call site.
+func Uint64Ptr(v uint64) *uint64 { return &v }
+
+// CertificationDataVersion is the only accepted CertificationData wire version.
+// It carries every field in a fixed-length array, with ExpiresAt written as CBOR
+// null when the requester left the deadline to the service.
+const CertificationDataVersion types.Version = 2
+
+// certificationDataFieldCount is the element count of the CertificationData CBOR
+// array: version, owner predicate, source state hash, transaction hash,
+// expires-at, witness.
+const certificationDataFieldCount = 6
+
+// CertificationStatusRequestExpired is returned when the round's reference time
+// had already reached the request's timeout. It is distinct from a double-spend
+// so a client can tell "too late" from "already spent".
+const CertificationStatusRequestExpired = "REQUEST_EXPIRED"
+
+// CertificationStatusServiceNotReady is returned while the aggregator has no
+// consensus reference time from which to derive or validate a request timeout.
+const CertificationStatusServiceNotReady = "SERVICE_NOT_READY"
 
 // CertificationResponse represents the certification_request JSON-RPC response.
 type CertificationResponse struct {
@@ -115,8 +139,15 @@ type CertificationData struct {
 	// SourceStateHash is the raw 32-byte hash of the source data.
 	SourceStateHash SourceStateHash `json:"sourceStateHash"`
 
-	// TransactionHash is the raw 32-byte hash of the transaction data.
+	// TransactionHash is the raw 32-byte hash of the transaction. It commits to
+	// ExpiresAt, so changing the deadline invalidates the witness.
 	TransactionHash TransactionHash `json:"transactionHash"`
+
+	// ExpiresAt is the exclusive certification request timeout in Unix seconds,
+	// or nil when the requester left the deadline to the service. It occupies a
+	// fixed position in the encoding and is written as CBOR null when absent, so
+	// a requester without a clock needs no separate wire format.
+	ExpiresAt *uint64 `json:"expiresAt"`
 
 	// Witness is the "unlocking part" of owner predicate. In case of PayToPublicKey owner predicate the witness must be
 	// a signature created on the hash of CBOR array[SourceStateHash, TransactionHash],
@@ -128,21 +159,39 @@ func (c *CertificationData) GetVersion() types.Version {
 	if c != nil && c.Version > 0 {
 		return c.Version
 	}
-	return 1
+	return CertificationDataVersion
 }
 
 func (c *CertificationData) MarshalCBOR() ([]byte, error) {
+	if c == nil {
+		return nil, errors.New("nil CertificationData")
+	}
+	if v := c.GetVersion(); v != CertificationDataVersion {
+		return nil, fmt.Errorf("unsupported CertificationData version: %d", v)
+	}
 	type alias CertificationData
 	cp := *c
-	if cp.Version == 0 {
-		cp.Version = 1
-	}
+	cp.Version = CertificationDataVersion
 	return types.Cbor.MarshalTaggedValue(CertificationDataTag, (*alias)(&cp))
 }
 
 func (c *CertificationData) UnmarshalCBOR(data []byte) error {
+	// One version, one element count. ExpiresAt holds its position even when it
+	// carries no value, so the array length never depends on the payload, and
+	// the toarray decode below rejects a wrong tag or a wrong element count on
+	// its own. Decoding once and checking the version off the result costs
+	// about half of what a separate tag-and-length probe pass did, on the
+	// per-request path.
 	type alias CertificationData
-	return types.UnmarshalTaggedVersioned(CertificationDataTag, 1, data, (*alias)(c), c)
+	var decoded alias
+	if err := types.Cbor.UnmarshalTaggedValue(CertificationDataTag, data, &decoded); err != nil {
+		return fmt.Errorf("CertificationData: %w", err)
+	}
+	if decoded.Version != CertificationDataVersion {
+		return fmt.Errorf("unsupported CertificationData version: %d", decoded.Version)
+	}
+	*c = CertificationData(decoded)
+	return nil
 }
 
 // SigDataHash returns the data hash used for signature generation.
@@ -171,9 +220,9 @@ func SigDataHash(sourceStateHash []byte, transactionHash []byte) *DataHash {
 
 // Hash returns the data hash of certification data.
 // The hash is calculated as the CBOR array
-// [OwnerPredicate, SourceStateHash, TransactionHash, Witness].
+// [OwnerPredicate, SourceStateHash, TransactionHash, ExpiresAt, Witness].
 func (c CertificationData) Hash() ([]byte, error) {
-	dataHash, err := CertDataHash(c.OwnerPredicate, c.SourceStateHash, c.TransactionHash, c.Witness)
+	dataHash, err := CertDataHash(c.OwnerPredicate, c.SourceStateHash, c.TransactionHash, c.ExpiresAt, c.Witness)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calculate certification data hash: %w", err)
 	}
@@ -186,8 +235,8 @@ func (c CertificationData) CreateStateID() (StateID, error) {
 
 // CertDataHash returns the data hash of certification data.
 // The hash is calculated as the CBOR array
-// [OwnerPredicate, SourceStateHash, TransactionHash, Witness].
-func CertDataHash(ownerPredicate Predicate, sourceStateHash, transactionHash, signature []byte) (*DataHash, error) {
+// [OwnerPredicate, SourceStateHash, TransactionHash, ExpiresAt, Witness].
+func CertDataHash(ownerPredicate Predicate, sourceStateHash, transactionHash []byte, expiresAt *uint64, signature []byte) (*DataHash, error) {
 	if len(sourceStateHash) != StateTreeKeyLengthBytes {
 		return nil, fmt.Errorf("invalid source state hash length: expected %d bytes, got %d", StateTreeKeyLengthBytes, len(sourceStateHash))
 	}
@@ -203,6 +252,7 @@ func CertDataHash(ownerPredicate Predicate, sourceStateHash, transactionHash, si
 		OwnerPredicate  Predicate
 		SourceStateHash []byte
 		TransactionHash []byte
+		ExpiresAt       *uint64
 		Witness         []byte
 	}
 
@@ -210,6 +260,7 @@ func CertDataHash(ownerPredicate Predicate, sourceStateHash, transactionHash, si
 		OwnerPredicate:  ownerPredicate,
 		SourceStateHash: sourceStateHash,
 		TransactionHash: transactionHash,
+		ExpiresAt:       expiresAt,
 		Witness:         signature,
 	}
 

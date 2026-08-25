@@ -15,10 +15,14 @@ type AggregatorRecord struct {
 	StateID               api.StateID       `json:"stateId"`
 	CertificationData     CertificationData `json:"certificationData"`
 	AggregateRequestCount uint64            `json:"aggregateRequestCount"`
-	BlockNumber           *api.BigInt       `json:"blockNumber"`
-	LeafIndex             *api.BigInt       `json:"leafIndex"`
-	ProposalID            string            `json:"proposalId,omitempty"`
-	CreatedAt             *api.Timestamp    `json:"createdAt"`
+	// ReferenceTime is the reference time of the round this record's leaf was
+	// created in; a verifier needs it to reproduce the certified leaf value.
+	ReferenceTime    uint64         `json:"referenceTime"`
+	EffectiveTimeout uint64         `json:"effectiveTimeout,omitempty"`
+	BlockNumber      *api.BigInt    `json:"blockNumber"`
+	LeafIndex        *api.BigInt    `json:"leafIndex"`
+	ProposalID       string         `json:"proposalId,omitempty"`
+	CreatedAt        *api.Timestamp `json:"createdAt"`
 }
 
 // AggregatorRecordBSON represents the BSON version of AggregatorRecord for MongoDB storage
@@ -27,6 +31,8 @@ type AggregatorRecordBSON struct {
 	StateID               string                `bson:"stateId"`
 	CertificationData     CertificationDataBSON `bson:"certificationData"`
 	AggregateRequestCount uint64                `bson:"aggregateRequestCount"`
+	ReferenceTime         uint64                `bson:"referenceTime"`
+	EffectiveTimeout      uint64                `bson:"effectiveTimeout,omitempty"`
 	BlockNumber           primitive.Decimal128  `bson:"blockNumber"`
 	LeafIndex             primitive.Decimal128  `bson:"leafIndex"`
 	ProposalID            string                `bson:"proposalId,omitempty"`
@@ -40,6 +46,8 @@ func NewAggregatorRecord(certRequest *CertificationRequest, blockNumber, leafInd
 		StateID:               certRequest.StateID,
 		CertificationData:     certRequest.CertificationData,
 		AggregateRequestCount: certRequest.AggregateRequestCount,
+		ReferenceTime:         certRequest.ReferenceTime,
+		EffectiveTimeout:      certRequest.EffectiveTimeout,
 		BlockNumber:           blockNumber,
 		LeafIndex:             leafIndex,
 		CreatedAt:             certRequest.CreatedAt,
@@ -65,6 +73,8 @@ func (ar *AggregatorRecord) ToBSON() (*AggregatorRecordBSON, error) {
 		StateID:               ar.StateID.String(),
 		CertificationData:     ar.CertificationData.ToBSON(),
 		AggregateRequestCount: ar.AggregateRequestCount,
+		ReferenceTime:         ar.ReferenceTime,
+		EffectiveTimeout:      ar.EffectiveTimeout,
 		BlockNumber:           blockNumber,
 		LeafIndex:             leafIndex,
 		ProposalID:            ar.ProposalID,
@@ -99,6 +109,8 @@ func (arb *AggregatorRecordBSON) FromBSON() (*AggregatorRecord, error) {
 		StateID:               stateID,
 		CertificationData:     *certDataBSON,
 		AggregateRequestCount: arb.AggregateRequestCount,
+		ReferenceTime:         arb.ReferenceTime,
+		EffectiveTimeout:      arb.EffectiveTimeout,
 		BlockNumber:           blockNumber,
 		LeafIndex:             leafIndex,
 		ProposalID:            arb.ProposalID,

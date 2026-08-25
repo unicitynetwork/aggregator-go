@@ -48,9 +48,10 @@ var (
 //
 // The certificate carries no root, no key, and no value. Verification
 // requires these to be supplied from the outer proof tuple:
-//   - key  (sid)   — from the RPC request parameter.
-//   - value (txhash) — from CertificationData.TransactionHash.
-//   - root         — from UC.IR.h.
+//   - key (sid) — from the RPC request parameter.
+//   - value (H(CBOR([txhash, referenceTime]))) — from CertificationData and
+//     InclusionProofV2.ReferenceTime.
+//   - root — from UC.IR.h.
 //
 // See docs/inclusion-proof-wire.md for the full specification.
 type InclusionCert struct {

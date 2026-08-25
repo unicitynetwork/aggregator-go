@@ -170,12 +170,12 @@ func GenerateDocsHTML() string {
         <div class="method-section">
             <div class="method-header">certification_request</div>
             <div class="method-content">
-                <div class="description">Submit a state transition certification request to the aggregator. The example below uses a real secp256k1 signature that will pass validation. In the v2 wire format, stateId, transactionHash, and sourceStateHash are raw 32-byte SHA-256 values with no algorithm-prefix bytes.</div>
+                <div class="description">Submit a state transition certification request to the aggregator. The example below uses a real secp256k1 signature that will pass validation. In the v2 wire format, stateId, transactionHash, and sourceStateHash are raw 32-byte SHA-256 values with no algorithm-prefix bytes. The certification data carries expiresAt, an exclusive deadline in Unix seconds that the transaction hash commits to. It occupies a fixed position and is sent as CBOR null when the requester has no clock, in which case the service assigns a deadline from consensus time instead. Either way the request is only inserted in a round whose reference time is strictly below its effective deadline.</div>
                 
                 <div class="params-container">
                     <div class="params-section">
                         <h3>Request Parameters</h3>
-                        <textarea id="certification_request_params">"d9987684015820f6a9010354c4359cbe9d63892684bbff6bd54ef86e9dd98a155a1a32716a0247d998778501d9987883014101582102cbbbe7dc6d51dea5c5fb4d7e7da3416e5914b989c303399f31b51db090981cfa58208126936ae7bcd660a93368a8c83951e01ccbcd4af093769b1cc14f942e2a9ca85820ad8f039daf3827446a0af7ccf31b438aea079440406a07cca7374b52b4e84c2c584177ff8a78a8e59f71d03e687fa14851327babb6a4f5cafcdfc56b16b2267284247734523df030465e249734aab146ae18d65bb3c7aee570c4f53e56e779e0c4200100"</textarea>
+                        <textarea id="certification_request_params">"d9987684015820f6a9010354c4359cbe9d63892684bbff6bd54ef86e9dd98a155a1a32716a0247d998778602d9987883014101582102cbbbe7dc6d51dea5c5fb4d7e7da3416e5914b989c303399f31b51db090981cfa58208126936ae7bcd660a93368a8c83951e01ccbcd4af093769b1cc14f942e2a9ca85820ad8f039daf3827446a0af7ccf31b438aea079440406a07cca7374b52b4e84c2c1a689b2cc0584177ff8a78a8e59f71d03e687fa14851327babb6a4f5cafcdfc56b16b2267284247734523df030465e249734aab146ae18d65bb3c7aee570c4f53e56e779e0c4200100"</textarea>
                         <div class="button-group">
                             <button onclick="sendRequest('certification_request')">🚀 Send Request</button>
                             <button onclick="clearResponse('certification_request')">🗑️ Clear</button>

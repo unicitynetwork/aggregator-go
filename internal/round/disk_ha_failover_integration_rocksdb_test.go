@@ -93,7 +93,7 @@ func TestDiskSMTHAFollowerRejectsDivergentFinalizedRoot(t *testing.T) {
 	storage := testutil.SetupTestStorage(t, cfg)
 
 	commitment := testutil.CreateTestCertificationRequest(t, "disk-ha-divergent-root")
-	leaf, err := commitmentLeafInput(commitment)
+	leaf, err := materializeCommitmentLeaf(commitment, 1755000000)
 	require.NoError(t, err)
 
 	wrongRoot := api.NewHexBytes(make([]byte, api.SiblingSize))
@@ -109,6 +109,7 @@ func TestDiskSMTHAFollowerRejectsDivergentFinalizedRoot(t *testing.T) {
 		wrongRoot,
 		api.HexBytes{},
 		uc,
+		1755000000,
 	)
 	block.Finalized = true
 	block.Status = models.FinalityStatusFinalized
@@ -205,7 +206,7 @@ func requirePublishedProof(
 	t.Helper()
 	reader, ok := backend.(smtbackend.PublishedProofReader)
 	require.True(t, ok)
-	leaf, err := commitmentLeafInput(commitment)
+	leaf, err := materializeCommitmentLeaf(commitment, 1755000000)
 	require.NoError(t, err)
 	publishedRoot, err := reader.PublishedRoot(ctx)
 	require.NoError(t, err)

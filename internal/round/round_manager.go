@@ -57,12 +57,17 @@ func (rs RoundState) String() string {
 
 // Round represents a single aggregation round
 type Round struct {
-	Number      *api.BigInt
-	StartTime   time.Time
-	State       RoundState
-	Commitments []*models.CertificationRequest
-	Cancel      context.CancelFunc
-	Block       *models.Block
+	Number *api.BigInt
+	// ReferenceTime is pinned when the round starts and is the only time value
+	// the round uses: every leaf value is built from it and it is reported as
+	// the input record timestamp. Reading the latest certificate again at
+	// proposal time could disagree with the leaves already inserted.
+	ReferenceTime uint64
+	StartTime     time.Time
+	State         RoundState
+	Commitments   []*models.CertificationRequest
+	Cancel        context.CancelFunc
+	Block         *models.Block
 	// Track commitments that have been added to SMT but not yet finalized in a block.
 	// Raw 32-byte SMT root (no algorithm-id prefix), matching the V2 wire format.
 	PendingRootHash api.HexBytes
@@ -152,6 +157,11 @@ type RoundManager struct {
 	// Child mode tracks the newest parent UC already accepted for finalization.
 	// This prevents empty rounds from immediately reusing an older parent proof.
 	lastAcceptedParentUCRound atomic.Uint64
+	// referenceTime is the round reference time most recently learned from the
+	// certificate chain this aggregator is anchored to: the BFT seal timestamp
+	// in standalone and bft-shard modes, the parent input record timestamp in
+	// child mode. A round pins it at start and never re-reads it.
+	referenceTime atomic.Uint64
 
 	// Metrics
 	totalRounds      int64
@@ -552,9 +562,9 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 }
 
 // StartNewRound starts a new round for processing commitments (delegates to unified function)
-func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt) error {
+func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt, referenceTime uint64) error {
 	rm.roundMutex.Lock()
-	supersededSnapshot, resetPendingSweep, unresolved := rm.abandonSupersededRoundLocked(roundNumber)
+	supersededSnapshot, resetPendingSweep, unresolved := rm.abandonSupersededRoundLocked(roundNumber, referenceTime)
 	rm.roundMutex.Unlock()
 	if supersededSnapshot != nil {
 		supersededSnapshot.Discard(ctx)
@@ -566,7 +576,7 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 			rm.resetRedisPendingSweep(ctx)
 		}
 	}
-	return rm.StartNewRoundWithSnapshot(ctx, roundNumber, nil, nil, nil, false, "")
+	return rm.StartNewRoundWithSnapshot(ctx, roundNumber, referenceTime, nil, nil, nil, false, "")
 }
 
 // StartNewRoundWithSnapshot starts a new round, optionally with pre-collected data.
@@ -579,6 +589,7 @@ var ErrDeactivated = fmt.Errorf("round manager deactivated")
 func (rm *RoundManager) StartNewRoundWithSnapshot(
 	ctx context.Context,
 	roundNumber *api.BigInt,
+	referenceTime uint64,
 	snapshot smtbackend.Snapshot,
 	commitments []*models.CertificationRequest,
 	leaves []smtbackend.LeafInput,
@@ -618,7 +629,8 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 			"previousRoundNumber", currentRoundNumberString,
 			"previousRoundState", currentRoundState.String(),
 			"previousRoundAge", currentRoundAge.String())
-		if currentRoundNumber != nil && currentRoundNumber.Cmp(roundNumber.Int) == 0 {
+		if currentRoundNumber != nil && currentRoundNumber.Cmp(roundNumber.Int) == 0 &&
+			rm.currentRound.ReferenceTime == referenceTime {
 			retryRound := rm.currentRound
 			shouldRetry := retryRound.State == RoundStateFinalizing && !retryRound.ProposalTime.IsZero()
 			rm.roundMutex.Unlock()
@@ -666,7 +678,7 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 		leaves = make([]smtbackend.LeafInput, 0)
 	}
 
-	supersededSnapshot, resetPendingSweep, _ := rm.abandonSupersededRoundLocked(roundNumber)
+	supersededSnapshot, resetPendingSweep, _ := rm.abandonSupersededRoundLocked(roundNumber, referenceTime)
 	if resetPendingSweep {
 		rm.signalRedisPendingSweepReset()
 	}
@@ -675,8 +687,11 @@ func (rm *RoundManager) StartNewRoundWithSnapshot(
 		proposalID = uuid.NewString()
 	}
 
+	rm.setReferenceTime(referenceTime)
+
 	round := &Round{
 		Number:                roundNumber,
+		ReferenceTime:         referenceTime,
 		StartTime:             time.Now(),
 		State:                 RoundStateProcessing,
 		Commitments:           commitments,
@@ -788,14 +803,26 @@ func (rm *RoundManager) retryRoundProposal(ctx context.Context, round *Round) er
 // superseded by a newer one and returns its unproposed snapshot (or nil) for the
 // caller to discard after releasing roundMutex. Proof-pending markers owned by
 // unresolved superseded commitments are removed without disturbing newer markers.
-func (rm *RoundManager) abandonSupersededRoundLocked(roundNumber *api.BigInt) (smtbackend.Snapshot, bool, bool) {
+// abandonSupersededRoundLocked drops the current round when a later round is
+// starting, or when the same round is restarting under a different reference
+// time. The second case matters because the round's leaves are built from the
+// reference time: a repeat certificate carrying a new seal timestamp makes the
+// leaves already inserted unusable, so the round has to be re-collected rather
+// than proposed under a timestamp its leaves do not match.
+func (rm *RoundManager) abandonSupersededRoundLocked(roundNumber *api.BigInt, referenceTime uint64) (smtbackend.Snapshot, bool, bool) {
 	if rm.currentRound == nil {
 		return nil, false, false
 	}
 	if roundNumber == nil ||
 		roundNumber.Int == nil ||
-		rm.currentRound.Number == nil ||
-		rm.currentRound.Number.Cmp(roundNumber.Int) >= 0 {
+		rm.currentRound.Number == nil {
+		return nil, false, false
+	}
+	order := rm.currentRound.Number.Cmp(roundNumber.Int)
+	if order > 0 {
+		return nil, false, false
+	}
+	if order == 0 && rm.currentRound.ReferenceTime == referenceTime {
 		return nil, false, false
 	}
 	unresolved := rm.currentRound.Block == nil
@@ -1308,7 +1335,7 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 			"latestBlock", latestBlockNumber,
 			"nextRound", roundNumber.String())
 
-		if err := rm.StartNewRound(activeCtx, api.NewBigInt(roundNumber)); err != nil {
+		if err := rm.StartNewRound(activeCtx, api.NewBigInt(roundNumber), rm.lastReferenceTime()); err != nil {
 			return fmt.Errorf("failed to start new round: %w", err)
 		}
 	default:
@@ -1341,6 +1368,9 @@ func (rm *RoundManager) restoreLastAcceptedParentUC(ctx context.Context) error {
 	}
 
 	rm.lastAcceptedParentUCRound.Store(parentUC.GetRoundNumber())
+	if parentUC.InputRecord != nil {
+		rm.setReferenceTime(parentUC.InputRecord.Timestamp)
+	}
 	rm.logger.WithContext(ctx).Info("Restored latest accepted parent UC from child storage",
 		"childBlockNumber", latestBlock.Index.String(),
 		"parentRound", parentUC.GetRoundNumber())
@@ -1353,6 +1383,34 @@ func (rm *RoundManager) acceptParentUC(parentUC *types.UnicityCertificate) {
 		return
 	}
 	rm.lastAcceptedParentUCRound.Store(parentUC.GetRoundNumber())
+	if parentUC.InputRecord != nil {
+		rm.setReferenceTime(parentUC.InputRecord.Timestamp)
+	}
+}
+
+// setReferenceTime records the reference time later rounds will pin. It never
+// moves backwards: a stale certificate arriving out of order must not undo a
+// newer one.
+func (rm *RoundManager) setReferenceTime(referenceTime uint64) {
+	for {
+		current := rm.referenceTime.Load()
+		if referenceTime <= current {
+			return
+		}
+		if rm.referenceTime.CompareAndSwap(current, referenceTime) {
+			return
+		}
+	}
+}
+
+// lastReferenceTime returns the reference time a round started now would pin.
+func (rm *RoundManager) lastReferenceTime() uint64 {
+	return rm.referenceTime.Load()
+}
+
+// CurrentReferenceTime implements Manager.
+func (rm *RoundManager) CurrentReferenceTime() uint64 {
+	return rm.lastReferenceTime()
 }
 
 func (rm *RoundManager) lastAcceptedParentUC() uint64 {
@@ -1544,8 +1602,8 @@ func (rm *RoundManager) collectMiniBatchSize() int {
 	return rm.config.Processing.CollectMiniBatchSize
 }
 
-func (rm *RoundManager) advancePrecollectorForHandoff(cp *childPrecollector) (*preCollectionResult, error) {
-	return cp.AdvanceRound()
+func (rm *RoundManager) advancePrecollectorForHandoff(cp *childPrecollector, referenceTime uint64) (*preCollectionResult, error) {
+	return cp.AdvanceRound(referenceTime)
 }
 
 func validatePrecollectorBlockNumber(preResult *preCollectionResult, roundNumber *api.BigInt) error {
@@ -1567,9 +1625,9 @@ func validatePrecollectorBlockNumber(preResult *preCollectionResult, roundNumber
 // StartNextRoundFromPrecollector starts the next standalone/bft-shard round
 // from the active precollector snapshot. If precollection is disabled or no
 // precollector is available, it falls back to the fixed collect path.
-func (rm *RoundManager) StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt) error {
+func (rm *RoundManager) StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt, referenceTime uint64) error {
 	if !rm.usesActivePrecollector() {
-		return rm.StartNewRound(ctx, roundNumber)
+		return rm.StartNewRound(ctx, roundNumber, referenceTime)
 	}
 
 	rm.roundMutex.RLock()
@@ -1600,11 +1658,11 @@ func (rm *RoundManager) StartNextRoundFromPrecollector(ctx context.Context, roun
 		return nil
 	}
 	if cp == nil {
-		return rm.StartNewRound(ctx, roundNumber)
+		return rm.StartNewRound(ctx, roundNumber, referenceTime)
 	}
 
 	advanceStart := time.Now()
-	preResult, err := rm.advancePrecollectorForHandoff(cp)
+	preResult, err := rm.advancePrecollectorForHandoff(cp, referenceTime)
 	advanceDuration := time.Since(advanceStart)
 	if err != nil {
 		rm.roundMutex.RLock()
@@ -1621,7 +1679,7 @@ func (rm *RoundManager) StartNextRoundFromPrecollector(ctx context.Context, roun
 		// can start. StartNewRound only discards when abandoning a pending
 		// round, which is not the case on the post-finalization fallback path.
 		rm.discardActivePrecollector(ctx)
-		return rm.StartNewRound(ctx, roundNumber)
+		return rm.StartNewRound(ctx, roundNumber, referenceTime)
 	}
 
 	if err := validatePrecollectorBlockNumber(preResult, roundNumber); err != nil {
@@ -1632,7 +1690,7 @@ func (rm *RoundManager) StartNextRoundFromPrecollector(ctx context.Context, roun
 		preResult.snapshot.Discard(ctx)
 		return fmt.Errorf("failed to set precollector commit target: %w", err)
 	}
-	if err := rm.StartNewRoundWithSnapshot(ctx, roundNumber, preResult.snapshot, preResult.commitments, preResult.leaves, preResult.recordsStaged, preResult.proposalID); err != nil {
+	if err := rm.StartNewRoundWithSnapshot(ctx, roundNumber, referenceTime, preResult.snapshot, preResult.commitments, preResult.leaves, preResult.recordsStaged, preResult.proposalID); err != nil {
 		if errors.Is(err, ErrDeactivated) {
 			return nil
 		}

@@ -203,6 +203,7 @@ func (s *FinalizeDuplicateTestSuite) Test1_DuplicateRecovery() {
 		rootHashBytes,
 		api.HexBytes{},
 		api.HexBytes{},
+		1755000000,
 	)
 	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 
@@ -262,6 +263,7 @@ func (s *FinalizeDuplicateTestSuite) Test2_NoDuplicates() {
 		rootHashBytes,
 		api.HexBytes{},
 		api.HexBytes{},
+		1755000000,
 	)
 	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 
@@ -325,6 +327,7 @@ func (s *FinalizeDuplicateTestSuite) Test3_AllDuplicates() {
 		rootHashBytes,
 		api.HexBytes{},
 		api.HexBytes{},
+		1755000000,
 	)
 	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 
@@ -383,6 +386,7 @@ func (s *FinalizeDuplicateTestSuite) Test4_DuplicateBlock() {
 		rootHashBytes,
 		api.HexBytes{},
 		api.HexBytes{},
+		1755000000,
 	)
 
 	// Pre-store the durable proposal (simulating the real pre-certification flow).
@@ -456,6 +460,7 @@ func (s *FinalizeDuplicateTestSuite) Test4b_MarkProcessedFailureAfterFinalizatio
 		rootHashBytes,
 		api.HexBytes{},
 		api.HexBytes{},
+		1755000000,
 	)
 	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 
@@ -519,6 +524,7 @@ func (s *FinalizeDuplicateTestSuite) Test4c_FinalizeFailureLeavesCertifiedBlockR
 		rootHashBytes,
 		api.HexBytes{},
 		certBytes,
+		1755000000,
 	)
 	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 
@@ -574,6 +580,7 @@ func (s *FinalizeDuplicateTestSuite) Test5_DuplicateBlockAlreadyFinalized() {
 		rootHashBytes,
 		api.HexBytes{},
 		api.HexBytes{},
+		1755000000,
 	)
 
 	// Pre-store the block as FINALIZED (simulating previous successful attempt except MarkProcessed)
@@ -643,9 +650,9 @@ func (s *FinalizeDuplicateTestSuite) Test6_ProposalRecordsMatchPendingCommitment
 	conflictingCommitment := *commitment1
 	conflictingCommitment.CertificationData.TransactionHash = commitment2.CertificationData.TransactionHash
 
-	leafValue1, err := commitment1.LeafValue()
+	leafValue1, err := commitment1.LeafValue(1755000000)
 	require.NoError(t, err)
-	leafValueConflict, err := conflictingCommitment.LeafValue()
+	leafValueConflict, err := conflictingCommitment.LeafValue(1755000000)
 	require.NoError(t, err)
 	require.NotEqual(t, leafValue1, leafValueConflict, "conflicting commitment must produce a different leaf value")
 
@@ -686,6 +693,7 @@ func (s *FinalizeDuplicateTestSuite) Test6_ProposalRecordsMatchPendingCommitment
 		rootHashBytes,
 		api.HexBytes{},
 		api.HexBytes{},
+		1755000000,
 	)
 	storeDurableProposalForCurrentRound(t, ctx, rm, block)
 
@@ -734,7 +742,7 @@ func (s *FinalizeDuplicateTestSuite) Test7_FinalizeBlockRejectsRoundNumberMismat
 	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
 	require.NoError(t, err)
 
-	block := models.NewBlock(api.NewBigInt(big.NewInt(7)), "unicity", 0, "1.0", "mainnet", rootHashBytes, api.HexBytes{}, api.HexBytes{})
+	block := models.NewBlock(api.NewBigInt(big.NewInt(7)), "unicity", 0, "1.0", "mainnet", rootHashBytes, api.HexBytes{}, api.HexBytes{}, 1755000000)
 	err = rm.FinalizeBlock(ctx, block)
 	require.ErrorContains(t, err, "does not match active round")
 }
@@ -767,14 +775,14 @@ func (s *FinalizeDuplicateTestSuite) Test8_DuplicateBlockMustMatchRootAndStateID
 	rootHashBytes, err := api.NewHexBytesFromString(rootHash)
 	require.NoError(t, err)
 
-	existing := models.NewBlock(api.NewBigInt(big.NewInt(8)), "unicity", 0, "1.0", "mainnet", api.HexBytes(repeatByte(32, 7)), api.HexBytes{}, api.HexBytes{})
+	existing := models.NewBlock(api.NewBigInt(big.NewInt(8)), "unicity", 0, "1.0", "mainnet", api.HexBytes(repeatByte(32, 7)), api.HexBytes{}, api.HexBytes{}, 1755000000)
 	existing.Finalized = true
 	existing.Status = models.FinalityStatusFinalized
 	existing.ProposalID = "proposal-8-existing"
 	require.NoError(t, s.storage.BlockStorage().Store(ctx, existing))
 	require.NoError(t, s.storage.AggregatorRecordStorage().StoreBatch(ctx, recordsForBlock(commitments[:1], existing)))
 
-	block := models.NewBlock(api.NewBigInt(big.NewInt(8)), "unicity", 0, "1.0", "mainnet", rootHashBytes, api.HexBytes{}, api.HexBytes{})
+	block := models.NewBlock(api.NewBigInt(big.NewInt(8)), "unicity", 0, "1.0", "mainnet", rootHashBytes, api.HexBytes{}, api.HexBytes{}, 1755000000)
 	err = rm.FinalizeBlock(ctx, block)
 	require.ErrorContains(t, err, "root mismatch")
 }
@@ -800,7 +808,7 @@ func (s *FinalizeDuplicateTestSuite) Test9_EmptyRoundCannotFinalizeChangedRoot()
 		Snapshot:           testRMSnapshot(t, ctx, rm),
 	}
 
-	block := models.NewBlock(api.NewBigInt(big.NewInt(9)), "unicity", 0, "1.0", "mainnet", api.HexBytes(repeatByte(32, 9)), api.HexBytes{}, api.HexBytes{})
+	block := models.NewBlock(api.NewBigInt(big.NewInt(9)), "unicity", 0, "1.0", "mainnet", api.HexBytes(repeatByte(32, 9)), api.HexBytes{}, api.HexBytes{}, 1755000000)
 	err = rm.FinalizeBlock(ctx, block)
 	require.ErrorContains(t, err, "snapshot root")
 }
@@ -809,7 +817,7 @@ func (s *FinalizeDuplicateTestSuite) Test10_FinalizeBlockWithRetryPropagatesCanc
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	block := models.NewBlock(api.NewBigInt(big.NewInt(10)), "unicity", 0, "1.0", "mainnet", api.HexBytes{}, api.HexBytes{}, api.HexBytes{})
+	block := models.NewBlock(api.NewBigInt(big.NewInt(10)), "unicity", 0, "1.0", "mainnet", api.HexBytes{}, api.HexBytes{}, api.HexBytes{}, 1755000000)
 	rm := &RoundManager{}
 
 	err := rm.FinalizeBlockWithRetry(ctx, block)

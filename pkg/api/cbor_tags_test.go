@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	corecbor "github.com/unicitynetwork/aggregator-go/pkg/cbor"
 )
 
 // cborTagPrefix returns the raw CBOR bytes that encode `tag` as a tag head
@@ -76,9 +78,27 @@ func TestCertificationData_WireFormat(t *testing.T) {
 	b, err := types.Cbor.Marshal(&cd)
 	require.NoError(t, err)
 
-	prefix := cborTagPrefix(t, CertificationDataTag, 5)
+	prefix := cborTagPrefix(t, CertificationDataTag, 6)
 	require.Equal(t, prefix, b[:len(prefix)])
-	require.Equal(t, byte(0x01), b[len(prefix)], "Version slot should be 1")
+	require.Equal(t, byte(0x02), b[len(prefix)], "Version slot should be 2")
+}
+
+func TestCertificationData_AbsentExpiryKeepsTheSameShape(t *testing.T) {
+	cd := createCertData(t)
+	cd.Version = 0
+	cd.ExpiresAt = nil
+
+	b, err := types.Cbor.Marshal(&cd)
+	require.NoError(t, err)
+	// Same tag, same element count, same version as a request that carries one.
+	prefix := cborTagPrefix(t, CertificationDataTag, 6)
+	require.Equal(t, prefix, b[:len(prefix)])
+	require.Equal(t, byte(0x02), b[len(prefix)])
+
+	var decoded CertificationData
+	require.NoError(t, types.Cbor.Unmarshal(b, &decoded))
+	require.Nil(t, decoded.ExpiresAt)
+	require.Equal(t, CertificationDataVersion, decoded.GetVersion())
 }
 
 func TestCertificationData_RejectsWrongTag(t *testing.T) {
@@ -132,8 +152,10 @@ func TestPredicate_RejectsWrongTag(t *testing.T) {
 
 func TestInclusionProofV2_WireFormat(t *testing.T) {
 	cd := createCertData(t)
+	referenceTime := uint64(1755000000)
 	proof := &InclusionProofV2{
 		CertificationData: &cd,
+		ReferenceTime:     &referenceTime,
 		CertificateBytes:  HexBytes{0x01, 0x02},
 		// UnicityCertificate is raw CBOR; an empty byte-string is valid CBOR.
 		UnicityCertificate: types.RawCBOR{0x40},
@@ -142,15 +164,17 @@ func TestInclusionProofV2_WireFormat(t *testing.T) {
 	b, err := types.Cbor.Marshal(proof)
 	require.NoError(t, err)
 
-	prefix := cborTagPrefix(t, InclusionProofTag, 4)
+	prefix := cborTagPrefix(t, InclusionProofTag, 5)
 	require.Equal(t, prefix, b[:len(prefix)])
 	require.Equal(t, byte(0x01), b[len(prefix)], "Version slot should be 1")
 }
 
 func TestInclusionProofV2_RejectsWrongTag(t *testing.T) {
 	cd := createCertData(t)
+	referenceTime := uint64(1755000000)
 	proof := &InclusionProofV2{
 		CertificationData:  &cd,
+		ReferenceTime:      &referenceTime,
 		CertificateBytes:   HexBytes{0x01, 0x02},
 		UnicityCertificate: types.RawCBOR{0x40},
 	}
@@ -166,8 +190,10 @@ func TestInclusionProofV2_RejectsWrongTag(t *testing.T) {
 
 func TestInclusionProofV2_RejectsWrongVersion(t *testing.T) {
 	cd := createCertData(t)
+	referenceTime := uint64(1755000000)
 	proof := &InclusionProofV2{
 		CertificationData:  &cd,
+		ReferenceTime:      &referenceTime,
 		CertificateBytes:   HexBytes{0x01, 0x02},
 		UnicityCertificate: types.RawCBOR{0x40},
 	}
@@ -179,4 +205,35 @@ func TestInclusionProofV2_RejectsWrongVersion(t *testing.T) {
 	err = types.Cbor.Unmarshal(b, &decoded)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "version")
+}
+
+// CborUint feeds hashing paths such as LeafValue, where the value is not always
+// ours to bound. It must therefore encode the whole uint64 range rather than
+// narrowing to int, which truncates above 2^31 on 32-bit platforms and wraps
+// negative above 2^63 anywhere.
+func TestCborUintCoversTheFullUnsignedRange(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   uint64
+		want []byte
+	}{
+		{"zero", 0, []byte{0x00}},
+		{"one byte inline", 23, []byte{0x17}},
+		{"one byte follows", 24, []byte{0x18, 0x18}},
+		{"max uint8", 0xff, []byte{0x18, 0xff}},
+		{"two bytes", 0x100, []byte{0x19, 0x01, 0x00}},
+		{"max uint16", 0xffff, []byte{0x19, 0xff, 0xff}},
+		{"four bytes", 0x10000, []byte{0x1a, 0x00, 0x01, 0x00, 0x00}},
+		{"max uint32", 0xffffffff, []byte{0x1a, 0xff, 0xff, 0xff, 0xff}},
+		{"eight bytes", 0x100000000, []byte{0x1b, 0, 0, 0, 1, 0, 0, 0, 0}},
+		{"above max int64", 1 << 63, []byte{0x1b, 0x80, 0, 0, 0, 0, 0, 0, 0}},
+		{"max uint64", ^uint64(0), []byte{0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CborUint(tc.in)
+			require.Equal(t, tc.want, got)
+			// Shortest-form encoding is what the canonical validator requires.
+			require.NoError(t, corecbor.ValidateCoreDeterministic(got))
+		})
+	}
 }

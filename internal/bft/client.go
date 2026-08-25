@@ -93,8 +93,14 @@ type (
 	RoundManager interface {
 		FinalizeBlock(ctx context.Context, block *models.Block) error
 		FinalizeBlockWithRetry(ctx context.Context, block *models.Block) error
-		StartNewRound(ctx context.Context, roundNumber *api.BigInt) error
-		StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt) error
+		// StartNewRound and StartNextRoundFromPrecollector take the reference
+		// time the new round must pin: the seal timestamp of the certificate
+		// that ended the previous round. The round builds every leaf value from
+		// it and reports it as the input record timestamp, so it cannot be
+		// re-read later without risking disagreement with leaves already
+		// inserted.
+		StartNewRound(ctx context.Context, roundNumber *api.BigInt, referenceTime uint64) error
+		StartNextRoundFromPrecollector(ctx context.Context, roundNumber *api.BigInt, referenceTime uint64) error
 		CommittedRoot(ctx context.Context) ([]byte, *api.BigInt, error)
 	}
 
@@ -476,7 +482,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 
 		c.logger.WithContext(ctx).Info("Starting new round after repeat UC",
 			"nextRoundNumber", nextRoundNumber.String())
-		if err := c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber)); err != nil {
+		if err := c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber), referenceTimeFromUC(uc)); err != nil {
 			rollbackInitialization()
 			return err
 		}
@@ -519,7 +525,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 			c.logger.WithContext(ctx).Info("Durable proposal finalized from initialization UC",
 				"ucRound", uc.GetRoundNumber(),
 				"nextRoundNumber", nextRoundNumber.String())
-			err := c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+			err := c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber), referenceTimeFromUC(uc))
 			if err != nil {
 				c.logger.WithContext(ctx).Error("Failed to start first round after durable proposal recovery",
 					"nextRoundNumber", nextRoundNumber.String(),
@@ -542,7 +548,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 			completeInitialization()
 			return nil
 		}
-		err = c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+		err = c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber), referenceTimeFromUC(uc))
 		if err != nil {
 			c.logger.WithContext(ctx).Error("Failed to start first round after initialization",
 				"nextRoundNumber", nextRoundNumber.String(),
@@ -581,7 +587,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 				// Start new round immediately with root chain's next round
 				c.logger.WithContext(ctx).Info("Starting new round to sync with root chain",
 					"nextRoundNumber", nextRoundNumber.String())
-				err := c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+				err := c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber), referenceTimeFromUC(uc))
 				if err != nil {
 					c.logger.WithContext(ctx).Error("Failed to start new round for sync",
 						"nextRoundNumber", nextRoundNumber.String(),
@@ -628,7 +634,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 					c.logger.WithContext(ctx).Info("Durable proposal finalized from UC",
 						"ucRound", expectedRound,
 						"nextRoundNumber", nextRoundNumber.String())
-					err := c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+					err := c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber), referenceTimeFromUC(uc))
 					if err != nil {
 						c.logger.WithContext(ctx).Error("Failed to start next round after durable proposal recovery",
 							"nextRoundNumber", nextRoundNumber.String(),
@@ -647,7 +653,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		// 3. The root chain advanced without us sending a certification request
 
 		// Start the next round directly
-		err := c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+		err := c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber), referenceTimeFromUC(uc))
 		if err != nil {
 			c.logger.WithContext(ctx).Error("Failed to start next round",
 				"nextRoundNumber", nextRoundNumber.String(),
@@ -724,7 +730,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 
 		c.logger.WithContext(ctx).Info("Resumed durable proposal finalized, starting new round",
 			"nextRoundNumber", nextRoundNumber.String())
-		err = c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber))
+		err = c.roundManager.StartNewRound(ctx, api.NewBigInt(nextRoundNumber), referenceTimeFromUC(uc))
 		if err != nil {
 			c.logger.WithContext(ctx).Error("Failed to start new round",
 				"nextRoundNumber", nextRoundNumber.String(),
@@ -752,7 +758,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 	c.logger.WithContext(ctx).Info("Block finalized, starting new round",
 		"nextRoundNumber", nextRoundNumber.String())
 
-	err = c.roundManager.StartNextRoundFromPrecollector(ctx, api.NewBigInt(nextRoundNumber))
+	err = c.roundManager.StartNextRoundFromPrecollector(ctx, api.NewBigInt(nextRoundNumber), referenceTimeFromUC(uc))
 	if err != nil {
 		c.logger.WithContext(ctx).Error("Failed to start new round",
 			"nextRoundNumber", nextRoundNumber.String(),
@@ -856,14 +862,14 @@ func (c *BFTClientImpl) resumeDurableProposalLocked(ctx context.Context, roundNu
 	c.proposedBlock = block
 	c.resumedDurableProposal = true
 	c.certRequestTime.Store(time.Now().UnixNano())
-	if err := c.sendCertificationRequest(ctx, block.RootHash.String(), block.Index.Uint64()); err != nil {
+	if err := c.sendCertificationRequest(ctx, block.RootHash.String(), block.Index.Uint64(), block.ReferenceTime); err != nil {
 		metrics.BFTErrorsTotal.Inc()
 		return true, fmt.Errorf("failed to resend durable proposal %s: %w", block.Index.String(), err)
 	}
 	return true, nil
 }
 
-func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash string, roundNumber uint64) error {
+func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash string, roundNumber uint64, referenceTime uint64) error {
 	rootHashBytes, err := hex.DecodeString(rootHash)
 	if err != nil {
 		return fmt.Errorf("failed to decode root hash: %w", err)
@@ -874,7 +880,7 @@ func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 		return fmt.Errorf("failed to prepare certification request: %w", err)
 	}
 
-	inputRecord, err := c.buildCertificationInputRecord(luc, rootHashBytes, roundNumber)
+	inputRecord, err := c.buildCertificationInputRecord(luc, rootHashBytes, roundNumber, referenceTime)
 	if err != nil {
 		return err
 	}
@@ -915,9 +921,26 @@ func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 	return bftNetwork.Send(ctx, req, rootIDs...)
 }
 
-func (c *BFTClientImpl) buildCertificationInputRecord(luc *types.UnicityCertificate, rootHashBytes []byte, roundNumber uint64) (*types.InputRecord, error) {
+// referenceTimeFromUC returns the reference time a round following uc must pin:
+// the timestamp of the seal that certified the previous round.
+func referenceTimeFromUC(uc *types.UnicityCertificate) uint64 {
+	if uc == nil || uc.UnicitySeal == nil {
+		return 0
+	}
+	return uc.UnicitySeal.Timestamp
+}
+
+func (c *BFTClientImpl) buildCertificationInputRecord(luc *types.UnicityCertificate, rootHashBytes []byte, roundNumber uint64, referenceTime uint64) (*types.InputRecord, error) {
 	if luc == nil || luc.InputRecord == nil || luc.UnicitySeal == nil {
 		return nil, errors.New("latest UC is incomplete")
+	}
+	// The round built its leaf values from referenceTime. Re-reading the latest
+	// seal here instead would certify a root the leaves do not correspond to
+	// whenever a repeat certificate arrived mid-round.
+	if referenceTime != luc.UnicitySeal.Timestamp {
+		return nil, fmt.Errorf("%w: round reference time %d does not match latest seal timestamp %d",
+			ErrStaleCertificationRound,
+			referenceTime, luc.UnicitySeal.Timestamp)
 	}
 
 	var blockHash []byte
@@ -937,7 +960,7 @@ func (c *BFTClientImpl) buildCertificationInputRecord(luc *types.UnicityCertific
 		PreviousHash:    luc.InputRecord.Hash,
 		Hash:            rootHashBytes,
 		SummaryValue:    []byte{}, // cant be nil if RoundNumber > 0
-		Timestamp:       luc.UnicitySeal.Timestamp,
+		Timestamp:       referenceTime,
 		BlockHash:       blockHash,
 		SumOfEarnedFees: 0,
 		ETHash:          nil, // can be nil, not validated
@@ -1026,7 +1049,7 @@ func (c *BFTClientImpl) CertificationRequest(ctx context.Context, block *models.
 		"blockNumber", block.Index.String(),
 		"roundNumber", block.Index.Uint64())
 
-	if err := c.sendCertificationRequest(ctx, block.RootHash.String(), block.Index.Uint64()); err != nil {
+	if err := c.sendCertificationRequest(ctx, block.RootHash.String(), block.Index.Uint64(), block.ReferenceTime); err != nil {
 		c.logger.WithContext(ctx).Error("Failed to send certification request",
 			"blockNumber", block.Index.String(),
 			"error", err.Error())

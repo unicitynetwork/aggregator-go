@@ -38,5 +38,9 @@ func VerifyInclusionProofLocal(p *api.InclusionProofV2, req *api.CertificationRe
 	if err != nil {
 		return fmt.Errorf("failed to derive SMT key: %w", err)
 	}
-	return cert.Verify(key, req.CertificationData.TransactionHash.DataBytes(), rootRaw, api.InclusionProofV2HashAlgorithm)
+	if p.ReferenceTime == nil {
+		return fmt.Errorf("missing inclusion proof reference time")
+	}
+	leafValue := api.LeafValue(req.CertificationData.TransactionHash.DataBytes(), *p.ReferenceTime)
+	return cert.Verify(key, leafValue, rootRaw, api.InclusionProofV2HashAlgorithm)
 }

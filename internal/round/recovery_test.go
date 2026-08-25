@@ -124,6 +124,25 @@ func (s *RecoveryTestSuite) SetupTest() {
 	_ = s.commitmentQueue.Initialize(s.ctx)
 }
 
+func TestStateIDsAndLeavesFromAggregatorRecordsBindsReferenceTime(t *testing.T) {
+	const referenceTime uint64 = 1755000000
+	stateID := api.ImprintV2(bytes.Repeat([]byte{0x11}, api.StateTreeKeyLengthBytes))
+	txHash := api.ImprintV2(bytes.Repeat([]byte{0x22}, api.StateTreeKeyLengthBytes))
+	record := &models.AggregatorRecord{
+		StateID:       stateID,
+		ReferenceTime: referenceTime,
+		CertificationData: models.CertificationData{
+			TransactionHash: txHash,
+		},
+	}
+
+	stateIDs, leaves, err := stateIDsAndLeavesFromAggregatorRecords([]*models.AggregatorRecord{record})
+	require.NoError(t, err)
+	require.Equal(t, []api.StateID{stateID}, stateIDs)
+	require.Len(t, leaves, 1)
+	require.Equal(t, api.LeafValue(txHash.DataBytes(), referenceTime), leaves[0].Value)
+}
+
 // Helper to create and store test data
 func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, prefix string) ([]*models.CertificationRequest, *models.Block, []api.StateID) {
 	t := s.T()
@@ -135,6 +154,7 @@ func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, 
 	// Create state IDs.
 	stateIDs := make([]api.StateID, len(commitments))
 	for i, c := range commitments {
+		c.ReferenceTime = 1755000000
 		stateIDs[i] = c.StateID
 	}
 
@@ -144,7 +164,7 @@ func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, 
 	for i, c := range commitments {
 		path, err := c.StateID.GetPath()
 		require.NoError(t, err)
-		leafValue, err := c.LeafValue()
+		leafValue, err := c.LeafValue(1755000000)
 		require.NoError(t, err)
 		leaves[i] = smt.NewLeaf(path, leafValue)
 	}
@@ -153,7 +173,7 @@ func (s *RecoveryTestSuite) createTestData(blockNum int64, commitmentCount int, 
 	rootHashBytes := smtTree.GetRootHashRaw()
 
 	// Create block (unfinalized)
-	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", api.HexBytes(rootHashBytes), nil, nil)
+	block := models.NewBlock(blockNumber, "unicity", 0, "1.0", "mainnet", api.HexBytes(rootHashBytes), nil, nil, 1755000000)
 	block.Finalized = false
 	block.ProposalID = "proposal-" + blockNumber.String()
 
@@ -176,7 +196,7 @@ func (s *RecoveryTestSuite) storeSmtNodes(commitments []*models.CertificationReq
 	for i, c := range commitments {
 		keyBytes, err := c.StateID.GetTreeKey()
 		s.Require().NoError(err)
-		leafValue, err := c.LeafValue()
+		leafValue, err := c.LeafValue(1755000000)
 		s.Require().NoError(err)
 		nodes[i] = models.NewSmtNode(api.HexBytes(keyBytes), leafValue)
 	}
@@ -580,17 +600,19 @@ func (s *RecoveryTestSuite) Test10_PartialSmtNodes_CorrectDetection() {
 	for i, idx := range existingIndices {
 		keyBytes, err := commitments[idx].StateID.GetTreeKey()
 		require.NoError(t, err)
-		leafValue, err := commitments[idx].LeafValue()
+		leafValue, err := commitments[idx].LeafValue(1755000000)
 		require.NoError(t, err)
 		existingNodes[i] = models.NewSmtNode(api.HexBytes(keyBytes), leafValue)
 	}
 	err = s.storage.SmtStorage().StoreBatch(s.ctx, existingNodes)
 	require.NoError(t, err)
 
-	// Store ONLY the commitments that need recovery (positions 2 and 3) in Redis
+	// Store pre-materialization queue copies; the round reference time is assigned later.
 	missingIndices := []int{2, 3}
 	for _, idx := range missingIndices {
-		err = s.commitmentQueue.Store(s.ctx, commitments[idx])
+		preMaterializationCommitment := *commitments[idx]
+		preMaterializationCommitment.ReferenceTime = 0
+		err = s.commitmentQueue.Store(s.ctx, &preMaterializationCommitment)
 		require.NoError(t, err)
 	}
 	time.Sleep(200 * time.Millisecond)
@@ -609,6 +631,17 @@ func (s *RecoveryTestSuite) Test10_PartialSmtNodes_CorrectDetection() {
 	smtCountAfter, err := s.storage.SmtStorage().Count(s.ctx)
 	require.NoError(t, err)
 	require.Equal(t, int64(5), smtCountAfter, "Should have 5 SMT nodes after recovery")
+	for _, idx := range missingIndices {
+		keyBytes, err := commitments[idx].StateID.GetTreeKey()
+		require.NoError(t, err)
+		node, err := s.storage.SmtStorage().GetByKey(s.ctx, keyBytes)
+		require.NoError(t, err)
+		require.NotNil(t, node)
+		require.Equal(t,
+			api.HexBytes(api.LeafValue(commitments[idx].CertificationData.TransactionHash.DataBytes(), commitments[idx].ReferenceTime)),
+			node.Value,
+		)
+	}
 
 	t.Log("✓ Test10_PartialSmtNodes_CorrectDetection passed")
 }
@@ -632,7 +665,7 @@ func (s *RecoveryTestSuite) Test11_LoadRecoveredNodesIntoBackend() {
 	for i, c := range commitments {
 		path, err := c.StateID.GetPath()
 		require.NoError(t, err)
-		leafValue, err := c.LeafValue()
+		leafValue, err := c.LeafValue(1755000000)
 		require.NoError(t, err)
 		leaves[i] = smt.NewLeaf(path, leafValue)
 	}

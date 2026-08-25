@@ -112,11 +112,12 @@ type GetInclusionProofResponseV2 struct {
 
 // InclusionProofV2 is the canonical v2 inclusion proof payload.
 //
-// Wire form: CBOR tag InclusionProofTag wrapping a 4-element toarray:
+// Wire form: CBOR tag InclusionProofTag wrapping a 5-element toarray:
 //
 //	#InclusionProofTag ([
 //	  version: uint,
 //	  certificationDataOrNull,
+//	  referenceTime: uint | null,
 //	  certificateBytes: bstr,   // InclusionCert or ExclusionCert raw wire form
 //	  unicityCertificate: raw CBOR
 //	])
@@ -124,7 +125,13 @@ type GetInclusionProofResponseV2 struct {
 // Discriminator:
 //   - CertificationData != nil → inclusion. CertificateBytes is an
 //     InclusionCert wire payload. The SMT key comes from the outer RPC
-//     request (stateId); the leaf value is CertificationData.TransactionHash.
+//     request (stateId); the leaf value is
+//     LeafValue(CertificationData.TransactionHash, ReferenceTime).
+//
+// ReferenceTime is the reference time of the round the leaf was created in. It
+// cannot be recovered from the embedded certificate: proofs are served against
+// the current certified root, whose input record time is that of the latest
+// round rather than the one the leaf was created under.
 //   - CertificationData == nil → non-inclusion. CertificateBytes is an
 //     ExclusionCert wire payload. Non-inclusion verification is not yet
 //     implemented in Go.
@@ -137,6 +144,7 @@ type InclusionProofV2 struct {
 	_                  struct{}           `cbor:",toarray"`
 	Version            types.Version      `json:"version"`
 	CertificationData  *CertificationData `json:"certificationData"`
+	ReferenceTime      *uint64            `json:"referenceTime"`
 	CertificateBytes   HexBytes           `json:"certificateBytes"`
 	UnicityCertificate types.RawCBOR      `json:"unicityCertificate"`
 }
@@ -397,6 +405,9 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 	) {
 		return errors.New("proof certification data transaction hash does not match certification request transaction hash")
 	}
+	if !equalExpiresAt(p.CertificationData.ExpiresAt, v2.CertificationData.ExpiresAt) {
+		return errors.New("proof certification data expiry does not match certification request expiry")
+	}
 
 	rootRaw, err := p.UCInputRecordHashRaw()
 	if err != nil {
@@ -411,8 +422,15 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 	if err != nil {
 		return fmt.Errorf("failed to derive SMT key from stateId: %w", err)
 	}
-	// v2 leaf value is the raw transaction hash.
-	value := v2.CertificationData.TransactionHash.DataBytes()
+	if p.ReferenceTime == nil {
+		return errors.New("missing inclusion proof reference time")
+	}
+	// A request without an explicit deadline was admitted under a service-assigned
+	// one, which is not recorded here and is not checked by a later verifier.
+	if expiresAt := v2.CertificationData.ExpiresAt; expiresAt != nil && *p.ReferenceTime >= *expiresAt {
+		return errors.New("certification request expired")
+	}
+	value := LeafValue(v2.CertificationData.TransactionHash.DataBytes(), *p.ReferenceTime)
 	if err := cert.Verify(key, value, rootRaw, InclusionProofV2HashAlgorithm); err != nil {
 		return err
 	}
@@ -451,4 +469,13 @@ func ucInputRecordHashRaw(raw []byte) ([]byte, error) {
 			len(ir), StateTreeKeyLengthBytes)
 	}
 	return append([]byte(nil), ir...), nil
+}
+
+// equalExpiresAt compares two optional request deadlines, treating "absent" as a
+// value in its own right rather than as zero.
+func equalExpiresAt(a, b *uint64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }

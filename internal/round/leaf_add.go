@@ -2,6 +2,7 @@ package round
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
@@ -11,15 +12,44 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
-func commitmentLeafInput(commitment *models.CertificationRequest) (smtbackend.LeafInput, error) {
+// ErrRequestExpired reports a request whose timeout the round's reference time
+// has already reached. The request can never be inserted in this or any later
+// round, so it is acked out of the queue rather than retried.
+var ErrRequestExpired = errors.New("certification request expired")
+
+// commitmentExpired reports whether the request may still be inserted in a
+// round with this reference time. The timeout is exclusive.
+func commitmentExpired(commitment *models.CertificationRequest, referenceTime uint64) bool {
+	deadline := commitment.EffectiveTimeout
+	if deadline == 0 {
+		// A record recovered from before the effective timeout was assigned falls
+		// back to the requester's own deadline, when the request carried one.
+		if commitment.CertificationData.ExpiresAt == nil {
+			return false
+		}
+		deadline = *commitment.CertificationData.ExpiresAt
+	}
+	return referenceTime >= deadline
+}
+
+// materializeCommitmentLeaf materialises a commitment's SMT leaf under the
+// round's pinned reference time. It WRITES commitment.ReferenceTime, so the
+// record and the served proof report the value the leaf was actually built
+// from; the name says materialize rather than build because of that write.
+// models.CertificationRequest.LeafValue is the pure counterpart.
+func materializeCommitmentLeaf(commitment *models.CertificationRequest, referenceTime uint64) (smtbackend.LeafInput, error) {
+	if commitmentExpired(commitment, referenceTime) {
+		return smtbackend.LeafInput{}, ErrRequestExpired
+	}
 	key, err := commitment.StateID.GetTreeKey()
 	if err != nil {
 		return smtbackend.LeafInput{}, err
 	}
-	leafValue, err := commitment.LeafValue()
+	leafValue, err := commitment.LeafValue(referenceTime)
 	if err != nil {
 		return smtbackend.LeafInput{}, err
 	}
+	commitment.ReferenceTime = referenceTime
 	return smtbackend.LeafInput{
 		Key:   append([]byte(nil), key...),
 		Value: append([]byte(nil), leafValue...),
@@ -57,6 +87,7 @@ func addCommitmentLeaves(
 		if idx < 0 || idx >= len(commitments) {
 			return nil, nil, nil, fmt.Errorf("SMT backend returned invalid duplicate leaf index %d", idx)
 		}
+		metrics.CommitmentsDroppedDuplicate.Inc()
 		dropped = append(dropped, interfaces.CertificationRequestAck{
 			StateID:  commitments[idx].StateID,
 			StreamID: commitments[idx].StreamID,
@@ -74,6 +105,7 @@ func addCommitmentLeaves(
 			"stateID", commitments[rejected.Index].StateID.String(),
 			"reason", string(rejected.Reason),
 			"error", errText)
+		metrics.CommitmentsDroppedRejected.Inc()
 		dropped = append(dropped, interfaces.CertificationRequestAck{
 			StateID:  commitments[rejected.Index].StateID,
 			StreamID: commitments[rejected.Index].StreamID,

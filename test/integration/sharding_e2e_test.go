@@ -258,7 +258,9 @@ func waitForValidProof(t *testing.T, url string, req *api.CertificationRequest, 
 				require.NoError(t, err)
 				key, err := req.StateID.GetTreeKey()
 				require.NoError(t, err)
-				require.NoError(t, cert.Verify(key, req.CertificationData.TransactionHash.DataBytes(), rootRaw, api.InclusionProofV2HashAlgorithm))
+				require.NotNil(t, resp.InclusionProof.ReferenceTime)
+				leafValue := api.LeafValue(req.CertificationData.TransactionHash.DataBytes(), *resp.InclusionProof.ReferenceTime)
+				require.NoError(t, cert.Verify(key, leafValue, rootRaw, api.InclusionProofV2HashAlgorithm))
 				return
 			}
 		}

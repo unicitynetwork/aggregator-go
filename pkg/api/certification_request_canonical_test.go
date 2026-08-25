@@ -22,7 +22,7 @@ func canonicalCertificationRequestFixture(t testing.TB) (*CertificationRequest, 
 	req := &CertificationRequest{
 		StateID: RequireNewImprintV2("0000000000000000000000000000000000000000000000000000000000000000"),
 		CertificationData: CertificationData{
-			Version:         1,
+			Version:         2,
 			OwnerPredicate:  NewPayToPublicKeyPredicate(publicKey),
 			SourceStateHash: RequireNewImprintV2("0000000000000000000000000000000000000000000000000000000000000000"),
 			TransactionHash: RequireNewImprintV2("0000000000000000000000000000000000000000000000000000000000000001"),
@@ -185,11 +185,11 @@ func TestUnmarshalCertificationRequestCBOR_VersionZero(t *testing.T) {
 func TestUnmarshalCertificationRequestCBOR_NestedVersionZero(t *testing.T) {
 	_, canonical := canonicalCertificationRequestFixture(t)
 
-	certDataMarker := []byte{0xd9, 0x98, 0x77, 0x85, 0x01}
+	certDataMarker := []byte{0xd9, 0x98, 0x77}
 	idx := bytes.Index(canonical, certDataMarker)
 	require.GreaterOrEqual(t, idx, 0, "fixture invariant: nested certification data marker not found")
 
-	versionPos := idx + 4
+	versionPos := idx + len(certDataMarker) + 1 // skip the following array header
 	tainted := append([]byte{}, canonical...)
 	tainted[versionPos] = 0x00
 
