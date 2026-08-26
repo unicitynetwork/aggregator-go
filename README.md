@@ -105,7 +105,7 @@ The service is configured via environment variables:
 |-----------------|-----------------|-----------|
 | `CHAIN_ID`      | Chain ID        | `unicity` |
 | `CHAIN_VERSION` | Chain version   | `1.0`     |
-| `CHAIN_FORK_ID` | Chain's Fork ID | `mainnet` |
+| `CHAIN_FORK_ID` | Chain's Fork ID | `testnet` |
 
 ### Server Configuration
 | Variable | Description | Default |
@@ -122,6 +122,8 @@ The service is configured via environment variables:
 | `ENABLE_TLS` | Enable HTTPS/TLS | `false` |
 | `TLS_CERT_FILE` | TLS certificate file path | `` |
 | `TLS_KEY_FILE` | TLS private key file path | `` |
+| `ENABLE_H2C` | Serve HTTP/2 cleartext (h2c) alongside HTTP/1.1 | `true` |
+| `HTTP2_MAX_CONCURRENT_STREAMS` | Max concurrent HTTP/2 streams per connection | `4096` |
 
 ### Database Configuration
 | Variable | Description | Default |
@@ -157,11 +159,23 @@ The service is configured via environment variables:
 | `LOG_ENABLE_JSON` | Enable JSON formatted logs | `true` |
 | `LOG_ENABLE_ASYNC` | Enable asynchronous logging for better performance | `true` |
 | `LOG_ASYNC_BUFFER_SIZE` | Buffer size for async logging | `10000` |
+| `LOG_FILE_PATH` | Log file path; empty disables file logging and rotation | `` |
+| `LOG_MAX_SIZE_MB` | Rotate the log file once it reaches this size | `100` |
+| `LOG_MAX_BACKUPS` | Rotated log files to retain | `30` |
+| `LOG_MAX_AGE_DAYS` | Days to retain rotated log files | `30` |
+| `LOG_COMPRESS_BACKUPS` | Compress rotated log files | `true` |
 
 ### Processing Configuration
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `BATCH_LIMIT` | Maximum number of commitments to process per batch | `1000` |
+| `BATCH_LIMIT` | Batch-size hint; currently only logged at startup, not enforced | `1000` |
+| `MAX_COMMITMENTS_PER_ROUND` | Cap on commitments collected per precollected round (child mode; standalone/`bft-shard` only when `USE_REDIS_FOR_COMMITMENTS=true`) | `20000` |
+| `COLLECT_PHASE_DURATION` | Fixed collection window before proposing a round (non-child modes, non-precollected rounds) | `200ms` |
+| `COLLECT_MINI_BATCH_SIZE` | SMT/proposal staging mini-batch size during collection | `500` |
+| `COMMITMENT_STREAM_BUFFER_SIZE` | Buffer between the queue streamer and round collection | `50000` |
+| `PRECOLLECTOR_GRACE_PERIOD` | Extra wait before cutting a precollected round snapshot | `0s` |
+| `SKIP_DUPLICATE_CHECK` | Skip the finalized-record lookup on submit | `true` |
+| `PARENT_COLLECT_PHASE_DURATION` | Collection window before proposing a round in `parent` mode | `200ms` |
 
 ### Storage Configuration
 | Variable | Description | Default |
@@ -174,6 +188,16 @@ The service is configured via environment variables:
 | `REDIS_STREAM_NAME` | Redis stream name for commitments (allows multiple shards to share a Redis instance) | `commitments` |
 | `REDIS_FLUSH_INTERVAL` | Interval for flushing pending commitments to Redis | `100ms` |
 | `REDIS_MAX_BATCH_SIZE` | Maximum batch size before forcing flush | `5000` |
+| `REDIS_ACK_BATCH_SIZE` | Commitments acknowledged per XACK batch | `1000` |
+| `REDIS_DELETE_AFTER_ACK` | Delete stream entries once acknowledged | `true` |
+| `REDIS_MAX_STREAM_LENGTH` | Stream length before trimming | `1000000` |
+| `REDIS_CLEANUP_INTERVAL` | Interval between stream trim checks | `5m` |
+| `REDIS_POOL_SIZE` | Connection pool size | `10` |
+| `REDIS_MIN_IDLE_CONNS` | Minimum idle connections kept in the pool | `2` |
+| `REDIS_MAX_RETRIES` | Retries per Redis command | `3` |
+| `REDIS_DIAL_TIMEOUT` | Connection dial timeout | `5s` |
+| `REDIS_READ_TIMEOUT` | Read timeout | `3s` |
+| `REDIS_WRITE_TIMEOUT` | Write timeout | `3s` |
 
 #### SMT Backend
 
@@ -194,6 +218,8 @@ go build -tags rocksdb ./cmd/aggregator
 | `SMT_ROCKSDB_BLOOM_BITS` | Bloom filter bits per key | `10` |
 | `SMT_ROCKSDB_MEMTABLE_MB` | RocksDB write buffer size in MB | `64` |
 | `SMT_MATERIALIZE_WORKERS` | Parallel workers for SMT materialization | `16` |
+| `SMT_PRECOMPUTE_PROOFS` | Precompute inclusion proof responses at finalization | `false` |
+| `SMT_PROOF_METADATA_CACHE_ENTRIES` | Cached proof metadata entries | `250000` |
 
 RocksDB SMT with HA is supported only in `bft-shard` mode. It is rejected for application-level `parent`/`child` sharding modes; use `SMT_BACKEND=memory` there.
 Changing `SMT_NODE_KEY_FORMAT` requires a fresh or separately seeded `SMT_DISK_PATH`; an existing database opened with the wrong layout fails startup.
@@ -233,7 +259,7 @@ make run
 | `BFT_BOOTSTRAP_CONNECT_RETRY_DELAY` | Delay between bootstrap connection retries (in seconds).                            | `5`                              |
 | `BFT_HEARTBEAT_INTERVAL`            | How often the BFT client checks for inactivity.                                     | `1s`                             |
 | `BFT_INACTIVITY_TIMEOUT`            | Duration of inactivity before the BFT client sends a new handshake.                 | `5s`                             |
-| `BFT_KEY_CONF_FILE`                 | Path to the BFT key configuration file.                                             | `bft-config/keys.json`           |
+| `SIGNING_KEY_FILE`                  | Path to the aggregator's signing key file (`keys.json`); also supplies the BFT key conf. | `""`                             |
 | `BFT_SHARD_CONF_FILE`               | Path to the aggregator shard configuration file.                                    | `bft-config/shard-conf-7_0.json` |
 | `BFT_TRUST_BASE_FILES`              | Comma-separated list of paths to trust base files.                                  | `bft-config/trust-base.json`     |
 
@@ -280,7 +306,8 @@ type CertificationRequest struct {
 // CertificationData represents the necessary cryptographic data needed for a state transition CertificationRequest.
 type CertificationData struct {
 	_ struct{} `cbor:",toarray"`
-	Version types.Version
+	// Version must be 2; any other value is rejected at decode.
+	Version types.Version `json:"version"`
 
 	// OwnerPredicate is the owner predicate in format: CBOR[engine: uint, code: byte[], params: byte[]].
 	//
@@ -325,13 +352,15 @@ type CertificationData struct {
 - `SUCCESS` - Certification request accepted and will be included in next block
 - `INVALID_PUBLIC_KEY_FORMAT` - Invalid secp256k1 public key
 - `INVALID_SIGNATURE_FORMAT` - Invalid signature format or length
-- `SIGNATURE_VERIFICATION_FAILED` - Signature doesn't match transaction hash and public key
-- `STATE_ID_MISMATCH` - StateID doesn't match SHA256(CBOR[publicKey, sourceStateHash])
+- `SIGNATURE_VERIFICATION_FAILED` - Witness doesn't verify against SHA256(CBOR[sourceStateHash, transactionHash]) and the predicate's public key
+- `STATE_ID_MISMATCH` - StateID doesn't match SHA256(CBOR[ownerPredicate, sourceStateHash])
 - `INVALID_SOURCE_STATE_HASH_FORMAT` - SourceStateHash is not exactly 32 bytes
 - `INVALID_TRANSACTION_HASH_FORMAT` - TransactionHash is not exactly 32 bytes
 - `INVALID_SHARD` - The certification request was sent to the wrong shard
 - `REQUEST_EXPIRED` - The round reference time has reached the request's exclusive deadline
 - `SERVICE_NOT_READY` - Consensus reference time is not yet available
+- `STATE_ID_EXISTS` - A record for this stateId was already finalized (returned only when `SKIP_DUPLICATE_CHECK=false`; the check is off by default)
+- `UNKNOWN` - The owner predicate is malformed (engine is not `1`, or code is not the single byte `0x01`)
 
 #### `get_inclusion_proof.v2`
 Retrieve the v2 inclusion proof for a submitted certification request.
@@ -374,10 +403,12 @@ the reference time at which its leaf was created, independently of request-deadl
 **Hash rules (Yellowpaper-aligned):**
 - Value: `SHA-256(CBOR([transactionHash, referenceTime]))` for every inclusion proof
 - Leaf: `H(0x00 || key || value)`
-- Inner node (two children): `H(0x01 || depth_byte || left || right)`
+- Inner node (two children): `H(0x01 || depth_byte || region(key, depth) || left || right)`
 - Inner node (one child): passthrough (child hash unchanged)
 
-**Key encoding:** 32 bytes, LSB-first bit addressing. `bit(key, d) = (key[d/8] >> (d%8)) & 1`.
+`region(key, depth)` is the 32-byte key prefix addressing the node: the first `depth` bits of the key with all lower-significance bits cleared. Omitting it verifies only for proofs with no siblings. See [docs/inclusion-proof-wire.md](docs/inclusion-proof-wire.md).
+
+**Key encoding:** 32 bytes, big-endian (MSB-first) bit addressing. `bit(key, d) = (key[d/8] >> (7 - d%8)) & 1`.
 
 **Verification pseudocode:**
 ```
@@ -386,10 +417,11 @@ j = len(siblings)
 for d in 255..=0:
     if bitmap bit d is not set: continue
     j -= 1
-    if bit(key, d) == 1:
-        h = H(0x01 || d || siblings[j] || h)
+    r = region(key, d)          # 32 bytes: first d bits of key, rest cleared
+    if bit(key, d) == 1:        # descent went right, sibling is the left child
+        h = H(0x01 || d || r || siblings[j] || h)
     else:
-        h = H(0x01 || d || h || siblings[j])
+        h = H(0x01 || d || r || h || siblings[j])
 assert j == 0 and h == UC.IR.h
 ```
 
@@ -440,14 +472,16 @@ Retrieve detailed information about a specific block.
     "block": {
       "index": "123",
       "chainId": "unicity",
-      "version": "1.0.0",
-      "forkId": "main",
+      "shardId": 0,
+      "version": "1.0",
+      "forkId": "testnet",
       "rootHash": "0000b67ebbbb3a8369f93981b9d8b510a7b8e72fc1e1b8a83b7c0d8a3c9f7e4d",
       "previousBlockHash": "0000a1b2c3d4e5f6789012345678901234567890123456789012345678901234",
-      "noDeletionProofHash": "0000c7d8e9f0123456789abcdef0123456789abcdef0123456789abcdef012345",
+      "noDeletionProofHash": "",
       "createdAt": "1734435600000",
       "unicityCertificate": "d903ef8701d903f08a01190146005844303030303936613239366432323466323835633637626565393363333066386133303931353766306461613335646335623837653431306237383633306130396366633758443030303039366132393664323234663238356336376265653933633330663861333039313537663064616133356463356238376534313062373836333061303963666337401a68553075f600f65820d4b5491031d8a9365555a01fa4d9805e32a4205c15fa19e53dc7f27ad4c534e058204296135d76b6345cdffaf57b434f6bd5c3579f3843731fab79e1e5a74a6091c982418080d903f683010780d903e9880103190737001a685530a658200b98a86c69c788bc54773d62cfd053ef54cf495bdb9a4b8298ad6c99966de7e058201d2b93c6e36694c316302b9cf9bf3c6ca076b085d6aaeb1d1874cd23301fa3f4a3783531365569753248416d326857486d66794a36484143696476367934686f377655323778504365436f5253515873694443595937654358417661160bc40a6a8722bd025ab49449dec2cee4a4680cc20f9f4fb2e1328c2f2e511a0390678a911b81a26d0171bfc43e813a01da7458c15558abb954bd2a52e501783531365569753248416d3665514d72327351566263575a73505062706332537537416e6e4d5647487043323350557a47544141546e7058410be3d9a494027aaed1d052145f8bd78ec5f909c1eeaa62e4a0aa79de1aef6108483aa8ff9253fb1d1c73407f49f428d246813780ed3648a92efa4c674fb5531401783531365569753248416d424a394c733865333662776b6a4c3574677737327a6b533578346479636a625a665956614e52676e7447317258415bd2c3b0ca0683c39e66129027eee216a66fc35eca1c58b5ba3e5a99dae4e97357893f88f7e91f70a16cccdfc7bfc9fa46757e2e1b1126bd5145af70a39e4bdb00"
-    }
+    },
+    "totalCommitments": "1"
   },
   "id": 4
 }
@@ -477,17 +511,22 @@ Retrieve all certification requests included in a specific block.
       {
         "stateId": "c7aa6962316c0eeb1469dc3d7793e39e140c005e6eea0e188dcc73035d765937",
         "certificationData": {
-          "publicKey": "027c4fdf89e8138b360397a7285ca99b863499d26f3c1652251fcf680f4d64882c",
-          "signature": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00",
+          "version": 2,
+          "ownerPredicate": {
+            "engine": 1,
+            "code": "AQ==",
+            "params": "AnxP34noE4s2A5enKFypm4Y0mdJvPBZSJR/PaA9NZIgs"
+          },
           "sourceStateHash": "539cb40d7450fa842ac13f4ea50a17e56c5b1ee544257d46b6ec8bb48a63e647",
           "transactionHash": "c5f9a1f02e6475c599449250bb741b49bd8858afe8a42059ac1522bff47c6297",
-          "expiresAt": 1755003600
+          "expiresAt": 1755003600,
+          "witness": "65ed0261e093aa2df02c0e8fb0aa46144e053ea705ce7053023745b3626c60550b2a5e90eacb93416df116af96872547608a31de1f8ef25dc5a79104e6b69c8d00"
         },
         "referenceTime": 1755000000,
+        "aggregateRequestCount": "1",
         "blockNumber": "123",
         "leafIndex": "0",
-        "createdAt": "1734435600000",
-        "finalizedAt": "1734435601000"
+        "createdAt": "1734435600000"
       }
     ]
   },
@@ -496,7 +535,7 @@ Retrieve all certification requests included in a specific block.
 ```
 
 #### `get_no_deletion_proof`
-Retrieve the global no-deletion proof for the aggregator data structure.
+Retrieve the global no-deletion proof for the aggregator data structure. **Not implemented yet** — in standalone/child mode this returns a fixed placeholder proof, and in parent mode it returns an error.
 
 **Request:**
 ```json
@@ -514,9 +553,8 @@ Retrieve the global no-deletion proof for the aggregator data structure.
   "jsonrpc": "2.0",
   "result": {
     "noDeletionProof": {
-      "proofHash": "0000c7d8e9f0123456789abcdef0123456789abcdef0123456789abcdef012345",
-      "blockNumber": "123",
-      "timestamp": "1734435600000"
+      "proof": "6d6f636b5f6e6f5f64656c6574696f6e5f70726f6f66",
+      "createdAt": "1734435600000"
     }
   },
   "id": 6
@@ -534,9 +572,15 @@ Returns the health status and role of the service.
   "status": "ok",
   "role": "leader",
   "serverId": "hostname-1234",
+  "sharding": {
+    "mode": "standalone",
+    "shardIdLen": 4,
+    "shardId": 0
+  },
   "details": {
     "database": "connected",
-    "commitment_queue": "42"
+    "commitment_queue": "42",
+    "commitment_queue_status": "healthy"
   }
 }
 ```
@@ -545,7 +589,9 @@ Returns the health status and role of the service.
 Adds trust base to the trust base store. The request body must be a valid trust base in json format.
 
 Example curl request
-```curl -X PUT -H 'Content-Type: application/json' -d @./test-nodes/trust-base-1.json http://localhost:3000/api/v1/trustbases```
+```bash
+curl -X PUT -H 'Content-Type: application/json' -d @./bft-config/trust-base.json http://localhost:3000/api/v1/trustbases
+```
 
 **If trust base was stored successfully then status 200 with empty response body is returned:**
 ```json
@@ -555,7 +601,7 @@ Example curl request
 **If trust base is invalid error then status 400 with error cause is returned:**
 ```json
 {
-  "error":"failed to store trust base: trust base already exists"
+  "error":"failed to store trust base: trust base already exist for epoch 1: trust base already exists"
 }
 ```
 
@@ -567,9 +613,9 @@ The documentation includes:
 - **📋 cURL export** - Copy commands for terminal use
 - **⌨️ Keyboard shortcuts** - Ctrl+Enter to send requests
 - **🎯 Status indicators** - Response times and success/error status
-- **↻ Reset functionality** - Restore original examples
+- **🗑️ Clear** - Reset the response panel for a method
 - **📱 Responsive design** - Works on desktop and mobile
-- **💾 Real-time responses** - JSON formatted with syntax highlighting
+- **💾 Real-time responses** - JSON pretty-printed in a monospace response panel
 
 ## Development
 
@@ -638,7 +684,7 @@ The service creates and manages the following MongoDB collections:
 - **`aggregator_records`** - Finalized certification request records with proofs
 - **`blocks`** - Blockchain blocks with metadata
 - **`smt_nodes`** - Sparse Merkle Tree leaf nodes
-- **`block_records`** - Block number to state ID mappings
+- **`trust_bases`** - Root trust base documents (BFT network trust base)
 - **`leadership`** - High availability leader election state
 
 All collections include proper indexes for efficient querying.
@@ -648,11 +694,12 @@ All collections include proper indexes for efficient querying.
 The service includes a built-in performance testing tool that generates cryptographically valid commitments:
 
 ```bash
-# Run performance test (requires aggregator running on localhost:3000)
+# Run performance test (defaults to a single shard target at https://localhost:3001;
+# set SHARD_TARGETS to point at your aggregator, e.g. SHARD_TARGETS="http://localhost:3000:1")
 make performance-test
 
 # Run performance test against a remote endpoint with authentication
-make performance-test-auth URL=http://localhost:8080 AUTH='Bearer supersecret'
+SHARD_TARGETS="http://localhost:8080:1" AUTH_HEADER='Bearer supersecret' make performance-test
 
 # Sharded performance test (provide shard targets with shardID suffix)
 SHARD_TARGETS="http://localhost:3001:3,http://localhost:3002:2" TEST_DURATION=10s REQUESTS_PER_SEC=100 go run ./cmd/performance-test
@@ -661,7 +708,7 @@ SHARD_TARGETS="http://localhost:3001:3,http://localhost:3002:2" TEST_DURATION=10
 **Performance Test Features:**
 - ✅ **Cryptographically Valid Data** - Real secp256k1 key pairs and signatures
 - ✅ **Raw v2 Hash Format** - 32-byte SHA256 state and transaction hashes
-- ✅ **Deterministic StateIDs** - Calculated as SHA256(publicKey || sourceStateHash)
+- ✅ **Deterministic StateIDs** - Calculated as SHA256(CBOR[ownerPredicate, sourceStateHash])
 - ✅ **High Concurrency** - Configurable worker count and request rate
 - ✅ **Block Monitoring** - Tracks certification requests per block and throughput
 - ✅ **Real-time Metrics** - Success rate, failure rate, and RPS tracking
@@ -669,17 +716,22 @@ SHARD_TARGETS="http://localhost:3001:3,http://localhost:3002:2" TEST_DURATION=10
 **Sample Output:**
 ```
 Starting aggregator performance test...
-Target: http://localhost:3000
-Duration: 10s
-Workers: 100
-Target RPS: 5000
+Sharding mode: app
+Targets (1 shards):
+  - shard-7 (https://localhost:3001) shardMask=7
+Duration: 30s
+Submission workers: 20
+Proof scheduling: exact per-submission timer (PROOF_WORKERS ignored, value=10)
+Proof initial delay: 2.5s
+Proof retry delay: 1s
+Server proof-readiness metric: aggregator_proof_readiness_seconds_bucket (direct /metrics scrape)
+HTTP client pool size: 4
+H2C: enabled (HTTP/2 cleartext for plain HTTP)
+Target RPS: 2000
 ----------------------------------------
-✓ Connected successfully
-Starting block monitoring from block 1
-[2s] Total: 9847, Success: 9832, Failed: 15, Exists: 0, RPS: 4923.5
-Block 1: 1456 commitments
-[4s] Total: 19736, Success: 19684, Failed: 52, Exists: 0, RPS: 4934.0
-Block 2: 1523 commitments
+Testing connectivity to https://localhost:3001...
+✓ Connected successfully to https://localhost:3001
+✓ Starting block number for https://localhost:3001: 42
 ...
 ```
 
@@ -697,6 +749,9 @@ The service implements a MongoDB-based leader election system:
 - **`leader`** - Actively creating blocks and managing consensus
 - **`follower`** - Processing API requests, monitoring for leadership
 - **`standalone`** - Single server mode (HA disabled)
+- **`parent-leader`** - Parent aggregator actively aggregating child shard roots
+- **`parent-follower`** - Parent aggregator processing API requests, monitoring for leadership
+- **`parent-standalone`** - Single parent aggregator (HA disabled)
 
 ## Sharding
 
@@ -705,7 +760,7 @@ The aggregator supports two orthogonal sharding strategies, selected by `SHARDIN
 - **Application-level sharding** (`parent` / `child`) — aggregator-layer split: one parent aggregator aggregates the SMTs of multiple children. Described in the rest of this section.
 - **BFT-side sharding** (`bft-shard`) — BFT-layer split: multiple aggregators act as shard validators of a single multi-shard BFT partition, and shard-inclusion is proved directly by the `ShardTreeCertificate` embedded in the `UnicityCertificate`. Described in [BFT-side sharding](#bft-side-sharding-sharding_modebft-shard).
 
-The two modes use different routing inputs and different shard-ID semantics; they are not interchangeable.
+The two modes share the same routing input (the raw 32-byte `stateId`, read MSB-first) but use different shard-ID semantics; they are not interchangeable.
 
 ### Application-level sharding (`SHARDING_MODE=parent` / `child`)
 
@@ -718,12 +773,12 @@ For a more detailed technical explanation of the sharded SMT structure, please r
 
 ### Certification Request Routing
 
-The requests are assigned to a shard based on the least significant bits of their state identifier. 
+The requests are assigned to a shard based on the most significant (leading) bits of their state identifier. 
 The number of bits used to determine the shard is defined by the `SHARD_ID_LENGTH` configuration.
 
-For example `SHARD_ID_LENGTH: 1` means that the rightmost `1` bits of state identifier determines 
-the correct shard. In this case there would be 2 shards e.g. certification requests ending with bit `0` would go to 
-`shard-1`, and certification requests ending with bit `1` would go to the `shard-2`.
+For example `SHARD_ID_LENGTH: 1` means that the leftmost `1` bits of state identifier determines 
+the correct shard. In this case there would be 2 shards e.g. certification requests starting with bit `0` would go to 
+the shard whose `shardID` is `0b10`, and certification requests starting with bit `1` would go to the shard whose `shardID` is `0b11`.
 
 In sharded setup only the parent aggregator talks to the BFT node.
 
@@ -753,14 +808,14 @@ The following diagram illustrates a sharded setup with one parent and two child 
 +----------------+     +----------------+
 | Child Agg. #1  |     | Child Agg. #2  |
 | ShardID = 0b10 |     | ShardID = 0b11 |
-| (handles *...0)|     | (handles *...1)|
+| (handles 0...) |     | (handles 1...) |
 +----------------+     +----------------+
         ^                      ^
         |                      |
 +----------------+     +----------------+
 | Agent sends    |     | Agent sends    |
 | commitment     |     | commitment     |
-| ID = ...xxx0   |     | ID = ...xxx1   |
+| ID = 0xxx...   |     | ID = 1xxx...   |
 +----------------+     +----------------+
 ```
 
@@ -781,7 +836,7 @@ Shard-1:
 ```yaml
 environment:
   SHARDING_MODE: "child"
-  SHARDING_CHILD_SHARD_ID: 2 # (binary 0b10)
+  SHARDING_CHILD_SHARD_ID: 3 # (binary 0b11)
   SHARDING_CHILD_PARENT_RPC_ADDR: http://aggregator-root:3000
 ```
 
@@ -789,15 +844,17 @@ Shard-2:
 ```yaml
 environment:
   SHARDING_MODE: "child"
-  SHARDING_CHILD_SHARD_ID: 3 # (binary 0b11)
+  SHARDING_CHILD_SHARD_ID: 2 # (binary 0b10)
   SHARDING_CHILD_PARENT_RPC_ADDR: http://aggregator-root:3000
+  SHARDING_CHILD_PARENT_POLL_INTERVAL: 100ms   # default
+  SHARDING_CHILD_PARENT_POLL_TIMEOUT: 5s       # default
 ```
 
 ### BFT-side sharding (`SHARDING_MODE=bft-shard`)
 
 In `bft-shard` mode, multiple aggregators are deployed as shard validators of a single multi-shard BFT partition. Each aggregator owns one shard, talks directly to the BFT rootchain, and the `UnicityCertificate` it receives embeds a `ShardTreeCertificate` that binds its local SMT root into the partition root. There is no parent aggregator — shard-inclusion is proved by the embedded certificate rather than by a per-round polling loop.
 
-This mode is orthogonal to `parent`/`child`: it uses a different routing key (raw 32-byte `stateId`), a different shard-ID encoding (bit-strings, MSB-first), and a different admission rule.
+This mode is orthogonal to `parent`/`child`: it uses the same routing key (the raw 32-byte `stateId`, read MSB-first) but a different shard-ID encoding (bit-strings instead of sentinel-prefixed integers) and a different admission rule.
 
 #### Routing semantics
 
@@ -939,7 +996,7 @@ The service implements complete secp256k1 signature validation:
 - **✅ Signature Verification** - 65-byte signatures (64 bytes + recovery byte)
 - **✅ StateID Validation** - Deterministic calculation over owner predicate and source state hash
 - **✅ Raw Hash Support** - 32-byte source state and transaction hashes
-- **✅ Transaction Signing** - Signatures verified against transaction hash data
+- **✅ Transaction Signing** - Signatures verified against SHA256(CBOR array [sourceStateHash, transactionHash])
 
 ### Supported Algorithms
 - **secp256k1** - Full implementation with btcec library
@@ -947,13 +1004,13 @@ The service implements complete secp256k1 signature validation:
 - **Raw v2 Hashes** - 32-byte SHA256 hashes without per-field algorithm prefixes
 
 ### Validation Process
-1. **Algorithm Check** - Verify "secp256k1" algorithm support
+1. **Owner Predicate Check** - Verify the pay-to-public-key predicate (engine `1`, code `0x01`) and extract the public key from its params
 2. **Public Key Format** - Validate compressed secp256k1 public key (33 bytes)
 3. **State Hash Format** - Validate raw 32-byte source state hash
 4. **StateID Verification** - Ensure StateID matches the owner predicate and source state hash
 5. **Signature Format** - Validate 65-byte signature length
 6. **Transaction Hash Format** - Validate raw 32-byte transaction hash
-7. **Signature Verification** - Cryptographically verify signature against transaction hash
+7. **Signature Verification** - Cryptographically verify the signature against SHA256(CBOR array [sourceStateHash, transactionHash])
 
 ## Architecture Notes
 
@@ -970,7 +1027,7 @@ The service implements complete secp256k1 signature validation:
 
 ## Limitations
 
-- **Receipt Signing**: Returns unsigned receipts (cryptographic signing planned)
+- **Submission Receipts**: `certification_request` returns only `{"status": ...}` — there is no submission receipt object, signed or unsigned.
 
 ## Contributing
 

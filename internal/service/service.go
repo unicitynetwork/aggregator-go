@@ -12,6 +12,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
@@ -85,15 +86,21 @@ type LeaderSelector interface {
 
 // Conversion functions between API and internal model types
 
+// modelToAPIAggregatorRecord converts a stored record for the wire.
 func modelToAPIAggregatorRecord(modelRecord *models.AggregatorRecord) *api.AggregatorRecord {
 	return &api.AggregatorRecord{
 		StateID: modelRecord.StateID,
 		CertificationData: api.CertificationData{
+			Version:         api.CertificationDataVersion,
 			OwnerPredicate:  modelRecord.CertificationData.OwnerPredicate,
 			Witness:         modelRecord.CertificationData.Witness,
 			SourceStateHash: modelRecord.CertificationData.SourceStateHash,
 			TransactionHash: modelRecord.CertificationData.TransactionHash,
+			// Without ExpiresAt a consumer cannot perform the request-deadline
+			// check; without ReferenceTime it cannot rebuild the leaf value.
+			ExpiresAt: modelRecord.CertificationData.ExpiresAt,
 		},
+		ReferenceTime:         modelRecord.ReferenceTime,
 		AggregateRequestCount: modelRecord.AggregateRequestCount,
 		BlockNumber:           modelRecord.BlockNumber,
 		LeafIndex:             modelRecord.LeafIndex,
@@ -188,11 +195,19 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 	if referenceTime == 0 {
 		return &api.CertificationResponse{Status: api.CertificationStatusServiceNotReady}, nil
 	}
-	// An explicit deadline is used verbatim and is covered by the witness. When
-	// the requester omitted one, the service derives a deadline from consensus
-	// reference time; that value is service metadata and is never recorded in the
-	// leaf, signed, or checked by a later verifier.
+	// This implements the yellowpaper's effective timeout: for a request
+	// Q = (predicate, sourceStateHash, txhash, tau_Q_bar, u) with an optional
+	// tau_Q_bar, the effective timeout is tau_a + Delta when the requester
+	// omitted one and tau_Q_bar otherwise, where tau_a is the latest
+	// consensus-derived reference time at admission and Delta the service's
+	// default request lifetime (DEFAULT_REQUEST_TTL). The assigned value is
+	// service metadata: it does not alter txhash and is not recorded in the leaf.
+	//
+	// The check below is the admission check, which the paper permits but does
+	// not accept as sufficient -- the authoritative one runs at leaf
+	// materialisation against that round's pinned reference time.
 	var effectiveTimeout uint64
+	deadlineOrigin := metrics.DeadlineOriginExplicit
 	if expiresAt := req.CertificationData.ExpiresAt; expiresAt != nil {
 		effectiveTimeout = *expiresAt
 	} else {
@@ -201,6 +216,7 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 			return nil, errors.New("default request deadline overflows uint64")
 		}
 		effectiveTimeout = referenceTime + ttl
+		deadlineOrigin = metrics.DeadlineOriginServiceAssigned
 	}
 	certificationRequest.EffectiveTimeout = effectiveTimeout
 
@@ -234,6 +250,11 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 	if err := as.commitmentQueue.Store(ctx, certificationRequest); err != nil {
 		return nil, fmt.Errorf("failed to store certificationRequest: %w", err)
 	}
+
+	// Counted here rather than at assignment: expired, duplicate and
+	// failed-to-store requests are never admitted, and counting them would
+	// misreport the share of traffic relying on the service-assigned deadline.
+	deadlineOrigin.Inc()
 
 	as.logger.WithContext(ctx).Log(ctx, logger.LevelTrace, "CertificationData submitted successfully", "stateId", req.StateID)
 

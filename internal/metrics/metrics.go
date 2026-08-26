@@ -187,6 +187,27 @@ var (
 	CommitmentsDroppedDuplicate = CommitmentsDroppedTotal.WithLabelValues("duplicate")
 	CommitmentsDroppedRejected  = CommitmentsDroppedTotal.WithLabelValues("rejected")
 
+	// CertificationRequestsByDeadline splits accepted requests by whether the
+	// requester supplied an exclusive deadline or the service assigned one from
+	// DEFAULT_REQUEST_TTL. Both forms are specified -- the yellowpaper's request
+	// timeout is optional -- so this is operational visibility, not a migration
+	// counter: it shows what share of traffic depends on the service's default
+	// lifetime, which is the knob that decides how long those requests stay
+	// admissible.
+	CertificationRequestsByDeadline = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_certification_requests_by_deadline_total",
+			Help: "Accepted certification requests by deadline origin (explicit or service_assigned).",
+		},
+		[]string{"origin"},
+	)
+
+	// Resolved once, as for the drop reasons above. Increment these only after
+	// the request is actually accepted -- an expired or duplicate request was
+	// never admitted and must not be counted.
+	DeadlineOriginExplicit        = CertificationRequestsByDeadline.WithLabelValues("explicit")
+	DeadlineOriginServiceAssigned = CertificationRequestsByDeadline.WithLabelValues("service_assigned")
+
 	BFTCertificationDuration = promauto.NewHistogram(
 		prometheus.HistogramOpts{
 			Name:    "aggregator_bft_certification_duration_seconds",

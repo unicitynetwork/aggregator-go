@@ -57,13 +57,23 @@ func (t *Timestamp) UnmarshalJSON(data []byte) error {
 
 // AggregatorRecord represents a finalized certification request with proof data
 type AggregatorRecord struct {
-	StateID               StateID           `json:"stateId"`
-	CertificationData     CertificationData `json:"certificationData"`
-	AggregateRequestCount uint64            `json:"aggregateRequestCount,omitempty,string"`
-	BlockNumber           *BigInt           `json:"blockNumber"`
-	LeafIndex             *BigInt           `json:"leafIndex"`
-	CreatedAt             *Timestamp        `json:"createdAt"`
-	FinalizedAt           *Timestamp        `json:"finalizedAt"`
+	StateID           StateID           `json:"stateId"`
+	CertificationData CertificationData `json:"certificationData"`
+	// ReferenceTime is the reference time of the round this record's leaf was
+	// created in. A verifier needs it to reproduce the certified leaf value,
+	// LeafValue(CertificationData.TransactionHash, ReferenceTime), so it is part
+	// of the record rather than something to be recovered from a later proof.
+	ReferenceTime         uint64     `json:"referenceTime"`
+	AggregateRequestCount uint64     `json:"aggregateRequestCount,omitempty,string"`
+	BlockNumber           *BigInt    `json:"blockNumber"`
+	LeafIndex             *BigInt    `json:"leafIndex"`
+	CreatedAt             *Timestamp `json:"createdAt"`
+	// FinalizedAt is intentionally absent. Nothing persists a finalization
+	// timestamp: models.Block.CreatedAt is stamped when the block is
+	// constructed at proposal time, before the certification request is sent to
+	// BFT, so returning it would underreport finalization by the whole BFT
+	// round trip. Adding a real one means persisting it on the block at
+	// finalization; until then the field is omitted rather than wrong.
 }
 
 // Block represents a blockchain block
@@ -375,8 +385,9 @@ type VerifierContext struct {
 }
 
 // Verify checks a v2 inclusion proof end-to-end against the outer
-// CertificationRequest and VerifierContext: local SMT path, UnicityCertificate
-// (shard tree → unicity tree → seal), and ShardTreeCertificate.Shard equality.
+// CertificationRequest and VerifierContext: request and state-ID binding, local
+// SMT path, certified-shard binding, network binding, and UnicityCertificate
+// verification (shard tree → unicity tree → seal).
 //
 // The nil-guard error strings below are part of the public contract so
 // reference verifiers in other languages can pin them.
@@ -408,6 +419,17 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 	if !equalExpiresAt(p.CertificationData.ExpiresAt, v2.CertificationData.ExpiresAt) {
 		return errors.New("proof certification data expiry does not match certification request expiry")
 	}
+	if p.CertificationData.OwnerPredicate.Engine != v2.CertificationData.OwnerPredicate.Engine ||
+		!bytes.Equal(p.CertificationData.OwnerPredicate.Code, v2.CertificationData.OwnerPredicate.Code) ||
+		!bytes.Equal(p.CertificationData.OwnerPredicate.Params, v2.CertificationData.OwnerPredicate.Params) {
+		return errors.New("proof certification data owner predicate does not match certification request owner predicate")
+	}
+	if !bytes.Equal(p.CertificationData.SourceStateHash, v2.CertificationData.SourceStateHash) {
+		return errors.New("proof certification data source state hash does not match certification request source state hash")
+	}
+	if !bytes.Equal(p.CertificationData.Witness, v2.CertificationData.Witness) {
+		return errors.New("proof certification data witness does not match certification request witness")
+	}
 
 	rootRaw, err := p.UCInputRecordHashRaw()
 	if err != nil {
@@ -421,6 +443,13 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 	key, err := v2.StateID.GetTreeKey()
 	if err != nil {
 		return fmt.Errorf("failed to derive SMT key from stateId: %w", err)
+	}
+	expectedStateID, err := p.CertificationData.CreateStateID()
+	if err != nil {
+		return fmt.Errorf("failed to derive stateId from certification data: %w", err)
+	}
+	if !bytes.Equal(key, expectedStateID.DataBytes()) {
+		return errors.New("stateId does not match certification data")
 	}
 	if p.ReferenceTime == nil {
 		return errors.New("missing inclusion proof reference time")
@@ -438,6 +467,16 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 	var uc types.UnicityCertificate
 	if err := types.Cbor.Unmarshal(p.UnicityCertificate, &uc); err != nil {
 		return fmt.Errorf("failed to decode unicity certificate: %w", err)
+	}
+	if uc.ShardTreeCertificate.Shard.Length() > uint(len(key)*8) ||
+		!uc.ShardTreeCertificate.Shard.Comparator()(key) {
+		return errors.New("stateId does not belong to certified shard")
+	}
+	if uc.UnicitySeal == nil {
+		return errors.New("unicity certificate missing unicity seal")
+	}
+	if uc.UnicitySeal.NetworkID != vctx.TrustBase.GetNetworkID() {
+		return errors.New("unicity seal network does not match trust base")
 	}
 	if err := uc.Verify(vctx.TrustBase, crypto.SHA256, vctx.PartitionID, vctx.ExpectedShardID, vctx.ShardConfHash); err != nil {
 		return fmt.Errorf("unicity certificate verification failed: %w", err)

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"crypto"
 	"errors"
 	"testing"
@@ -206,7 +207,7 @@ func TestInclusionProofV2Verify_RejectsInvalidUCInputRecordHash(t *testing.T) {
 // same root is placed into InputRecord.Hash and flows through the shard tree
 // and unicity tree verbatim. No aggregator plumbing is involved — this builds
 // the exact cryptographic objects that a real deployment would emit.
-func buildSignedSingleLeafProof(t *testing.T, ownerShard types.ShardID) (
+func buildSignedSingleLeafProof(t *testing.T, ownerShard types.ShardID, sealNetwork types.NetworkID) (
 	*InclusionProofV2,
 	*CertificationRequest,
 	types.PartitionID,
@@ -214,16 +215,37 @@ func buildSignedSingleLeafProof(t *testing.T, ownerShard types.ShardID) (
 ) {
 	t.Helper()
 
-	// A deterministic 32-byte state ID and tx hash. Content is irrelevant
-	// — Verify checks the cryptographic chain, not the values.
-	stateID := RequireNewImprintV2("1111111111111111111111111111111111111111111111111111111111111111")
 	txHash := RequireNewImprintV2("2222222222222222222222222222222222222222222222222222222222222222")
+	certData := CertificationData{
+		Version: CertificationDataVersion,
+		OwnerPredicate: Predicate{
+			Engine: 1,
+			Code:   []byte{1},
+			Params: bytes.Repeat([]byte{0x02}, 33),
+		},
+		SourceStateHash: bytes.Repeat([]byte{0x33}, StateTreeKeyLengthBytes),
+		TransactionHash: txHash,
+		Witness:         bytes.Repeat([]byte{0x44}, 65),
+	}
+	var (
+		stateID StateID
+		err     error
+	)
+	for candidate := 0; candidate < 256; candidate++ {
+		certData.SourceStateHash[len(certData.SourceStateHash)-1] = byte(candidate)
+		stateID, err = certData.CreateStateID()
+		require.NoError(t, err)
+		if stateID.DataBytes()[0]&0x80 == 0 {
+			break
+		}
+	}
+	// This fixture intentionally routes to shard 0. Passing ownerShard=shard 1
+	// creates a fully signed wrong-shard proof for the regression test below.
+	require.Zero(t, stateID.DataBytes()[0]&0x80)
 
 	req := &CertificationRequest{
-		StateID: stateID,
-		CertificationData: CertificationData{
-			TransactionHash: txHash,
-		},
+		StateID:           stateID,
+		CertificationData: certData,
 	}
 
 	// Single-leaf root: H(0x00 || key || value) under the v2 hash algorithm,
@@ -247,10 +269,19 @@ func buildSignedSingleLeafProof(t *testing.T, ownerShard types.ShardID) (
 	sid0, sid1 := types.ShardID{}.Split()
 
 	const partitionID types.PartitionID = 0x0f0f0f0f
+	ir0Hash := test.RandomBytes(32)
+	ir1Hash := test.RandomBytes(32)
+	if ownerShard.Equal(sid0) {
+		ir0Hash = leafRoot
+	} else if ownerShard.Equal(sid1) {
+		ir1Hash = leafRoot
+	} else {
+		t.Fatalf("owner shard %s is outside the fixture's two-shard scheme", ownerShard)
+	}
 	ir0 := &types.InputRecord{
 		Version:         1,
 		PreviousHash:    []byte{0, 0, 1},
-		Hash:            leafRoot,
+		Hash:            ir0Hash,
 		BlockHash:       []byte{0, 0, 3},
 		SummaryValue:    []byte{0, 0, 4},
 		Timestamp:       types.NewTimestamp(),
@@ -258,9 +289,6 @@ func buildSignedSingleLeafProof(t *testing.T, ownerShard types.ShardID) (
 		Epoch:           0,
 		SumOfEarnedFees: 0,
 	}
-	// Shard 1 needs its own (non-degenerate) IR so the shard tree is
-	// well-formed; its hash is irrelevant to this test.
-	ir1Hash := test.RandomBytes(32)
 	ir1 := &types.InputRecord{
 		Version:         1,
 		PreviousHash:    []byte{0, 0, 5},
@@ -312,6 +340,7 @@ func buildSignedSingleLeafProof(t *testing.T, ownerShard types.ShardID) (
 
 	seal := &types.UnicitySeal{
 		Version:              1,
+		NetworkID:            sealNetwork,
 		RootChainRoundNumber: 1,
 		Timestamp:            types.NewTimestamp(),
 		PreviousHash:         test.RandomBytes(32),
@@ -345,7 +374,7 @@ func buildSignedSingleLeafProof(t *testing.T, ownerShard types.ShardID) (
 func TestInclusionProofV2Verify_HappyPath_FullySignedUC(t *testing.T) {
 	sid0, _ := types.ShardID{}.Split()
 
-	proof, req, partitionID, tb := buildSignedSingleLeafProof(t, sid0)
+	proof, req, partitionID, tb := buildSignedSingleLeafProof(t, sid0, types.NetworkMainNet)
 
 	vctx := &VerifierContext{
 		TrustBase:       tb,
@@ -360,7 +389,7 @@ func TestInclusionProofV2Verify_HappyPath_FullySignedUC(t *testing.T) {
 func TestInclusionProofV2Verify_ShardMismatch_Rejected(t *testing.T) {
 	sid0, sid1 := types.ShardID{}.Split()
 
-	proof, req, partitionID, tb := buildSignedSingleLeafProof(t, sid0)
+	proof, req, partitionID, tb := buildSignedSingleLeafProof(t, sid0, types.NetworkMainNet)
 
 	vctx := &VerifierContext{
 		TrustBase:       tb,
@@ -371,4 +400,171 @@ func TestInclusionProofV2Verify_ShardMismatch_Rejected(t *testing.T) {
 	err := proof.Verify(req, vctx)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid shard ID")
+}
+
+// A validly signed shard-1 UC does not certify a state ID whose first bit
+// routes it to shard 0, even when the caller also says it expects shard 1.
+func TestInclusionProofV2Verify_StateIDMustBelongToCertifiedShard(t *testing.T) {
+	_, sid1 := types.ShardID{}.Split()
+	proof, req, partitionID, tb := buildSignedSingleLeafProof(t, sid1, types.NetworkMainNet)
+
+	err := proof.Verify(req, &VerifierContext{
+		TrustBase:       tb,
+		PartitionID:     partitionID,
+		ExpectedShardID: sid1,
+	})
+	require.EqualError(t, err, "stateId does not belong to certified shard")
+}
+
+// The seal is signed by a key accepted by the trust base, but its network is
+// different. Signature validity must not substitute for network binding.
+func TestInclusionProofV2Verify_SealNetworkMustMatchTrustBase(t *testing.T) {
+	sid0, _ := types.ShardID{}.Split()
+	proof, req, partitionID, tb := buildSignedSingleLeafProof(t, sid0, types.NetworkLocal)
+
+	err := proof.Verify(req, &VerifierContext{
+		TrustBase:       tb,
+		PartitionID:     partitionID,
+		ExpectedShardID: sid0,
+	})
+	require.EqualError(t, err, "unicity seal network does not match trust base")
+}
+
+func TestInclusionProofV2Verify_StateIDMustMatchCertificationData(t *testing.T) {
+	sid0, _ := types.ShardID{}.Split()
+	proof, req, partitionID, tb := buildSignedSingleLeafProof(t, sid0, types.NetworkMainNet)
+	req.StateID = RequireNewImprintV2("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+
+	err := proof.Verify(req, &VerifierContext{
+		TrustBase:       tb,
+		PartitionID:     partitionID,
+		ExpectedShardID: sid0,
+	})
+	require.EqualError(t, err, "stateId does not match certification data")
+}
+
+func TestInclusionProofV2Verify_CertificationDataMustMatchRequest(t *testing.T) {
+	sid0, _ := types.ShardID{}.Split()
+	tests := []struct {
+		name    string
+		mutate  func(*CertificationData)
+		errText string
+	}{
+		{
+			name: "owner predicate",
+			mutate: func(cd *CertificationData) {
+				cd.OwnerPredicate.Params = append([]byte(nil), cd.OwnerPredicate.Params...)
+				cd.OwnerPredicate.Params[0] ^= 0xff
+			},
+			errText: "proof certification data owner predicate does not match certification request owner predicate",
+		},
+		{
+			name: "source state hash",
+			mutate: func(cd *CertificationData) {
+				cd.SourceStateHash = append([]byte(nil), cd.SourceStateHash...)
+				cd.SourceStateHash[0] ^= 0xff
+			},
+			errText: "proof certification data source state hash does not match certification request source state hash",
+		},
+		{
+			name: "witness",
+			mutate: func(cd *CertificationData) {
+				cd.Witness = append([]byte(nil), cd.Witness...)
+				cd.Witness[0] ^= 0xff
+			},
+			errText: "proof certification data witness does not match certification request witness",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proof, req, partitionID, tb := buildSignedSingleLeafProof(t, sid0, types.NetworkMainNet)
+			detached := *proof.CertificationData
+			proof.CertificationData = &detached
+			tt.mutate(proof.CertificationData)
+
+			err := proof.Verify(req, &VerifierContext{
+				TrustBase:       tb,
+				PartitionID:     partitionID,
+				ExpectedShardID: sid0,
+			})
+			require.EqualError(t, err, tt.errText)
+		})
+	}
+}
+
+// The request deadline is exclusive: a leaf created at exactly the deadline is
+// expired, one created a second earlier is not. The deadline does not enter the
+// leaf value, so the cryptographic chain is unaffected either way and this
+// isolates the boundary itself.
+func TestInclusionProofV2Verify_ExpiryBoundaryIsExclusive(t *testing.T) {
+	sid0, _ := types.ShardID{}.Split()
+
+	tests := []struct {
+		name      string
+		expiresAt func(referenceTime uint64) uint64
+		accept    bool
+	}{
+		{"deadline one past the reference time", func(rt uint64) uint64 { return rt + 1 }, true},
+		{"deadline equal to the reference time", func(rt uint64) uint64 { return rt }, false},
+		{"deadline before the reference time", func(rt uint64) uint64 { return rt - 1 }, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proof, req, partitionID, tb := buildSignedSingleLeafProof(t, sid0, types.NetworkMainNet)
+			require.NotNil(t, proof.ReferenceTime)
+
+			// Both copies must agree or Verify rejects on the equality check
+			// before it ever reaches the deadline comparison.
+			deadline := tt.expiresAt(*proof.ReferenceTime)
+			proof.CertificationData.ExpiresAt = &deadline
+			req.CertificationData.ExpiresAt = &deadline
+
+			err := proof.Verify(req, &VerifierContext{
+				TrustBase:       tb,
+				PartitionID:     partitionID,
+				ExpectedShardID: sid0,
+			})
+			if tt.accept {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, "expired")
+		})
+	}
+}
+
+// A deadline present on one side and absent on the other is a mismatch, not a
+// silent pass: absence is a value in its own right, and zero is a legal instant.
+//
+// buildSignedSingleLeafProof aliases the proof's certification data to the
+// request's, so the two must be separated before they can disagree at all.
+func TestInclusionProofV2Verify_ExpiryPresenceMustMatch(t *testing.T) {
+	sid0, _ := types.ShardID{}.Split()
+
+	for _, tt := range []struct {
+		name               string
+		onProof, onRequest *uint64
+	}{
+		{"absent on the proof, present on the request", nil, Uint64Ptr(1755003600)},
+		{"present on the proof, absent on the request", Uint64Ptr(1755003600), nil},
+		{"present on both but different", Uint64Ptr(1755003600), Uint64Ptr(1755003601)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			proof, req, partitionID, tb := buildSignedSingleLeafProof(t, sid0, types.NetworkMainNet)
+
+			detached := *proof.CertificationData
+			proof.CertificationData = &detached
+			proof.CertificationData.ExpiresAt = tt.onProof
+			req.CertificationData.ExpiresAt = tt.onRequest
+
+			err := proof.Verify(req, &VerifierContext{
+				TrustBase:       tb,
+				PartitionID:     partitionID,
+				ExpectedShardID: sid0,
+			})
+			require.ErrorContains(t, err, "expiry")
+		})
+	}
 }

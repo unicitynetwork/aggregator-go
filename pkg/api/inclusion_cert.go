@@ -98,7 +98,8 @@ func (c *InclusionCert) UnmarshalBinary(data []byte) error {
 //
 // Parameters:
 //   - key:          32-byte SMT key, big-endian bit layout.
-//   - value:        raw leaf value bytes (v2 inclusion proofs use the tx hash).
+//   - value:        raw leaf value bytes. For v2 inclusion proofs this is
+//     LeafValue(transactionHash, referenceTime), not the transaction hash.
 //   - expectedRoot: raw 32-byte root hash, taken from UC.IR.h.
 //   - algo:         hash algorithm used by the SMT.
 func (c *InclusionCert) Verify(key, value, expectedRoot []byte, algo HashAlgorithm) error {

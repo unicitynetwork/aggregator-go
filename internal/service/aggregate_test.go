@@ -75,6 +75,7 @@ func TestGetBlockTotalCommitments(t *testing.T) {
 				TransactionHash: api.RequireNewImprintV2("e1b2c3d4e5f67890e1b2c3d4e5f67890e1b2c3d4e5f67890e1b2c3d4e5f67891"),
 			},
 			AggregateRequestCount: 1000,
+			ReferenceTime:         1755000000,
 			BlockNumber:           api.NewBigInt(big.NewInt(1)),
 			LeafIndex:             api.NewBigInt(big.NewInt(0)),
 			CreatedAt:             api.Now(),
@@ -82,5 +83,8 @@ func TestGetBlockTotalCommitments(t *testing.T) {
 
 		apiRecord := modelToAPIAggregatorRecord(modelRecord)
 		require.Equal(t, uint64(1000), apiRecord.AggregateRequestCount)
+		// The reference time is what a consumer needs to rebuild the leaf value,
+		// so it must survive the conversion rather than being dropped.
+		require.Equal(t, uint64(1755000000), apiRecord.ReferenceTime)
 	})
 }
