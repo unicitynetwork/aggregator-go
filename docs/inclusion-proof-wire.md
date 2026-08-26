@@ -181,51 +181,26 @@ child.
 1. Non-nil proof, request, verifier context and trust base.
 2. `certificationData != null`, else non-inclusion (unimplemented).
 3. Request `transactionHash` present, and equal to the proof's.
-4. `expiresAt` equal on both sides, treating absence as a value of its own.
+4. The proof and request have equal `expiresAt`, owner predicate, source state
+   hash and witness fields.
 5. `UC.IR.h` extractable and exactly 32 bytes.
-6. `referenceTime` present.
-7. If `expiresAt` is present, `referenceTime < expiresAt`. **Exclusive**: a leaf
+6. The request `stateId` is exactly the value derived from the certification
+   data's owner predicate and source state hash.
+7. `referenceTime` present.
+8. If `expiresAt` is present, `referenceTime < expiresAt`. **Exclusive**: a leaf
    created at exactly the deadline is expired. When `expiresAt` is absent this
    check cannot run — the service-assigned deadline is not carried in the proof,
    is not signed, and is not checkable by any later verifier.
-8. `InclusionCert.Verify(key, LeafValue(txhash, referenceTime), UC.IR.h)`.
-9. Unicity Certificate verification against the trust base.
+9. `InclusionCert.Verify(key, LeafValue(txhash, referenceTime), UC.IR.h)`.
+10. The UC's certified shard is a bit prefix of `stateId`.
+11. The UC seal network equals the trust-base network.
+12. Unicity Certificate verification against the expected partition, shard,
+    optional shard-configuration hash, and trust base.
 
 The nil-guard error strings are part of the public contract so reference
 verifiers in other languages can pin them.
 
-## Known divergence from the yellowpaper: the shard binding is not checked
-
-**This is a soundness gap, not a caller responsibility.** An earlier revision of
-this document told integrators to "derive `ExpectedShardID` from configuration".
-That is not the specified check and does not close the hole.
-
-`platform.tex` `VerifyInclusionProof` takes the partition description `CD_β` as
-an input and mandates, before any tree check:
-
-```
-ensure(UC.C^r.α = T.α)
-σ ← UC.C^shard.σ
-ensure(σ ∈ CD_β.SH)
-ensure(f_{CD_β.SH}(sid) = σ)      // Proof comes from the right shard
-```
-
-`f_SH` derives the expected shard **from the key itself**. `platform.tex`
-explicitly forecloses delegating this to certificate verification:
-`VerifyUnicityCert` "does not, by itself, prove that a particular state
-identifier belongs to the shard named in `C^shard`; that binding is checked by
-the proof verification functions below."
-
-`InclusionProofV2.Verify` implements the tree and certificate steps but not the
-binding: it compares the UC's shard against a caller-supplied
-`VerifierContext.ExpectedShardID` rather than computing `f_SH(sid)`. In a
-multi-shard deployment a leaf whose key routes to shard A, committed in shard
-B's SMT under shard B's validly signed UC, therefore verifies — reproduced in
-testing. That is cross-shard double-spend exposure. The network id
-`UC.C^r.α = T.α` is likewise unchecked, so a certificate sealed for one network
-verifies against another network's trust base.
-
-Until `VerifierContext` carries the sharding scheme and `Verify` derives the
-expected shard from `sid`, do not rely on this function alone for cross-shard
-safety. `api.MatchesShardPrefix` implements `f_SH` and the admission path
-applies it correctly.
+The shard and network checks match the JavaScript, Java and Rust state-transition
+SDK verifiers. `ExpectedShardID` remains an additional caller policy check for
+backward compatibility; it does not replace deriving the state ID or checking
+that the UC's certified shard contains it.
