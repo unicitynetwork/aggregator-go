@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -151,4 +152,34 @@ func TestRootAggregatorClient_CheckHealth_Failure(t *testing.T) {
 	client := NewRootAggregatorClient(server.URL)
 	err := client.CheckHealth(context.Background())
 	require.ErrorContains(t, err, "parent health")
+}
+
+// The stub parent's proofs carry the reference time of the round they certify and, in the seal, the time the child's next round pins.
+// By default successive proofs advance a second; a same-second step reproduces a live parent certifying within one second.
+func TestRootAggregatorClientStub_ReferenceStep(t *testing.T) {
+	proofTimes := func(stub *RootAggregatorClientStub) (inputs, seals []uint64) {
+		require.NoError(t, stub.SubmitShardRoot(t.Context(), &api.SubmitShardRootRequest{ShardID: 4, RootHash: api.NewHexBytes([]byte{1, 2, 3})}))
+		for i := 0; i < 3; i++ {
+			proof, err := stub.GetShardProof(t.Context(), &api.GetShardProofRequest{ShardID: 4})
+			require.NoError(t, err)
+			var uc types.UnicityCertificate
+			require.NoError(t, types.Cbor.Unmarshal(proof.UnicityCertificate, &uc))
+			inputs, seals = append(inputs, uc.InputRecord.Timestamp), append(seals, uc.UnicitySeal.Timestamp)
+		}
+		return inputs, seals
+	}
+
+	inputs, seals := proofTimes(NewRootAggregatorClientStub())
+	for i := range inputs {
+		require.Equal(t, inputs[i]+1, seals[i], "default: the seal is one second past the round")
+		if i > 0 {
+			require.Equal(t, inputs[i-1]+1, inputs[i], "default: each proof advances one second")
+		}
+	}
+
+	inputs, seals = proofTimes(NewRootAggregatorClientStub().WithReferenceStep(func(p uint64) uint64 { return p }))
+	for i := range inputs {
+		require.Equal(t, inputs[0], inputs[i], "same second: every proof pins the same reference time")
+		require.Equal(t, inputs[i], seals[i], "same second: the seal names the same second")
+	}
 }
