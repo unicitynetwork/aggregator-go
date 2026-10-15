@@ -221,12 +221,16 @@ func (ars *AggregatorRecordStorage) getByStateIDFromFinalizedBlock(ctx context.C
 	return ars.decodeRecord(raw)
 }
 
-// GetStoredSizeByStateID returns the BSON size in bytes of the finalized record
-// for stateID without transferring or decoding the document (a server-side
-// $bsonSize projection). found is false when no finalized record exists.
-func (ars *AggregatorRecordStorage) GetStoredSizeByStateID(ctx context.Context, stateID api.StateID) (size int64, found bool, err error) {
-	pipeline := mongo.Pipeline{
-		{{Key: "$match", Value: bson.M{"stateId": stateID.String()}}},
+// batchLookupChunk is the largest number of state IDs sent in one $in query.
+// A get_inclusion_proofs.v1 batch (at most 256 IDs) is exactly one query.
+const batchLookupChunk = 256
+
+// finalizedByStateIDsPipeline selects, for each of the given state IDs, its
+// newest record whose block is finalized with the same proposal (the same rule as
+// GetByStateID), without the joined block. The caller appends projections.
+func finalizedByStateIDsPipeline(stateIDs []string) mongo.Pipeline {
+	return mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{"stateId": bson.M{"$in": stateIDs}}}},
 		{{Key: "$lookup", Value: bson.M{
 			"from":         blockCollection,
 			"localField":   "blockNumber",
@@ -239,28 +243,83 @@ func (ars *AggregatorRecordStorage) GetStoredSizeByStateID(ctx context.Context, 
 			"$expr":           bson.M{"$eq": bson.A{"$proposalId", "$block.proposalId"}},
 		}}},
 		{{Key: "$sort", Value: bson.M{"blockNumber": -1}}},
-		{{Key: "$limit", Value: 1}},
+		{{Key: "$group", Value: bson.M{"_id": "$stateId", "doc": bson.M{"$first": "$$ROOT"}}}},
+		{{Key: "$replaceRoot", Value: bson.M{"newRoot": "$doc"}}},
 		{{Key: "$project", Value: bson.M{"block": 0}}},
-		{{Key: "$project", Value: bson.M{"_id": 0, "size": bson.M{"$bsonSize": "$$ROOT"}}}},
 	}
-	cursor, err := ars.collection.Aggregate(ctx, pipeline)
-	if err != nil {
-		return 0, false, fmt.Errorf("failed to get aggregator record size by state ID: %w", err)
+}
+
+// batchAggregateOptions makes the first reply carry every result of a chunk of n
+// state IDs (at most n documents, one per state ID), so the cursor is exhausted
+// by the aggregate command itself: the default first batch of 101 documents would
+// otherwise cost an extra getMore round trip per step for n > 100. (A reply is
+// still limited to 16 MiB by the server; larger results fall back to getMore.)
+func batchAggregateOptions(n int) *options.AggregateOptions {
+	return options.Aggregate().SetBatchSize(int32(n + 1))
+}
+
+func stateIDStrings(ids []api.StateID) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
 	}
-	defer cursor.Close(ctx)
-	if !cursor.Next(ctx) {
-		if err := cursor.Err(); err != nil {
-			return 0, false, fmt.Errorf("cursor error: %w", err)
+	return out
+}
+
+// GetStoredSizesByStateIDs returns the BSON size in bytes of the finalized
+// record of each given state ID, keyed by StateID.String(), without transferring
+// or decoding the documents (a server-side $bsonSize projection). State IDs
+// without a finalized record are absent from the result. Each chunk of up to
+// 256 IDs is a single query.
+func (ars *AggregatorRecordStorage) GetStoredSizesByStateIDs(ctx context.Context, stateIDs []api.StateID) (map[string]int64, error) {
+	sizes := make(map[string]int64, len(stateIDs))
+	for from := 0; from < len(stateIDs); from += batchLookupChunk {
+		to := min(from+batchLookupChunk, len(stateIDs))
+		pipeline := append(finalizedByStateIDsPipeline(stateIDStrings(stateIDs[from:to])),
+			bson.D{{Key: "$project", Value: bson.M{"_id": 0, "stateId": 1, "size": bson.M{"$bsonSize": "$$ROOT"}}}})
+		cursor, err := ars.collection.Aggregate(ctx, pipeline, batchAggregateOptions(to-from))
+		if err != nil {
+			return nil, fmt.Errorf("failed to get aggregator record sizes by state IDs: %w", err)
 		}
-		return 0, false, nil
+		var out []struct {
+			StateID string `bson:"stateId"`
+			Size    int64  `bson:"size"`
+		}
+		if err := cursor.All(ctx, &out); err != nil {
+			return nil, fmt.Errorf("failed to read aggregator record sizes: %w", err)
+		}
+		for _, o := range out {
+			sizes[o.StateID] = o.Size
+		}
 	}
-	var out struct {
-		Size int64 `bson:"size"`
+	return sizes, nil
+}
+
+// GetFinalizedByStateIDs loads the finalized record of each given state ID,
+// keyed by StateID.String(); state IDs without a finalized record are absent.
+// Each chunk of up to 256 IDs is a single query. Callers bound the total size
+// first (GetStoredSizesByStateIDs).
+func (ars *AggregatorRecordStorage) GetFinalizedByStateIDs(ctx context.Context, stateIDs []api.StateID) (map[string]*models.AggregatorRecord, error) {
+	records := make(map[string]*models.AggregatorRecord, len(stateIDs))
+	for from := 0; from < len(stateIDs); from += batchLookupChunk {
+		to := min(from+batchLookupChunk, len(stateIDs))
+		cursor, err := ars.collection.Aggregate(ctx, finalizedByStateIDsPipeline(stateIDStrings(stateIDs[from:to])), batchAggregateOptions(to-from))
+		if err != nil {
+			return nil, fmt.Errorf("failed to get finalized aggregator records by state IDs: %w", err)
+		}
+		var raws []bson.Raw
+		if err := cursor.All(ctx, &raws); err != nil {
+			return nil, fmt.Errorf("failed to read finalized aggregator records: %w", err)
+		}
+		for _, raw := range raws {
+			rec, err := ars.decodeRecord(raw)
+			if err != nil {
+				return nil, err
+			}
+			records[rec.StateID.String()] = rec
+		}
 	}
-	if err := cursor.Decode(&out); err != nil {
-		return 0, false, fmt.Errorf("failed to decode aggregator record size: %w", err)
-	}
-	return out.Size, true, nil
+	return records, nil
 }
 
 // GetByBlockNumber retrieves all records for a specific block

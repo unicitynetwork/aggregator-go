@@ -2,8 +2,8 @@ package proofpub_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -52,42 +52,16 @@ func newEnv(t *testing.T, f *prooftest.Fixture) *env {
 	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cat.Close() })
-	pub := proofpub.New(cat, b, prooftest.Partition, f.Provider(t), log)
+	pub := proofpub.New(cat, b, prooftest.Partition, nil, log)
 	require.NotNil(t, pub)
-	// stored views are re-authenticated before they are republished: natively verify the
-	// seal against the authority of whichever fixture produced the block
-	pub.SetSealVerifier(func(context.Context) types.SealVerifier { return fixtureVerifier{} })
+	pub.SetSealVerifier(f.Verifier())
 	return &env{b: b, cat: cat, pub: pub}
 }
 
 // finalizedBlock builds the finalized block for the root with a certification
 // (and optionally the matching partition view).
-var (
-	fixtureMu sync.Mutex
-	fixtureTB []*types.RootTrustBaseV1
-)
-
-// fixtureVerifier accepts a seal only if one of the fixture authorities natively verifies it.
-type fixtureVerifier struct{}
-
-func (fixtureVerifier) VerifySeal(seal *types.UnicitySeal) error {
-	fixtureMu.Lock()
-	tbs := append([]*types.RootTrustBaseV1(nil), fixtureTB...)
-	fixtureMu.Unlock()
-	var last error = types.ErrRootValidatorInfoMissing
-	for _, tb := range tbs {
-		if last = types.TrustBaseSealVerifier(tb).VerifySeal(seal); last == nil {
-			return nil
-		}
-	}
-	return last
-}
-
 func finalizedBlock(t *testing.T, number uint64, root []byte, rootRound uint64, withView bool) (*models.Block, *prooftest.Fixture) {
 	f := prooftest.New(t, 2, number, root, rootRound)
-	fixtureMu.Lock()
-	fixtureTB = append(fixtureTB, f.TrustBase)
-	fixtureMu.Unlock()
 	uc, err := types.Cbor.Marshal(f.UC)
 	require.NoError(t, err)
 	b := models.NewBlock(api.NewBigIntFromUint64(number), "unicity", 0, "1.0", "mainnet",
@@ -274,9 +248,8 @@ func Test_HistoricalRetryWithSameRootNeverRegressesLatest(t *testing.T) {
 	l := latest(t, e.cat)
 	require.EqualValues(t, 18, l.Block().Number.Uint64(), "latest must not regress to block 1")
 	require.Equal(t, []byte(head.UnicityCertificate), l.UC())
-	_, found := e.cat.BlockForRoot(root)
+	id, found := e.cat.ViewForRootMatching(root, func([]byte) bool { return true })
 	require.True(t, found)
-	id, _ := e.cat.BlockForRoot(root)
 	require.EqualValues(t, 18, id.Number.Uint64())
 
 	// the same applies to a strict publication of a block the backend is not at
@@ -383,4 +356,73 @@ func Test_PublishRequiresConfigIdentityInUC(t *testing.T) {
 	e.pub.PublishFinalized(t.Context(), block)
 	_, err = e.cat.AcquireLatest(t.Context())
 	require.ErrorIs(t, err, proofview.ErrViewNotRetained, "an unsupported boundary is rejected, not labelled with a startup value")
+}
+
+// A late view for an older block whose root equals a newer empty block's is attached to
+// the older block by the exact certification digest (architect/codex re-check, minor 1).
+func Test_SidecarFillReachesOlderBlockWithSameRoot(t *testing.T) {
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80))
+	root := commit(t, e.b, 1, 0, 20)
+	b1, f1 := finalizedBlock(t, 1, root, 80, false) // block 1 finalized without its view
+	e.pub.PublishFinalized(t.Context(), b1)
+	commitEmpty(t, e.b, 2)
+	b2, _ := finalizedBlock(t, 2, root, 81, false) // empty block 2: same root
+	e.pub.PublishFinalized(t.Context(), b2)
+
+	// duplicate of UC1 now brings the view
+	require.NoError(t, e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindSidecarFill, f1, f1.Raw, 0, false)))
+
+	// the view landed on the certification of block 1; latest (block 2) is untouched
+	id, _, ok := e.cat.ViewForDigest(sha256.Sum256(b1.UnicityCertificate))
+	require.True(t, ok)
+	require.EqualValues(t, 1, id.Number.Uint64())
+	got, ok := e.cat.PartitionViewForDigest(sha256.Sum256(b1.UnicityCertificate))
+	require.True(t, ok)
+	require.Equal(t, f1.Raw, got)
+	require.Nil(t, latest(t, e.cat).PartitionView(), "latest (block 2) was not modified")
+}
+
+// Repeats select the same-root view whose accepted IR they repeat, not the newest one.
+func Test_RepeatPicksCompatibleViewAmongSameRootViews(t *testing.T) {
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80))
+	root := commit(t, e.b, 1, 0, 20)
+	b1, _ := finalizedBlock(t, 1, root, 80, false)
+	e.pub.PublishFinalized(t.Context(), b1)
+	commitEmpty(t, e.b, 2)
+	b2, _ := finalizedBlock(t, 2, root, 81, false)
+	e.pub.PublishFinalized(t.Context(), b2)
+
+	// a repeat of block 1's input record (round 1) is compatible with block 1's view only
+	rep1 := prooftest.New(t, 2, 1, root, 95)
+	require.NoError(t, e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, rep1, rep1.Raw, 0, false)))
+	// a repeat of block 2 attaches to block 2, which is latest
+	rep2 := prooftest.New(t, 2, 2, root, 96)
+	require.NoError(t, e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, rep2, rep2.Raw, 0, false)))
+	uc2, _ := types.Cbor.Marshal(rep2.UC)
+	require.Equal(t, uc2, latest(t, e.cat).UC())
+	// a repeat of neither is incompatible
+	rep3 := prooftest.New(t, 2, 9, root, 97)
+	require.ErrorIs(t, e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, rep3, nil, 0, false)), proofpub.ErrIncompatibleCertification)
+}
+
+// The live path reuses the view admitted at intake (no second authentication in the commit
+// lock); restored material is always re-authenticated.
+func Test_AdmittedViewIsNotReauthenticatedButStoredViewIs(t *testing.T) {
+	f := prooftest.New(t, 2, 1, prooftest.Hash("x"), 80)
+	e := newEnv(t, f)
+	var calls int
+	inner := f.Verifier()
+	e.pub.SetSealVerifier(func(ctx context.Context) types.SealVerifier { calls++; return inner(ctx) })
+
+	root := commit(t, e.b, 1, 0, 20)
+	b1, f1 := finalizedBlock(t, 1, root, 80, true)
+	e.pub.PublishFinalizedAdmitted(t.Context(), b1)
+	require.Zero(t, calls, "admitted view: no second authentication")
+	require.Equal(t, f1.Raw, latest(t, e.cat).PartitionView())
+
+	commitEmpty(t, e.b, 2)
+	b2, f2 := finalizedBlock(t, 2, root, 81, true)
+	e.pub.PublishFinalized(t.Context(), b2) // stored/recovered material
+	require.Positive(t, calls, "stored view is re-authenticated")
+	require.Equal(t, f2.Raw, latest(t, e.cat).PartitionView())
 }

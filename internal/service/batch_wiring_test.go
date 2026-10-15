@@ -10,6 +10,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/proofview"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -20,8 +21,12 @@ type wiringRecords struct {
 	interfaces.AggregatorRecordStorage
 }
 
-func (wiringRecords) GetStoredSizeByStateID(context.Context, api.StateID) (int64, bool, error) {
-	return 0, false, nil
+func (wiringRecords) GetStoredSizesByStateIDs(context.Context, []api.StateID) (map[string]int64, error) {
+	return nil, nil
+}
+
+func (wiringRecords) GetFinalizedByStateIDs(context.Context, []api.StateID) (map[string]*models.AggregatorRecord, error) {
+	return nil, nil
 }
 
 type wiringStorage struct {
@@ -97,7 +102,7 @@ func TestNewBatchProofHandler(t *testing.T) {
 		h, reason := NewBatchProofHandler(wiringConfig(config.ShardingModeBFTShard), wiringRM{cat}, wiringStorage{rec: struct {
 			interfaces.AggregatorRecordStorage
 		}{}}, wiringSvc{})
-		require.NotEmpty(t, reason, "record storage without the size projection")
+		require.NotEmpty(t, reason, "record storage without the bulk projection")
 		requireUnsupported(t, h)
 	})
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/ha"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial/prooftest"
 	"github.com/unicitynetwork/aggregator-go/internal/proofpub"
 	"github.com/unicitynetwork/aggregator-go/internal/proofview"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/mongodb"
@@ -23,7 +24,8 @@ func attachDiskProofPub(t *testing.T, rm *RoundManager) *proofview.Catalog {
 	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cat.Close() })
-	rm.proofPub = proofpub.New(cat, rm.smtBackend, 0, nil, newTestLogger(t))
+	rm.proofPub = proofpub.New(cat, rm.smtBackend, prooftest.Partition, nil, newTestLogger(t))
+	rm.proofPub.SetSealVerifier(prooftest.New(t, 2, 1, prooftest.Hash("x"), 80).Verifier())
 	require.NotNil(t, rm.proofPub, "the RocksDB backend must support retained read views")
 	return cat
 }
