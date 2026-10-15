@@ -369,6 +369,27 @@ var (
 		[]string{"action"},
 	)
 
+	SMTDiskBatchProofLeaves = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_smt_disk_batch_proof_leaves_total",
+			Help: "Leaves proven by union-path batch builds on retained disk views.",
+		},
+	)
+
+	SMTDiskBatchNodeReads = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_smt_disk_batch_node_reads_total",
+			Help: "Node reads requested by union-path batch proof builds (compare with unique nodes and leaves).",
+		},
+	)
+
+	SMTDiskBatchUniqueNodes = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_smt_disk_batch_unique_nodes_total",
+			Help: "Distinct nodes read by union-path batch proof builds.",
+		},
+	)
+
 	SMTDiskProofSnapshotsActive = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "aggregator_smt_disk_proof_snapshots_active",
