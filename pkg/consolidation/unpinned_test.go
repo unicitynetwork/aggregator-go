@@ -17,7 +17,7 @@ func TestConsolidate_UnpinnedTopologyIsAuthenticatedByTheSeal(t *testing.T) {
 	s := f.session()
 	got, err := f.consolidate(s)
 	require.NoError(t, err)
-	require.Equal(t, Counters{QuorumChecks: 1, BodyChecks: 2, LeafChecks: 2, EvidenceQuorumChecks: 2}, s.Counters())
+	require.Equal(t, Counters{QuorumChecks: 1, BodyChecks: 2, LeafChecks: 2, EvidenceQuorumChecks: 2}, verificationCounters(s.Counters()))
 	require.Len(t, got.Shards, 2)
 	for i, so := range got.Shards {
 		l := f.view.Leaves[i]

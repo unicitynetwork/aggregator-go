@@ -216,6 +216,37 @@ var (
 		},
 	)
 
+	// BFTCertificationResponsesTotal counts certification response messages received
+	// from the BFT root (one per root->shard message, whatever its protocol version).
+	BFTCertificationResponsesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_bft_certification_responses_total",
+			Help: "Certification response messages received from the BFT root, by shard.",
+		},
+		[]string{"shard"},
+	)
+
+	// BFTCertificationResponseNonProgressTotal counts responses which certify no new shard
+	// block: the shard input record round does not advance beyond the newest one received. It
+	// covers re-deliveries, timeout repeats and any extra traffic carrying an advancing root round.
+	BFTCertificationResponseNonProgressTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_bft_certification_response_nonprogress_total",
+			Help: "Certification responses that certify no new shard block, by shard.",
+		},
+		[]string{"shard"},
+	)
+
+	// BFTHandshakesTotal counts handshakes sent to the root; each may legitimately be answered by a
+	// re-delivery of the last certification response.
+	BFTHandshakesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_bft_handshakes_total",
+			Help: "Handshakes sent to the BFT root, by shard.",
+		},
+		[]string{"shard"},
+	)
+
 	BFTPartitionViewTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aggregator_bft_partition_view_total",

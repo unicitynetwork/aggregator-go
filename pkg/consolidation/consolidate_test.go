@@ -27,7 +27,7 @@ func TestConsolidate_HappyPath(t *testing.T) {
 	s := f.session()
 	out, err := f.consolidate(s)
 	require.NoError(t, err)
-	require.Equal(t, Counters{QuorumChecks: 1, BodyChecks: 2, LeafChecks: 2, EvidenceQuorumChecks: 2}, s.Counters())
+	require.Equal(t, Counters{QuorumChecks: 1, BodyChecks: 2, LeafChecks: 2, EvidenceQuorumChecks: 2}, verificationCounters(s.Counters()))
 	require.Equal(t, f.round, out.RootRound)
 	require.Len(t, out.Shards, 2)
 
@@ -525,5 +525,66 @@ func TestRootRoundBound_ShardOfMaximumRound(t *testing.T) {
 			order, _ := types.CanonicalShardOrder(f.policy.Topology.Scheme)
 			require.Contains(t, order, b.Shard())
 		})
+	}
+}
+
+func TestAuthenticateMaster_Stage(t *testing.T) {
+	f := newFixture(t, ts())
+	s := f.session()
+	b, err := s.AuthenticateEvidence(f.defaultEvidence())
+	require.NoError(t, err)
+	m, err := s.AuthenticateMaster(b, f.in.Master, f.in.PartitionView)
+	require.NoError(t, err)
+	require.Equal(t, f.round, m.Round())
+	require.Equal(t, 1, s.Counters().QuorumChecks)
+	root, err := m.PeerRoot(f.in.Peers[0].ShardID)
+	require.NoError(t, err)
+	require.Equal(t, []byte(f.view.Leaves[1].InputRecord.Hash), root)
+	_, err = m.PeerRoot(types.ShardID{})
+	requireOutcome(t, err, OutcomeBindingMismatch)
+
+	// completing reuses the verified master: still one quorum check
+	out, err := s.Complete(m, f.in.Peers)
+	require.NoError(t, err)
+	require.Len(t, out.Shards, 2)
+	require.Equal(t, 1, s.Counters().QuorumChecks)
+
+	// a master authenticated by another session is refused
+	_, err = f.session().Complete(m, f.in.Peers)
+	requireOutcome(t, err, OutcomeInvalidInput)
+	// bad view / signature stop at the master stage
+	_, err = s.AuthenticateMaster(b, f.in.Master, f.in.PartitionView[:len(f.in.PartitionView)-1])
+	requireOutcome(t, err, OutcomeInvalidInput)
+	_, err = s.AuthenticateMaster(nil, f.in.Master, f.in.PartitionView)
+	requireOutcome(t, err, OutcomeUnavailable)
+}
+
+// Outputs never alias the authenticated master state: mutating a result cannot
+// affect a later completion with the same master.
+func TestComplete_OutputDoesNotAliasAuthenticatedMaster(t *testing.T) {
+	f := newFixture(t, ts())
+	s := f.session()
+	b, err := s.AuthenticateEvidence(f.defaultEvidence())
+	require.NoError(t, err)
+	m, err := s.AuthenticateMaster(b, f.in.Master, f.in.PartitionView)
+	require.NoError(t, err)
+
+	out1, err := s.Complete(m, f.in.Peers)
+	require.NoError(t, err)
+	for _, so := range out1.Shards {
+		for k := range so.UC.UnicitySeal.Signatures {
+			so.UC.UnicitySeal.Signatures[k][0] ^= 0xff
+		}
+		so.UC.InputRecord.RoundNumber++
+		so.UC.UnicityTreeCertificate.HashSteps[0].Hash[0] ^= 1
+		so.UC.UnicitySeal.Hash[0] ^= 1
+	}
+
+	out2, err := s.Complete(m, f.in.Peers)
+	require.NoError(t, err)
+	for i, so := range out2.Shards {
+		vctx := &api.VerifierContext{TrustBase: f.tb, PartitionID: testPartition, ExpectedShardID: so.ShardID,
+			ShardConfHash: f.policy.Topology.ShardConfHashes[so.ShardID.Key()]}
+		require.NoError(t, so.Proofs[0].InclusionProof.Verify(f.reqs[i], vctx), "shard %d", i)
 	}
 }

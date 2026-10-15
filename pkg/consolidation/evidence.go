@@ -5,7 +5,6 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"errors"
-	"slices"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -132,27 +131,52 @@ func (s *Session) AuthenticateEvidence(ev []Evidence) (*RootRoundBound, error) {
 			round, bestShard = seal.RootChainRoundNumber, uc.ShardTreeCertificate.Shard
 		}
 	}
-	return &RootRoundBound{round: round, shard: bestShard, network: network, lineage: s.policy.id(), session: s, inputs: inputs}, nil
+	return &RootRoundBound{round: round, shard: bestShard, network: network, lineage: s.policyID, session: s, inputs: inputs}, nil
 }
 
 func (s *Session) checkEvidenceProof(i int, e Evidence) (*types.UnicityCertificate, error) {
 	if e.Proof.CertificationData == nil {
 		return nil, fail(OutcomeInvalidInput, i, nil, "evidence is not an inclusion proof")
 	}
-	uc, err := decodeUC(e.Proof.UnicityCertificate, i)
+	uc, err := s.evidenceUC(i, e.Proof.UnicityCertificate)
+	if err != nil {
+		return nil, err
+	}
+	// per-input rules, never memoized: binding, expiry, reference time not after the UC
+	// timestamp, certified-shard membership, path to the root
+	if err := leafRules(i, e.Request, e.Proof, uc); err != nil {
+		return nil, err
+	}
+	return uc, nil
+}
+
+// evidenceUC decodes and body-verifies an evidence UC (structure, shard and partition
+// path up to its seal hash) once per distinct complete canonical byte string of the
+// session (the policy is fixed per session; the seal itself is authenticated separately
+// against the resolved authority). The returned certificate is shared and must not be
+// modified. Failures are not cached.
+func (s *Session) evidenceUC(i int, raw []byte) (*types.UnicityCertificate, error) {
+	s.mu.Lock()
+	uc, ok := s.evUCs[string(raw)]
+	s.mu.Unlock()
+	if ok {
+		return uc, nil
+	}
+	s.count(func(c *Counters) { c.UCDecodes++ })
+	uc, err := decodeUC(raw, i)
 	if err != nil {
 		return nil, err
 	}
 	if err := checkPathSteps(i, uc); err != nil {
 		return nil, err
 	}
+	s.count(func(c *Counters) { c.EvidenceBodyChecks++ })
 	shard := uc.ShardTreeCertificate.Shard
 	// the configuration hash of an original may legitimately differ from the target's: it is
 	// only checked against independent pins, otherwise the shard is bound at consolidation
 	var pinnedConf []byte
 	if s.policy.pinned() {
-		order, _ := types.CanonicalShardOrder(s.policy.Topology.Scheme)
-		if !slices.ContainsFunc(order, shard.Equal) {
+		if _, ok := s.pinnedShards[shard.Key()]; !ok {
 			return nil, fail(OutcomeIncompatibleLineage, i, nil, "evidence shard %q is not in the policy topology", shard)
 		}
 		pinnedConf = s.policy.Topology.ShardConfHashes[shard.Key()]
@@ -171,11 +195,9 @@ func (s *Session) checkEvidenceProof(i int, e Evidence) (*types.UnicityCertifica
 	if !bytes.Equal(root, uc.UnicitySeal.Hash) {
 		return nil, fail(OutcomeBindingMismatch, i, nil, "evidence shard path does not reach its seal hash")
 	}
-	// the same leaf rules as for the output proofs: binding, expiry, reference
-	// time not after the UC timestamp, certified-shard membership, path to the root
-	if err := leafRules(i, e.Request, e.Proof, uc); err != nil {
-		return nil, err
-	}
+	s.mu.Lock()
+	s.evUCs[string(raw)] = uc
+	s.mu.Unlock()
 	return uc, nil
 }
 
