@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
-	"github.com/unicitynetwork/aggregator-go/internal/service"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
@@ -183,7 +183,9 @@ const BatchProofsMethod = "get_inclusion_proofs.v1"
 // unsupported_configuration error instead.
 func (s *Server) SetBatchProofHandler(h jsonrpc.HandlerFunc) {
 	if m := s.config.Sharding.Mode; m.IsParent() || m.IsChild() {
-		h = service.UnsupportedRPC
+		h = func(context.Context, json.RawMessage) (interface{}, *jsonrpc.Error) {
+			return nil, jsonrpc.NewDetailedError(jsonrpc.ProofUnavailableCode, "Proof unavailable", "proof_unavailable", "unsupported_configuration", false, nil)
+		}
 	}
 	s.rpcServer.RegisterMethodWithLimits(BatchProofsMethod, h, jsonrpc.MethodLimits{
 		MaxRequestBytes:  api.InclusionProofsMaxRequestBytes,
