@@ -65,7 +65,9 @@ func checkMessageRate(base, with phaseCount) error {
 		scale = with.Rounds / base.Rounds // phases may span different numbers of root rounds
 	}
 	for i := range with.Responses {
-		if with.Responses[i] < with.Blocks[i]-1 {
+		// the root coalesces the responses of a backlog (e.g. the catch-up after a stall of at least T2),
+		// so fewer responses than blocks is only a defect in a phase without such a stall
+		if with.MaxGap[i] < t2Seconds && with.Responses[i] < with.Blocks[i]-1 {
 			return fmt.Errorf("shard %d: %.0f responses for %.0f finalized blocks (missing deliveries)", i, with.Responses[i], with.Blocks[i])
 		}
 		if progress := with.Responses[i] - with.NonProgress[i]; progress > with.Blocks[i]+1 {
@@ -130,6 +132,13 @@ func TestMessageRateCheck(t *testing.T) {
 	stalled.NonProgress = vec(2, 0) // a second one needs a second T2 gap
 	stalled.Responses = vec(5, 3)
 	require.ErrorContains(t, checkMessageRate(minBase, stalled), "shard 0")
+
+	// after a stall of at least T2 the root coalesces the backlog: fewer responses than blocks is legitimate
+	catchUp := pc(vec(4, 3), vec(9, 3), vec(1, 0), vec(0, 0), vec(50, 50), 21)
+	catchUp.MaxGap = vec(6.0, 1)
+	require.NoError(t, checkMessageRate(minBase, catchUp))
+	catchUp.MaxGap = vec(2.0, 1)
+	require.ErrorContains(t, checkMessageRate(minBase, catchUp), "missing deliveries")
 
 	// missing deliveries are detected too
 	missing := with
