@@ -539,7 +539,7 @@ func TestAuthenticateMaster_Stage(t *testing.T) {
 	require.Equal(t, 1, s.Counters().QuorumChecks)
 	root, err := m.PeerRoot(f.in.Peers[0].ShardID)
 	require.NoError(t, err)
-	require.Equal(t, f.view.Leaves[1].InputRecord.Hash, root)
+	require.Equal(t, []byte(f.view.Leaves[1].InputRecord.Hash), root)
 	_, err = m.PeerRoot(types.ShardID{})
 	requireOutcome(t, err, OutcomeBindingMismatch)
 
