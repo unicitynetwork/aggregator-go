@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"math/bits"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -471,4 +473,90 @@ func TestOverlayChainBasics(t *testing.T) {
 	require.Equal(t, []byte("newer"), e.value)
 	// an empty layer is not pushed
 	require.Equal(t, derived.depth(), derived.push(nil, nil).depth())
+}
+
+// The number of layers is logarithmic in the entries for EVERY sequence of layer sizes, in particular
+// for decreasing ones (a pipeline whose blocks taper off), which a "merge while the lower layer is not
+// larger" rule never merges.
+func TestOverlayChainLayersAreLogarithmicForAnyLayerSizes(t *testing.T) {
+	k := func(i int) disk.NodeKey {
+		nk, err := disk.NewNodeKey(16, disk.PrefixBits{byte(i >> 8), byte(i)})
+		require.NoError(t, err)
+		return nk
+	}
+	layerOf := func(start, n int) nodeOverlay {
+		l := make(nodeOverlay, n)
+		for i := 0; i < n; i++ {
+			l[k(start+i)] = overlayEntry{value: []byte{byte(i)}}
+		}
+		return l
+	}
+	check := func(name string, sizes []int) {
+		var c *overlayChain
+		var copies atomic.Int64
+		total, next := 0, 0
+		for _, n := range sizes {
+			c = c.push(layerOf(next, n), &copies)
+			next += n
+			total += n
+			require.LessOrEqual(t, c.depth(), bits.Len(uint(total)), "%s: %d layers for %d entries", name, c.depth(), total)
+		}
+		// copied entries: each pushed entry is copied O(log total) times
+		require.LessOrEqual(t, copies.Load(), int64(total)*int64(bits.Len(uint(total))+1), name)
+		// every key is still found, at its newest layer
+		for i := 0; i < next; i++ {
+			_, ok := c.get(k(i))
+			require.True(t, ok, "%s: key %d", name, i)
+		}
+	}
+	dec := make([]int, 0, 64)
+	for i := 64; i >= 1; i-- {
+		dec = append(dec, i)
+	}
+	check("decreasing 64..1", dec)
+	inc := make([]int, 0, 64)
+	for i := 1; i <= 64; i++ {
+		inc = append(inc, i)
+	}
+	check("increasing", inc)
+	check("equal", func() []int {
+		s := make([]int, 100)
+		for i := range s {
+			s[i] = 7
+		}
+		return s
+	}())
+	rng := rand.New(rand.NewSource(3))
+	for seed := 0; seed < 20; seed++ {
+		sizes := make([]int, 50+rng.Intn(100))
+		for i := range sizes {
+			sizes[i] = 1 + rng.Intn(1<<uint(rng.Intn(9)))
+		}
+		check(fmt.Sprintf("random %d", seed), sizes)
+	}
+	// geometric decrease: the worst case for a "lower layer not larger" rule
+	var geo []int
+	for n := 1 << 12; n >= 1; n /= 2 {
+		geo = append(geo, n)
+	}
+	check("halving", geo)
+}
+
+// A real chain of speculative snapshots with shrinking blocks keeps a logarithmic number of layers.
+func TestForkChainOfShrinkingBlocksHasLogarithmicLayers(t *testing.T) {
+	rng := rand.New(rand.NewSource(8))
+	store := newMemStore()
+	tree := openMem(t, store)
+	cur, err := tree.CreateSnapshot()
+	require.NoError(t, err)
+	entries := 0
+	for n := 64; n >= 1; n-- {
+		_, err := cur.AddLeaves(randLeaves(rng, n))
+		require.NoError(t, err)
+		entries += len(cur.ownOverlay)
+		next, err := cur.Fork()
+		require.NoError(t, err)
+		require.LessOrEqual(t, next.parentOverlay.depth(), bits.Len(uint(entries)), "after %d blocks (%d entries)", 65-n, entries)
+		cur = next
+	}
 }

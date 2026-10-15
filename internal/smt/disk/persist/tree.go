@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math/bits"
 	"runtime"
 	"sort"
 	"sync"
@@ -1034,9 +1035,11 @@ func (c *overlayChain) depth() int {
 }
 
 // push returns the chain with "layer" (which must not be modified afterwards) on top. Layers are
-// merged like a binary counter: while the layer below is at most twice the size of the top one,
-// they are merged into one new layer, which keeps the number of layers logarithmic and the
-// amortized copying per pushed entry logarithmic.
+// merged by size class (the bit length of their entry count), like the carries of a binary
+// counter: while the layer below is of the same or a smaller class than the top one, they are merged
+// into one new layer. Classes then strictly increase toward the bottom of the chain, so there are at
+// most log2(total entries)+1 layers whatever the sequence of layer sizes (also decreasing ones), and
+// every entry is copied O(log) times.
 func (c *overlayChain) push(layer nodeOverlay, copied *atomic.Int64) *overlayChain {
 	var layers []nodeOverlay
 	if c != nil {
@@ -1045,7 +1048,7 @@ func (c *overlayChain) push(layer nodeOverlay, copied *atomic.Int64) *overlayCha
 	if len(layer) > 0 {
 		layers = append(layers, layer)
 	}
-	for n := len(layers); n >= 2 && len(layers[n-2]) <= len(layers[n-1]); n = len(layers) {
+	for n := len(layers); n >= 2 && bits.Len(uint(len(layers[n-2]))) <= bits.Len(uint(len(layers[n-1]))); n = len(layers) {
 		merged := make(nodeOverlay, len(layers[n-2])+len(layers[n-1]))
 		for k, e := range layers[n-2] {
 			merged[k] = e
