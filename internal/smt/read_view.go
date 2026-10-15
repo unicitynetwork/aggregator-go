@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"sync/atomic"
 	"unsafe"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -27,23 +26,21 @@ type ReadView struct {
 	root []byte            // raw root hash, fixed at freeze time
 	seq  uint64            // root's creation sequence, the newest in the view
 
-	// retainedBytes is the conservative incremental memory this view keeps
-	// alive beyond the live tree: the nodes it holds that its successor
-	// replaced. It is zero for the newest view and set when the successor is
-	// frozen.
-	retainedBytes atomic.Uint64
+	// introduced is the estimated bytes of nodes this root holds that the
+	// previously frozen root did not (see FreezeReadView).
+	introduced uint64
 }
 
-// readViewOverheadBytes covers the view struct and detached tree header.
-const readViewOverheadBytes = 256
+// ReadViewOverheadBytes covers a view's own struct and detached tree header.
+const ReadViewOverheadBytes = 256
 
 // FreezeReadView captures the current committed root as an immutable ReadView.
 // The write lock is held only to prime hash caches and copy the root pointer.
 //
-// prev, when non-nil, is the previously frozen view of this tree; the nodes
-// the new root introduced relative to it are charged to prev as the memory it
-// retains. Pass nil for the first view.
-func (ts *ThreadSafeSMT) FreezeReadView(prev *ReadView) *ReadView {
+// prevSeq is Seq() of the previously frozen view of this tree, or 0 for the
+// first. The view records as Introduced the bytes of nodes created since then;
+// the caller decides which surviving view those replaced nodes are charged to.
+func (ts *ThreadSafeSMT) FreezeReadView(prevSeq uint64) *ReadView {
 	ts.rwMux.Lock()
 	ts.smt.ensureHashes()
 	root := ts.smt.root
@@ -57,12 +54,19 @@ func (ts *ThreadSafeSMT) FreezeReadView(prev *ReadView) *ReadView {
 	ts.rwMux.Unlock()
 
 	v := &ReadView{tree: tree, root: rootHash, seq: root.seq}
-	v.retainedBytes.Store(readViewOverheadBytes)
-	if prev != nil {
-		prev.retainedBytes.Add(v.introducedBytesSince(prev))
+	if prevSeq != 0 {
+		v.introduced = v.introducedBytesSince(prevSeq)
 	}
 	return v
 }
+
+// Seq is the creation sequence of the view's root; later roots have larger
+// values on one lineage.
+func (v *ReadView) Seq() uint64 { return v.seq }
+
+// Introduced returns the estimated bytes of nodes this view's root holds that
+// the previously frozen root did not.
+func (v *ReadView) Introduced() uint64 { return v.introduced }
 
 // RootHashRaw returns a copy of the raw root hash this view was frozen at.
 func (v *ReadView) RootHashRaw() []byte {
@@ -94,16 +98,12 @@ func (v *ReadView) GetInclusionCert(key []byte) (*api.InclusionCert, error) {
 	return v.tree.GetInclusionCert(key)
 }
 
-// RetainedBytes returns the conservative incremental bytes held by this view.
-func (v *ReadView) RetainedBytes() uint64 { return v.retainedBytes.Load() }
-
 // introducedBytesSince estimates the bytes of nodes reachable from v that
-// prev's root did not hold. Parents are constructed after their children, so
-// descending only into nodes newer than prev's root visits exactly the nodes
-// created since (each once, as the tree is a tree). A root older than prev
+// the root with sequence floor did not hold. Parents are constructed after their children, so
+// descending only into nodes newer than floor visits exactly the nodes
+// created since (each once, as the tree is a tree). A root older than floor
 // means the views are not on one lineage; fall back to charging the whole tree.
-func (v *ReadView) introducedBytesSince(prev *ReadView) uint64 {
-	floor := prev.seq
+func (v *ReadView) introducedBytesSince(floor uint64) uint64 {
 	if v.seq == floor {
 		return 0 // the same committed root: nothing new is held
 	}

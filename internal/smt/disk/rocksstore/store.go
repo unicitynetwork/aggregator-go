@@ -185,6 +185,10 @@ type Store struct {
 	block []byte
 
 	counters storeCounters
+
+	// writtenBytes is the cumulative estimated size of node versions written
+	// by committed batches, see WrittenBytes.
+	writtenBytes atomic.Uint64
 }
 
 type ReadSnapshot struct {
@@ -197,6 +201,7 @@ type ReadSnapshot struct {
 }
 
 var _ storage.ReadSnapshotter = (*Store)(nil)
+var _ storage.WriteVolumeReporter = (*Store)(nil)
 var _ storage.ReadStore = (*ReadSnapshot)(nil)
 
 type storeCounters struct {
@@ -492,6 +497,17 @@ func (s *Store) NewReadSnapshot() (storage.ReadStore, func(), error) {
 		release:  s.closeMu.RUnlock,
 	}
 	return readSnapshot, readSnapshot.Close, nil
+}
+
+// WrittenBytes returns a monotonic, conservative estimate of the node storage
+// written by committed batches since the store was opened. The difference
+// between two readings bounds the extra versions a read snapshot taken at the
+// first reading keeps alive (storage.WriteVolumeReporter).
+func (s *Store) WrittenBytes() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.writtenBytes.Load()
 }
 
 func (s *Store) NumSnapshots() uint64 {

@@ -172,8 +172,9 @@ type MemoryBackend struct {
 	tree        *smt.ThreadSafeSMT
 	blockNumber *api.BigInt
 
-	retainMu     sync.Mutex
-	lastRetained *memoryReadView
+	retainMu sync.Mutex
+	lastSeq  uint64
+	lineage  lineage
 }
 
 func NewMemoryBackend(tree *smt.ThreadSafeSMT) *MemoryBackend {

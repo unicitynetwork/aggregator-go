@@ -53,8 +53,8 @@ type ReadViewRetainer interface {
 }
 
 // RetainReadView captures the current committed in-memory state. Consecutive
-// calls on one backend form a lineage: each call charges the nodes it
-// introduced to the previous view as the memory that view retains.
+// calls on one backend form a lineage used for retention accounting: the nodes
+// a call introduced are the memory that earlier views keep alive.
 func (b *MemoryBackend) RetainReadView(ctx context.Context) (ReadView, error) {
 	if b == nil || b.tree == nil {
 		return nil, fmt.Errorf("memory SMT backend not initialized")
@@ -64,13 +64,72 @@ func (b *MemoryBackend) RetainReadView(ctx context.Context) (ReadView, error) {
 	}
 	b.retainMu.Lock()
 	defer b.retainMu.Unlock()
-	var prev *smt.ReadView
-	if b.lastRetained != nil {
-		prev = b.lastRetained.view
+	view := b.tree.FreezeReadView(b.lastSeq)
+	b.lastSeq = view.Seq()
+	return b.lineage.add(view), nil
+}
+
+// lineage accounts retained memory across the views of one backend. Each frozen
+// view contributes a delta: the bytes of nodes it introduced, which replaced
+// nodes held by earlier views. A surviving view is charged the deltas from
+// itself (exclusive) up to and including the next surviving view's, or to the
+// head if it is the last survivor, so shared nodes are counted once, the
+// charge stays with surviving views when intermediate handles close, and
+// closing a handle never loses nodes an older pinned view still holds.
+type lineage struct {
+	mu      sync.Mutex
+	entries []*lineageEntry // oldest first
+}
+
+type lineageEntry struct {
+	delta uint64
+	alive bool
+}
+
+func (l *lineage) add(view *smt.ReadView) *memoryReadView {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e := &lineageEntry{delta: view.Introduced(), alive: true}
+	l.entries = append(l.entries, e)
+	return &memoryReadView{view: view, lin: l, entry: e}
+}
+
+// retained returns the incremental bytes charged to e.
+func (l *lineage) retained(e *lineageEntry) uint64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !e.alive {
+		return 0
 	}
-	v := &memoryReadView{view: b.tree.FreezeReadView(prev)}
-	b.lastRetained = v
-	return v, nil
+	total := uint64(smt.ReadViewOverheadBytes)
+	after := false
+	for _, x := range l.entries {
+		if x == e {
+			after = true
+			continue
+		}
+		if !after {
+			continue
+		}
+		total += x.delta
+		if x.alive {
+			break
+		}
+	}
+	return total
+}
+
+// close marks e dead and drops the dead prefix, whose deltas nothing is
+// charged for (no surviving view is older).
+func (l *lineage) close(e *lineageEntry) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e.alive = false
+	i := 0
+	for i < len(l.entries) && !l.entries[i].alive {
+		i++
+	}
+	l.entries = append([]*lineageEntry(nil), l.entries[i:]...)
 }
 
 type memoryReadView struct {
@@ -78,6 +137,8 @@ type memoryReadView struct {
 	// needs no lock.
 	mu     sync.RWMutex
 	view   *smt.ReadView
+	lin    *lineage
+	entry  *lineageEntry
 	closed bool
 }
 
@@ -103,12 +164,7 @@ func (v *memoryReadView) GetInclusionCert(ctx context.Context, key []byte) (*api
 }
 
 func (v *memoryReadView) RetainedBytes() uint64 {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	if v.closed {
-		return 0
-	}
-	return v.view.RetainedBytes()
+	return v.lin.retained(v.entry)
 }
 
 func (v *memoryReadView) Close() error {
@@ -118,9 +174,9 @@ func (v *memoryReadView) Close() error {
 		return nil
 	}
 	v.closed = true
-	// Drop the tree so retired views do not pin old nodes. The root hash,
-	// sequence and byte counter stay valid as the lineage anchor.
+	// Drop the tree so retired views do not pin old nodes.
 	v.view.Release()
+	v.lin.close(v.entry)
 	return nil
 }
 

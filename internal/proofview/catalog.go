@@ -64,6 +64,7 @@ type attachment struct {
 	uc     []byte
 	digest [sha256.Size]byte
 	view   []byte
+	round  uint64 // UC root-chain round: the order in which certifications supersede each other
 	bytes  uint64
 	refs   int
 }
@@ -90,7 +91,15 @@ type Catalog struct {
 	// Latest then reports ErrViewNotRetained until a later publication
 	// succeeds; it never falls back to an older view.
 	latestStale bool
-	closed      bool
+	// curView/curRound identify the current published certification
+	// independently of what is retained: curView is the retained view it
+	// belongs to (nil if that publication was rejected) and curRound its UC
+	// root round. Only a genuinely newer certification on curView, or a newer
+	// published view, clears latestStale; filling in historical material never
+	// does.
+	curView  *view
+	curRound uint64
+	closed   bool
 
 	evictions     uint64
 	pressureKills uint64
@@ -137,24 +146,24 @@ func (c *Catalog) Stats() Stats {
 	}
 }
 
-// ucRoot decodes the UC and returns its input-record state hash.
-func ucRoot(uc []byte) ([]byte, error) {
+// decodeUC returns the UC's input-record state hash and root-chain round.
+func decodeUC(uc []byte) ([]byte, uint64, error) {
 	var cert types.UnicityCertificate
 	if err := types.Cbor.Unmarshal(uc, &cert); err != nil {
-		return nil, fmt.Errorf("decode UC: %w", err)
+		return nil, 0, fmt.Errorf("decode UC: %w", err)
 	}
 	root := cert.GetStateHash()
 	if len(root) == 0 {
-		return nil, errors.New("UC has no input record state hash")
+		return nil, 0, errors.New("UC has no input record state hash")
 	}
-	return root, nil
+	return root, cert.GetRootRoundNumber(), nil
 }
 
 func newAttachment(cert Certification, root []byte) (*attachment, error) {
 	if len(cert.UC) == 0 {
 		return nil, fmt.Errorf("%w: missing UC", ErrInvalidPublication)
 	}
-	got, err := ucRoot(cert.UC)
+	got, round, err := decodeUC(cert.UC)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidPublication, err)
 	}
@@ -164,6 +173,7 @@ func newAttachment(cert Certification, root []byte) (*attachment, error) {
 	a := &attachment{
 		uc:     append([]byte(nil), cert.UC...),
 		digest: sha256.Sum256(cert.UC),
+		round:  round,
 	}
 	if len(cert.PartitionView) > 0 {
 		a.view = append([]byte(nil), cert.PartitionView...)
@@ -193,7 +203,7 @@ func (c *Catalog) Publish(ctx context.Context, in PublishInput) error {
 		if !owned {
 			toClose = append(toClose, in.Reader)
 		}
-		closeAll(toClose)
+		c.settle(toClose)
 	}()
 	if err := ctx.Err(); err != nil {
 		return err
@@ -232,11 +242,13 @@ func (c *Catalog) Publish(ctx context.Context, in PublishInput) error {
 		// Cannot retain this view even alone: refuse without disturbing older
 		// history, and make latest unavailable rather than serving an older view.
 		c.latestStale = true
+		c.curView, c.curRound = nil, att.round
 		return ErrBudget
 	}
 	c.views = append(c.views, v)
 	toClose = c.enforceLocked(toClose)
 	c.latestStale = false
+	c.curView, c.curRound = v, att.round
 	owned = true
 	return nil
 }
@@ -256,7 +268,7 @@ func (c *Catalog) AttachCertification(ctx context.Context, block BlockIdentity, 
 		return err
 	}
 	var toClose []backend.ReadView
-	defer func() { closeAll(toClose) }()
+	defer func() { c.settle(toClose) }()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -271,8 +283,12 @@ func (c *Catalog) AttachCertification(ctx context.Context, block BlockIdentity, 
 }
 
 // attachLocked installs att on v. Caller holds c.mu.
+//
+// A UC already attached only gains a missing partition view. Any other UC is
+// accepted only if it is newer (higher root round) than the view's latest;
+// an older or equal UC that is no longer (or never was) attached is historical
+// and is dropped, so redelivery can never promote it over a newer certification.
 func (c *Catalog) attachLocked(v *view, att *attachment, toClose []backend.ReadView) ([]backend.ReadView, error) {
-	newest := len(c.views) > 0 && c.views[len(c.views)-1] == v
 	for i, old := range v.atts {
 		if old.digest != att.digest {
 			continue
@@ -282,21 +298,25 @@ func (c *Catalog) attachLocked(v *view, att *attachment, toClose []backend.ReadV
 		}
 		v.atts[i] = att // fill the missing partition view; position (and latest-ness) unchanged
 		c.retireAttLocked(old)
-		return c.enforceAttachLocked(v, att, newest, toClose)
+		return c.enforceAttachLocked(v, att, toClose)
+	}
+	if n := len(v.atts); n > 0 && att.round <= v.atts[n-1].round {
+		return toClose, nil
 	}
 	v.atts = append(v.atts, att)
 	for len(v.atts) > c.limits.MaxAttachmentsPerView {
 		c.retireAttLocked(v.atts[0])
 		v.atts = v.atts[1:]
 	}
-	return c.enforceAttachLocked(v, att, newest, toClose)
+	return c.enforceAttachLocked(v, att, toClose)
 }
 
-func (c *Catalog) enforceAttachLocked(v *view, att *attachment, newest bool, toClose []backend.ReadView) ([]backend.ReadView, error) {
+func (c *Catalog) enforceAttachLocked(v *view, att *attachment, toClose []backend.ReadView) ([]backend.ReadView, error) {
 	toClose = c.enforceLocked(toClose)
+	isCur := v == c.curView
 	if c.viewCostLocked(v) > c.limits.RetentionBudgetBytes {
-		// The certification does not fit; drop it. If it was the newest
-		// state's, latest would otherwise be an older certification.
+		// The certification does not fit; drop it. If it is (or supersedes)
+		// the current one, latest would otherwise be older material.
 		for i, a := range v.atts {
 			if a == att {
 				v.atts = append(v.atts[:i:i], v.atts[i+1:]...)
@@ -304,12 +324,14 @@ func (c *Catalog) enforceAttachLocked(v *view, att *attachment, newest bool, toC
 				break
 			}
 		}
-		if newest {
+		if isCur && att.round >= c.curRound {
+			c.curRound = att.round
 			c.latestStale = true
 		}
 		return toClose, ErrBudget
 	}
-	if newest {
+	if isCur && att.round > c.curRound {
+		c.curRound = att.round
 		c.latestStale = false
 	}
 	return toClose, nil
@@ -361,21 +383,36 @@ func (c *Catalog) retainedBytesLocked() uint64 {
 // If still over budget, the oldest active leases are cancelled so retired
 // views can drain; their readers are not closed until released.
 func (c *Catalog) enforceLocked(toClose []backend.ReadView) []backend.ReadView {
-	for len(c.views) > 1 &&
-		(len(c.views) > c.limits.MaxViews || c.retainedBytesLocked() > c.limits.RetentionBudgetBytes) {
-		toClose = c.evictOldestLocked(toClose)
+	for len(c.views) > 1 {
+		overCount := len(c.views) > c.limits.MaxViews
+		if !overCount && c.retainedBytesLocked() <= c.limits.RetentionBudgetBytes {
+			break
+		}
+		// Unpinned history first: evicting it actually frees memory. A pinned
+		// view is retired (hidden from lookup, still counted) only to satisfy
+		// the view count, since retiring it frees no bytes.
+		idx := -1
+		for i, v := range c.views[:len(c.views)-1] {
+			if v.refs == 0 {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			if !overCount {
+				break
+			}
+			idx = 0
+		}
+		v := c.views[idx]
+		c.views = append(c.views[:idx:idx], c.views[idx+1:]...)
+		c.evictions++
+		toClose = c.retireViewLocked(v, toClose)
 	}
 	if c.retainedBytesLocked() > c.limits.RetentionBudgetBytes {
 		c.cancelOldestLeasesLocked()
 	}
 	return toClose
-}
-
-func (c *Catalog) evictOldestLocked(toClose []backend.ReadView) []backend.ReadView {
-	v := c.views[0]
-	c.views = c.views[1:]
-	c.evictions++
-	return c.retireViewLocked(v, toClose)
 }
 
 func (c *Catalog) retireViewLocked(v *view, toClose []backend.ReadView) []backend.ReadView {
@@ -489,8 +526,30 @@ func (c *Catalog) release(l *Lease) {
 		delete(c.retired, l.v)
 		toClose = append(toClose, l.v.reader)
 	}
+	// A release can make an over-budget view evictable.
+	if !c.closed {
+		toClose = c.enforceLocked(toClose)
+	}
 	c.mu.Unlock()
-	closeAll(toClose)
+	c.settle(toClose)
+}
+
+// settle closes readers that left the catalog, outside the lock, then re-runs
+// retention enforcement. Closing a reader can move its accounted charge onto an
+// older surviving (possibly pinned) reader; until the close the charge was not
+// visible, so pressure that appears only afterwards would otherwise go
+// unnoticed. Enforcement never closes a reader a lease still holds.
+func (c *Catalog) settle(toClose []backend.ReadView) {
+	for len(toClose) > 0 {
+		closeAll(toClose)
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return
+		}
+		toClose = c.enforceLocked(nil)
+		c.mu.Unlock()
+	}
 }
 
 // Close cancels all leases, retires every view, and closes the readers that no
