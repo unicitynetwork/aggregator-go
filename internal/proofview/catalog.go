@@ -122,8 +122,12 @@ type Catalog struct {
 	seq        uint64
 	byID       map[string]*view // block identity and root -> the live view
 	byRoot     map[string]*view // root -> newest live view with it
-	evictable  viewHeap         // live, unpinned views except the newest, oldest first
-	pinned     viewHeap         // live, pinned views, oldest first
+	// byDigest maps the digest of a certification to the live views holding it (normally one),
+	// so a late partition view finds its view without scanning the retained ones.
+	byDigest     map[[sha256.Size]byte]map[*view]struct{}
+	digestVisits uint64   // candidate views examined by digest lookups (hardware independent metric)
+	evictable    viewHeap // live, unpinned views except the newest, oldest first
+	pinned       viewHeap // live, pinned views, oldest first
 	// retiredLive are the retired views with leases pressure has not cancelled yet: a pressure
 	// pass visits only pending leases, so a lease is looked at once, not on every later pass.
 	retiredLive map[*view]struct{}
@@ -173,6 +177,7 @@ func NewCatalog(limits Limits, opts ...Option) (*Catalog, error) {
 		limits:      limits,
 		byID:        make(map[string]*view),
 		byRoot:      make(map[string]*view),
+		byDigest:    make(map[[sha256.Size]byte]map[*view]struct{}),
 		retired:     make(map[*view]struct{}),
 		retiredAtts: make(map[*attachment]struct{}),
 		leases:      make(map[*Lease]struct{}),
@@ -185,6 +190,10 @@ func NewCatalog(limits Limits, opts ...Option) (*Catalog, error) {
 	}
 	return c, nil
 }
+
+// UsesAccountant reports whether the retained-byte total comes from the backend's O(1) accountant
+// (otherwise it is summed over the held readers, linear in the number of views).
+func (c *Catalog) UsesAccountant() bool { return c.acc != nil }
 
 // Limits returns the catalog's limits.
 func (c *Catalog) Limits() Limits { return c.limits }
@@ -428,6 +437,7 @@ func (c *Catalog) pushAttLocked(v *view, att *attachment) {
 	v.attBytes += att.bytes
 	if v.live {
 		c.liveAttBytes += att.bytes
+		c.indexDigestLocked(v, att.digest)
 	}
 }
 
@@ -470,6 +480,7 @@ func (c *Catalog) dropAttLocked(v *view, a *attachment) {
 	v.attBytes -= a.bytes
 	if v.live {
 		c.liveAttBytes -= a.bytes
+		c.unindexDigestLocked(v, a.digest)
 	}
 	c.retireAttLocked(a)
 }
@@ -483,6 +494,36 @@ func (c *Catalog) retireAttLocked(a *attachment) {
 			c.retiredAttBytes += a.bytes
 		}
 	}
+}
+
+func (c *Catalog) indexDigestLocked(v *view, d [sha256.Size]byte) {
+	m := c.byDigest[d]
+	if m == nil {
+		m = make(map[*view]struct{}, 1)
+		c.byDigest[d] = m
+	}
+	m[v] = struct{}{}
+}
+
+func (c *Catalog) unindexDigestLocked(v *view, d [sha256.Size]byte) {
+	if m := c.byDigest[d]; m != nil {
+		delete(m, v)
+		if len(m) == 0 {
+			delete(c.byDigest, d)
+		}
+	}
+}
+
+// newestWithDigestLocked is the newest live view holding the certification.
+func (c *Catalog) newestWithDigestLocked(d [sha256.Size]byte) *view {
+	var best *view
+	for v := range c.byDigest[d] {
+		c.digestVisits++
+		if best == nil || v.seq > best.seq {
+			best = v
+		}
+	}
+	return best
 }
 
 func identityKey(b BlockIdentity, root []byte) string {
@@ -504,6 +545,9 @@ func (c *Catalog) linkViewLocked(v *view) {
 	v.seq = c.seq
 	v.live = true
 	c.liveAttBytes += v.attBytes
+	for d := range v.attIdx {
+		c.indexDigestLocked(v, d)
+	}
 	prevTail := c.tail
 	v.prev = c.tail
 	if c.tail != nil {
@@ -556,6 +600,9 @@ func (c *Catalog) unlinkViewLocked(v *view) {
 	v.rootOlder, v.rootNewer = nil, nil
 	v.live = false
 	c.liveAttBytes -= v.attBytes
+	for d := range v.attIdx {
+		c.unindexDigestLocked(v, d)
+	}
 	c.evictable.remove(v)
 	c.pinned.remove(v)
 	if c.tail != nil {

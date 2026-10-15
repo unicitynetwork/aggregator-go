@@ -1796,6 +1796,14 @@ func (rm *RoundManager) stopCommitmentPrefetcherAndWait() bool {
 	return true
 }
 
+// newProofViewCatalog is the production constructor of the retained-view catalog. The catalog owns
+// every read view the publisher retains from the backend, so the backend's O(1) total of the
+// retained bytes of its open views (both the memory and the RocksDB backend provide it) replaces the
+// linear sum over the views; backends without it use the correct linear fallback.
+func newProofViewCatalog(limits proofview.Limits, be smtbackend.Backend) (*proofview.Catalog, error) {
+	return proofview.NewCatalog(limits, proofview.AccountantFor(be))
+}
+
 // initProofViews creates the retained-view catalog and connects it to finalization
 // and to the BFT client's proof material. Backends which cannot retain read views
 // simply leave consolidation proof views unavailable.
@@ -1807,7 +1815,7 @@ func (rm *RoundManager) initProofViews(cfg *config.Config, client *bft.BFTClient
 	if err != nil {
 		return fmt.Errorf("invalid proof view retention limits: %w", err)
 	}
-	catalog, err := proofview.NewCatalog(limits)
+	catalog, err := newProofViewCatalog(limits, rm.smtBackend)
 	if err != nil {
 		return fmt.Errorf("failed to create proof view catalog: %w", err)
 	}

@@ -23,10 +23,8 @@ func (c *Catalog) MarkLatestUnavailable() {
 func (c *Catalog) ViewForDigest(digest [sha256.Size]byte) (BlockIdentity, []byte, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for v := c.tail; v != nil; v = v.prev {
-		if _, ok := v.attIdx[digest]; ok {
-			return v.block.clone(), append([]byte(nil), v.root...), true
-		}
+	if v := c.newestWithDigestLocked(digest); v != nil {
+		return v.block.clone(), append([]byte(nil), v.root...), true
 	}
 	return BlockIdentity{}, nil, false
 }
@@ -52,10 +50,8 @@ func (c *Catalog) ViewForRootMatching(root []byte, match func(latestUC []byte) b
 func (c *Catalog) PartitionViewForDigest(digest [sha256.Size]byte) ([]byte, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for v := c.tail; v != nil; v = v.prev {
-		if a, ok := v.attIdx[digest]; ok {
-			return append([]byte(nil), a.view...), true
-		}
+	if v := c.newestWithDigestLocked(digest); v != nil {
+		return append([]byte(nil), v.attIdx[digest].view...), true
 	}
 	return nil, false
 }
