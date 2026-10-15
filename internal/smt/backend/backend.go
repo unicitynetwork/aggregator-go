@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
@@ -170,6 +171,9 @@ type CommitMetadata struct {
 type MemoryBackend struct {
 	tree        *smt.ThreadSafeSMT
 	blockNumber *api.BigInt
+
+	retainMu     sync.Mutex
+	lastRetained *memoryReadView
 }
 
 func NewMemoryBackend(tree *smt.ThreadSafeSMT) *MemoryBackend {
