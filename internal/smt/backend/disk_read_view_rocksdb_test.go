@@ -4,6 +4,7 @@ package backend
 
 import (
 	"context"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -477,4 +478,43 @@ func TestDiskReadViewNewestCloseResumesPredecessor(t *testing.T) {
 	require.Zero(t, d.RetainedBytes())
 	f.commit(120, 130)
 	require.Equal(t, f.store.WrittenBytes()-d.(*diskReadView).lineageStart, d.RetainedBytes())
+}
+
+// The backend total is O(1) (no list walk) and equals the sum of the charges of the open
+// views through random captures, out-of-order closes and accounting retirements.
+func TestDiskReadViewTotalIsTheSumOfCharges(t *testing.T) {
+	f := newRVFixture(t)
+	rng := rand.New(rand.NewSource(11))
+	var open []ReadView
+	next := 0
+	for step := 0; step < 120; step++ {
+		switch op := rng.Intn(10); {
+		case op < 3:
+			f.commit(next, next+1+rng.Intn(6))
+			next += 6
+		case op < 6:
+			v, err := f.backend.RetainReadView(f.ctx)
+			require.NoError(t, err)
+			open = append(open, v)
+		case op < 8 && len(open) > 0:
+			i := rng.Intn(len(open))
+			require.NoError(t, open[i].Close())
+			open = append(open[:i], open[i+1:]...)
+		case len(open) > 0:
+			i := rng.Intn(len(open))
+			open[i].(AccountingRetirer).RetireAccounting()
+			require.Zero(t, open[i].RetainedBytes())
+			defer open[i].Close()
+			open = append(open[:i], open[i+1:]...)
+		}
+		var sum uint64
+		for _, v := range open {
+			sum += v.RetainedBytes()
+		}
+		require.Equal(t, sum, f.backend.RetainedBytesTotal(), "step %d", step)
+	}
+	for _, v := range open {
+		require.NoError(t, v.Close())
+	}
+	require.Zero(t, f.backend.RetainedBytesTotal())
 }

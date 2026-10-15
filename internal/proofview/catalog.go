@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -60,33 +61,83 @@ type PublishInput struct {
 	Cert   Certification
 }
 
+// attachment is one certification (UC plus optional partition view) of a view. The
+// attachments of a view form a list, oldest first, whose tail is the latest
+// certification; it is indexed by digest.
 type attachment struct {
-	uc     []byte
-	digest [sha256.Size]byte
-	view   []byte
-	round  uint64 // UC root-chain round: the order in which certifications supersede each other
-	bytes  uint64
-	refs   int
+	uc         []byte
+	digest     [sha256.Size]byte
+	view       []byte
+	round      uint64 // UC root-chain round: the order in which certifications supersede each other
+	bytes      uint64
+	refs       int
+	prev, next *attachment
 }
 
+// view is one retained finalized state. All catalog bookkeeping about it is O(1):
+// it is a member of a handful of intrusive lists/indexes (publication order, same-root
+// chain, identity map, eviction/pin heaps) instead of being found by scanning.
 type view struct {
 	block   BlockIdentity
 	root    []byte
 	reader  backend.ReadView
-	atts    []*attachment // oldest first; last is the latest certification
 	refs    int
 	retired bool
+	seq     uint64 // publication order
+
+	attHead, attTail *attachment // oldest ... latest
+	attN             int
+	attIdx           map[[sha256.Size]byte]*attachment
+	attBytes         uint64 // sum of the bytes of the attachments in the list
+
+	leases map[*Lease]struct{}
+	// pending are the leases pressure has not cancelled yet (a subset of leases)
+	pending map[*Lease]struct{}
+
+	// live views in publication order
+	prev, next *view
+	// live views with equal root, older/newer
+	rootOlder, rootNewer *view
+	idKey                string
+	live                 bool
+	// positions in the evictable / pinned heaps, -1 when not a member
+	evictIdx, pinIdx int
 }
 
 // Catalog retains finalized views. All methods are safe for concurrent use.
+//
+// Cost model (V live views, U attachments per view, P pins): publishing, attaching,
+// acquiring, releasing and the retained-byte total are O(1) or O(log V); evicting k
+// views is O(k log V). The retained total is maintained, not recomputed: attachment
+// bytes by running sums, backend bytes by the backend's O(1) lineage total
+// (WithAccountant; without it the sum over the open readers is the fallback).
 type Catalog struct {
 	limits Limits
+	acc    backend.RetentionAccountant
 
-	mu          sync.Mutex
-	views       []*view // oldest first; last is the newest published
+	mu sync.Mutex
+	// live views, oldest first; tail is the newest published
+	head, tail *view
+	nViews     int
+	seq        uint64
+	byID       map[string]*view // block identity and root -> the live view
+	byRoot     map[string]*view // root -> newest live view with it
+	evictable  viewHeap         // live, unpinned views except the newest, oldest first
+	pinned     viewHeap         // live, pinned views, oldest first
+	// retiredLive are the retired views with leases pressure has not cancelled yet: a pressure
+	// pass visits only pending leases, so a lease is looked at once, not on every later pass.
+	retiredLive map[*view]struct{}
+	leaseVisits uint64 // leases examined by pressure passes (hardware independent metric)
+
 	retired     map[*view]struct{}
 	retiredAtts map[*attachment]struct{}
 	leases      map[*Lease]struct{}
+
+	// maintained attachment totals (bytes)
+	liveAttBytes        uint64 // attachments of live views
+	retiredViewAttBytes uint64 // attachments of retired views still pinned
+	retiredAttBytes     uint64 // attachments removed from a view but still leased
+
 	// latestStale is set when the newest certification could not be retained.
 	// Latest then reports ErrViewNotRetained until a later publication
 	// succeeds; it never falls back to an older view.
@@ -105,17 +156,34 @@ type Catalog struct {
 	pressureKills uint64
 }
 
+// Option configures a Catalog.
+type Option func(*Catalog)
+
+// WithAccountant supplies the O(1) total of the backend's open readers' retained
+// bytes (see backend.RetentionAccountant). The catalog must own every open reader
+// of that backend. Without it the total is the sum over the catalog's readers.
+func WithAccountant(a backend.RetentionAccountant) Option { return func(c *Catalog) { c.acc = a } }
+
 // NewCatalog creates an empty catalog.
-func NewCatalog(limits Limits) (*Catalog, error) {
+func NewCatalog(limits Limits, opts ...Option) (*Catalog, error) {
 	if err := limits.Validate(); err != nil {
 		return nil, err
 	}
-	return &Catalog{
+	c := &Catalog{
 		limits:      limits,
+		byID:        make(map[string]*view),
+		byRoot:      make(map[string]*view),
 		retired:     make(map[*view]struct{}),
 		retiredAtts: make(map[*attachment]struct{}),
 		leases:      make(map[*Lease]struct{}),
-	}, nil
+	}
+	c.evictable.idx = func(v *view) *int { return &v.evictIdx }
+	c.pinned.idx = func(v *view) *int { return &v.pinIdx }
+	c.retiredLive = make(map[*view]struct{})
+	for _, o := range opts {
+		o(c)
+	}
+	return c, nil
 }
 
 // Limits returns the catalog's limits.
@@ -136,7 +204,7 @@ func (c *Catalog) Stats() Stats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return Stats{
-		Views:         len(c.views),
+		Views:         c.nViews,
 		RetiredPinned: len(c.retired),
 		ActivePins:    len(c.leases),
 		RetainedBytes: c.retainedBytesLocked(),
@@ -227,30 +295,48 @@ func (c *Catalog) Publish(ctx context.Context, in PublishInput) error {
 	if existing := c.findLocked(in.Block, in.Root); existing != nil {
 		// Same finalized state again (retry, repeat, duplicate delivery):
 		// keep the retained tree, add the certification; the redundant reader
-		// is closed by the deferred cleanup.
+		// is closed by the deferred cleanup. It leaves the accounting now so
+		// that it does not weigh on the budget while it waits to be closed.
+		retireAccounting(in.Reader)
 		var aerr error
 		toClose, aerr = c.attachLocked(existing, att, toClose)
 		return aerr
 	}
 	v := &view{
-		block:  in.Block.clone(),
-		root:   append([]byte(nil), in.Root...),
-		reader: in.Reader,
-		atts:   []*attachment{att},
+		block:    in.Block.clone(),
+		root:     append([]byte(nil), in.Root...),
+		reader:   in.Reader,
+		attIdx:   make(map[[sha256.Size]byte]*attachment, 1),
+		evictIdx: -1,
+		pinIdx:   -1,
 	}
-	if c.viewCostLocked(v) > c.limits.RetentionBudgetBytes {
+	v.idKey = identityKey(v.block, v.root)
+	if viewCost(v, att.bytes) > c.limits.RetentionBudgetBytes {
 		// Cannot retain this view even alone: refuse without disturbing older
 		// history, and make latest unavailable rather than serving an older view.
+		retireAccounting(in.Reader)
 		c.latestStale = true
 		c.curView, c.curRound = nil, att.round
 		return ErrBudget
 	}
-	c.views = append(c.views, v)
+	c.pushAttLocked(v, att)
+	c.linkViewLocked(v)
 	toClose = c.enforceLocked(toClose)
 	c.latestStale = false
 	c.curView, c.curRound = v, att.round
 	owned = true
 	return nil
+}
+
+// viewCost is the cost of a view holding "extraAtt" more attachment bytes.
+func viewCost(v *view, extraAtt uint64) uint64 {
+	return v.reader.RetainedBytes() + v.attBytes + extraAtt
+}
+
+func retireAccounting(r backend.ReadView) {
+	if ar, ok := r.(backend.AccountingRetirer); ok {
+		ar.RetireAccounting()
+	}
 }
 
 // AttachCertification adds certification material to an already retained
@@ -289,24 +375,19 @@ func (c *Catalog) AttachCertification(ctx context.Context, block BlockIdentity, 
 // an older or equal UC that is no longer (or never was) attached is historical
 // and is dropped, so redelivery can never promote it over a newer certification.
 func (c *Catalog) attachLocked(v *view, att *attachment, toClose []backend.ReadView) ([]backend.ReadView, error) {
-	for i, old := range v.atts {
-		if old.digest != att.digest {
-			continue
-		}
+	if old := v.attIdx[att.digest]; old != nil {
 		if old.view != nil || att.view == nil {
 			return toClose, nil // nothing new
 		}
-		v.atts[i] = att // fill the missing partition view; position (and latest-ness) unchanged
-		c.retireAttLocked(old)
+		c.replaceAttLocked(v, old, att) // fill the missing partition view; position (and latest-ness) unchanged
 		return c.enforceAttachLocked(v, att, toClose)
 	}
-	if n := len(v.atts); n > 0 && att.round <= v.atts[n-1].round {
+	if v.attTail != nil && att.round <= v.attTail.round {
 		return toClose, nil
 	}
-	v.atts = append(v.atts, att)
-	for len(v.atts) > c.limits.MaxAttachmentsPerView {
-		c.retireAttLocked(v.atts[0])
-		v.atts = v.atts[1:]
+	c.pushAttLocked(v, att)
+	for v.attN > c.limits.MaxAttachmentsPerView {
+		c.dropAttLocked(v, v.attHead)
 	}
 	return c.enforceAttachLocked(v, att, toClose)
 }
@@ -314,15 +395,11 @@ func (c *Catalog) attachLocked(v *view, att *attachment, toClose []backend.ReadV
 func (c *Catalog) enforceAttachLocked(v *view, att *attachment, toClose []backend.ReadView) ([]backend.ReadView, error) {
 	toClose = c.enforceLocked(toClose)
 	isCur := v == c.curView
-	if c.viewCostLocked(v) > c.limits.RetentionBudgetBytes {
+	if viewCost(v, 0) > c.limits.RetentionBudgetBytes {
 		// The certification does not fit; drop it. If it is (or supersedes)
 		// the current one, latest would otherwise be older material.
-		for i, a := range v.atts {
-			if a == att {
-				v.atts = append(v.atts[:i:i], v.atts[i+1:]...)
-				c.retireAttLocked(a)
-				break
-			}
+		if v.attIdx[att.digest] == att {
+			c.dropAttLocked(v, att)
 		}
 		if isCur && att.round >= c.curRound {
 			c.curRound = att.round
@@ -337,44 +414,194 @@ func (c *Catalog) enforceAttachLocked(v *view, att *attachment, toClose []backen
 	return toClose, nil
 }
 
+// pushAttLocked appends att as the latest attachment of v.
+func (c *Catalog) pushAttLocked(v *view, att *attachment) {
+	att.prev, att.next = v.attTail, nil
+	if v.attTail != nil {
+		v.attTail.next = att
+	} else {
+		v.attHead = att
+	}
+	v.attTail = att
+	v.attN++
+	v.attIdx[att.digest] = att
+	v.attBytes += att.bytes
+	if v.live {
+		c.liveAttBytes += att.bytes
+	}
+}
+
+// replaceAttLocked puts att in the position of old (same digest).
+func (c *Catalog) replaceAttLocked(v *view, old, att *attachment) {
+	att.prev, att.next = old.prev, old.next
+	if old.prev != nil {
+		old.prev.next = att
+	} else {
+		v.attHead = att
+	}
+	if old.next != nil {
+		old.next.prev = att
+	} else {
+		v.attTail = att
+	}
+	v.attIdx[att.digest] = att
+	v.attBytes = v.attBytes - old.bytes + att.bytes
+	if v.live {
+		c.liveAttBytes = c.liveAttBytes - old.bytes + att.bytes
+	}
+	c.retireAttLocked(old)
+}
+
+// dropAttLocked removes a from v.
+func (c *Catalog) dropAttLocked(v *view, a *attachment) {
+	if a.prev != nil {
+		a.prev.next = a.next
+	} else {
+		v.attHead = a.next
+	}
+	if a.next != nil {
+		a.next.prev = a.prev
+	} else {
+		v.attTail = a.prev
+	}
+	a.prev, a.next = nil, nil
+	v.attN--
+	delete(v.attIdx, a.digest)
+	v.attBytes -= a.bytes
+	if v.live {
+		c.liveAttBytes -= a.bytes
+	}
+	c.retireAttLocked(a)
+}
+
 // retireAttLocked tracks a removed attachment while leases still hold it, so
 // it keeps counting against the budget.
 func (c *Catalog) retireAttLocked(a *attachment) {
 	if a.refs > 0 {
-		c.retiredAtts[a] = struct{}{}
-	}
-}
-
-func (c *Catalog) findLocked(block BlockIdentity, root []byte) *view {
-	for i := len(c.views) - 1; i >= 0; i-- {
-		v := c.views[i]
-		if bytes.Equal(v.root, root) && v.block.equal(block) {
-			return v
+		if _, ok := c.retiredAtts[a]; !ok {
+			c.retiredAtts[a] = struct{}{}
+			c.retiredAttBytes += a.bytes
 		}
 	}
-	return nil
 }
 
-func (c *Catalog) viewCostLocked(v *view) uint64 {
-	cost := v.reader.RetainedBytes()
-	for _, a := range v.atts {
-		cost += a.bytes
+func identityKey(b BlockIdentity, root []byte) string {
+	n := "-"
+	if b.Number != nil {
+		n = b.Number.String()
 	}
-	return cost
+	return strconv.Itoa(len(root)) + ":" + string(root) + strconv.Itoa(len(n)) + ":" + n + string(b.ConfigLineage)
 }
 
-func (c *Catalog) retainedBytesLocked() uint64 {
+// findLocked returns the live view of the exact block identity and root.
+func (c *Catalog) findLocked(block BlockIdentity, root []byte) *view {
+	return c.byID[identityKey(block, root)]
+}
+
+// linkViewLocked makes v the newest live view.
+func (c *Catalog) linkViewLocked(v *view) {
+	c.seq++
+	v.seq = c.seq
+	v.live = true
+	c.liveAttBytes += v.attBytes
+	prevTail := c.tail
+	v.prev = c.tail
+	if c.tail != nil {
+		c.tail.next = v
+	} else {
+		c.head = v
+	}
+	c.tail = v
+	c.nViews++
+	c.byID[v.idKey] = v
+	if old := c.byRoot[string(v.root)]; old != nil {
+		old.rootNewer = v
+		v.rootOlder = old
+	}
+	c.byRoot[string(v.root)] = v
+	// the previous newest becomes evictable history unless pinned
+	if prevTail != nil {
+		c.reclassLocked(prevTail)
+	}
+	c.reclassLocked(v)
+}
+
+// unlinkViewLocked removes v from the live structures.
+func (c *Catalog) unlinkViewLocked(v *view) {
+	if v.prev != nil {
+		v.prev.next = v.next
+	} else {
+		c.head = v.next
+	}
+	if v.next != nil {
+		v.next.prev = v.prev
+	} else {
+		c.tail = v.prev
+	}
+	v.prev, v.next = nil, nil
+	c.nViews--
+	delete(c.byID, v.idKey)
+	if v.rootNewer == nil {
+		if v.rootOlder != nil {
+			c.byRoot[string(v.root)] = v.rootOlder
+		} else {
+			delete(c.byRoot, string(v.root))
+		}
+	} else {
+		v.rootNewer.rootOlder = v.rootOlder
+	}
+	if v.rootOlder != nil {
+		v.rootOlder.rootNewer = v.rootNewer
+	}
+	v.rootOlder, v.rootNewer = nil, nil
+	v.live = false
+	c.liveAttBytes -= v.attBytes
+	c.evictable.remove(v)
+	c.pinned.remove(v)
+	if c.tail != nil {
+		c.reclassLocked(c.tail) // a new newest view is never evicted as history
+	}
+}
+
+// reclassLocked restores the heap membership of a live view: pinned views are in the
+// pinned heap; unpinned views other than the newest are evictable.
+func (c *Catalog) reclassLocked(v *view) {
+	if !v.live {
+		return
+	}
+	if v.refs > 0 {
+		c.evictable.remove(v)
+		c.pinned.push(v)
+		return
+	}
+	c.pinned.remove(v)
+	if v == c.tail {
+		c.evictable.remove(v)
+	} else {
+		c.evictable.push(v)
+	}
+}
+
+// readersBytesLocked is the retained bytes of the backend readers the catalog holds.
+func (c *Catalog) readersBytesLocked() uint64 {
+	if c.acc != nil {
+		return c.acc.RetainedBytesTotal()
+	}
+	// fallback without a backend total: sum over the held readers (linear in V)
 	var total uint64
-	for _, v := range c.views {
-		total += c.viewCostLocked(v)
+	for v := c.head; v != nil; v = v.next {
+		total += v.reader.RetainedBytes()
 	}
 	for v := range c.retired {
-		total += c.viewCostLocked(v)
-	}
-	for a := range c.retiredAtts {
-		total += a.bytes
+		total += v.reader.RetainedBytes()
 	}
 	return total
+}
+
+// retainedBytesLocked is the budgeted total: readers, attachments of live views,
+// of retired pinned views, and attachments still leased after their removal.
+func (c *Catalog) retainedBytesLocked() uint64 {
+	return c.readersBytesLocked() + c.liveAttBytes + c.retiredViewAttBytes + c.retiredAttBytes
 }
 
 // enforceLocked evicts to satisfy the view count and byte budget. Oldest
@@ -383,29 +610,22 @@ func (c *Catalog) retainedBytesLocked() uint64 {
 // If still over budget, the oldest active leases are cancelled so retired
 // views can drain; their readers are not closed until released.
 func (c *Catalog) enforceLocked(toClose []backend.ReadView) []backend.ReadView {
-	for len(c.views) > 1 {
-		overCount := len(c.views) > c.limits.MaxViews
+	for c.nViews > 1 {
+		overCount := c.nViews > c.limits.MaxViews
 		if !overCount && c.retainedBytesLocked() <= c.limits.RetentionBudgetBytes {
 			break
 		}
 		// Unpinned history first: evicting it actually frees memory. A pinned
 		// view is retired (hidden from lookup, still counted) only to satisfy
 		// the view count, since retiring it frees no bytes.
-		idx := -1
-		for i, v := range c.views[:len(c.views)-1] {
-			if v.refs == 0 {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 {
+		v := c.evictable.peek()
+		if v == nil {
 			if !overCount {
 				break
 			}
-			idx = 0
+			v = c.head
 		}
-		v := c.views[idx]
-		c.views = append(c.views[:idx:idx], c.views[idx+1:]...)
+		c.unlinkViewLocked(v)
 		c.evictions++
 		toClose = c.retireViewLocked(v, toClose)
 	}
@@ -419,32 +639,42 @@ func (c *Catalog) retireViewLocked(v *view, toClose []backend.ReadView) []backen
 	v.retired = true
 	if v.refs > 0 {
 		c.retired[v] = struct{}{}
+		c.retiredViewAttBytes += v.attBytes
+		if len(v.pending) > 0 {
+			c.retiredLive[v] = struct{}{}
+		}
 		return toClose
 	}
+	// leaves the accounting now; closed outside the lock
+	retireAccounting(v.reader)
 	return append(toClose, v.reader)
 }
 
 func (c *Catalog) cancelOldestLeasesLocked() {
 	// Leases are cancelled oldest-view-first; a lease on a retired view goes
-	// before one on a retained view.
-	for l := range c.leases {
-		if l.v.retired && l.ctx.Err() == nil {
-			l.cancel()
-			c.pressureKills++
-		}
+	// before one on a retained view. Only leases pressure has not dealt with yet are visited
+	// (each once): a view whose leases are all cancelled is skipped until a new lease pins it.
+	for v := range c.retiredLive {
+		c.cancelViewLeasesLocked(v)
+		delete(c.retiredLive, v)
 	}
 	if c.retainedBytesLocked() <= c.limits.RetentionBudgetBytes {
 		return
 	}
-	for _, v := range c.views {
-		for l := range c.leases {
-			if l.v == v && l.ctx.Err() == nil {
-				l.cancel()
-				c.pressureKills++
-			}
-		}
-		if v.refs > 0 {
-			return
+	// the oldest live pinned view: its leases are cancelled; if it has none left to cancel nothing
+	// else is touched (the pass is about draining the oldest pinned history)
+	if v := c.pinned.peek(); v != nil {
+		c.cancelViewLeasesLocked(v)
+	}
+}
+
+func (c *Catalog) cancelViewLeasesLocked(v *view) {
+	for l := range v.pending {
+		c.leaseVisits++
+		delete(v.pending, l)
+		if l.ctx.Err() == nil {
+			l.cancel()
+			c.pressureKills++
 		}
 	}
 }
@@ -477,25 +707,20 @@ func (c *Catalog) acquire(ctx context.Context, root []byte) (*Lease, error) {
 	}
 	var v *view
 	if root == nil {
-		if len(c.views) == 0 && !c.latestStale {
+		if c.nViews == 0 && !c.latestStale {
 			return nil, ErrNoFinalizedView
 		}
-		if c.latestStale || len(c.views) == 0 {
+		if c.latestStale || c.nViews == 0 {
 			return nil, ErrViewNotRetained
 		}
-		v = c.views[len(c.views)-1]
+		v = c.tail
 	} else {
-		for i := len(c.views) - 1; i >= 0; i-- {
-			if bytes.Equal(c.views[i].root, root) {
-				v = c.views[i]
-				break
-			}
-		}
+		v = c.byRoot[string(root)]
 		if v == nil {
 			return nil, ErrViewNotRetained
 		}
 	}
-	if len(v.atts) == 0 {
+	if v.attN == 0 {
 		return nil, ErrViewNotRetained
 	}
 	if len(c.leases) >= c.limits.MaxConcurrentPins {
@@ -504,12 +729,20 @@ func (c *Catalog) acquire(ctx context.Context, root []byte) (*Lease, error) {
 	if c.retainedBytesLocked() > c.limits.RetentionBudgetBytes {
 		return nil, ErrBusyBudget
 	}
-	att := v.atts[len(v.atts)-1]
+	att := v.attTail
 	lctx, cancel := context.WithTimeout(ctx, c.limits.MaxLeaseDuration)
 	l := &Lease{c: c, v: v, att: att, ctx: lctx, cancel: cancel}
 	v.refs++
 	att.refs++
+	if v.leases == nil {
+		v.leases = make(map[*Lease]struct{}, 1)
+		v.pending = make(map[*Lease]struct{}, 1)
+	}
+	v.leases[l] = struct{}{}
+	v.pending[l] = struct{}{}
+
 	c.leases[l] = struct{}{}
+	c.reclassLocked(v)
 	return l, nil
 }
 
@@ -517,15 +750,26 @@ func (c *Catalog) release(l *Lease) {
 	var toClose []backend.ReadView
 	c.mu.Lock()
 	delete(c.leases, l)
+	delete(l.v.leases, l)
+	delete(l.v.pending, l)
+	if len(l.v.pending) == 0 {
+		delete(c.retiredLive, l.v)
+	}
 	l.att.refs--
 	if l.att.refs == 0 {
-		delete(c.retiredAtts, l.att)
+		if _, ok := c.retiredAtts[l.att]; ok {
+			delete(c.retiredAtts, l.att)
+			c.retiredAttBytes -= l.att.bytes
+		}
 	}
 	l.v.refs--
 	if l.v.refs == 0 && l.v.retired {
 		delete(c.retired, l.v)
+		c.retiredViewAttBytes -= l.v.attBytes
+		retireAccounting(l.v.reader)
 		toClose = append(toClose, l.v.reader)
 	}
+	c.reclassLocked(l.v)
 	// A release can make an over-budget view evictable.
 	if !c.closed {
 		toClose = c.enforceLocked(toClose)
@@ -536,9 +780,10 @@ func (c *Catalog) release(l *Lease) {
 
 // settle closes readers that left the catalog, outside the lock, then re-runs
 // retention enforcement. Closing a reader can move its accounted charge onto an
-// older surviving (possibly pinned) reader; until the close the charge was not
-// visible, so pressure that appears only afterwards would otherwise go
-// unnoticed. Enforcement never closes a reader a lease still holds.
+// older surviving (possibly pinned) reader; readers leave the accounting when they
+// leave the catalog (retireAccounting) so that the transfer is already visible, and
+// enforcement is re-run once more after the closes for readers without that ability.
+// Enforcement never closes a reader a lease still holds.
 func (c *Catalog) settle(toClose []backend.ReadView) {
 	for len(toClose) > 0 {
 		closeAll(toClose)
@@ -565,10 +810,12 @@ func (c *Catalog) Close() error {
 	for l := range c.leases {
 		l.cancel()
 	}
-	for _, v := range c.views {
+	for v := c.head; v != nil; {
+		next := v.next
+		c.unlinkViewLocked(v)
 		toClose = c.retireViewLocked(v, toClose)
+		v = next
 	}
-	c.views = nil
 	c.mu.Unlock()
 	closeAll(toClose)
 	return nil
@@ -580,4 +827,96 @@ func closeAll(rs []backend.ReadView) {
 			_ = r.Close()
 		}
 	}
+}
+
+// viewHeap is a min-heap of views by publication order with O(log n) removal of any member.
+type viewHeap struct {
+	items []*view
+	idx   func(*view) *int
+}
+
+func (h *viewHeap) less(i, j int) bool { return h.items[i].seq < h.items[j].seq }
+
+func (h *viewHeap) swap(i, j int) {
+	h.items[i], h.items[j] = h.items[j], h.items[i]
+	*h.idx(h.items[i]) = i
+	*h.idx(h.items[j]) = j
+}
+
+func (h *viewHeap) up(i int) {
+	for i > 0 {
+		p := (i - 1) / 2
+		if !h.less(i, p) {
+			return
+		}
+		h.swap(i, p)
+		i = p
+	}
+}
+
+func (h *viewHeap) down(i int) {
+	n := len(h.items)
+	for {
+		l, r, m := 2*i+1, 2*i+2, i
+		if l < n && h.less(l, m) {
+			m = l
+		}
+		if r < n && h.less(r, m) {
+			m = r
+		}
+		if m == i {
+			return
+		}
+		h.swap(i, m)
+		i = m
+	}
+}
+
+func (h *viewHeap) push(v *view) {
+	if *h.idx(v) >= 0 {
+		return
+	}
+	h.items = append(h.items, v)
+	*h.idx(v) = len(h.items) - 1
+	h.up(len(h.items) - 1)
+}
+
+func (h *viewHeap) remove(v *view) {
+	i := *h.idx(v)
+	if i < 0 {
+		return
+	}
+	last := len(h.items) - 1
+	if i != last {
+		h.swap(i, last)
+	}
+	h.items[last] = nil
+	h.items = h.items[:last]
+	*h.idx(v) = -1
+	if i != last {
+		h.down(i)
+		h.up(i)
+	}
+}
+
+func (h *viewHeap) peek() *view {
+	if len(h.items) == 0 {
+		return nil
+	}
+	return h.items[0]
+}
+
+// AccountantFor returns WithAccountant(b) when the backend can total the retained bytes of its open
+// readers in O(1) (both the memory and the RocksDB backend do), and no option otherwise, so that
+// the catalog constructor can be given the backend whatever its type:
+//
+//	proofview.NewCatalog(limits, proofview.AccountantFor(backend))
+//
+// The catalog must own every reader the backend retains for the O(1) total to be the sum of the
+// catalog's readers (one catalog per backend).
+func AccountantFor(b any) Option {
+	if acc, ok := b.(backend.RetentionAccountant); ok {
+		return WithAccountant(acc)
+	}
+	return func(*Catalog) {}
 }
