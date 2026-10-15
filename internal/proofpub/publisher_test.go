@@ -198,9 +198,9 @@ func Test_Sink_LateViewAndRepeat(t *testing.T) {
 	require.Equal(t, repBytes, l2.UC(), "latest is the newest certification")
 	require.Equal(t, rep.Raw, l2.PartitionView())
 
-	// a state which is not retained is ignored without error
+	// a state which is not retained is reported (the caller keeps the fill retryable)
 	unknown := prooftest.New(t, 2, 5, prooftest.Hash("unknown"), 95)
-	require.NoError(t, e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, unknown, nil, 0, false)))
+	require.ErrorIs(t, e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, unknown, nil, 0, false)), proofview.ErrViewNotRetained)
 	require.Equal(t, repBytes, latest(t, e.cat).UC())
 }
 
@@ -217,4 +217,84 @@ func Test_UnsupportedBackend(t *testing.T) {
 	require.NoError(t, err)
 	defer cat.Close()
 	require.Nil(t, proofpub.New(cat, nil, 1, nil, nil, nil))
+}
+
+func commitEmpty(t testing.TB, b *smtbackend.MemoryBackend, block uint64) {
+	ctx := context.Background()
+	snap, err := b.CreateSnapshot(ctx)
+	require.NoError(t, err)
+	root, err := snap.RootHashRaw(ctx)
+	require.NoError(t, err)
+	require.NoError(t, snap.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: api.NewBigIntFromUint64(block), RootHash: root}))
+}
+
+// Different finalized empty rounds share one root. A historical block must never be
+// recreated from the current state, nor replace latest (codex review, major 2).
+func Test_HistoricalRetryWithSameRootNeverRegressesLatest(t *testing.T) {
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80))
+	root := commit(t, e.b, 1, 0, 20)
+	first, _ := finalizedBlock(t, 1, root, 80, true)
+	e.pub.PublishFinalized(t.Context(), first)
+
+	var head *models.Block
+	for n := uint64(2); n <= 18; n++ { // 17 views > the 16 retained: block 1 is evicted
+		commitEmpty(t, e.b, n)
+		head, _ = finalizedBlock(t, n, root, 80+n, false)
+		e.pub.PublishFinalized(t.Context(), head)
+	}
+	require.EqualValues(t, 18, latest(t, e.cat).Block().Number.Uint64())
+
+	e.pub.EnsurePublished(t.Context(), first) // historical retry, same root as the head
+	l := latest(t, e.cat)
+	require.EqualValues(t, 18, l.Block().Number.Uint64(), "latest must not regress to block 1")
+	require.Equal(t, []byte(head.UnicityCertificate), l.UC())
+	_, found := e.cat.BlockForRoot(root)
+	require.True(t, found)
+	id, _ := e.cat.BlockForRoot(root)
+	require.EqualValues(t, 18, id.Number.Uint64())
+
+	// the same applies to a strict publication of a block the backend is not at
+	e.pub.PublishFinalized(t.Context(), first)
+	_, err := e.cat.AcquireLatest(t.Context())
+	require.ErrorIs(t, err, proofview.ErrViewNotRetained, "a stale strict publication invalidates latest, it does not promote block 1")
+}
+
+func Test_StartupPublicationAllowsUnknownCommittedBlock(t *testing.T) {
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80))
+	// a restored memory backend knows its root but not its block number
+	ctx := context.Background()
+	snap, err := e.b.CreateSnapshot(ctx)
+	require.NoError(t, err)
+	var in []smtbackend.LeafInput
+	key := make([]byte, api.StateTreeKeyLengthBytes)
+	key[0] = 7
+	in = append(in, smtbackend.LeafInput{Key: key, Value: make([]byte, 32)})
+	res, err := snap.AddLeavesClassified(ctx, in)
+	require.NoError(t, err)
+	require.NoError(t, snap.Commit(ctx, smtbackend.CommitMetadata{RootHash: res.CandidateRoot}))
+	block, _ := finalizedBlock(t, 5, res.CandidateRoot, 85, true)
+
+	e.pub.EnsurePublished(t.Context(), block)
+	_, err = e.cat.AcquireLatest(t.Context())
+	require.ErrorIs(t, err, proofview.ErrNoFinalizedView, "ordinary retries need a known committed block")
+
+	e.pub.EnsurePublishedAtStartup(t.Context(), block)
+	require.Equal(t, res.CandidateRoot, latest(t, e.cat).Root())
+}
+
+func Test_Sink_ReturnsAttachmentFailures(t *testing.T) {
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80))
+	f := prooftest.New(t, 2, 1, prooftest.Hash("nothing retained"), 80)
+	err := e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, f, f.Raw, 0, false))
+	require.ErrorIs(t, err, proofview.ErrViewNotRetained)
+	err = e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindFinalized, f, f.Raw, 1, true))
+	require.ErrorIs(t, err, proofview.ErrViewNotRetained)
+
+	root := commit(t, e.b, 1, 0, 20)
+	block, bf := finalizedBlock(t, 1, root, 80, false)
+	e.pub.PublishFinalized(t.Context(), block)
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.Error(t, e.pub.PublishProofMaterial(cancelled, material(t, proofmaterial.KindFinalized, bf, bf.Raw, 1, true)))
+	require.NoError(t, e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindFinalized, bf, bf.Raw, 1, true)))
 }

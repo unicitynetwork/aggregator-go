@@ -1318,6 +1318,9 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 			if err := LoadRecoveredNodesIntoBackend(activeCtx, rm.logger, rm.storage, rm.smtBackend, recoveryResult.BlockNumber, recoveryResult.StateIDs); err != nil {
 				return fmt.Errorf("failed to load recovered nodes into SMT: %w", err)
 			}
+			rm.finalizationMu.Lock()
+			rm.publishRecoveredBlock(activeCtx, recoveryResult.BlockNumber)
+			rm.finalizationMu.Unlock()
 		}
 	}
 
@@ -1846,5 +1849,22 @@ func (rm *RoundManager) publishStartupView(ctx context.Context) {
 		}
 		return
 	}
-	rm.proofPub.EnsurePublished(ctx, latest)
+	rm.proofPub.EnsurePublishedAtStartup(ctx, latest)
+}
+
+// publishRecoveredBlock publishes a block finalized by recovery once the backend and
+// storage agree on it. The caller holds finalizationMu (commit ordering). If the block
+// cannot be published, latest is invalidated rather than left at an older block.
+func (rm *RoundManager) publishRecoveredBlock(ctx context.Context, blockNumber *api.BigInt) {
+	if rm.proofPub == nil || blockNumber == nil {
+		return
+	}
+	block, err := rm.storage.BlockStorage().GetByNumber(ctx, blockNumber)
+	if err != nil || block == nil {
+		rm.logger.WithContext(ctx).Warn("Recovered block cannot be loaded for proof view publication",
+			"blockNumber", blockNumber.String())
+		rm.proofPub.InvalidateLatest()
+		return
+	}
+	rm.proofPub.PublishFinalized(ctx, block)
 }

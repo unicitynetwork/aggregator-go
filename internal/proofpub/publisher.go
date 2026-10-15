@@ -33,6 +33,7 @@ const (
 	ResultNoCert       = "no_certificate"
 	ResultRetainFailed = "retain_failed"
 	ResultRootMismatch = "root_mismatch"
+	ResultStaleBlock   = "stale_block"
 	ResultRejected     = "rejected"
 	ResultUnsupported  = "unsupported_backend"
 	ResultAttached     = "attached"
@@ -44,6 +45,7 @@ const (
 type Publisher struct {
 	catalog  *proofview.Catalog
 	retainer smtbackend.ReadViewRetainer
+	backend  smtbackend.Backend
 	lineage  []byte
 	// partition is used to re-validate stored partition views against their UC
 	// before publication (restored material is never trusted blindly).
@@ -60,7 +62,7 @@ func New(catalog *proofview.Catalog, backend smtbackend.Backend, partition types
 	if !ok || catalog == nil {
 		return nil
 	}
-	return &Publisher{catalog: catalog, retainer: retainer, partition: partition, topology: topology, lineage: append([]byte(nil), configLineage...), log: log}
+	return &Publisher{catalog: catalog, retainer: retainer, backend: backend, partition: partition, topology: topology, lineage: append([]byte(nil), configLineage...), log: log}
 }
 
 // Catalog returns the catalog (nil for a nil publisher).
@@ -76,17 +78,31 @@ func (p *Publisher) Catalog() *proofview.Catalog {
 // committed: if it cannot publish, the latest published view would be older than the
 // local head, so latest is marked unavailable.
 func (p *Publisher) PublishFinalized(ctx context.Context, block *models.Block) {
-	p.publish(ctx, block, true)
+	p.publish(ctx, block, true, false)
 }
 
 // EnsurePublished publishes the committed state for the block when it is the
 // backend's current state (startup, retries, follower replay). A failure leaves the
 // catalog untouched: the state may legitimately have moved on.
 func (p *Publisher) EnsurePublished(ctx context.Context, block *models.Block) {
-	p.publish(ctx, block, false)
+	p.publish(ctx, block, false, false)
 }
 
-func (p *Publisher) publish(ctx context.Context, block *models.Block, strict bool) {
+// EnsurePublishedAtStartup is EnsurePublished for a freshly restored backend which does
+// not know its committed block number: the caller has verified that the restored root is
+// the latest finalized block's root. It must only be given that latest block.
+func (p *Publisher) EnsurePublishedAtStartup(ctx context.Context, latest *models.Block) {
+	p.publish(ctx, latest, false, true)
+}
+
+// InvalidateLatest makes latest unavailable (state advanced but could not be published).
+func (p *Publisher) InvalidateLatest() {
+	if p != nil {
+		p.catalog.MarkLatestUnavailable()
+	}
+}
+
+func (p *Publisher) publish(ctx context.Context, block *models.Block, strict, unknownCommittedOK bool) {
 	if p == nil {
 		return
 	}
@@ -108,6 +124,22 @@ func (p *Publisher) publish(ctx context.Context, block *models.Block, strict boo
 	}
 	if len(block.UnicityCertificate) == 0 {
 		fail(ResultNoCert, nil)
+		return
+	}
+	// The block must be the one the backend is committed at: a historical block whose
+	// root merely equals the current one (eg consecutive empty rounds) must never be
+	// recreated as a view, nor replace latest. Callers hold the commit ordering lock.
+	st, err := p.backend.CommittedState(ctx)
+	if err != nil {
+		fail(ResultRetainFailed, err)
+		return
+	}
+	switch {
+	case st.BlockNumber != nil && st.BlockNumber.Cmp(block.Index.Int) != 0:
+		fail(ResultStaleBlock, nil)
+		return
+	case st.BlockNumber == nil && !unknownCommittedOK:
+		fail(ResultStaleBlock, nil)
 		return
 	}
 	rv, err := p.retainer.RetainReadView(ctx)
@@ -157,7 +189,8 @@ func (p *Publisher) revalidatedView(ctx context.Context, block *models.Block) []
 // PublishProofMaterial implements proofmaterial.Sink: it attaches accepted
 // certifications (finalized-from-recovery with a late view, repeat/timeout UCs,
 // duplicate deliveries that bring a view) to the retained finalized state they
-// certify. It neither commits nor advances state, and never errors.
+// certify. It neither commits nor advances state. A missing retained state or a
+// rejected attachment is returned so the caller can retry on a later delivery.
 func (p *Publisher) PublishProofMaterial(ctx context.Context, m *proofmaterial.Material) error {
 	if p == nil || m == nil || m.UC == nil || m.UC.InputRecord == nil {
 		return nil
@@ -170,7 +203,7 @@ func (p *Publisher) PublishProofMaterial(ctx context.Context, m *proofmaterial.M
 		var ok bool
 		if id, ok = p.catalog.BlockForRoot(root); !ok {
 			metrics.ProofViewPublicationTotal.WithLabelValues(ResultAttachMiss).Inc()
-			return nil
+			return proofview.ErrViewNotRetained
 		}
 	}
 	err := p.catalog.AttachCertification(ctx, id, root, proofview.Certification{UC: m.UCBytes, PartitionView: m.PartitionView})
@@ -181,9 +214,10 @@ func (p *Publisher) PublishProofMaterial(ctx context.Context, m *proofmaterial.M
 		metrics.ProofViewPublicationTotal.WithLabelValues(ResultAttachMiss).Inc()
 	default:
 		metrics.ProofViewPublicationTotal.WithLabelValues(ResultAttachFailed).Inc()
-		p.log.WithContext(ctx).Warn("Attaching certification to retained view failed", "kind", m.Kind.String(), "error", err.Error())
 	}
-	return nil
+	// The error goes back to the BFT client, which only logs it (certification is never
+	// failed) but keeps the sidecar fill retryable for later duplicate deliveries.
+	return err
 }
 
 var _ proofmaterial.Sink = (*Publisher)(nil)

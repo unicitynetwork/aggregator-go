@@ -6,6 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/proofpub"
+	"github.com/unicitynetwork/aggregator-go/internal/proofview"
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -294,4 +298,62 @@ func Test_ProofTopologyFromConfig(t *testing.T) {
 		_, ok := p.Topology(prooftest.Partition)
 		require.True(t, ok)
 	})
+}
+
+// Integration with the real publisher: a fill rejected because the view is not retained
+// yet stays retryable; once the state is published, a duplicate attaches the sidecar
+// (codex review of A4, major 3).
+func Test_ProofMaterial_FillRetriedUntilViewRetained(t *testing.T) {
+	ctx := t.Context()
+	backend := smtbackend.NewMemoryBackend(smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)))
+	snap, err := backend.CreateSnapshot(ctx)
+	require.NoError(t, err)
+	key := make([]byte, api.StateTreeKeyLengthBytes)
+	key[0] = 9
+	res, err := snap.AddLeavesClassified(ctx, []smtbackend.LeafInput{{Key: key, Value: make([]byte, 32)}})
+	require.NoError(t, err)
+	root := res.CandidateRoot
+	require.NoError(t, snap.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: api.NewBigIntFromUint64(7), RootHash: root}))
+
+	f := prooftest.New(t, 2, 7, root, 80)
+	catalog, err := proofview.NewCatalog(proofview.DefaultLimits())
+	require.NoError(t, err)
+	defer catalog.Close()
+	log, err := logger.New("error", "json", "", false)
+	require.NoError(t, err)
+	pub := proofpub.New(catalog, backend, prooftest.Partition, f.Provider(t), nil, log)
+	require.NotNil(t, pub)
+
+	rm := &stubRoundManager{}
+	c, _ := newProofClient(t, rm, f)
+	c.SetProofMaterialSink(pub)
+	proposeBlock(c, 7, root)
+	tr := &certification.TechnicalRecord{Round: 8, Epoch: 1}
+	require.NoError(t, c.handleUnicityCertificate(ctx, f.UC, tr)) // accepted; nothing retained yet
+
+	c.stagePartitionView(ctx, response(f, f.Raw))
+	require.NoError(t, c.handleUnicityCertificate(ctx, f.UC, tr))
+	c.publishSidecarFill(ctx, f.UC)
+	_, err = catalog.AcquireLatest(ctx)
+	require.ErrorIs(t, err, proofview.ErrNoFinalizedView)
+
+	// the finalized state becomes retained (without the view)
+	_, ucBytes, err := proofmaterial.DigestOfUC(f.UC)
+	require.NoError(t, err)
+	block := models.NewBlock(api.NewBigIntFromUint64(7), "unicity", 0, "1.0", "mainnet", api.NewHexBytes(root), nil, api.NewHexBytes(ucBytes), 1)
+	block.Finalized = true
+	pub.PublishFinalized(ctx, block)
+	l, err := catalog.AcquireLatest(ctx)
+	require.NoError(t, err)
+	require.Nil(t, l.PartitionView())
+	l.Release()
+
+	// a later duplicate delivers the sidecar
+	require.NoError(t, c.handleUnicityCertificate(ctx, f.UC, tr))
+	c.publishSidecarFill(ctx, f.UC)
+	l, err = catalog.AcquireLatest(ctx)
+	require.NoError(t, err)
+	defer l.Release()
+	require.Equal(t, f.Raw, l.PartitionView(), "the failed fill was retried and attached")
+	require.Len(t, rm.finalizedBlocks, 1, "no re-execution")
 }
