@@ -2,14 +2,18 @@ package mongodb
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go/modules/mongodb"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/event"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
@@ -19,6 +23,12 @@ import (
 
 // setupAggregatorRecordTestDB creates a test database connection using Testcontainers
 func setupAggregatorRecordTestDB(t *testing.T) *mongo.Database {
+	return setupAggregatorRecordTestDBWithOptions(t)
+}
+
+// setupAggregatorRecordTestDBWithOptions is setupAggregatorRecordTestDB with
+// extra client options (for example a command monitor).
+func setupAggregatorRecordTestDBWithOptions(t *testing.T, extra ...*options.ClientOptions) *mongo.Database {
 	ctx := context.Background()
 
 	// Create MongoDB container
@@ -34,7 +44,7 @@ func setupAggregatorRecordTestDB(t *testing.T) *mongo.Database {
 	}
 
 	// Connect to MongoDB
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(connStr))
+	client, err := mongo.Connect(ctx, append([]*options.ClientOptions{options.Client().ApplyURI(connStr)}, extra...)...)
 	if err != nil {
 		t.Fatalf("Failed to connect to MongoDB: %v", err)
 	}
@@ -405,4 +415,118 @@ func TestAggregatorRecordStorage_RoundTrip(t *testing.T) {
 	require.NotNil(t, retrieved)
 	require.Equal(t, record.StateID, retrieved.StateID)
 	require.Equal(t, record.CertificationData.SourceStateHash, retrieved.CertificationData.SourceStateHash)
+}
+
+func TestAggregatorRecordStorage_BatchedSizesAndRecords(t *testing.T) {
+	db := setupAggregatorRecordTestDB(t)
+	storage := NewAggregatorRecordStorage(db)
+	ctx := context.Background()
+	require.NoError(t, storage.CreateIndexes(ctx))
+
+	// 300 finalized records (two chunks), one proposed-only, one unknown
+	var recs []*models.AggregatorRecord
+	var ids []api.StateID
+	for i := 0; i < 300; i++ {
+		hexID := testStateIDHex(fmt.Sprintf("%04x", 0x1000+i))
+		recs = append(recs, createTestAggregatorRecord(hexID, 720, int64(i)))
+		ids = append(ids, api.RequireNewImprintV2(hexID))
+	}
+	proposed := testStateIDHex("0f12")
+	recs = append(recs, createTestAggregatorRecord(proposed, 721, 0))
+	require.NoError(t, storage.StoreBatch(ctx, recs))
+	storeTestBlock(t, ctx, db, 720, true)
+	storeTestBlock(t, ctx, db, 721, false)
+
+	query := append(append([]api.StateID{}, ids...), api.RequireNewImprintV2(proposed), api.RequireNewImprintV2(testStateIDHex("0fff")))
+
+	sizes, err := storage.GetStoredSizesByStateIDs(ctx, query)
+	require.NoError(t, err)
+	require.Len(t, sizes, 300, "only finalized records, unknown and proposed-only are absent")
+	loaded, err := storage.GetFinalizedByStateIDs(ctx, query)
+	require.NoError(t, err)
+	require.Len(t, loaded, 300)
+
+	for _, id := range ids {
+		rec := loaded[id.String()]
+		require.NotNil(t, rec, id.String())
+		require.Equal(t, id, rec.StateID)
+		// the size is the BSON size of the stored document, read without decoding it
+		var raw bson.Raw
+		require.NoError(t, db.Collection(aggregatorRecordCollection).FindOne(ctx, bson.M{"stateId": id.String()}).Decode(&raw))
+		require.EqualValues(t, len(raw), sizes[id.String()])
+	}
+	_, ok := sizes[api.RequireNewImprintV2(proposed).String()]
+	require.False(t, ok)
+
+	none, err := storage.GetStoredSizesByStateIDs(ctx, nil)
+	require.NoError(t, err)
+	require.Empty(t, none)
+}
+
+// The number of database commands of a batched lookup is a function of the number
+// of 256-ID chunks only, never of the number of IDs: exactly one aggregate per
+// chunk for the size projection and one per chunk for the record load, and no
+// getMore (the first reply exhausts the cursor, including above the default
+// first batch of 101 documents). Every command is counted except the driver's
+// connection and session housekeeping.
+func TestAggregatorRecordStorage_BatchedLookupCommandCounts(t *testing.T) {
+	var mu sync.Mutex
+	counts := map[string]int{}
+	monitor := &event.CommandMonitor{Started: func(_ context.Context, e *event.CommandStartedEvent) {
+		switch e.CommandName {
+		case "hello", "isMaster", "ismaster", "endSessions", "saslStart", "saslContinue", "buildInfo":
+			return
+		}
+		mu.Lock()
+		counts[e.CommandName]++
+		mu.Unlock()
+	}}
+	db := setupAggregatorRecordTestDBWithOptions(t, options.Client().SetMonitor(monitor))
+	storage := NewAggregatorRecordStorage(db)
+	ctx := context.Background()
+	require.NoError(t, storage.CreateIndexes(ctx))
+
+	var recs []*models.AggregatorRecord
+	var ids []api.StateID
+	for i := 0; i < 600; i++ {
+		hexID := testStateIDHex(fmt.Sprintf("%04x", 0x2000+i))
+		recs = append(recs, createTestAggregatorRecord(hexID, 730, int64(i)))
+		ids = append(ids, api.RequireNewImprintV2(hexID))
+	}
+	require.NoError(t, storage.StoreBatch(ctx, recs))
+	storeTestBlock(t, ctx, db, 730, true)
+
+	snapshot := func() map[string]int {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make(map[string]int, len(counts))
+		for k, v := range counts {
+			out[k] = v
+		}
+		return out
+	}
+	delta := func(before map[string]int) map[string]int {
+		after := snapshot()
+		out := map[string]int{}
+		for k, v := range after {
+			if v != before[k] {
+				out[k] = v - before[k]
+			}
+		}
+		return out
+	}
+	// L = 100, 101 and 256 straddle the default first batch of 101 documents
+	for _, tc := range []struct{ ids, chunks int }{{1, 1}, {2, 1}, {16, 1}, {100, 1}, {101, 1}, {102, 1}, {256, 1}, {257, 2}, {512, 2}, {600, 3}} {
+		before := snapshot()
+		sizes, err := storage.GetStoredSizesByStateIDs(ctx, ids[:tc.ids])
+		require.NoError(t, err)
+		require.Len(t, sizes, tc.ids)
+		require.Equal(t, map[string]int{"aggregate": tc.chunks}, delta(before), "%d IDs: size projection commands", tc.ids)
+
+		before = snapshot()
+		loaded, err := storage.GetFinalizedByStateIDs(ctx, ids[:tc.ids])
+		require.NoError(t, err)
+		require.Len(t, loaded, tc.ids)
+		require.Equal(t, map[string]int{"aggregate": tc.chunks}, delta(before), "%d IDs: record load commands", tc.ids)
+	}
 }
