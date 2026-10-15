@@ -251,11 +251,14 @@ func checkParamsLimit(l MethodLimits, req *Request) *Error {
 	return nil
 }
 
-// writeLimitedResponse serializes the complete response first (one
-// allocation, no copy) and writes it only when it fits the limit.
+// writeLimitedResponse assembles the complete response and writes it only when
+// it fits the limit. A success whose result is BoundedJSON is built with the
+// output capped, counting the envelope and the ID, so an oversized result is
+// rejected before it is fully encoded; any other result is encoded with
+// json.Marshal (the existing path) and measured.
 func (s *Server) writeLimitedResponse(w http.ResponseWriter, response *Response, max int) {
-	data, err := json.Marshal(response)
-	if err == nil && len(data)+1 > max {
+	data, err := encodeLimited(response, max)
+	if tooLarge(err) {
 		n := max
 		data, err = json.Marshal(NewErrorResponse(
 			NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "response_bytes", false, &n), response.ID))
@@ -267,6 +270,35 @@ func (s *Server) writeLimitedResponse(w http.ResponseWriter, response *Response,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(append(data, '\n'))
+}
+
+// encodeLimited returns the response JSON without the trailing newline, or
+// ErrResponseTooLarge if the response plus the newline exceeds max.
+func encodeLimited(response *Response, max int) ([]byte, error) {
+	if bj, ok := response.Result.(BoundedJSON); ok && response.Error == nil {
+		id, err := json.Marshal(response.ID)
+		if err != nil {
+			return nil, err
+		}
+		const prefix = `{"jsonrpc":"2.0","result":`
+		suffix := append(append([]byte(`,"id":`), id...), '}')
+		// budget for the result: everything but the envelope and the newline
+		budget := max - len(prefix) - len(suffix) - 1
+		if budget < 0 {
+			return nil, ErrResponseTooLarge
+		}
+		buf := append(make([]byte, 0, 4096), prefix...)
+		buf, err = bj.AppendJSONBounded(buf, len(prefix)+budget)
+		if err != nil {
+			return nil, err
+		}
+		return append(buf, suffix...), nil
+	}
+	data, err := json.Marshal(response)
+	if err == nil && len(data)+1 > max {
+		return nil, ErrResponseTooLarge
+	}
+	return data, err
 }
 
 // processRequest processes a JSON-RPC request

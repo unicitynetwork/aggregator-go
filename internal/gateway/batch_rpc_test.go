@@ -1,12 +1,14 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -202,4 +204,58 @@ func TestBatchRPC_InvalidEnvelopeIsStructured(t *testing.T) {
 	// legacy IDs still decode as before (float conversion included)
 	_, body = postRPC(t, rpc, `{"jsonrpc":"2.0","id":9007199254740993,"method":"nope","params":{}}`)
 	require.Contains(t, body, `"id":9007199254740992`)
+}
+
+func bigProofs(n, witnessBytes int) []*api.GetInclusionProofResponseV2 {
+	proofs := make([]*api.GetInclusionProofResponseV2, n)
+	for i := range proofs {
+		p := v2Fixture()
+		p.InclusionProof.CertificationData.Witness = bytes.Repeat([]byte{byte(i)}, witnessBytes)
+		proofs[i] = p
+	}
+	return proofs
+}
+
+// Regression: an oversized result is rejected while it is being assembled, with
+// output capped; the previous writer encoded all of it first.
+func TestBatchRPC_OversizedResponseIsRejectedWithBoundedAllocation(t *testing.T) {
+	// 256 proofs with ~128 KiB witnesses: ~64 MiB of hex JSON against the 8 MiB limit
+	resp := &api.GetInclusionProofsResponseV1{Proofs: bigProofs(256, 128<<10), PartitionView: []byte{1, 2, 3}}
+	handler := func(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) { return resp, nil }
+	rpc := batchServer(t, config.ShardingModeStandalone, handler)
+	body := `{"jsonrpc":"2.0","id":9,"method":"get_inclusion_proofs.v1","params":{"stateIds":["` + strings.Repeat("ab", 32) + `"]}}`
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, got := postRPC(t, rpc, body)
+	runtime.ReadMemStats(&after)
+	boundedAllocated := after.TotalAlloc - before.TotalAlloc
+	require.Equal(t, `{"jsonrpc":"2.0","error":{"code":-32007,"message":"Limit exceeded","data":{"reason":"limit_exceeded","detail":"response_bytes","retryable":false,"limit":8388608}},"id":9}`+"\n", got)
+
+	// encoding the whole result first (the previous writer) costs several times more
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	full, err := json.Marshal(jsonrpc.NewResponse(resp, 9))
+	require.NoError(t, err)
+	runtime.ReadMemStats(&after)
+	fullAllocated := after.TotalAlloc - before.TotalAlloc
+	require.Greater(t, len(full), 4*api.InclusionProofsMaxResponseBytes)
+
+	allocated := boundedAllocated
+	require.Less(t, allocated*4, fullAllocated, "bounded writer allocated %d bytes, full encoding %d", allocated, fullAllocated)
+}
+
+// The bounded writer is byte-identical to json.Marshal of the response, and the
+// limit counts the envelope, ID and newline exactly.
+func TestBatchRPC_BoundedWriterMatchesMarshalAndLimitIsExact(t *testing.T) {
+	resp := &api.GetInclusionProofsResponseV1{Proofs: bigProofs(3, 100), PartitionView: []byte{9, 8, 7}}
+	handler := func(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) { return resp, nil }
+	rpc := batchServer(t, config.ShardingModeStandalone, handler)
+	call := `{"jsonrpc":"2.0","id":"x","method":"get_inclusion_proofs.v1","params":{"stateIds":["` + strings.Repeat("ab", 32) + `"]}}`
+	_, got := postRPC(t, rpc, call)
+	want, err := json.Marshal(jsonrpc.NewResponse(resp, json.RawMessage(`"x"`)))
+	require.NoError(t, err)
+	require.Equal(t, string(want)+"\n", got)
+	require.Contains(t, got, `"partitionView":"090807"`)
 }

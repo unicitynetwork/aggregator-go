@@ -2,6 +2,7 @@ package jsonrpc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -177,4 +178,24 @@ type MethodLimits struct {
 	// envelope and request ID. An oversized success is replaced by a
 	// limit_exceeded/response_bytes error; nothing partial is ever written.
 	MaxResponseBytes int
+}
+
+// ErrResponseTooLarge is returned by BoundedJSON implementations that stopped
+// before producing more than the allowed bytes.
+var ErrResponseTooLarge = errors.New("jsonrpc: response exceeds limit")
+
+// tooLarge reports whether err is ErrResponseTooLarge or any error exposing
+// ResponseTooLarge() bool (so result types need not import this package).
+func tooLarge(err error) bool {
+	var t interface{ ResponseTooLarge() bool }
+	return errors.Is(err, ErrResponseTooLarge) || (errors.As(err, &t) && t.ResponseTooLarge())
+}
+
+// BoundedJSON is implemented by results that can be encoded without first
+// materializing more than max bytes: AppendJSONBounded appends the result's JSON
+// to dst, and returns ErrResponseTooLarge (or an error with ResponseTooLarge() true) as soon as the output (len(dst) after
+// appending) would exceed max, having allocated at most about max bytes plus one
+// element. The output must equal json.Marshal of the value.
+type BoundedJSON interface {
+	AppendJSONBounded(dst []byte, max int) ([]byte, error)
 }
