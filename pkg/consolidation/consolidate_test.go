@@ -27,7 +27,7 @@ func TestConsolidate_HappyPath(t *testing.T) {
 	s := f.session()
 	out, err := f.consolidate(s)
 	require.NoError(t, err)
-	require.Equal(t, Counters{QuorumChecks: 1, BodyChecks: 2, LeafChecks: 2, EvidenceQuorumChecks: 2}, s.Counters())
+	require.Equal(t, Counters{QuorumChecks: 1, BodyChecks: 2, LeafChecks: 2, EvidenceQuorumChecks: 2}, verificationCounters(s.Counters()))
 	require.Equal(t, f.round, out.RootRound)
 	require.Len(t, out.Shards, 2)
 

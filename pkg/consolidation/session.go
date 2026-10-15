@@ -1,10 +1,12 @@
 package consolidation
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -27,6 +29,24 @@ type Counters struct {
 	// authenticate the original evidence for R_min. They are reported
 	// separately from the output-bundle QuorumChecks.
 	EvidenceQuorumChecks int
+
+	// Hardware-independent work metrics (asymptotic regression tests count these):
+
+	// TopologyValidations is the number of policy topology validations (canonical
+	// ordering, completeness, digest). One per Session, whatever the input size.
+	TopologyValidations int
+	// UCDecodes is the number of unicity certificate decodes of original evidence and
+	// source responses; evidence UCs are decoded once per distinct complete byte string.
+	UCDecodes int
+	// EvidenceBodyChecks is the number of distinct evidence UC body verifications
+	// (structure, shard and partition path to the seal hash).
+	EvidenceBodyChecks int
+	// ShardLeafProbes is the number of authenticated view leaves examined by shard
+	// lookups: one hash probe per lookup with the shard index.
+	ShardLeafProbes int
+	// UCDerivations is the number of shard certificates derived from the authenticated
+	// view: only the m participating shards, lazily.
+	UCDerivations int
 }
 
 // Session is the operation scope of one consolidation. It memoizes successful
@@ -37,9 +57,14 @@ type Session struct {
 	resolver TrustBaseResolver
 	epochEnd EpochEndResolver
 
+	// computed once at construction from the defensive policy snapshot
+	policyID     []byte
+	pinnedShards map[string]struct{} // canonical membership index of a pinned topology
+
 	mu       sync.Mutex
 	seals    map[string]struct{}
 	bodies   map[string]struct{}
+	evUCs    map[string]*types.UnicityCertificate // verified evidence UCs by complete canonical bytes
 	counters Counters
 }
 
@@ -60,10 +85,21 @@ func NewSession(policy Policy, resolver TrustBaseResolver, opts ...SessionOption
 	if resolver == nil {
 		return nil, fail(OutcomeInvalidInput, -1, nil, "trust base resolver is required")
 	}
-	if err := policy.validate(); err != nil {
+	policy = policy.clone() // later changes by the caller never affect the session
+	var topoOps int
+	order, err := policy.analyze(&topoOps)
+	if err != nil {
 		return nil, err
 	}
-	s := &Session{policy: policy, resolver: resolver, seals: map[string]struct{}{}, bodies: map[string]struct{}{}}
+	s := &Session{policy: policy, resolver: resolver, seals: map[string]struct{}{}, bodies: map[string]struct{}{},
+		evUCs: map[string]*types.UnicityCertificate{}, policyID: policy.idFor(order)}
+	s.counters.TopologyValidations = topoOps
+	if policy.pinned() {
+		s.pinnedShards = make(map[string]struct{}, len(order))
+		for _, id := range order {
+			s.pinnedShards[id.Key()] = struct{}{}
+		}
+	}
 	for _, o := range opts {
 		o(s)
 	}
@@ -132,7 +168,7 @@ func (s *Session) verifySeal(seal *types.UnicitySeal, count func(*Counters)) err
 			return &sealError{fmt.Errorf("seal round %d is at or after the start of the next epoch (round %d)", seal.RootChainRoundNumber, next)}
 		}
 	}
-	key := sealKey(sealBytes, authority, s.policy.id())
+	key := sealKey(sealBytes, authority, s.policyID)
 	if s.seen(s.seals, key) {
 		return nil
 	}
@@ -212,27 +248,44 @@ func (p Policy) pinned() bool {
 	return len(p.Topology.Scheme) > 0 || len(p.Topology.ShardConfHashes) > 0
 }
 
-func (p Policy) validate() error {
+// clone is a deep copy.
+func (p Policy) clone() Policy {
+	c := p
+	c.ID = append([]byte(nil), p.ID...)
+	c.Topology.Scheme = slices.Clone(p.Topology.Scheme)
+	if p.Topology.ShardConfHashes != nil {
+		c.Topology.ShardConfHashes = make(map[string][]byte, len(p.Topology.ShardConfHashes))
+		for k, v := range p.Topology.ShardConfHashes {
+			c.Topology.ShardConfHashes[k] = bytes.Clone(v)
+		}
+	}
+	return c
+}
+
+// analyze validates the policy and returns the canonical shard order of a pinned
+// topology; it is the only place the topology is validated and sorted (once per Session).
+func (p Policy) analyze(ops *int) ([]types.ShardID, error) {
 	if p.PartitionID == 0 {
-		return fail(OutcomeInvalidInput, -1, nil, "policy partition ID is zero")
+		return nil, fail(OutcomeInvalidInput, -1, nil, "policy partition ID is zero")
 	}
 	if !p.pinned() {
-		return nil
+		return nil, nil
 	}
+	*ops++
 	order, err := types.CanonicalShardOrder(p.Topology.Scheme)
 	if err != nil {
-		return fail(OutcomeInvalidInput, -1, err, "policy topology")
+		return nil, fail(OutcomeInvalidInput, -1, err, "policy topology")
 	}
 	for _, id := range order {
 		if h := p.Topology.ShardConfHashes[id.Key()]; len(h) != sha256.Size {
-			return fail(OutcomeInvalidInput, -1, nil, "policy lacks configuration hash of shard %q", id)
+			return nil, fail(OutcomeInvalidInput, -1, nil, "policy lacks configuration hash of shard %q", id)
 		}
 	}
-	return nil
+	return order, nil
 }
 
-// id returns the policy identity bytes; explicit ID or digest of partition and topology.
-func (p Policy) id() []byte {
+// idFor returns the policy identity bytes: explicit ID, partition and the canonical topology.
+func (p Policy) idFor(order []types.ShardID) []byte {
 	var b []byte
 	b = appendLP(b, p.ID)
 	b = binary.BigEndian.AppendUint64(b, uint64(p.PartitionID))
@@ -242,7 +295,6 @@ func (p Policy) id() []byte {
 		return h[:]
 	}
 	b = append(b, 1)
-	order, _ := types.CanonicalShardOrder(p.Topology.Scheme)
 	for _, id := range order {
 		b = appendLP(b, []byte(id.String()))
 		b = appendLP(b, p.Topology.ShardConfHashes[id.Key()])

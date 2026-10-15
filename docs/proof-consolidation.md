@@ -118,3 +118,22 @@ latency numbers. The stop-writers negative control fails as intended
 (`CONSOLIDATION_E2E_NEGATIVE=stop-writers`: "shard 0 accepted only 0 writes"). The topology file is the current source of the
 admitted configuration hashes; the e2e consumes it only through the CLI config, so it keeps working when the file becomes
 optional (the hashes can then come from the shard configurations directly).
+
+## Work bounds (asymptotic regression tests)
+
+`Counters` and `Stats` expose hardware-independent work metrics; the tests sweep the parameter and assert the bound
+(`pkg/consolidation/client/asymptotic_test.go`, `router_test.go`, `pkg/consolidation/session_internal_test.go`):
+
+| Work | Bound | Metric |
+|---|---|---|
+| policy topology validation, canonical order, digest | once per `Session` (defensive snapshot), independent of L, S | `TopologyValidations == 1` |
+| evidence UC decode + body check | once per distinct complete UC byte string (E distinct certificates), not per leaf | `UCDecodes`, `EvidenceBodyChecks` |
+| per-input rules (binding, expiry, reference time, shard membership, leaf path) | O(1) per input, never memoized | `LeafChecks == L` |
+| seal quorum | one per distinct complete seal + authority + policy | `QuorumChecks`, `EvidenceQuorumChecks` |
+| shard lookups in the authenticated view | one hash probe per lookup (index built once, O(S)) | `ShardLeafProbes` |
+| derived shard certificates | only the m participating shards, lazily | `UCDerivations == m` |
+| endpoint routing | binary trie, O(shard depth) per input (log S balanced, ≤ key width) | `Stats.RoutingVisits == Σ (depth+1)` |
+
+Memoization keys commit to the complete canonical bytes (and, for seals, the resolved authority content and policy
+identity); the authority/epoch-end resolution still runs on every seal use. The trie and the shard index are checked
+against a linear-scan reference model.

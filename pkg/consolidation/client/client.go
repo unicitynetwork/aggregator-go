@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,6 +94,9 @@ type Stats struct {
 	PartitionViewBytes int
 	// ResponseBytes is the total size of the response bodies.
 	ResponseBytes int
+	// RoutingVisits is the number of routing trie nodes visited to route the items
+	// (O(L · shard depth)).
+	RoutingVisits int
 }
 
 // Result is a consolidated bundle with provenance and instrumentation.
@@ -109,9 +113,11 @@ type Position struct{ Shard, Proof int }
 
 // Client runs consolidation attempts. It is safe for concurrent use.
 type Client struct {
-	cfg   Config
-	http  *http.Client
-	order []types.ShardID // canonical order of the routable shards
+	cfg    Config
+	http   *http.Client
+	order  []types.ShardID // canonical order of the routable shards
+	router *router
+	rank   []int // canonical rank of every endpoint
 }
 
 // New validates the configuration and creates a client.
@@ -159,7 +165,20 @@ func New(cfg Config) (*Client, error) {
 	if h == nil {
 		h = &http.Client{}
 	}
-	return &Client{cfg: cfg, http: h, order: order}, nil
+	rt, err := newRouter(cfg.Endpoints)
+	if err != nil {
+		return nil, &Error{Kind: KindInput, Err: err}
+	}
+	// canonical rank of every endpoint (computed once)
+	pos := make(map[string]int, len(order))
+	for i, id := range order {
+		pos[id.Key()] = i
+	}
+	rank := make([]int, len(cfg.Endpoints))
+	for i, ep := range cfg.Endpoints {
+		rank[i] = pos[ep.ShardID.Key()]
+	}
+	return &Client{cfg: cfg, http: h, order: order, router: rt, rank: rank}, nil
 }
 
 // resolve runs trust resolution bounded by the attempt context.
@@ -240,7 +259,7 @@ func (c *Client) Consolidate(ctx context.Context, items []Item) (*Result, error)
 		}
 		return libError(err)
 	}
-	groups, err := c.group(items)
+	groups, routeVisits, err := c.group(items)
 	if err != nil {
 		return nil, err
 	}
@@ -263,6 +282,7 @@ func (c *Client) Consolidate(ctx context.Context, items []Item) (*Result, error)
 		return nil, err
 	}
 	var stats Stats
+	stats.RoutingVisits = routeVisits
 
 	// wave 1: the master's latest batch and the partition view
 	mg := groups[master]
@@ -336,40 +356,41 @@ func (c *Client) Consolidate(ctx context.Context, items []Item) (*Result, error)
 	return res, nil
 }
 
-// group routes every item to its shard endpoint, in canonical shard order.
-func (c *Client) group(items []Item) ([]*shardGroup, error) {
-	byShard := map[string]*shardGroup{}
+// group routes every item to its shard endpoint through the routing trie (O(shard depth)
+// per item), returning the participating shards in canonical shard order.
+func (c *Client) group(items []Item) ([]*shardGroup, int, error) {
+	visits := 0
+	byEp := map[int]*shardGroup{}
 	for i, it := range items {
 		if it.Request == nil || it.Proof == nil {
-			return nil, &Error{Kind: KindInput, Err: fmt.Errorf("item %d is incomplete", i)}
+			return nil, 0, &Error{Kind: KindInput, Err: fmt.Errorf("item %d is incomplete", i)}
 		}
 		key, err := it.Request.StateID.GetTreeKey()
 		if err != nil {
-			return nil, &Error{Kind: KindInput, Err: fmt.Errorf("item %d: %w", i, err)}
+			return nil, 0, &Error{Kind: KindInput, Err: fmt.Errorf("item %d: %w", i, err)}
 		}
-		var g *shardGroup
-		for _, ep := range c.cfg.Endpoints {
-			if ep.ShardID.Length() <= uint(len(key)*8) && ep.ShardID.Comparator()(key) {
-				if byShard[ep.ShardID.Key()] == nil {
-					byShard[ep.ShardID.Key()] = &shardGroup{ep: ep}
-				}
-				g = byShard[ep.ShardID.Key()]
-				break
-			}
+		ei, v := c.router.lookup(key)
+		visits += v
+		if ei < 0 {
+			return nil, 0, &Error{Kind: KindInput, Err: fmt.Errorf("item %d: no configured endpoint serves state %s", i, it.Request.StateID)}
 		}
+		g := byEp[ei]
 		if g == nil {
-			return nil, &Error{Kind: KindInput, Err: fmt.Errorf("item %d: no configured endpoint serves state %s", i, it.Request.StateID)}
+			g = &shardGroup{ep: c.cfg.Endpoints[ei]}
+			byEp[ei] = g
 		}
 		g.items = append(g.items, i)
 	}
-	order := c.order
-	var groups []*shardGroup
-	for _, id := range order {
-		if g := byShard[id.Key()]; g != nil {
-			groups = append(groups, g)
-		}
+	idx := make([]int, 0, len(byEp))
+	for ei := range byEp {
+		idx = append(idx, ei)
 	}
-	return groups, nil
+	sort.Slice(idx, func(a, b int) bool { return c.rank[idx[a]] < c.rank[idx[b]] }) // m log m
+	groups := make([]*shardGroup, 0, len(idx))
+	for _, ei := range idx {
+		groups = append(groups, byEp[ei])
+	}
+	return groups, visits, nil
 }
 
 func (c *Client) pickMaster(groups []*shardGroup, bound *consolidation.RootRoundBound) (int, error) {
