@@ -2,6 +2,7 @@ package round
 
 import (
 	"context"
+	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -56,7 +57,7 @@ func newRecoveryEnv(t *testing.T) *recoveryEnv {
 		logger:     log,
 		smtBackend: b,
 		storage:    &fixedStorage{bs: bs},
-		proofPub:   proofpub.New(cat, b, prooftest.Partition, nil, topo.Verifier(), log),
+		proofPub:   newPub(cat, b, topo, log),
 	}
 	return &recoveryEnv{rm: rm, cat: cat, bs: bs, b: b}
 }
@@ -132,4 +133,10 @@ func Test_RecoveredBlockWhichCannotBePublishedInvalidatesLatest(t *testing.T) {
 		_, err := e.cat.AcquireLatest(ctx)
 		require.ErrorIs(t, err, proofview.ErrViewNotRetained, "not served as block 2")
 	})
+}
+
+func newPub(cat *proofview.Catalog, b smtbackend.Backend, f *prooftest.Fixture, log *logger.Logger) *proofpub.Publisher {
+	p := proofpub.New(cat, b, prooftest.Partition, nil, log)
+	p.SetSealVerifier(f.Verifier())
+	return p
 }

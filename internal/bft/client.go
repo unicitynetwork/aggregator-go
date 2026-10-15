@@ -158,7 +158,7 @@ func NewBFTClient(
 		proofStaging:   proofmaterial.NewStaging(proofmaterial.DefaultStagingEntries),
 		published:      map[proofmaterial.Digest]bool{},
 	}
-	topo, err := ProofTopologyFromConfig(conf)
+	topo, err := proofTopologyFromConfig(conf)
 	if err != nil {
 		return nil, fmt.Errorf("invalid consolidation topology: %w", err)
 	}
@@ -813,18 +813,11 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 	return err
 }
 
-// SealVerifier returns the verifier used to authenticate partition views (and UCs) against
-// the trust bases of the configured network; stored views are re-authenticated with it
-// before publication.
-func (c *BFTClientImpl) SealVerifier(ctx context.Context) types.SealVerifier {
-	return c.authn.sealVerifier(ctx)
-}
-
-// ProofTopologyFromConfig derives the OPTIONAL independently pinned topology used to
+// proofTopologyFromConfig derives the OPTIONAL independently pinned topology used to
 // validate partition views more strictly (BFT_CONSOLIDATION_TOPOLOGY_FILE). Without it
 // views are authenticated by the seal alone: the scheme and every configuration hash are
 // the ones the root quorum signed. Returns nil when no pins are configured.
-func ProofTopologyFromConfig(conf *config.BFTConfig) (proofmaterial.TopologyProvider, error) {
+func proofTopologyFromConfig(conf *config.BFTConfig) (proofmaterial.TopologyProvider, error) {
 	if conf == nil || conf.ShardConf == nil || len(conf.ConsolidationShards) == 0 {
 		return nil, nil
 	}
@@ -849,6 +842,15 @@ func ProofTopologyFromConfig(conf *config.BFTConfig) (proofmaterial.TopologyProv
 		return nil, err
 	}
 	return t, nil
+}
+
+// ProofTopology returns the optional independently pinned topology (nil: none configured).
+func (c *BFTClientImpl) ProofTopology() proofmaterial.TopologyProvider { return c.proofTopology }
+
+// SealVerifier returns the client's trusted seal verifier (authority resolved from the
+// admitted trust history) for re-authenticating stored material.
+func (c *BFTClientImpl) SealVerifier(ctx context.Context) types.SealVerifier {
+	return c.authn.sealVerifier(ctx)
 }
 
 // SetProofMaterialSink sets the consumer of published proof material (A4 wires the

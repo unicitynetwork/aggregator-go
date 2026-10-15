@@ -44,9 +44,6 @@ const (
 	ResultAttachFailed = "attach_failed"
 )
 
-// SealVerifierFunc returns the verifier authenticating seals for the given operation.
-type SealVerifierFunc func(ctx context.Context) types.SealVerifier
-
 // Publisher owns publication for one local backend/shard.
 type Publisher struct {
 	catalog  *proofview.Catalog
@@ -56,19 +53,28 @@ type Publisher struct {
 	// before publication (restored material is never trusted blindly).
 	partition types.PartitionID
 	topology  proofmaterial.TopologyProvider
-	verifier  SealVerifierFunc
 	log       *logger.Logger
+	// sealVerifier authenticates stored views again (nil: stored views are not republished).
+	sealVerifier func(ctx context.Context) types.SealVerifier
 }
 
 // New returns a publisher, or nil when the backend cannot retain read views
 // (the batch API is then unavailable for this deployment). A nil *Publisher is
 // valid and does nothing.
-func New(catalog *proofview.Catalog, backend smtbackend.Backend, partition types.PartitionID, topology proofmaterial.TopologyProvider, verifier SealVerifierFunc, log *logger.Logger) *Publisher {
+func New(catalog *proofview.Catalog, backend smtbackend.Backend, partition types.PartitionID, topology proofmaterial.TopologyProvider, log *logger.Logger) *Publisher {
 	retainer, ok := backend.(smtbackend.ReadViewRetainer)
 	if !ok || catalog == nil {
 		return nil
 	}
-	return &Publisher{catalog: catalog, retainer: retainer, backend: backend, partition: partition, topology: topology, verifier: verifier, log: log}
+	return &Publisher{catalog: catalog, retainer: retainer, backend: backend, partition: partition, topology: topology, log: log}
+}
+
+// SetSealVerifier sets the trusted seal verifier used to re-authenticate stored
+// partition views before they are published again (the BFT client's verifier).
+func (p *Publisher) SetSealVerifier(f func(ctx context.Context) types.SealVerifier) {
+	if p != nil {
+		p.sealVerifier = f
+	}
 }
 
 // Catalog returns the catalog (nil for a nil publisher).
@@ -187,8 +193,13 @@ func (p *Publisher) revalidatedView(ctx context.Context, block *models.Block) []
 		return nil
 	}
 	var uc types.UnicityCertificate
-	if err := types.Cbor.Unmarshal(block.UnicityCertificate, &uc); err == nil && p.partition != 0 && p.verifier != nil {
-		if _, view, err := proofmaterial.ValidateView(block.PartitionView, &uc, p.partition, p.verifier(ctx), p.topology); err == nil {
+	var verifier types.SealVerifier
+	if p.sealVerifier != nil {
+		verifier = p.sealVerifier(ctx)
+	}
+	// fail closed: without an authenticating verifier a stored view is not republished
+	if err := types.Cbor.Unmarshal(block.UnicityCertificate, &uc); err == nil && p.partition != 0 && verifier != nil {
+		if _, view, err := proofmaterial.ValidateView(block.PartitionView, &uc, p.partition, verifier, p.topology); err == nil {
 			return view
 		} else {
 			p.log.WithContext(ctx).Warn("Dropping stored partition view which does not validate against its UC",

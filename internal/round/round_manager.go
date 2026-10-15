@@ -1811,15 +1811,12 @@ func (rm *RoundManager) initProofViews(cfg *config.Config, client *bft.BFTClient
 	if err != nil {
 		return fmt.Errorf("failed to create proof view catalog: %w", err)
 	}
-	topology, err := bft.ProofTopologyFromConfig(&cfg.BFT)
-	if err != nil {
-		return fmt.Errorf("invalid consolidation topology: %w", err)
-	}
-	rm.proofPub = proofpub.New(catalog, rm.smtBackend, cfg.BFT.ShardConf.PartitionID, topology, client.SealVerifier, rm.logger)
+	rm.proofPub = proofpub.New(catalog, rm.smtBackend, cfg.BFT.ShardConf.PartitionID, client.ProofTopology(), rm.logger)
 	if rm.proofPub == nil {
 		_ = catalog.Close()
 		return nil
 	}
+	rm.proofPub.SetSealVerifier(client.SealVerifier)
 	client.SetProofMaterialSink(rm.proofPub)
 	return nil
 }
