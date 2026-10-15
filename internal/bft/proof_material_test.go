@@ -262,7 +262,7 @@ func Test_ProofTopologyFromConfig(t *testing.T) {
 	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 3, PartitionID: prooftest.Partition, Epoch: 1}
 
 	t.Run("unsharded uses the own configuration hash", func(t *testing.T) {
-		p, err := proofTopologyFromConfig(&config.BFTConfig{ShardConf: pdr})
+		p, err := ProofTopologyFromConfig(&config.BFTConfig{ShardConf: pdr})
 		require.NoError(t, err)
 		topo, ok := p.Topology(prooftest.Partition)
 		require.True(t, ok)
@@ -273,7 +273,7 @@ func Test_ProofTopologyFromConfig(t *testing.T) {
 		a, _ := types.ShardID{}.Split()
 		sharded := *pdr
 		sharded.ShardID = a
-		p, err := proofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded})
+		p, err := ProofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded})
 		require.NoError(t, err)
 		require.Nil(t, p)
 	})
@@ -282,13 +282,13 @@ func Test_ProofTopologyFromConfig(t *testing.T) {
 		h := hex.EncodeToString(prooftest.Hash("c"))
 		sharded := *pdr
 		sharded.ShardID = a
-		_, err := proofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded,
+		_, err := ProofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded,
 			ConsolidationShards: []config.ConsolidationShard{{ShardID: a, ConfigHash: h}}})
 		require.Error(t, err, "incomplete scheme")
-		_, err = proofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded,
+		_, err = ProofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded,
 			ConsolidationShards: []config.ConsolidationShard{{ShardID: a, ConfigHash: h}, {ShardID: b, ConfigHash: "abcd"}}})
 		require.Error(t, err, "short hash")
-		p, err := proofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded,
+		p, err := ProofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded,
 			ConsolidationShards: []config.ConsolidationShard{{ShardID: a, ConfigHash: h}, {ShardID: b, ConfigHash: "0x" + h}}})
 		require.NoError(t, err)
 		_, ok := p.Topology(prooftest.Partition)

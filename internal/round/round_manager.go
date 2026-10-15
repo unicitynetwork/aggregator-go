@@ -1813,7 +1813,11 @@ func (rm *RoundManager) initProofViews(cfg *config.Config, client *bft.BFTClient
 	if err != nil {
 		return fmt.Errorf("failed to hash shard configuration: %w", err)
 	}
-	rm.proofPub = proofpub.New(catalog, rm.smtBackend, cfg.BFT.ShardConf.PartitionID, lineage, rm.logger)
+	topology, err := bft.ProofTopologyFromConfig(&cfg.BFT)
+	if err != nil {
+		return fmt.Errorf("invalid consolidation topology: %w", err)
+	}
+	rm.proofPub = proofpub.New(catalog, rm.smtBackend, cfg.BFT.ShardConf.PartitionID, topology, lineage, rm.logger)
 	if rm.proofPub == nil {
 		_ = catalog.Close()
 		return nil

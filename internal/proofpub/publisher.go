@@ -48,18 +48,19 @@ type Publisher struct {
 	// partition is used to re-validate stored partition views against their UC
 	// before publication (restored material is never trusted blindly).
 	partition types.PartitionID
+	topology  proofmaterial.TopologyProvider
 	log       *logger.Logger
 }
 
 // New returns a publisher, or nil when the backend cannot retain read views
 // (the batch API is then unavailable for this deployment). A nil *Publisher is
 // valid and does nothing.
-func New(catalog *proofview.Catalog, backend smtbackend.Backend, partition types.PartitionID, configLineage []byte, log *logger.Logger) *Publisher {
+func New(catalog *proofview.Catalog, backend smtbackend.Backend, partition types.PartitionID, topology proofmaterial.TopologyProvider, configLineage []byte, log *logger.Logger) *Publisher {
 	retainer, ok := backend.(smtbackend.ReadViewRetainer)
 	if !ok || catalog == nil {
 		return nil
 	}
-	return &Publisher{catalog: catalog, retainer: retainer, partition: partition, lineage: append([]byte(nil), configLineage...), log: log}
+	return &Publisher{catalog: catalog, retainer: retainer, partition: partition, topology: topology, lineage: append([]byte(nil), configLineage...), log: log}
 }
 
 // Catalog returns the catalog (nil for a nil publisher).
@@ -142,7 +143,7 @@ func (p *Publisher) revalidatedView(ctx context.Context, block *models.Block) []
 	}
 	var uc types.UnicityCertificate
 	if err := types.Cbor.Unmarshal(block.UnicityCertificate, &uc); err == nil && p.partition != 0 {
-		if _, view, err := proofmaterial.ValidateView(block.PartitionView, &uc, p.partition, nil); err == nil {
+		if _, view, err := proofmaterial.ValidateView(block.PartitionView, &uc, p.partition, p.topology); err == nil {
 			return view
 		} else {
 			p.log.WithContext(ctx).Warn("Dropping stored partition view which does not validate against its UC",

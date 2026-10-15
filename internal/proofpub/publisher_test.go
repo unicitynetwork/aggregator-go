@@ -46,14 +46,14 @@ type env struct {
 	pub *proofpub.Publisher
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T, f *prooftest.Fixture) *env {
 	log, err := logger.New("error", "json", "", false)
 	require.NoError(t, err)
 	b := smtbackend.NewMemoryBackend(smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)))
 	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cat.Close() })
-	pub := proofpub.New(cat, b, prooftest.Partition, lineage, log)
+	pub := proofpub.New(cat, b, prooftest.Partition, f.Provider(t), lineage, log)
 	require.NotNil(t, pub)
 	return &env{b: b, cat: cat, pub: pub}
 }
@@ -81,7 +81,7 @@ func latest(t *testing.T, c *proofview.Catalog) *proofview.Lease {
 }
 
 func Test_PublishFinalized(t *testing.T) {
-	e := newEnv(t)
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80))
 	root := commit(t, e.b, 1, 0, 20)
 	block, f := finalizedBlock(t, 1, root, 80, true)
 
@@ -96,7 +96,7 @@ func Test_PublishFinalized(t *testing.T) {
 }
 
 func Test_PublishFinalized_WithoutSidecar(t *testing.T) {
-	e := newEnv(t)
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80))
 	root := commit(t, e.b, 1, 0, 20)
 	block, _ := finalizedBlock(t, 1, root, 80, false)
 	e.pub.PublishFinalized(t.Context(), block)
@@ -106,7 +106,7 @@ func Test_PublishFinalized_WithoutSidecar(t *testing.T) {
 // No state which is not finalized is ever published, and a failure makes latest
 // unavailable instead of falling back to an older view.
 func Test_NoUnfinalizedRootAndNoLatestFallback(t *testing.T) {
-	e := newEnv(t)
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80))
 	root1 := commit(t, e.b, 1, 0, 20)
 	b1, _ := finalizedBlock(t, 1, root1, 80, true)
 	e.pub.PublishFinalized(t.Context(), b1)
@@ -131,7 +131,7 @@ func Test_NoUnfinalizedRootAndNoLatestFallback(t *testing.T) {
 }
 
 func Test_RootMismatchAndMissingCertificate(t *testing.T) {
-	e := newEnv(t)
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80))
 	root1 := commit(t, e.b, 1, 0, 20)
 	b1, _ := finalizedBlock(t, 1, root1, 80, true)
 	e.pub.PublishFinalized(t.Context(), b1)
@@ -160,7 +160,7 @@ func Test_RootMismatchAndMissingCertificate(t *testing.T) {
 }
 
 func Test_StoredViewIsRevalidated(t *testing.T) {
-	e := newEnv(t)
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80))
 	root := commit(t, e.b, 1, 0, 20)
 	block, _ := finalizedBlock(t, 1, root, 80, false)
 	other := prooftest.New(t, 2, 9, prooftest.Hash("elsewhere"), 99)
@@ -178,7 +178,7 @@ func material(t *testing.T, kind proofmaterial.Kind, f *prooftest.Fixture, view 
 }
 
 func Test_Sink_LateViewAndRepeat(t *testing.T) {
-	e := newEnv(t)
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80))
 	root := commit(t, e.b, 1, 0, 20)
 	block, f := finalizedBlock(t, 1, root, 80, false)
 	e.pub.PublishFinalized(t.Context(), block)
@@ -216,5 +216,5 @@ func Test_UnsupportedBackend(t *testing.T) {
 	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
 	require.NoError(t, err)
 	defer cat.Close()
-	require.Nil(t, proofpub.New(cat, nil, 1, nil, nil))
+	require.Nil(t, proofpub.New(cat, nil, 1, nil, nil, nil))
 }

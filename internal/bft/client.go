@@ -156,7 +156,7 @@ func NewBFTClient(
 		proofStaging:   proofmaterial.NewStaging(proofmaterial.DefaultStagingEntries),
 		published:      map[proofmaterial.Digest]bool{},
 	}
-	topo, err := proofTopologyFromConfig(conf)
+	topo, err := ProofTopologyFromConfig(conf)
 	if err != nil {
 		return nil, fmt.Errorf("invalid consolidation topology: %w", err)
 	}
@@ -811,10 +811,10 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 	return err
 }
 
-// proofTopologyFromConfig derives the trusted topology used to validate partition views:
+// ProofTopologyFromConfig derives the trusted topology used to validate partition views:
 // the own shard configuration hash for an unsharded partition, otherwise the configured
 // complete topology. Returns nil (no views are retained) when neither is available.
-func proofTopologyFromConfig(conf *config.BFTConfig) (proofmaterial.TopologyProvider, error) {
+func ProofTopologyFromConfig(conf *config.BFTConfig) (proofmaterial.TopologyProvider, error) {
 	if conf == nil || conf.ShardConf == nil {
 		return nil, nil
 	}

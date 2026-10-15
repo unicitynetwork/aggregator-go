@@ -26,16 +26,18 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-type ProofPublicationSuite struct {
+type proofPubBase struct {
 	suite.Suite
 	storage *mongodb.Storage
 	cfg     *config.Config
 	log     *logger.Logger
 }
 
+type ProofPublicationSuite struct{ proofPubBase }
+
 func TestProofPublicationSuite(t *testing.T) { suite.Run(t, new(ProofPublicationSuite)) }
 
-func (s *ProofPublicationSuite) SetupSuite() {
+func (s *proofPubBase) SetupSuite() {
 	conf := config.Config{Database: config.DatabaseConfig{
 		Database: "test_proof_publication_suite", ConnectTimeout: 30 * time.Second,
 		ServerSelectionTimeout: 5 * time.Second, SocketTimeout: 30 * time.Second,
@@ -48,7 +50,7 @@ func (s *ProofPublicationSuite) SetupSuite() {
 	s.Require().NoError(err)
 }
 
-func (s *ProofPublicationSuite) newRM() (*RoundManager, *proofview.Catalog) {
+func (s *proofPubBase) newRM() (*RoundManager, *proofview.Catalog) {
 	rm, err := NewRoundManager(context.Background(), s.cfg, s.log, s.storage.CommitmentQueue(), s.storage, nil,
 		state.NewSyncStateTracker(), nil, events.NewEventBus(s.log),
 		smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)), nil)
@@ -56,14 +58,14 @@ func (s *ProofPublicationSuite) newRM() (*RoundManager, *proofview.Catalog) {
 	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = cat.Close() })
-	rm.proofPub = proofpub.New(cat, rm.smtBackend, prooftest.Partition, []byte("lineage"), s.log)
+	rm.proofPub = proofpub.New(cat, rm.smtBackend, prooftest.Partition, prooftest.New(s.T(), 2, 1, prooftest.Hash("x"), 80).Provider(s.T()), []byte("lineage"), s.log)
 	s.Require().NotNil(rm.proofPub)
 	return rm, cat
 }
 
 // proposal processes commitments into a round and stores the durable proposal;
 // the block carries the UC (and view) of a certification for its root.
-func (s *ProofPublicationSuite) proposal(rm *RoundManager, number int64, prefix string, withView bool) (*models.Block, *prooftest.Fixture) {
+func (s *proofPubBase) proposal(rm *RoundManager, number int64, prefix string, withView bool) (*models.Block, *prooftest.Fixture) {
 	t := s.T()
 	ctx := context.Background()
 	commitments := testutil.CreateTestCertificationRequests(t, 3, prefix)
@@ -169,7 +171,13 @@ func (s *ProofPublicationSuite) Test4_DurableRecoveryPublishesAndLateViewFills()
 	require.Equal(t, f.Raw, l.PartitionView())
 }
 
-func (s *ProofPublicationSuite) Test5_StartupPublishesValidatedCurrentState() {
+// The startup test restores the SMT from storage, so it needs a database holding a
+// single consistent chain: its own suite instance (own database).
+type ProofPublicationStartupSuite struct{ proofPubBase }
+
+func TestProofPublicationStartupSuite(t *testing.T) { suite.Run(t, new(ProofPublicationStartupSuite)) }
+
+func (s *ProofPublicationStartupSuite) Test1_StartupPublishesValidatedCurrentState() {
 	t := s.T()
 	ctx := context.Background()
 	rm, _ := s.newRM()

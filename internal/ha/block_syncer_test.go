@@ -708,7 +708,7 @@ func TestBlockSyncerPublishesFinalStateOfRun(t *testing.T) {
 	catalog, err := proofview.NewCatalog(proofview.DefaultLimits())
 	require.NoError(t, err)
 	defer catalog.Close()
-	pub := proofpub.New(catalog, backend, prooftest.Partition, []byte("lineage"), log)
+	pub := proofpub.New(catalog, backend, prooftest.Partition, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80).Provider(t), []byte("lineage"), log)
 	require.NotNil(t, pub)
 
 	syncer := NewBlockSyncer(log, &mockLeaderSelector{}, storage, backend, 0, time.Second, state.NewSyncStateTracker())
