@@ -122,9 +122,9 @@ writers kept submitting and every shard kept finalizing during the consolidation
 proofs), and each shard received one root response per finalized block with consolidation traffic running — no extra
 root-to-shard messages (per-shard responses never exceeded blocks + baseline extra + 2). It does not establish throughput or
 latency numbers. The stop-writers negative control fails as intended
-(`CONSOLIDATION_E2E_NEGATIVE=stop-writers`: "shard 0 accepted only 0 writes"). The topology file is the current source of the
-admitted configuration hashes; the e2e consumes it only through the CLI config, so it keeps working when the file becomes
-optional (the hashes can then come from the shard configurations directly).
+(`CONSOLIDATION_E2E_NEGATIVE=stop-writers`: "shard 0 accepted only 0 writes"). A topology file is **not required**: by default the aggregators and the e2e configure no
+independent pins, and the topology and configuration hashes come from the authenticated partition view (committed by the root quorum's seal). `BFT_CONSOLIDATION_TOPOLOGY_FILE` (and `confHash` in the CLI configuration) remain as an
+optional, stricter independent pin, exercised by `CONSOLIDATION_E2E_PINNED=1`.
 
 ## Work bounds (asymptotic regression tests)
 

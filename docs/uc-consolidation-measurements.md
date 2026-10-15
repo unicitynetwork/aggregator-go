@@ -151,7 +151,7 @@ above eight shards no view is produced, so only exact-root requests can be serve
 
 ## 2. Retained-view cost (bare backends)
 
-These sweeps measure `RetainReadView` and its lineage accounting in the backends directly. They do **not** include the A4 publication path or the catalog (section 3), and peak RSS is not measured.
+These sweeps measure `RetainReadView` and its lineage accounting in the backends directly. They do not include the A4 publication path or the catalog (section 3); the integrated path (A4 publication into the catalog, D1 batch proofs, a real root) is measured in section 5. Peak RSS is not measured.
 "Measured" is real memory: Go heap for the memory backend (with all views retained minus only the newest, per older view) and on-disk size after full compaction
 for RocksDB (identical churn with 16 snapshots pinned minus none, per view; compaction cannot drop old node versions under a pinned snapshot).
 "Accounted" is the `RetainedBytes` charge counted against the retention budget.
@@ -228,7 +228,8 @@ The retention budget (256 MiB) is divided by the accounted bytes per view to giv
 
 The retained-view catalog was measured twice: before the catalog/lineage indexing fix (#200, the audit's item 1) and on the merged code, which keeps an O(1) retained-bytes total (`proofview.AccountantFor`) and an attachment digest index.
 The "before" numbers are from the earlier revision of this document (same sweeps, same host); the "after" tables below are regenerated on the merged code, once without the backend accountant (the catalog sums its readers, the fallback)
-and once with it (the production wiring).
+and once with it. (The production round manager constructs the catalog with the accountant from #205 on; before that, `initProofViews` called `NewCatalog(limits)` without it, so
+the "without accountant" tables describe what production did until then. Section 5 runs the integrated path on both.)
 
 ### 3.1 Retained views V = 1..256 (no pressure)
 
@@ -252,7 +253,7 @@ N = 2,000, B = 10 new leaves per block, V retained views, one attachment each
 
 Log-log slopes over V = 1..256: RetainedBytes reads per Publish 1.02, per AcquireLatest+Release 1.04, per Stats 1.00 (0 for a constant-time catalog; 1 when each retained reader is read once per operation); relative time: Publish 0.10, AcquireLatest+Release 0.57, Stats 0.91
 
-**With the backend accountant (production wiring)**
+**With the backend accountant (wired in production by #205)**
 
 N = 2,000, B = 10 new leaves per block, V retained views, one attachment each
 
@@ -276,7 +277,7 @@ Log-log slopes over V = 1..256: RetainedBytes reads per Publish 0.00, per Acquir
 | relative time slope: Acquire+Release / Stats | 1.25 / 1.49 | 0.57 / 0.91 | **0.06 / 0.09** |
 
 With the accountant every ordinary catalog operation reads no reader at all (reads per operation are 0 for every V), and the time per Acquire+Release and per Stats is flat in V. Without it the reads are still linear in V by construction (the catalog sums its own readers),
-which is why production wires the accountant; the fallback is kept for backends that cannot total their readers.
+which is why #205 wires the accountant in production; the fallback is kept for backends that cannot total their readers.
 
 ### 3.2 Oldest view pinned while captures accumulate (V = 4)
 
@@ -296,7 +297,7 @@ V = 4 retained views, oldest view pinned by a lease, N = 2,000, B = 10; R = capt
 
 Log-log slopes over R = 4..1024: RetainedBytes reads per Stats call -0.00 (bounded by V = 4, so 0); relative time: Stats -0.01, AcquireLatest+Release -0.05 (0 when the per-operation work does not depend on the captures since the pinned view).
 
-**With the backend accountant (production wiring)**
+**With the backend accountant (wired in production by #205)**
 
 V = 4 retained views, oldest view pinned by a lease, N = 2,000, B = 10; R = captures after the pinned view (exact)
 
@@ -355,9 +356,188 @@ Log-log slopes over L = 1..256: single-proof node reads 1.00 (expect 1: L x dept
 Single-proof building reads `L x depth` nodes (slope 1.00) and makes that many snapshot calls. The union build reads exactly the distinct nodes (sublinear: 1.7x fewer reads at L = 256 for random keys) and makes a constant 18 frontier-batched `GetNodes` calls (the tree depth), independent of L:
 round trips to the store drop from `L x depth` to `depth`. Output size is unchanged (`L x depth` siblings are still returned).
 
-## 5. Not covered
+## 5. Integrated measurements: real root, A4 publication and D1 batch proofs wired
 
-- **A4-integrated publication and end-to-end service** (finalization hooks, HA, recovery) are not wired in this snapshot; section 2 is the bare backend, section 3 the catalog.
+`test/integration/bft_integrated_measurement_test.go` (build tag `e2e_bft`, run `INTEGRATED_SHARDS=4 INTEGRATED_PHASE_SECONDS=20 go test -tags=e2e_bft ./test/integration -run TestBFTIntegratedMeasurement -v -timeout 40m`,
+Docker environment as in the commands above) runs the production path end to end: a real `ubft` root node as a host process, four in-process bft-shard aggregators (memory SMT backend) with the production wiring
+(finalization hooks and the retained-view catalog from A4, the production batch handler with D1 batch proofs), MongoDB and Redis in Docker, continuous writers, and three probes per shard that time **submission to proof** (a state is submitted, then
+`get_inclusion_proof.v2` is polled every 50 ms until the proof exists). Everything shares one host (root, four aggregators, Mongo, Redis, load generators), so CPU contention between certification and proof load is part of what is measured.
+
+**Hardware context:** the host was a roughly ten-year-old MacBook Pro running other jobs; the colima VM is 2 vCPU / 3 GiB. Latencies are shown as ratios to the no-load baseline, never as gates.
+A shard finalizes about one block every 1.7 s here (every three to four root rounds), which is why submission-to-proof is about 2.9 s at the median in every phase.
+
+**Method.** Each configuration runs three phases of 20 s: baseline A (writes + probes), the loaded phase (the same plus eight closed-loop batch clients, two per shard, mixing latest with 1 ID, latest with 16 IDs and exact-root requests for roots observed
+earlier, with a 25 ms back-off after any non-OK answer), and baseline B. **The difference between baseline A and B is the noise floor of the host;** the last column compares the loaded phase with their mean. Every served proof is verified with the full
+`InclusionProofV2.Verify` against the real trust base (0 failures in every run). Outcomes are the typed JSON-RPC results of the batch method, with their denominators.
+
+### 5.1 Default limits (16 retained views, 8 concurrent batches, 5 s lease)
+
+| metric | baseline A | baseline B | with batch load | with / mean(A,B) |
+|---|---|---|---|---|
+| finalized blocks per second (sum over shards) | 2.55 | 2.40 | 2.44 | 0.99x |
+| accepted writes per second (sum over shards) | 23.62 | 23.59 | 23.70 | 1.00x |
+| root->shard responses per finalized block | 1.00 | 1.00 | 1.00 | 1.00x |
+| non-progress responses (count) | 0 | 0 | 0 | n/a |
+| longest gap without a finalized block (s, max over shards) | 2.0 | 2.0 | 2.0 | 1.00x |
+| submission-to-proof latency p50 (probes, ms) | 2900 | 2885 | 2896 | 1.00x |
+| submission-to-proof latency p95 (probes, ms) | 2987 | 2940 | 2979 | 1.01x |
+| probes completed | 72 | 72 | 72 | 1.00x |
+
+batch requests issued during the loaded phase: 5028 (251 per second)
+
+| mode | outcome | requests | share of mode | latency p50 ms (ok) | p95 ms (ok) |
+|---|---|---|---|---|---|
+| latest-1 | ok | 2544 | 100.0% | 19 | 40 |
+| latest-16 | ok | 1257 | 100.0% | 60 | 98 |
+| exact-root | ok | 1227 | 100.0% | 20 | 41 |
+
+| age of the requested root (blocks behind the tip) | exact-root requests | served | availability |
+|---|---|---|---|
+| 0 | 105 | 105 | 100% |
+| 1-2 | 518 | 518 | 100% |
+| 3-4 | 260 | 260 | 100% |
+| 5-8 | 275 | 275 | 100% |
+| 9-16 | 69 | 69 | 100% |
+
+verified proofs: 5028 (failures 0)
+
+Catalog counters per shard during the run: retained views peak 16 (the cap), active pins peak 2, retained bytes peak 261 KB, 0 pressure cancellations, retired-but-pinned 0.
+
+### 5.2 Retention pressure: at most 2 retained views per shard
+
+| metric | baseline A | baseline B | with batch load | with / mean(A,B) |
+|---|---|---|---|---|
+| finalized blocks per second (sum over shards) | 2.34 | 2.40 | 2.24 | 0.95x |
+| accepted writes per second (sum over shards) | 23.58 | 23.59 | 22.91 | 0.97x |
+| root->shard responses per finalized block | 1.02 | 1.00 | 0.98 | 0.97x |
+| non-progress responses (count) | 0 | 0 | 0 | n/a |
+| longest gap without a finalized block (s, max over shards) | 2.0 | 2.0 | 2.5 | 1.25x |
+| submission-to-proof latency p50 (probes, ms) | 3041 | 2990 | 3158 | 1.05x |
+| submission-to-proof latency p95 (probes, ms) | 3350 | 3170 | 3661 | 1.12x |
+| probes completed | 72 | 72 | 63 | 0.88x |
+
+batch requests issued during the loaded phase: 3468 (173 per second)
+
+| mode | outcome | requests | share of mode | latency p50 ms (ok) | p95 ms (ok) |
+|---|---|---|---|---|---|
+| latest-1 | ok | 1725 | 100.0% | 28 | 68 |
+| latest-16 | ok | 883 | 100.0% | 82 | 174 |
+| exact-root | ok | 353 | 41.0% | 28 | 79 |
+| exact-root | proof_unavailable/view_not_retained | 507 | 59.0% |  |  |
+
+| age of the requested root (blocks behind the tip) | exact-root requests | served | availability |
+|---|---|---|---|
+| 0 | 126 | 125 | 99% |
+| 1-2 | 324 | 228 | 70% |
+| 3-4 | 200 | 0 | 0% |
+| 5-8 | 166 | 0 | 0% |
+| 9-16 | 44 | 0 | 0% |
+
+verified proofs: 2961 (failures 0)
+
+Latest requests are always served; exact-root requests are served only while the root is among the 2 retained views, i.e. availability is 99% for the tip, 70% one to two blocks back and 0% beyond. Every unavailable answer is the typed
+`proof_unavailable/view_not_retained` (retryable as a new attempt); there are no transport errors and no wrong answers (2,961 proofs verified). Certification is unaffected within the noise floor.
+
+### 5.3 Admission pressure: one concurrent batch per shard
+
+| metric | baseline A | baseline B | with batch load | with / mean(A,B) |
+|---|---|---|---|---|
+| finalized blocks per second (sum over shards) | 2.40 | 2.50 | 2.49 | 1.02x |
+| accepted writes per second (sum over shards) | 23.58 | 23.99 | 23.60 | 0.99x |
+| root->shard responses per finalized block | 1.00 | 0.96 | 1.00 | 1.02x |
+| non-progress responses (count) | 0 | 0 | 0 | n/a |
+| longest gap without a finalized block (s, max over shards) | 2.0 | 2.0 | 2.0 | 1.00x |
+| submission-to-proof latency p50 (probes, ms) | 2882 | 2884 | 2874 | 1.00x |
+| submission-to-proof latency p95 (probes, ms) | 2991 | 2958 | 2964 | 1.00x |
+| probes completed | 72 | 78 | 72 | 0.96x |
+
+batch requests issued during the loaded phase: 7875 (393 per second)
+
+| mode | outcome | requests | share of mode | latency p50 ms (ok) | p95 ms (ok) |
+|---|---|---|---|---|---|
+| latest-1 | busy/active_requests | 1590 | 39.8% |  |  |
+| latest-1 | ok | 2404 | 60.2% | 11 | 20 |
+| latest-16 | busy/active_requests | 778 | 39.7% |  |  |
+| latest-16 | ok | 1182 | 60.3% | 31 | 52 |
+| exact-root | busy/active_requests | 771 | 40.1% |  |  |
+| exact-root | ok | 1150 | 59.9% | 11 | 19 |
+
+| age of the requested root (blocks behind the tip) | exact-root requests | served | availability |
+|---|---|---|---|
+| 0 | 170 | 108 | 64% |
+| 1-2 | 635 | 372 | 59% |
+| 3-4 | 430 | 260 | 60% |
+| 5-8 | 514 | 303 | 59% |
+| 9-16 | 172 | 107 | 62% |
+
+verified proofs: 4736 (failures 0)
+
+Requests beyond the single slot are rejected immediately with the typed retryable `busy/active_requests` (about 40% of 7,875 requests, with 8 clients on 4 shards); the rest are served faster (smaller queue). Certification is unaffected within the noise floor.
+The byte budget and the pin-count (`busy/pinned_views`) paths were not reached: the retained state per shard is tens to hundreds of KB here (section 2), far below the 256 MiB budget.
+
+### 5.4 Recovery: cold restart of one shard
+
+Shard 0's aggregator is stopped and started again on the same database (the catalog is rebuilt only for the current validated state, A4's startup publication):
+
+- The restarted aggregator served block height at about 0.3-0.5 s after the stop began, and the **first latest batch request succeeded about 10 ms after it started serving** (the persisted sidecar of the latest block is revalidated, so latest is available immediately).
+- The next block was finalized at 0.5-2.3 s after the restart across runs (the root round cadence dominates).
+- **History is not rebuilt, by design:** of the roots observed before the restart, 0 of 19 were served afterwards; every one answered `proof_unavailable/view_not_retained` (typed, retryable as a new attempt).
+
+### 5.5 HA failover: follower with the block syncer
+
+Shard 0 gets a second aggregator on the same database that is not activated; the production block syncer (with the catalog's publisher, as `cmd/aggregator` wires it) replays finalized blocks and publishes the replayed states into its own catalog.
+Promotion mirrors the production leader-change listener (stop the syncer, `SyncToLatestBlock`, `Activate`); leader election itself is not used (the leader is stopped by the test), so lease and election delay are not measured.
+
+- Before the failover the follower's catalog held 15 retained views (149 KB) and **served 13 of 13 roots the leader had observed**, and latest was available on the follower.
+- At the failover: the leader stopped in about 0.1 s, the follower's final sync took 10 ms and activation 9 ms (about 10-30 ms each across runs); the **first latest batch succeeded 148 ms after the stop began and the new leader finalized its first block 255 ms after it**; 13 of 13 pre-failover roots were still served.
+- The follower publishes the replayed state once per sync tick (500 ms here), so it retains every block only when blocks arrive slower than the tick; with faster blocks it would retain one view per tick.
+
+### 5.6 With the accountant wired (#205)
+
+The default-limits run repeated on `uc/P5-wire-accountant` merged with the same test (production `initProofViews` with `AccountantFor`):
+
+| metric | baseline A | baseline B | with batch load | with / mean(A,B) |
+|---|---|---|---|---|
+| finalized blocks per second (sum over shards) | 2.40 | 2.50 | 2.35 | 0.96x |
+| accepted writes per second (sum over shards) | 23.63 | 23.59 | 23.56 | 1.00x |
+| root->shard responses per finalized block | 1.00 | 1.00 | 1.00 | 1.00x |
+| non-progress responses (count) | 0 | 0 | 0 | n/a |
+| longest gap without a finalized block (s, max over shards) | 2.0 | 2.0 | 2.5 | 1.25x |
+| submission-to-proof latency p50 (probes, ms) | 2887 | 2878 | 2987 | 1.04x |
+| submission-to-proof latency p95 (probes, ms) | 3008 | 2974 | 3496 | 1.17x |
+| probes completed | 72 | 72 | 72 | 1.00x |
+
+batch requests issued during the loaded phase: 4088 (204 per second)
+
+| mode | outcome | requests | share of mode | latency p50 ms (ok) | p95 ms (ok) |
+|---|---|---|---|---|---|
+| latest-1 | ok | 2036 | 100.0% | 24 | 51 |
+| latest-16 | ok | 1019 | 100.0% | 72 | 127 |
+| exact-root | ok | 1033 | 100.0% | 23 | 51 |
+
+| age of the requested root (blocks behind the tip) | exact-root requests | served | availability |
+|---|---|---|---|
+| 0 | 164 | 164 | 100% |
+| 1-2 | 357 | 357 | 100% |
+| 3-4 | 206 | 206 | 100% |
+| 5-8 | 229 | 229 | 100% |
+| 9-16 | 77 | 77 | 100% |
+
+verified proofs: 4088 (failures 0)
+
+Within the noise floor the integrated results are the same with and without the accountant at these sizes; the catalog curves in section 3 are where it matters.
+
+### 5.7 What these runs establish
+
+- **Certification impact:** with eight closed-loop batch clients issuing 170-390 requests per second (and proof building, CBOR and verification on the same CPUs), finalized blocks per second and accepted writes per second stay within about 5% of the baseline mean (the two baselines themselves differ by up to 4%), responses per finalized block stay at 1.00,
+  non-progress responses at 0 and the longest gap without a block at 2.0-2.5 s; submission-to-proof latency p50 moves by 0-5%. At these sizes consolidation load does not measurably slow certification; it does not prove the same for larger shards or a saturated host.
+- **Availability with denominators:** under default limits every one of 5,028 requests was served and verified; under retention pressure the exact-root availability follows the retained-view window exactly and every refusal is typed; under admission pressure
+  refusals are typed busy answers. No request failed silently or with a transport error.
+- **Recovery and HA:** latest is available within tens of milliseconds of serving after a cold restart and about 150 ms after a failover; history is lost on a cold restart and kept by a follower in proportion to its sync ticks.
+
+## 6. Not covered
+
+- **Integrated runs on other configurations:** section 5 uses the in-memory SMT backend, four shards and one run per configuration; the RocksDB backend, eight shards, longer runs and a deployment with real network latency between the aggregators, root and Mongo were not run.
 - **Peak RSS** is not measured; only heap (memory) and physical on-disk bytes after compaction (RocksDB). Cold versus warm RocksDB block cache, adversarial shared-prefix keys and disk batch proofs through the service were not run.
 - **Absolute latency** is deliberately not reported (hardware context above); the Mongo curves report command counts and relative time only.
 - The V sweep only goes to 256 on the memory backend (the RocksDB catalog accounting was not swept). The retention sweeps in section 2 and the proof reads in section 4 call the backends directly; they were not re-run end to end through the D1 batch API.
