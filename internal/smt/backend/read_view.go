@@ -88,8 +88,9 @@ type lineage struct {
 	first *lineageEntry
 	last  *lineageEntry
 	alive int
-	// visits counts entries examined by accounting operations. It stays zero:
-	// the bound is asserted by tests, not assumed.
+	// visits counts the entries touched by accounting operations: the entry itself and the
+	// neighbors read or relinked. Tests assert it is a constant per operation, independent of
+	// the number of alive entries.
 	visits uint64
 }
 
@@ -108,9 +109,11 @@ func (l *lineage) add(view *smt.ReadView) *memoryReadView {
 func (l *lineage) addDelta(delta uint64) *lineageEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.visits++
 	l.total += delta
 	e := &lineageEntry{cum: l.total, alive: true, prev: l.last}
 	if l.last != nil {
+		l.visits++
 		l.last.next = e
 	} else {
 		l.first = e
@@ -124,11 +127,13 @@ func (l *lineage) addDelta(delta uint64) *lineageEntry {
 func (l *lineage) retained(e *lineageEntry) uint64 {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.visits++
 	if !e.alive {
 		return 0
 	}
 	end := l.total
 	if e.next != nil {
+		l.visits++
 		end = e.next.cum
 	}
 	return smt.ReadViewOverheadBytes + end - e.cum
@@ -138,6 +143,7 @@ func (l *lineage) retained(e *lineageEntry) uint64 {
 func (l *lineage) totalRetained() uint64 {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.visits++
 	if l.alive == 0 {
 		return 0
 	}
@@ -149,16 +155,19 @@ func (l *lineage) totalRetained() uint64 {
 func (l *lineage) close(e *lineageEntry) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.visits++
 	if !e.alive {
 		return
 	}
 	e.alive = false
 	if e.prev != nil {
+		l.visits++
 		e.prev.next = e.next
 	} else {
 		l.first = e.next
 	}
 	if e.next != nil {
+		l.visits++
 		e.next.prev = e.prev
 	} else {
 		l.last = e.prev

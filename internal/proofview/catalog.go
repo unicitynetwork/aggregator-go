@@ -91,6 +91,8 @@ type view struct {
 	attBytes         uint64 // sum of the bytes of the attachments in the list
 
 	leases map[*Lease]struct{}
+	// pending are the leases pressure has not cancelled yet (a subset of leases)
+	pending map[*Lease]struct{}
 
 	// live views in publication order
 	prev, next *view
@@ -122,6 +124,10 @@ type Catalog struct {
 	byRoot     map[string]*view // root -> newest live view with it
 	evictable  viewHeap         // live, unpinned views except the newest, oldest first
 	pinned     viewHeap         // live, pinned views, oldest first
+	// retiredLive are the retired views with leases pressure has not cancelled yet: a pressure
+	// pass visits only pending leases, so a lease is looked at once, not on every later pass.
+	retiredLive map[*view]struct{}
+	leaseVisits uint64 // leases examined by pressure passes (hardware independent metric)
 
 	retired     map[*view]struct{}
 	retiredAtts map[*attachment]struct{}
@@ -173,6 +179,7 @@ func NewCatalog(limits Limits, opts ...Option) (*Catalog, error) {
 	}
 	c.evictable.idx = func(v *view) *int { return &v.evictIdx }
 	c.pinned.idx = func(v *view) *int { return &v.pinIdx }
+	c.retiredLive = make(map[*view]struct{})
 	for _, o := range opts {
 		o(c)
 	}
@@ -633,6 +640,9 @@ func (c *Catalog) retireViewLocked(v *view, toClose []backend.ReadView) []backen
 	if v.refs > 0 {
 		c.retired[v] = struct{}{}
 		c.retiredViewAttBytes += v.attBytes
+		if len(v.pending) > 0 {
+			c.retiredLive[v] = struct{}{}
+		}
 		return toClose
 	}
 	// leaves the accounting now; closed outside the lock
@@ -642,25 +652,29 @@ func (c *Catalog) retireViewLocked(v *view, toClose []backend.ReadView) []backen
 
 func (c *Catalog) cancelOldestLeasesLocked() {
 	// Leases are cancelled oldest-view-first; a lease on a retired view goes
-	// before one on a retained view.
-	for v := range c.retired {
-		for l := range v.leases {
-			if l.ctx.Err() == nil {
-				l.cancel()
-				c.pressureKills++
-			}
-		}
+	// before one on a retained view. Only leases pressure has not dealt with yet are visited
+	// (each once): a view whose leases are all cancelled is skipped until a new lease pins it.
+	for v := range c.retiredLive {
+		c.cancelViewLeasesLocked(v)
+		delete(c.retiredLive, v)
 	}
 	if c.retainedBytesLocked() <= c.limits.RetentionBudgetBytes {
 		return
 	}
-	// the oldest live view which is pinned
+	// the oldest live pinned view: its leases are cancelled; if it has none left to cancel nothing
+	// else is touched (the pass is about draining the oldest pinned history)
 	if v := c.pinned.peek(); v != nil {
-		for l := range v.leases {
-			if l.ctx.Err() == nil {
-				l.cancel()
-				c.pressureKills++
-			}
+		c.cancelViewLeasesLocked(v)
+	}
+}
+
+func (c *Catalog) cancelViewLeasesLocked(v *view) {
+	for l := range v.pending {
+		c.leaseVisits++
+		delete(v.pending, l)
+		if l.ctx.Err() == nil {
+			l.cancel()
+			c.pressureKills++
 		}
 	}
 }
@@ -722,8 +736,11 @@ func (c *Catalog) acquire(ctx context.Context, root []byte) (*Lease, error) {
 	att.refs++
 	if v.leases == nil {
 		v.leases = make(map[*Lease]struct{}, 1)
+		v.pending = make(map[*Lease]struct{}, 1)
 	}
 	v.leases[l] = struct{}{}
+	v.pending[l] = struct{}{}
+
 	c.leases[l] = struct{}{}
 	c.reclassLocked(v)
 	return l, nil
@@ -734,6 +751,10 @@ func (c *Catalog) release(l *Lease) {
 	c.mu.Lock()
 	delete(c.leases, l)
 	delete(l.v.leases, l)
+	delete(l.v.pending, l)
+	if len(l.v.pending) == 0 {
+		delete(c.retiredLive, l.v)
+	}
 	l.att.refs--
 	if l.att.refs == 0 {
 		if _, ok := c.retiredAtts[l.att]; ok {
@@ -883,4 +904,19 @@ func (h *viewHeap) peek() *view {
 		return nil
 	}
 	return h.items[0]
+}
+
+// AccountantFor returns WithAccountant(b) when the backend can total the retained bytes of its open
+// readers in O(1) (both the memory and the RocksDB backend do), and no option otherwise, so that
+// the catalog constructor can be given the backend whatever its type:
+//
+//	proofview.NewCatalog(limits, proofview.AccountantFor(backend))
+//
+// The catalog must own every reader the backend retains for the O(1) total to be the sum of the
+// catalog's readers (one catalog per backend).
+func AccountantFor(b any) Option {
+	if acc, ok := b.(backend.RetentionAccountant); ok {
+		return WithAccountant(acc)
+	}
+	return func(*Catalog) {}
 }

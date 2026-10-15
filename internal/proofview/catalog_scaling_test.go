@@ -47,6 +47,9 @@ func checkInvariants(t testing.TB, c *Catalog) {
 		require.Equal(t, attBytes, v.attBytes)
 		live += int(attBytes)
 		require.Equal(t, v.refs, len(v.leases))
+		for l := range v.pending {
+			require.Contains(t, v.leases, l, "a pending lease is a lease of the view")
+		}
 		wantEvictable := v.refs == 0 && v != c.tail
 		require.Equal(t, wantEvictable, v.evictIdx >= 0, "evictable membership")
 		require.Equal(t, v.refs > 0, v.pinIdx >= 0, "pinned membership")
@@ -75,7 +78,9 @@ func checkInvariants(t testing.TB, c *Catalog) {
 		require.True(t, v.retired)
 		require.False(t, v.live)
 		retiredViews += v.attBytes
+		require.Equal(t, len(v.pending) > 0, func() bool { _, ok := c.retiredLive[v]; return ok }(), "retiredLive tracks retired views with pending leases")
 	}
+	require.LessOrEqual(t, len(c.retiredLive), len(c.retired))
 	for a := range c.retiredAtts {
 		retiredAtts += a.bytes
 	}
@@ -585,4 +590,82 @@ func TestCatalogTotalsMatchSlowRecomputationWithMemoryBackend(t *testing.T) {
 		require.NoError(t, c.Close())
 		require.Zero(t, be.RetainedBytesTotal(), "all readers closed")
 	}
+}
+
+// Under sustained retention pressure each lease is looked at by a pressure pass once, not by every later
+// pass: P pinned leases on views which retention pressure retires, then released one by one while the
+// catalog stays over budget, cost O(P) lease visits in total; the previous passes re-scanned every
+// lease (and, per pass, all views x leases) and cost Θ(P²) and worse.
+func TestPressurePassesVisitEachLeaseOnce(t *testing.T) {
+	ctx := context.Background()
+	var indexed, reference []uint64
+	ps := []int{8, 16, 32, 64, 128}
+	for _, p := range ps {
+		l := scalingLimits(2) // the view limit retires the pinned views as newer ones are published
+		l.MaxConcurrentPins = p
+		l.RetentionBudgetBytes = uint64(p+6) * 400 // fits the history while charges are small
+		w, rw := &countingWorld{}, &countingWorld{}
+		c, err := NewCatalog(l, WithAccountant(w))
+		require.NoError(t, err)
+		rc, err := newRefCatalog(l)
+		require.NoError(t, err)
+		var readers, rreaders []*cReader
+		var leases []*Lease
+		var rleases []*refLease
+		publishBoth := func(i int) {
+			readers = append(readers, pub(t, c, w, i, uint64(i), 1))
+			root := rootN(i)
+			rr := rw.newReader(root, 1)
+			rreaders = append(rreaders, rr)
+			require.NoError(t, rc.Publish(ctx, PublishInput{Block: BlockIdentity{Number: api.NewBigIntFromUint64(uint64(i)), ConfigLineage: []byte("cfg")},
+				Root: root, Reader: rr, Cert: Certification{UC: ucFor(t, root, uint64(i))}}))
+		}
+		for i := 1; i <= p; i++ {
+			publishBoth(i)
+			ls, err := c.AcquireLatest(ctx)
+			require.NoError(t, err)
+			rls, err := rc.AcquireLatest(ctx)
+			require.NoError(t, err)
+			leases, rleases = append(leases, ls), append(rleases, rls)
+		}
+		// the charges grow (writes arrive): from now on the retired pinned history is over budget
+		for i := range readers {
+			readers[i].charge.Store(800)
+			rreaders[i].charge.Store(800)
+		}
+		require.Equal(t, p-2, c.Stats().RetiredPinned)
+		// the pins drain one by one, in a scrambled order, while pressure persists
+		for _, i := range rand.New(rand.NewSource(int64(p))).Perm(len(leases)) {
+			leases[i].Release()
+			rleases[i].Release()
+		}
+		checkInvariants(t, c)
+		indexed = append(indexed, c.leaseVisits)
+		reference = append(reference, rc.leaseVisits)
+		require.Equal(t, rc.Stats(), c.Stats(), "p=%d: identical observable behavior", p)
+	}
+	for i, p := range ps {
+		require.LessOrEqual(t, indexed[i], uint64(3*p), "p=%d: %v", p, indexed)
+	}
+	last := len(ps) - 1
+	require.Greater(t, reference[last], 8*indexed[last], "reference %v indexed %v", reference, indexed)
+	for i := 1; i < len(ps); i++ {
+		require.Greater(t, float64(reference[i]), 3.0*float64(reference[i-1]), "the reference is superlinear: %v", reference)
+	}
+}
+
+// The constructor wiring: the backends are accountants, other types silently are not.
+func TestAccountantForWiresBackendsWhichCanTotal(t *testing.T) {
+	be := backend.NewMemoryBackend(smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)))
+	c, err := NewCatalog(DefaultLimits(), AccountantFor(be))
+	require.NoError(t, err)
+	require.NotNil(t, c.acc, "the memory backend is an O(1) accountant")
+	c, err = NewCatalog(DefaultLimits(), AccountantFor(struct{}{}), AccountantFor(nil))
+	require.NoError(t, err)
+	require.Nil(t, c.acc, "no accountant: the catalog uses the linear fallback")
+	// ... and the wired catalog behaves identically to the fallback one
+	w := &countingWorld{}
+	c, err = NewCatalog(scalingLimits(4), AccountantFor(w))
+	require.NoError(t, err)
+	require.NotNil(t, c.acc)
 }

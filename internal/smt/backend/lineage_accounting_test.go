@@ -82,22 +82,29 @@ func TestLineageMatchesReferenceModel(t *testing.T) {
 			r *refEntry
 		}
 		var all []pair
+		ops := 0 // accounting operations performed on the lineage
 		for step := 0; step < 400; step++ {
 			switch op := rng.Intn(10); {
 			case op < 4: // capture
 				d := uint64(rng.Intn(5000))
 				all = append(all, pair{l.addDelta(d), ref.add(d)})
+				ops++
 			case op < 8 && len(all) > 0: // close or retire (idempotent) any entry, any order
 				p := all[rng.Intn(len(all))]
 				l.close(p.e)
 				ref.close(p.r)
+				ops++
 			}
 			for _, p := range all {
 				require.Equal(t, ref.retained(p.r), l.retained(p.e), "seed %d step %d", seed, step)
+				ops++
 			}
 			require.Equal(t, ref.total(), l.totalRetained(), "seed %d step %d", seed, step)
+			ops++
 		}
-		require.Zero(t, l.visits)
+		// every operation touches a constant number of entries (itself and at most two neighbors)
+		require.LessOrEqual(t, l.visits, uint64(3*ops), "seed %d: %d visits for %d operations", seed, l.visits, ops)
+		require.Positive(t, l.visits)
 	}
 }
 
@@ -117,10 +124,13 @@ func TestLineageAccountingWorkIsIndependentOfLiveEntries(t *testing.T) {
 			}
 		}
 		ref.visits = 0
+		l.visits = 0
 		require.Equal(t, ref.retained(rfirst), l.retained(first))
 		_ = l.totalRetained()
+		l.close(first) // the interval of the oldest entry is inherited by nobody, the next becomes first
 		_ = ref.total()
-		require.Zero(t, l.visits, "H=%d", h)
+		require.LessOrEqual(t, l.visits, uint64(6), "H=%d: a charge query, a total and a close touch a constant number of entries", h)
+		require.Positive(t, l.visits)
 		require.Greater(t, ref.visits, prevRef, "the reference model must scale with H (otherwise this test proves nothing)")
 		prevRef = ref.visits
 	}
@@ -131,6 +141,7 @@ func TestMemoryBackendRetainedBytesTotalIsTheSumOfCharges(t *testing.T) {
 	b := NewMemoryBackend(smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)))
 	rng := rand.New(rand.NewSource(7))
 	var open []ReadView
+	ops := 0
 	next := 0
 	commit := func() {
 		snap, err := b.CreateSnapshot(ctx)
@@ -150,8 +161,10 @@ func TestMemoryBackendRetainedBytesTotalIsTheSumOfCharges(t *testing.T) {
 		var sum uint64
 		for _, v := range open {
 			sum += v.RetainedBytes()
+			ops++
 		}
 		require.Equal(t, sum, b.RetainedBytesTotal(), "step %d", step)
+		ops++
 	}
 	for step := 0; step < 300; step++ {
 		switch op := rng.Intn(10); {
@@ -161,19 +174,22 @@ func TestMemoryBackendRetainedBytesTotalIsTheSumOfCharges(t *testing.T) {
 			v, err := b.RetainReadView(ctx)
 			require.NoError(t, err)
 			open = append(open, v)
+			ops++
 		case op < 8 && len(open) > 0: // out-of-order close
 			i := rng.Intn(len(open))
 			require.NoError(t, open[i].Close())
+			ops++
 			open = append(open[:i], open[i+1:]...)
 		case len(open) > 0: // retire from the accounting, stays readable until closed
 			i := rng.Intn(len(open))
 			open[i].(AccountingRetirer).RetireAccounting()
 			require.Zero(t, open[i].RetainedBytes())
+			ops += 2
 			_, err := open[i].GetInclusionCert(ctx, testLeafInput(1, 1).Key)
 			require.NotErrorIs(t, err, ErrReadViewClosed)
 			open = append(open[:i], open[i+1:]...)
 		}
 		check(step)
 	}
-	require.Zero(t, b.lineage.visits)
+	require.LessOrEqual(t, b.lineage.visits, uint64(3*ops), "visits stay constant per accounting operation")
 }

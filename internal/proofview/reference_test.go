@@ -57,6 +57,7 @@ type refCatalog struct {
 
 	evictions     uint64
 	pressureKills uint64
+	leaseVisits   uint64
 }
 
 // NewCatalog creates an empty catalog.
@@ -356,6 +357,7 @@ func (c *refCatalog) cancelOldestLeasesLocked() {
 	// Leases are cancelled oldest-view-first; a lease on a retired view goes
 	// before one on a retained view.
 	for l := range c.leases {
+		c.leaseVisits++
 		if l.v.retired && l.ctx.Err() == nil {
 			l.cancel()
 			c.pressureKills++
@@ -366,6 +368,7 @@ func (c *refCatalog) cancelOldestLeasesLocked() {
 	}
 	for _, v := range c.views {
 		for l := range c.leases {
+			c.leaseVisits++
 			if l.v == v && l.ctx.Err() == nil {
 				l.cancel()
 				c.pressureKills++
