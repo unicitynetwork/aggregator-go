@@ -252,7 +252,12 @@ func (s *Session) consolidateShard(bi int, b ShardResult, target *types.UnicityC
 		return nil, err
 	}
 
-	so := &ShardOutput{ShardID: b.ShardID, UC: target, SourceUC: slices.Clone(b.Proofs[0].InclusionProof.UnicityCertificate)}
+	// the output never aliases the authenticated master state
+	var ucCopy types.UnicityCertificate
+	if err := types.Cbor.Unmarshal(targetBytes, &ucCopy); err != nil {
+		return nil, fail(OutcomeInvalidInput, bi, err, "copying assembled unicity certificate")
+	}
+	so := &ShardOutput{ShardID: b.ShardID, UC: &ucCopy, SourceUC: slices.Clone(b.Proofs[0].InclusionProof.UnicityCertificate)}
 	for i, req := range b.Requests {
 		p := b.Proofs[i]
 		if err := s.checkLeaf(bi, req, p.InclusionProof, target); err != nil {

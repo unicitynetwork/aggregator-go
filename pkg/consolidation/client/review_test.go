@@ -230,3 +230,80 @@ func TestConsolidate_EnvelopeValidation(t *testing.T) {
 }
 
 var _ = api.StateTreeKeyLengthBytes
+
+// A blocked trust resolver cannot hold the attempt past its deadline.
+func TestConsolidate_BlockedResolverIsBoundedByDeadline(t *testing.T) {
+	sim, items := scenario(t, 2, 1)
+	release := make(chan struct{})
+	var finished atomic.Int32
+	c := newClient(t, sim, func(cfg *client.Config) {
+		cfg.Timeout = 20 * time.Millisecond
+		inner := cfg.Resolver
+		cfg.Resolver = func(s *types.UnicitySeal) (types.RootTrustBase, error) {
+			<-release
+			defer finished.Add(1)
+			return inner(s)
+		}
+	})
+	start := time.Now()
+	res, err := c.Consolidate(context.Background(), items)
+	elapsed := time.Since(start)
+	require.Nil(t, res)
+	requireClientErr(t, err, client.KindUnavailable, "deadline")
+	require.Less(t, elapsed, 150*time.Millisecond, "the attempt must not wait for the blocked resolver")
+
+	// outstanding work completes once released and nothing is left blocked
+	close(release)
+	require.Eventually(t, func() bool { return finished.Load() >= 1 }, 2*time.Second, 5*time.Millisecond)
+}
+
+func TestConsolidate_BlockedResolverCancellation(t *testing.T) {
+	sim, items := scenario(t, 2, 1)
+	release := make(chan struct{})
+	defer close(release)
+	c := newClient(t, sim, func(cfg *client.Config) {
+		cfg.Timeout = 10 * time.Second
+		cfg.Resolver = func(*types.UnicitySeal) (types.RootTrustBase, error) { <-release; return nil, nil }
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(30 * time.Millisecond); cancel() }()
+	start := time.Now()
+	_, err := c.Consolidate(ctx, items)
+	requireClientErr(t, err, client.KindUnavailable, "cancelled")
+	require.Less(t, time.Since(start), 200*time.Millisecond)
+}
+
+func TestConsolidate_ContextResolverReceivesAttemptContext(t *testing.T) {
+	sim, items := scenario(t, 2, 1)
+	var sawDeadline atomic.Bool
+	c := newClient(t, sim, func(cfg *client.Config) {
+		cfg.Timeout = 50 * time.Millisecond
+		inner := cfg.Resolver
+		cfg.Resolver = nil
+		cfg.ResolverContext = func(ctx context.Context, s *types.UnicitySeal) (types.RootTrustBase, error) {
+			if _, ok := ctx.Deadline(); ok {
+				sawDeadline.Store(true)
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(10 * time.Second):
+				return inner(s)
+			}
+		}
+	})
+	start := time.Now()
+	_, err := c.Consolidate(context.Background(), items)
+	requireClientErr(t, err, client.KindUnavailable, "deadline")
+	require.True(t, sawDeadline.Load())
+	require.Less(t, time.Since(start), time.Second)
+
+	// and a working context resolver succeeds
+	good := newClient(t, sim, func(cfg *client.Config) {
+		inner := cfg.Resolver
+		cfg.Resolver = nil
+		cfg.ResolverContext = func(_ context.Context, s *types.UnicitySeal) (types.RootTrustBase, error) { return inner(s) }
+	})
+	_, err = good.Consolidate(context.Background(), items)
+	require.NoError(t, err)
+}

@@ -558,3 +558,33 @@ func TestAuthenticateMaster_Stage(t *testing.T) {
 	_, err = s.AuthenticateMaster(nil, f.in.Master, f.in.PartitionView)
 	requireOutcome(t, err, OutcomeUnavailable)
 }
+
+// Outputs never alias the authenticated master state: mutating a result cannot
+// affect a later completion with the same master.
+func TestComplete_OutputDoesNotAliasAuthenticatedMaster(t *testing.T) {
+	f := newFixture(t, ts())
+	s := f.session()
+	b, err := s.AuthenticateEvidence(f.defaultEvidence())
+	require.NoError(t, err)
+	m, err := s.AuthenticateMaster(b, f.in.Master, f.in.PartitionView)
+	require.NoError(t, err)
+
+	out1, err := s.Complete(m, f.in.Peers)
+	require.NoError(t, err)
+	for _, so := range out1.Shards {
+		for k := range so.UC.UnicitySeal.Signatures {
+			so.UC.UnicitySeal.Signatures[k][0] ^= 0xff
+		}
+		so.UC.InputRecord.RoundNumber++
+		so.UC.UnicityTreeCertificate.HashSteps[0].Hash[0] ^= 1
+		so.UC.UnicitySeal.Hash[0] ^= 1
+	}
+
+	out2, err := s.Complete(m, f.in.Peers)
+	require.NoError(t, err)
+	for i, so := range out2.Shards {
+		vctx := &api.VerifierContext{TrustBase: f.tb, PartitionID: testPartition, ExpectedShardID: so.ShardID,
+			ShardConfHash: f.policy.Topology.ShardConfHashes[so.ShardID.Key()]}
+		require.NoError(t, so.Proofs[0].InclusionProof.Verify(f.reqs[i], vctx), "shard %d", i)
+	}
+}

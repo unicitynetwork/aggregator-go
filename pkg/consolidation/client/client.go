@@ -56,8 +56,15 @@ type Config struct {
 	// must be shards of Policy.Topology.
 	Endpoints []Endpoint
 	// Policy and Resolver are the trusted verification context.
-	Policy   consolidation.Policy
+	Policy consolidation.Policy
+	// Resolver is the trusted authority resolver. It is run so that the attempt
+	// deadline/cancellation is honored while it is in progress: the attempt stops
+	// waiting for it (the call itself cannot be interrupted, its result is
+	// discarded). Prefer ResolverContext for resolvers that can block.
 	Resolver consolidation.TrustBaseResolver
+	// ResolverContext, when set, is used instead of Resolver and receives the
+	// attempt context, which it must honor.
+	ResolverContext func(ctx context.Context, seal *types.UnicitySeal) (types.RootTrustBase, error)
 	// HTTPClient defaults to a client without its own timeout (the attempt deadline governs).
 	HTTPClient *http.Client
 	// Timeout is the total deadline of one attempt (default DefaultTimeout).
@@ -107,7 +114,7 @@ type Client struct {
 
 // New validates the configuration and creates a client.
 func New(cfg Config) (*Client, error) {
-	if cfg.Resolver == nil {
+	if cfg.Resolver == nil && cfg.ResolverContext == nil {
 		return nil, &Error{Kind: KindInput, Err: errors.New("trust base resolver is required")}
 	}
 	order, err := types.CanonicalShardOrder(cfg.Policy.Topology.Scheme)
@@ -140,6 +147,43 @@ func New(cfg Config) (*Client, error) {
 	return &Client{cfg: cfg, http: h}, nil
 }
 
+// resolve runs trust resolution bounded by the attempt context.
+func (c *Client) resolve(ctx context.Context, seal *types.UnicitySeal) (types.RootTrustBase, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c.cfg.ResolverContext != nil {
+		tb, err := c.cfg.ResolverContext(ctx, seal)
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr
+		}
+		return tb, err
+	}
+	type result struct {
+		tb  types.RootTrustBase
+		err error
+	}
+	ch := make(chan result, 1) // buffered: the worker never blocks on an abandoned attempt
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				ch <- result{err: fmt.Errorf("trust resolver panicked: %v", r)}
+			}
+		}()
+		tb, err := c.cfg.Resolver(seal)
+		ch <- result{tb, err}
+	}()
+	select {
+	case r := <-ch:
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr
+		}
+		return r.tb, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 type shardGroup struct {
 	ep    Endpoint
 	items []int // indexes into the input
@@ -156,10 +200,7 @@ func (c *Client) Consolidate(ctx context.Context, items []Item) (*Result, error)
 
 	// trust resolution cooperates with the attempt context
 	resolver := func(seal *types.UnicitySeal) (types.RootTrustBase, error) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		return c.cfg.Resolver(seal)
+		return c.resolve(ctx, seal)
 	}
 	session, err := consolidation.NewSession(c.cfg.Policy, resolver)
 	if err != nil {
