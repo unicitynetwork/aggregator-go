@@ -169,17 +169,28 @@ func authorityIdentity(tb types.RootTrustBase) ([]byte, error) {
 type Policy struct {
 	// PartitionID of the consolidated partition.
 	PartitionID types.PartitionID
-	// Topology is the admitted shard scheme and shard configuration hashes of
-	// every shard (required for UC assembly).
+	// Topology OPTIONALLY pins the admitted shard scheme and the configuration
+	// hash of every shard. Without it the topology comes from the partition view
+	// itself, authenticated by the seal (types.AuthenticateView): the root quorum
+	// signature commits to the complete ordered vector and every configuration
+	// hash. Pins are a stricter policy: they can only reject more.
 	Topology types.PartitionViewTopology
 	// ID identifies the policy content for memoization; derived from the
 	// partition and topology when empty.
 	ID []byte
 }
 
+// pinned reports whether the policy carries an independently admitted topology.
+func (p Policy) pinned() bool {
+	return len(p.Topology.Scheme) > 0 || len(p.Topology.ShardConfHashes) > 0
+}
+
 func (p Policy) validate() error {
 	if p.PartitionID == 0 {
 		return fail(OutcomeInvalidInput, -1, nil, "policy partition ID is zero")
+	}
+	if !p.pinned() {
+		return nil
 	}
 	order, err := types.CanonicalShardOrder(p.Topology.Scheme)
 	if err != nil {
@@ -198,6 +209,12 @@ func (p Policy) id() []byte {
 	var b []byte
 	b = appendLP(b, p.ID)
 	b = binary.BigEndian.AppendUint64(b, uint64(p.PartitionID))
+	if !p.pinned() {
+		b = append(b, 0) // authenticated topology: no pins
+		h := sha256.Sum256(b)
+		return h[:]
+	}
+	b = append(b, 1)
 	order, _ := types.CanonicalShardOrder(p.Topology.Scheme)
 	for _, id := range order {
 		b = appendLP(b, []byte(id.String()))

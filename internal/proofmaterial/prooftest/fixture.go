@@ -1,5 +1,6 @@
-// Package prooftest builds unsigned test fixtures of partition views and their
-// enclosing UCs. The seal is NOT signed; use only where seal authentication is stubbed.
+// Package prooftest builds test fixtures of partition views and their enclosing UCs.
+// The seal is signed by a deterministic public test key of the fixture trust base
+// (network 3, epoch 1, epoch start 1); never use the key outside tests.
 package prooftest
 
 import (
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 
 	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -43,7 +45,13 @@ type Fixture struct {
 	UC    *types.UnicityCertificate
 	Topo  types.PartitionViewTopology
 	Shard types.ShardID // shard of UC (first leaf)
+	// TrustBase is the authority which signed the seal; Signer its key.
+	TrustBase *types.RootTrustBaseV1
+	Signer    abcrypto.Signer
 }
+
+// NetworkID of the fixture authority.
+const NetworkID types.NetworkID = 3
 
 // New builds a view over 2^bits shards. The enclosing UC belongs to the first shard,
 // whose IR has the given round and state hash.
@@ -79,12 +87,22 @@ func New(t testing.TB, bits int, round uint64, stateHash []byte, rootRound uint6
 	require.NoError(t, err)
 	stc, err := tree.Certificate(order[0])
 	require.NoError(t, err)
-	seal := &types.UnicitySeal{Version: 1, NetworkID: 3, Epoch: 1, RootChainRoundNumber: rootRound,
-		Timestamp: 1731504600, PreviousHash: Hash("prev root"), Hash: ut.RootHash(), Signatures: types.SignatureMap{"node": []byte{1}}}
+	signer, err := abcrypto.NewInMemorySecp256K1SignerFromKey(Hash("prooftest authority key"))
+	require.NoError(t, err)
+	verifier, err := signer.Verifier()
+	require.NoError(t, err)
+	pub, err := verifier.MarshalPublicKey()
+	require.NoError(t, err)
+	tb, err := types.NewTrustBase(NetworkID, []*types.NodeInfo{{NodeID: "node", SigKey: pub, Stake: 1}}, types.WithEpoch(1), types.WithEpochStart(1))
+	require.NoError(t, err)
+	seal := &types.UnicitySeal{Version: 1, NetworkID: NetworkID, Epoch: 1, RootChainRoundNumber: rootRound,
+		Timestamp: 1731504600, PreviousHash: Hash("prev root"), Hash: ut.RootHash()}
+	require.NoError(t, seal.Sign("node", signer))
 	l := v.Leaves[0]
 	raw, err := types.Cbor.Marshal(v)
 	require.NoError(t, err)
 	return &Fixture{
+		TrustBase: tb, Signer: signer,
 		View: v, Raw: raw, Topo: types.PartitionViewTopology{Scheme: scheme, ShardConfHashes: confHashes}, Shard: order[0],
 		UC: &types.UnicityCertificate{Version: 1, InputRecord: l.InputRecord, TRHash: l.TRHash, ShardConfHash: l.ShardConfHash,
 			ShardTreeCertificate: stc, UnicityTreeCertificate: utc, UnicitySeal: seal},

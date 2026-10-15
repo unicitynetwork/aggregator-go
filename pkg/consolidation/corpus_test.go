@@ -509,3 +509,47 @@ func TestCorpusContextNetworkIsEnforced(t *testing.T) {
 	require.Equal(t, consolidationcorpus.StagePolicy, res.Stage)
 	require.Equal(t, "incompatible_lineage", res.Outcome)
 }
+
+// The independently admitted topology of the context is optional: without it the scheme and
+// configuration hashes are those the seal commits to, with identical results.
+func TestCorpusPositiveCasesWithoutPinnedTopology(t *testing.T) {
+	m, all := loadManifest(t)
+	for _, name := range positives(m) {
+		files := caseFiles(all, name)
+		pinned, err := consolidationcorpus.Evaluate(files)
+		require.NoError(t, err)
+		unpinned, err := consolidationcorpus.EvaluateWith(files, consolidationcorpus.Options{Unpinned: true})
+		require.NoError(t, err)
+		require.Equal(t, consolidationcorpus.StageOK, unpinned.Stage, name)
+		require.Equal(t, pinned.Bundle, unpinned.Bundle, name)
+		require.Equal(t, *pinned.Counters, *unpinned.Counters, name)
+	}
+}
+
+// Dropping the pins never turns a tampered case into an accepted one.
+func TestCorpusNegativeCasesAreRefusedWithoutPinnedTopology(t *testing.T) {
+	m, all := loadManifest(t)
+	base := caseFiles(all, "shards-4")
+	for _, c := range m.Cases {
+		if c.Kind != "negative" {
+			continue
+		}
+		dir := caseFiles(all, c.Name)
+		var exp struct {
+			ChangedFiles []string `json:"changedFiles"`
+		}
+		require.NoError(t, dir.Decode(consolidationcorpus.FileExpected, &exp))
+		files := base.Clone()
+		for _, n := range exp.ChangedFiles {
+			files[n] = dir[n]
+		}
+		res, err := consolidationcorpus.EvaluateWith(files, consolidationcorpus.Options{Unpinned: true})
+		require.NoError(t, err, c.Name)
+		switch c.Name {
+		case "context-wrong-config-participant", "context-incomplete-scheme", "context-overlapping-scheme":
+			// these tamper with the pins themselves
+			continue
+		}
+		require.NotEqual(t, consolidationcorpus.StageOK, res.Stage, "%s must be refused without pins as well", c.Name)
+	}
+}
