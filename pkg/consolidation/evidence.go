@@ -3,6 +3,7 @@ package consolidation
 import (
 	"bytes"
 	"crypto"
+	"crypto/sha256"
 	"errors"
 	"slices"
 
@@ -19,17 +20,55 @@ type Evidence struct {
 }
 
 // RootRoundBound is the authenticated minimal root chain round (R_min). It can
-// only be produced by Session.AuthenticateEvidence: it records the network and
-// the policy it was derived under, and Consolidate refuses it for any other
-// lineage. Its fields are unexported so a bound cannot be forged or lowered.
+// only be produced by Session.AuthenticateEvidence and is only accepted by that
+// same session: it is bound to the verifying session (its authority resolver and
+// policy), the network, and a commitment to the original inputs it was derived
+// from. Consolidate requires every request of the consolidation to be covered by
+// that commitment, so evidence that is omitted or substituted never yields a
+// usable bound. Its fields are unexported so it cannot be forged or lowered.
 type RootRoundBound struct {
 	round   uint64
+	shard   types.ShardID
 	network types.NetworkID
 	lineage []byte
+	session *Session
+	// inputs commits to every authenticated original input: state ID -> digest
+	// of its certification data.
+	inputs map[string][sha256.Size]byte
 }
 
 // Round returns the authenticated minimal root chain round.
 func (b *RootRoundBound) Round() uint64 { return b.round }
+
+// Shard returns the shard of the (first) evidence that carries the maximum
+// round: the preferred master.
+func (b *RootRoundBound) Shard() types.ShardID { return b.shard }
+
+func inputDigest(req *api.CertificationRequest) ([sha256.Size]byte, error) {
+	b, err := types.Cbor.Marshal(&req.CertificationData)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	return sha256.Sum256(b), nil
+}
+
+// covers checks that every request of the consolidation is one of the
+// authenticated required inputs, byte-for-byte in its certification data.
+func (b *RootRoundBound) covers(batches []ShardResult) error {
+	for bi, sr := range batches {
+		for _, r := range sr.Requests {
+			want, ok := b.inputs[string(r.StateID)]
+			if !ok {
+				return fail(OutcomeIncompatibleLineage, bi, nil, "state %s is not covered by the authenticated evidence", r.StateID)
+			}
+			got, err := inputDigest(r)
+			if err != nil || got != want {
+				return fail(OutcomeIncompatibleLineage, bi, err, "state %s differs from the authenticated evidence", r.StateID)
+			}
+		}
+	}
+	return nil
+}
 
 // AuthenticateEvidence authenticates every original proof (request binding,
 // leaf path to its UC, shard and partition path to its seal hash, and the seal
@@ -42,6 +81,7 @@ func (s *Session) AuthenticateEvidence(ev []Evidence) (*RootRoundBound, error) {
 	}
 	var round uint64
 	var network types.NetworkID
+	inputs := map[string][sha256.Size]byte{}
 	for i, e := range ev {
 		if e.Request == nil || e.Proof == nil {
 			return nil, fail(OutcomeInvalidInput, i, nil, "nil evidence")
@@ -50,6 +90,14 @@ func (s *Session) AuthenticateEvidence(ev []Evidence) (*RootRoundBound, error) {
 		if err != nil {
 			return nil, err
 		}
+		d, err := inputDigest(e.Request)
+		if err != nil {
+			return nil, fail(OutcomeInvalidInput, i, err, "encoding certification data")
+		}
+		if _, dup := inputs[string(e.Request.StateID)]; dup {
+			return nil, fail(OutcomeInvalidInput, i, nil, "duplicate evidence for state %s", e.Request.StateID)
+		}
+		inputs[string(e.Request.StateID)] = d
 		seal := uc.UnicitySeal
 		if i == 0 {
 			network = seal.NetworkID
@@ -61,15 +109,18 @@ func (s *Session) AuthenticateEvidence(ev []Evidence) (*RootRoundBound, error) {
 		}
 		round = max(round, seal.RootChainRoundNumber)
 	}
-	return &RootRoundBound{round: round, network: network, lineage: s.policy.id()}, nil
+	return &RootRoundBound{round: round, network: network, lineage: s.policy.id(), session: s, inputs: inputs}, nil
 }
 
 func (s *Session) checkEvidenceProof(i int, e Evidence) (*types.UnicityCertificate, error) {
-	if err := e.Proof.CheckRequestBinding(e.Request); err != nil {
-		return nil, fail(OutcomeBindingMismatch, i, err, "evidence state %s", e.Request.StateID)
+	if e.Proof.CertificationData == nil {
+		return nil, fail(OutcomeInvalidInput, i, nil, "evidence is not an inclusion proof")
 	}
 	uc, err := decodeUC(e.Proof.UnicityCertificate, i)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkPathSteps(i, uc); err != nil {
 		return nil, err
 	}
 	shard := uc.ShardTreeCertificate.Shard
@@ -91,14 +142,10 @@ func (s *Session) checkEvidenceProof(i int, e Evidence) (*types.UnicityCertifica
 	if !bytes.Equal(root, uc.UnicitySeal.Hash) {
 		return nil, fail(OutcomeBindingMismatch, i, nil, "evidence shard path does not reach its seal hash")
 	}
-	if len(uc.InputRecord.Hash) != api.StateTreeKeyLengthBytes {
-		return nil, fail(OutcomeUnsupported, i, nil, "evidence state root has %d bytes", len(uc.InputRecord.Hash))
-	}
-	if exp := e.Request.CertificationData.ExpiresAt; exp != nil && e.Proof.ReferenceTime != nil && *e.Proof.ReferenceTime >= *exp {
-		return nil, fail(OutcomeExpired, i, nil, "evidence state %s expired at its reference time", e.Request.StateID)
-	}
-	if err := e.Proof.VerifyLeafPath(e.Request, uc.InputRecord.Hash); err != nil {
-		return nil, fail(OutcomeBindingMismatch, i, err, "evidence state %s", e.Request.StateID)
+	// the same leaf rules as for the output proofs: binding, expiry, reference
+	// time not after the UC timestamp, certified-shard membership, path to the root
+	if err := leafRules(i, e.Request, e.Proof, uc); err != nil {
+		return nil, err
 	}
 	return uc, nil
 }
