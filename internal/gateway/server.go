@@ -14,6 +14,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/service"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
@@ -171,6 +172,25 @@ func (s *Server) setupJSONRPCHandlers() {
 	s.rpcServer.RegisterMethod("get_block_height", s.handleGetBlockHeight)
 	s.rpcServer.RegisterMethod("get_block", s.handleGetBlock)
 	s.rpcServer.RegisterMethod("get_block_records", s.handleGetBlockRecords)
+}
+
+// BatchProofsMethod is the JSON-RPC method of the batch inclusion proof API.
+const BatchProofsMethod = "get_inclusion_proofs.v1"
+
+// SetBatchProofHandler registers get_inclusion_proofs.v1 with its request and
+// response bounds. Until it is called (publication wiring) the method is not
+// served. Deployments that cannot serve it (parent/child aggregation) get the
+// unsupported_configuration error instead.
+func (s *Server) SetBatchProofHandler(h jsonrpc.HandlerFunc) {
+	if m := s.config.Sharding.Mode; m.IsParent() || m.IsChild() {
+		h = service.UnsupportedRPC
+	}
+	s.rpcServer.RegisterMethodWithLimits(BatchProofsMethod, h, jsonrpc.MethodLimits{
+		MaxRequestBytes:  api.InclusionProofsMaxRequestBytes,
+		MaxParamsBytes:   api.InclusionProofsMaxParamsBytes,
+		MaxIDBytes:       api.InclusionProofsMaxIDBytes,
+		MaxResponseBytes: api.InclusionProofsMaxResponseBytes,
+	})
 }
 
 // Start starts the HTTP server
