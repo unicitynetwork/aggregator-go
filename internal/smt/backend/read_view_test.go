@@ -253,3 +253,54 @@ func TestMemoryReadViewOfEmptyTree(t *testing.T) {
 	_, err = v.GetInclusionCert(context.Background(), spreadInput(1).Key)
 	require.Error(t, err)
 }
+
+// Regression: closing a duplicate handle must not strand the charge for nodes
+// an older surviving view still holds.
+func TestMemoryReadViewChargeSurvivesDuplicateHandleClose(t *testing.T) {
+	ctx := context.Background()
+	b := newMemory()
+	commitBatch(t, b, 1, spreadRange(0, 1000))
+	a, err := b.RetainReadView(ctx)
+	require.NoError(t, err)
+	dup, err := b.RetainReadView(ctx) // same state, as a retried publication
+	require.NoError(t, err)
+	require.NoError(t, dup.Close())
+
+	commitBatch(t, b, 2, spreadRange(1000, 2000))
+	nb, err := b.RetainReadView(ctx)
+	require.NoError(t, err)
+
+	require.Greater(t, a.RetainedBytes(), uint64(50_000), "A keeps ~1000 replaced paths alive")
+	require.EqualValues(t, 256, nb.RetainedBytes(), "newest view holds nothing beyond live state")
+}
+
+// Regression: with an older view still pinned, closing an intermediate view
+// moves its share of the charge onto the survivor instead of dropping it.
+func TestMemoryReadViewChargeMovesToSurvivorWhenIntermediateCloses(t *testing.T) {
+	ctx := context.Background()
+	b := newMemory()
+	commitBatch(t, b, 1, spreadRange(0, 1000))
+	a, err := b.RetainReadView(ctx)
+	require.NoError(t, err)
+	commitBatch(t, b, 2, spreadRange(1000, 1500))
+	m, err := b.RetainReadView(ctx)
+	require.NoError(t, err)
+	commitBatch(t, b, 3, spreadRange(1500, 2000))
+	head, err := b.RetainReadView(ctx)
+	require.NoError(t, err)
+
+	aBefore := a.RetainedBytes()
+	mBefore := m.RetainedBytes()
+	require.Greater(t, mBefore, uint64(256))
+	require.NoError(t, m.Close())
+	require.Zero(t, m.RetainedBytes())
+	require.Equal(t, aBefore+mBefore-256, a.RetainedBytes(), "A absorbs M's share")
+	require.EqualValues(t, 256, head.RetainedBytes())
+
+	// With A closed too, nothing older than head remains to charge.
+	require.NoError(t, a.Close())
+	commitBatch(t, b, 4, spreadRange(2000, 2100))
+	_, err = b.RetainReadView(ctx)
+	require.NoError(t, err)
+	require.Greater(t, head.RetainedBytes(), uint64(256))
+}

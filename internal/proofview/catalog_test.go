@@ -55,6 +55,7 @@ func ucFor(t testing.TB, root []byte, round uint64) []byte {
 		InputRecord: &types.InputRecord{
 			Version: 1, RoundNumber: round, Hash: root, SummaryValue: []byte{},
 		},
+		UnicitySeal: &types.UnicitySeal{Version: 1, RootChainRoundNumber: round},
 	}
 	b, err := types.Cbor.Marshal(&uc)
 	require.NoError(t, err)
@@ -208,7 +209,10 @@ func TestPinnedViewSurvivesEvictionUntilReleased(t *testing.T) {
 	require.NoError(t, err)
 
 	publish(t, c, 2, 2, newFakeReader(2, 10), nil)
-	publish(t, c, 3, 3, newFakeReader(3, 10), nil) // evicts view 1 from the catalog
+	pin2, err := c.AcquireRoot(context.Background(), rootOf(2))
+	require.NoError(t, err)
+	defer pin2.Release()
+	publish(t, c, 3, 3, newFakeReader(3, 10), nil) // both older views pinned: view 1 retires
 
 	st := c.Stats()
 	require.Equal(t, 2, st.Views)
@@ -645,4 +649,132 @@ func TestLimitsFromConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, Limits{MaxViews: 3, MaxAttachmentsPerView: 2, RetentionBudgetBytes: 8 << 20,
 		MaxConcurrentPins: 5, MaxLeaseDuration: time.Second}, l)
+}
+
+// Regression: a rejected newer publication must keep latest unavailable even
+// when a late sidecar is attached to the older retained UC.
+func TestLateSidecarOnOlderViewDoesNotRestoreRejectedLatest(t *testing.T) {
+	l := testLimits()
+	l.RetentionBudgetBytes = 5000
+	c := newCatalog(t, l)
+	ctx := context.Background()
+	publish(t, c, 1, 1, newFakeReader(1, 100), nil)
+	err := c.Publish(ctx, PublishInput{Block: block(2), Root: rootOf(2), Reader: newFakeReader(2, 1<<20),
+		Cert: Certification{UC: ucFor(t, rootOf(2), 2)}})
+	require.ErrorIs(t, err, ErrBudget)
+
+	require.NoError(t, c.AttachCertification(ctx, block(1), rootOf(1),
+		Certification{UC: ucFor(t, rootOf(1), 1), PartitionView: []byte("late")}))
+	_, err = c.AcquireLatest(ctx)
+	require.ErrorIs(t, err, ErrViewNotRetained)
+
+	// A repeat UC for the old state is older than the rejected publication.
+	require.NoError(t, c.AttachCertification(ctx, block(1), rootOf(1), Certification{UC: ucFor(t, rootOf(1), 1)}))
+	_, err = c.AcquireLatest(ctx)
+	require.ErrorIs(t, err, ErrViewNotRetained)
+
+	// A genuinely newer published view restores latest.
+	publish(t, c, 3, 3, newFakeReader(3, 100), nil)
+	lease, err := c.AcquireLatest(ctx)
+	require.NoError(t, err)
+	require.Equal(t, rootOf(3), lease.Root())
+	lease.Release()
+}
+
+// Regression: a newer same-root UC rejected for budget keeps latest
+// unavailable when an older UC's sidecar is filled in; only a newer UC clears it.
+func TestRejectedNewerUCKeepsLatestUnavailableUntilNewerOne(t *testing.T) {
+	l := testLimits()
+	l.RetentionBudgetBytes = 1000
+	c := newCatalog(t, l)
+	ctx := context.Background()
+	r := newFakeReader(1, 100)
+	publish(t, c, 1, 1, r, nil)
+
+	r.bytes.Store(2000) // the view alone now exceeds the budget: a new UC cannot be retained
+	err := c.AttachCertification(ctx, block(1), rootOf(1), Certification{UC: ucFor(t, rootOf(1), 2)})
+	require.ErrorIs(t, err, ErrBudget)
+	_, err = c.AcquireLatest(ctx)
+	require.ErrorIs(t, err, ErrViewNotRetained)
+
+	r.bytes.Store(100)
+	require.NoError(t, c.AttachCertification(ctx, block(1), rootOf(1),
+		Certification{UC: ucFor(t, rootOf(1), 1), PartitionView: []byte("old")}))
+	_, err = c.AcquireLatest(ctx)
+	require.ErrorIs(t, err, ErrViewNotRetained, "filling an older UC must not restore latest")
+
+	require.NoError(t, c.AttachCertification(ctx, block(1), rootOf(1), Certification{UC: ucFor(t, rootOf(1), 3)}))
+	lease, err := c.AcquireLatest(ctx)
+	require.NoError(t, err)
+	require.Equal(t, ucFor(t, rootOf(1), 3), lease.UC())
+	lease.Release()
+}
+
+// Regression: redelivering a UC whose attachment was evicted must not promote it.
+func TestEvictedUCRedeliveryDoesNotBecomeLatest(t *testing.T) {
+	l := testLimits()
+	l.MaxAttachmentsPerView = 2
+	c := newCatalog(t, l)
+	ctx := context.Background()
+	publish(t, c, 1, 1, newFakeReader(1, 10), nil) // A
+	for round := uint64(2); round <= 3; round++ {  // B, C evict A
+		require.NoError(t, c.AttachCertification(ctx, block(1), rootOf(1), Certification{UC: ucFor(t, rootOf(1), round)}))
+	}
+	// A's late sidecar (or plain redelivery) arrives.
+	require.NoError(t, c.AttachCertification(ctx, block(1), rootOf(1),
+		Certification{UC: ucFor(t, rootOf(1), 1), PartitionView: []byte("late-A")}))
+	require.NoError(t, c.AttachCertification(ctx, block(1), rootOf(1), Certification{UC: ucFor(t, rootOf(1), 1)}))
+	require.Equal(t, 2, attachmentCount(c))
+	for _, acquire := range []func() (*Lease, error){
+		func() (*Lease, error) { return c.AcquireLatest(ctx) },
+		func() (*Lease, error) { return c.AcquireRoot(ctx, rootOf(1)) },
+	} {
+		lease, err := acquire()
+		require.NoError(t, err)
+		require.Equal(t, ucFor(t, rootOf(1), 3), lease.UC())
+		lease.Release()
+	}
+}
+
+// Regression: eviction removes unpinned history before a pinned entry.
+func TestBudgetEvictionPrefersUnpinnedOverPinnedOldest(t *testing.T) {
+	l := testLimits()
+	l.RetentionBudgetBytes = 2500 // fits two 1000-byte views, not three
+	c := newCatalog(t, l)
+	ctx := context.Background()
+	ra := newFakeReader(1, 1000)
+	publish(t, c, 1, 1, ra, nil)
+	pinA, err := c.AcquireRoot(ctx, rootOf(1))
+	require.NoError(t, err)
+	publish(t, c, 2, 2, newFakeReader(2, 1000), nil)
+	publish(t, c, 3, 3, newFakeReader(3, 1000), nil)
+
+	a, err := c.AcquireRoot(ctx, rootOf(1))
+	require.NoError(t, err, "pinned A must stay reachable: evicting B alone satisfies the budget")
+	a.Release()
+	_, err = c.AcquireRoot(ctx, rootOf(2))
+	require.ErrorIs(t, err, ErrViewNotRetained)
+	require.Zero(t, ra.closes.Load())
+	require.Zero(t, c.Stats().RetiredPinned)
+	pinA.Release()
+}
+
+func TestViewCountLimitRetiresPinnedOnlyWhenNothingUnpinned(t *testing.T) {
+	l := testLimits()
+	l.MaxViews = 2
+	c := newCatalog(t, l)
+	ctx := context.Background()
+	publish(t, c, 1, 1, newFakeReader(1, 10), nil)
+	pin1, err := c.AcquireRoot(ctx, rootOf(1))
+	require.NoError(t, err)
+	publish(t, c, 2, 2, newFakeReader(2, 10), nil)
+	pin2, err := c.AcquireRoot(ctx, rootOf(2))
+	require.NoError(t, err)
+	publish(t, c, 3, 3, newFakeReader(3, 10), nil) // all older views pinned: oldest retires
+	require.Equal(t, 2, c.Stats().Views)
+	require.Equal(t, 1, c.Stats().RetiredPinned)
+	_, err = c.AcquireRoot(ctx, rootOf(1))
+	require.ErrorIs(t, err, ErrViewNotRetained)
+	pin1.Release()
+	pin2.Release()
 }
