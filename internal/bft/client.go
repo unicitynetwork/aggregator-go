@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial"
 	"math/big"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -90,7 +91,7 @@ type (
 		proofSink     atomic.Pointer[proofmaterial.Sink]
 		proofTopology proofmaterial.TopologyProvider
 		publishedMu   sync.Mutex
-		published     map[proofmaterial.Digest]bool // recent published UC digests -> had a view
+		published     map[proofmaterial.Digest]bool // recent accepted UC digests -> partition view delivered to the sink
 		publishedFIFO []proofmaterial.Digest
 	}
 
@@ -155,6 +156,11 @@ func NewBFTClient(
 		proofStaging:   proofmaterial.NewStaging(proofmaterial.DefaultStagingEntries),
 		published:      map[proofmaterial.Digest]bool{},
 	}
+	topo, err := proofTopologyFromConfig(conf)
+	if err != nil {
+		return nil, fmt.Errorf("invalid consolidation topology: %w", err)
+	}
+	bftClient.proofTopology = topo
 	bftClient.status.Store(idle)
 	bftClient.luc.Store(luc)
 	bftClient.lastCertResponseTime.Store(time.Now().UnixMilli())
@@ -805,6 +811,50 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 	return err
 }
 
+// proofTopologyFromConfig derives the trusted topology used to validate partition views:
+// the own shard configuration hash for an unsharded partition, otherwise the configured
+// complete topology. Returns nil (no views are retained) when neither is available.
+func proofTopologyFromConfig(conf *config.BFTConfig) (proofmaterial.TopologyProvider, error) {
+	if conf == nil || conf.ShardConf == nil {
+		return nil, nil
+	}
+	if len(conf.ConsolidationShards) == 0 {
+		if conf.ShardConf.ShardID.Length() != 0 {
+			return nil, nil
+		}
+		h, err := conf.ShardConf.Hash(crypto.SHA256)
+		if err != nil {
+			return nil, fmt.Errorf("hashing shard configuration: %w", err)
+		}
+		t, err := proofmaterial.SingleShardTopology(conf.ShardConf.PartitionID, h)
+		if err != nil {
+			return nil, err
+		}
+		return t, nil
+	}
+	scheme := make(types.ShardingScheme, 0, len(conf.ConsolidationShards))
+	hashes := make(map[string][]byte, len(conf.ConsolidationShards))
+	for _, sh := range conf.ConsolidationShards {
+		h, err := hex.DecodeString(strings.TrimPrefix(sh.ConfigHash, "0x"))
+		if err != nil {
+			return nil, fmt.Errorf("shard %q configuration hash: %w", sh.ShardID, err)
+		}
+		if _, dup := hashes[sh.ShardID.Key()]; dup {
+			return nil, fmt.Errorf("duplicate shard %q", sh.ShardID)
+		}
+		scheme = append(scheme, sh.ShardID)
+		hashes[sh.ShardID.Key()] = h
+	}
+	if len(scheme) == 1 && scheme[0].Length() == 0 {
+		scheme = types.ShardingScheme{}
+	}
+	t, err := proofmaterial.NewStaticTopology(conf.ShardConf.PartitionID, scheme, hashes)
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
 // SetProofMaterialSink sets the consumer of published proof material (A4 wires the
 // retained-view catalog here). Safe to call before or after Start; nil resets to discard.
 func (c *BFTClientImpl) SetProofMaterialSink(sink proofmaterial.Sink) {
@@ -866,19 +916,9 @@ func (c *BFTClientImpl) publishProofMaterial(ctx context.Context, uc *types.Unic
 }
 
 func (c *BFTClientImpl) deliverProofMaterial(ctx context.Context, m *proofmaterial.Material) {
-	c.publishedMu.Lock()
-	if c.published == nil {
-		c.published = map[proofmaterial.Digest]bool{}
-	}
-	if _, seen := c.published[m.UCDigest]; !seen {
-		c.publishedFIFO = append(c.publishedFIFO, m.UCDigest)
-		if len(c.publishedFIFO) > maxPublishedTracked {
-			delete(c.published, c.publishedFIFO[0])
-			c.publishedFIFO = c.publishedFIFO[1:]
-		}
-	}
-	c.published[m.UCDigest] = len(m.PartitionView) > 0
-	c.publishedMu.Unlock()
+	// The UC is tracked as accepted from now on; its view counts as delivered only once
+	// the sink has accepted it, so a failed fill stays eligible for later duplicates.
+	c.trackPublished(m.UCDigest, false)
 
 	sink := c.proofSink.Load()
 	if sink == nil {
@@ -887,7 +927,29 @@ func (c *BFTClientImpl) deliverProofMaterial(ctx context.Context, m *proofmateri
 	if err := (*sink).PublishProofMaterial(ctx, m); err != nil {
 		c.logger.WithContext(ctx).Warn("Publishing proof material failed",
 			"kind", m.Kind.String(), "error", err.Error())
+		return
 	}
+	if len(m.PartitionView) > 0 {
+		c.trackPublished(m.UCDigest, true)
+	}
+}
+
+// trackPublished records an accepted UC; viewDelivered only ever moves to true.
+func (c *BFTClientImpl) trackPublished(d proofmaterial.Digest, viewDelivered bool) {
+	c.publishedMu.Lock()
+	defer c.publishedMu.Unlock()
+	if c.published == nil {
+		c.published = map[proofmaterial.Digest]bool{}
+	}
+	prev, seen := c.published[d]
+	if !seen {
+		c.publishedFIFO = append(c.publishedFIFO, d)
+		if len(c.publishedFIFO) > maxPublishedTracked {
+			delete(c.published, c.publishedFIFO[0])
+			c.publishedFIFO = c.publishedFIFO[1:]
+		}
+	}
+	c.published[d] = prev || viewDelivered
 }
 
 // publishSidecarFill handles a duplicate delivery of an already published UC which

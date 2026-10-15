@@ -3,7 +3,9 @@ package bft
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
+	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -27,15 +29,16 @@ func (s *recordingSink) PublishProofMaterial(_ context.Context, m *proofmaterial
 	return s.err
 }
 
-func newProofClient(t *testing.T, rm RoundManager) (*BFTClientImpl, *recordingSink) {
+func newProofClient(t *testing.T, rm RoundManager, f *prooftest.Fixture) (*BFTClientImpl, *recordingSink) {
 	log, err := logger.New("warn", "json", "", false)
 	require.NoError(t, err)
 	c := &BFTClientImpl{
-		logger:       log,
-		roundManager: rm,
-		partitionID:  prooftest.Partition,
-		proofStaging: proofmaterial.NewStaging(8),
-		published:    map[proofmaterial.Digest]bool{},
+		logger:        log,
+		roundManager:  rm,
+		partitionID:   prooftest.Partition,
+		proofStaging:  proofmaterial.NewStaging(8),
+		published:     map[proofmaterial.Digest]bool{},
+		proofTopology: f.Provider(t),
 	}
 	sink := &recordingSink{}
 	c.SetProofMaterialSink(sink)
@@ -55,7 +58,7 @@ func Test_ProofMaterial_FinalizedWithView(t *testing.T) {
 	root := prooftest.Hash("root-1")
 	f := prooftest.New(t, 2, 7, root, 80)
 	rm := &stubRoundManager{}
-	c, sink := newProofClient(t, rm)
+	c, sink := newProofClient(t, rm, f)
 	proposeBlock(c, 7, root)
 
 	c.stagePartitionView(t.Context(), response(f, f.Raw))
@@ -76,7 +79,7 @@ func Test_ProofMaterial_NoSidecar(t *testing.T) {
 	root := prooftest.Hash("root-1")
 	f := prooftest.New(t, 2, 7, root, 80)
 	rm := &stubRoundManager{}
-	c, sink := newProofClient(t, rm)
+	c, sink := newProofClient(t, rm, f)
 	proposeBlock(c, 7, root)
 
 	require.NoError(t, c.handleUnicityCertificate(t.Context(), f.UC, &certification.TechnicalRecord{Round: 8, Epoch: 1}))
@@ -97,7 +100,7 @@ func Test_ProofMaterial_InvalidSidecarIsMissingMaterial(t *testing.T) {
 		"trailing bytes": append(bytes.Clone(f.Raw), 0),
 	} {
 		rm := &stubRoundManager{}
-		c, sink := newProofClient(t, rm)
+		c, sink := newProofClient(t, rm, f)
 		proposeBlock(c, 7, root)
 		c.stagePartitionView(t.Context(), response(f, view))
 		require.NoError(t, c.handleUnicityCertificate(t.Context(), f.UC, &certification.TechnicalRecord{Round: 8, Epoch: 1}), name)
@@ -113,7 +116,7 @@ func Test_ProofMaterial_ExactUCAssociation(t *testing.T) {
 	f := prooftest.New(t, 2, 7, root, 80)
 	sameRootLaterSeal := prooftest.New(t, 2, 7, root, 81) // same IR, different seal
 	rm := &stubRoundManager{}
-	c, sink := newProofClient(t, rm)
+	c, sink := newProofClient(t, rm, f)
 	proposeBlock(c, 7, root)
 
 	c.stagePartitionView(t.Context(), response(sameRootLaterSeal, sameRootLaterSeal.Raw))
@@ -126,7 +129,7 @@ func Test_ProofMaterial_DuplicateFillsMissingView(t *testing.T) {
 	root := prooftest.Hash("root-1")
 	f := prooftest.New(t, 2, 7, root, 80)
 	rm := &stubRoundManager{}
-	c, sink := newProofClient(t, rm)
+	c, sink := newProofClient(t, rm, f)
 	proposeBlock(c, 7, root)
 	tr := &certification.TechnicalRecord{Round: 8, Epoch: 1}
 
@@ -150,7 +153,7 @@ func Test_ProofMaterial_DuplicateFillsMissingView(t *testing.T) {
 
 func Test_ProofMaterial_FillOnlyForPublishedUC(t *testing.T) {
 	f := prooftest.New(t, 2, 7, prooftest.Hash("root-1"), 80)
-	c, sink := newProofClient(t, &stubRoundManager{})
+	c, sink := newProofClient(t, &stubRoundManager{}, f)
 	c.stagePartitionView(t.Context(), response(f, f.Raw))
 	c.publishSidecarFill(t.Context(), f.UC) // never accepted/finalized
 	require.Empty(t, sink.got)
@@ -162,7 +165,7 @@ func Test_ProofMaterial_RepeatUC(t *testing.T) {
 	repeat := prooftest.New(t, 2, 7, root, 81)
 	repeat.UC.InputRecord.PreviousHash = prev.UC.InputRecord.PreviousHash
 	rm := &stubRoundManager{}
-	c, sink := newProofClient(t, rm)
+	c, sink := newProofClient(t, rm, repeat)
 	c.luc.Store(prev.UC)
 	c.lastRootRound.Store(80)
 
@@ -181,7 +184,7 @@ func Test_ProofMaterial_SinkFailureDoesNotFailCertification(t *testing.T) {
 	root := prooftest.Hash("root-1")
 	f := prooftest.New(t, 2, 7, root, 80)
 	rm := &stubRoundManager{}
-	c, sink := newProofClient(t, rm)
+	c, sink := newProofClient(t, rm, f)
 	sink.err = errors.New("catalog unavailable")
 	proposeBlock(c, 7, root)
 	require.NoError(t, c.handleUnicityCertificate(t.Context(), f.UC, &certification.TechnicalRecord{Round: 8, Epoch: 1}))
@@ -193,7 +196,7 @@ func Test_ProofMaterial_DurableRecoveryPublishes(t *testing.T) {
 	root := prooftest.Hash("root-1")
 	f := prooftest.New(t, 2, 7, root, 80)
 	rm := &stubRoundManager{durableRecovered: true}
-	c, sink := newProofClient(t, rm)
+	c, sink := newProofClient(t, rm, f)
 	c.stagePartitionView(t.Context(), response(f, f.Raw))
 	require.NoError(t, c.handleUnicityCertificate(t.Context(), f.UC, &certification.TechnicalRecord{Round: 8, Epoch: 1}))
 	require.Len(t, sink.got, 1)
@@ -206,8 +209,89 @@ func Test_ProofMaterial_NoPublicationWithoutFinalization(t *testing.T) {
 	root := prooftest.Hash("root-1")
 	f := prooftest.New(t, 2, 7, root, 80)
 	rm := &stubRoundManager{durableRecovered: false} // no proposed block, nothing recovered
-	c, sink := newProofClient(t, rm)
+	c, sink := newProofClient(t, rm, f)
 	c.stagePartitionView(t.Context(), response(f, f.Raw))
 	require.NoError(t, c.handleUnicityCertificate(t.Context(), f.UC, &certification.TechnicalRecord{Round: 8, Epoch: 1}))
 	require.Empty(t, sink.got, "local state was not finalized")
+}
+
+// A fill the sink rejected stays eligible: a later duplicate retries it without
+// re-executing finalization (codex review: delivery is only marked once accepted).
+func Test_ProofMaterial_FailedFillIsRetried(t *testing.T) {
+	root := prooftest.Hash("root-1")
+	f := prooftest.New(t, 2, 7, root, 80)
+	rm := &stubRoundManager{}
+	c, sink := newProofClient(t, rm, f)
+	proposeBlock(c, 7, root)
+	tr := &certification.TechnicalRecord{Round: 8, Epoch: 1}
+	require.NoError(t, c.handleUnicityCertificate(t.Context(), f.UC, tr))
+	require.Len(t, sink.got, 1)
+
+	sink.err = errors.New("temporary catalog pressure")
+	c.stagePartitionView(t.Context(), response(f, f.Raw))
+	require.NoError(t, c.handleUnicityCertificate(t.Context(), f.UC, tr))
+	c.publishSidecarFill(t.Context(), f.UC)
+	require.Len(t, sink.got, 2, "first fill attempted and rejected")
+
+	sink.err = nil
+	c.publishSidecarFill(t.Context(), f.UC) // a later duplicate
+	require.Len(t, sink.got, 3, "failed fill is retried")
+	require.Equal(t, proofmaterial.KindSidecarFill, sink.got[2].Kind)
+
+	c.publishSidecarFill(t.Context(), f.UC)
+	require.Len(t, sink.got, 3, "no further fills once accepted")
+	require.Len(t, rm.finalizedBlocks, 1, "no re-execution")
+}
+
+func Test_ProofMaterial_NoTopologyMeansNoMaterial(t *testing.T) {
+	root := prooftest.Hash("root-1")
+	f := prooftest.New(t, 2, 7, root, 80)
+	rm := &stubRoundManager{}
+	c, sink := newProofClient(t, rm, f)
+	c.proofTopology = nil
+	proposeBlock(c, 7, root)
+	c.stagePartitionView(t.Context(), response(f, f.Raw))
+	require.NoError(t, c.handleUnicityCertificate(t.Context(), f.UC, &certification.TechnicalRecord{Round: 8, Epoch: 1}))
+	require.Len(t, rm.finalizedBlocks, 1)
+	require.Nil(t, rm.finalizedBlocks[0].PartitionView)
+	require.Nil(t, sink.got[0].PartitionView)
+}
+
+func Test_ProofTopologyFromConfig(t *testing.T) {
+	f1 := prooftest.New(t, 0, 7, prooftest.Hash("root"), 80)
+	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 3, PartitionID: prooftest.Partition, Epoch: 1}
+
+	t.Run("unsharded uses the own configuration hash", func(t *testing.T) {
+		p, err := proofTopologyFromConfig(&config.BFTConfig{ShardConf: pdr})
+		require.NoError(t, err)
+		topo, ok := p.Topology(prooftest.Partition)
+		require.True(t, ok)
+		require.Len(t, topo.ShardConfHashes[types.ShardID{}.Key()], 32)
+		_ = f1
+	})
+	t.Run("sharded without configured topology is unavailable", func(t *testing.T) {
+		a, _ := types.ShardID{}.Split()
+		sharded := *pdr
+		sharded.ShardID = a
+		p, err := proofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded})
+		require.NoError(t, err)
+		require.Nil(t, p)
+	})
+	t.Run("configured topology must be complete with 32-byte hashes", func(t *testing.T) {
+		a, b := types.ShardID{}.Split()
+		h := hex.EncodeToString(prooftest.Hash("c"))
+		sharded := *pdr
+		sharded.ShardID = a
+		_, err := proofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded,
+			ConsolidationShards: []config.ConsolidationShard{{ShardID: a, ConfigHash: h}}})
+		require.Error(t, err, "incomplete scheme")
+		_, err = proofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded,
+			ConsolidationShards: []config.ConsolidationShard{{ShardID: a, ConfigHash: h}, {ShardID: b, ConfigHash: "abcd"}}})
+		require.Error(t, err, "short hash")
+		p, err := proofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded,
+			ConsolidationShards: []config.ConsolidationShard{{ShardID: a, ConfigHash: h}, {ShardID: b, ConfigHash: "0x" + h}}})
+		require.NoError(t, err)
+		_, ok := p.Topology(prooftest.Partition)
+		require.True(t, ok)
+	})
 }

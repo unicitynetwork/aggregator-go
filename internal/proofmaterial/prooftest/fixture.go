@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -52,6 +53,7 @@ func New(t testing.TB, bits int, round uint64, stateHash []byte, rootRound uint6
 	require.NoError(t, err)
 	v := &types.PartitionViewV1{Version: 1, PartitionID: Partition}
 	var inputs []types.ShardTreeInput
+	confHashes := map[string][]byte{}
 	for i, id := range order {
 		ir := &types.InputRecord{
 			Version: 1, RoundNumber: round, Epoch: 1,
@@ -62,6 +64,7 @@ func New(t testing.TB, bits int, round uint64, stateHash []byte, rootRound uint6
 			ir.Hash, ir.BlockHash = stateHash, stateHash
 		}
 		leaf := types.PartitionViewLeafV1{ShardID: id, InputRecord: ir, TRHash: Hash("tr-" + id.String()), ShardConfHash: Hash("conf-" + id.String())}
+		confHashes[id.Key()] = leaf.ShardConfHash
 		v.Leaves = append(v.Leaves, leaf)
 		inputs = append(inputs, types.ShardTreeInput{Shard: id, IR: ir, TRHash: leaf.TRHash, ShardConfHash: leaf.ShardConfHash})
 	}
@@ -82,8 +85,15 @@ func New(t testing.TB, bits int, round uint64, stateHash []byte, rootRound uint6
 	raw, err := types.Cbor.Marshal(v)
 	require.NoError(t, err)
 	return &Fixture{
-		View: v, Raw: raw, Topo: types.PartitionViewTopology{Scheme: scheme}, Shard: order[0],
+		View: v, Raw: raw, Topo: types.PartitionViewTopology{Scheme: scheme, ShardConfHashes: confHashes}, Shard: order[0],
 		UC: &types.UnicityCertificate{Version: 1, InputRecord: l.InputRecord, TRHash: l.TRHash, ShardConfHash: l.ShardConfHash,
 			ShardTreeCertificate: stc, UnicityTreeCertificate: utc, UnicitySeal: seal},
 	}
+}
+
+// Provider returns the trusted topology provider matching the fixture.
+func (f *Fixture) Provider(t testing.TB) *proofmaterial.StaticTopology {
+	p, err := proofmaterial.NewStaticTopology(Partition, f.Topo.Scheme, f.Topo.ShardConfHashes)
+	require.NoError(t, err)
+	return p
 }
