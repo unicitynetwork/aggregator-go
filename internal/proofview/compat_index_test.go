@@ -13,11 +13,11 @@ import (
 )
 
 // compatUC is a UC for root with the accepted input record round/epoch/block hash and configuration given.
-func compatUC(t testing.TB, root []byte, irRound, epoch uint64, blockHash, conf []byte, sealRound uint64) []byte {
+func compatUC(t testing.TB, root []byte, irRound, epoch uint64, blockHash, prevHash, conf []byte, sealRound uint64) []byte {
 	t.Helper()
 	uc := types.UnicityCertificate{
 		Version: 1, ShardConfHash: conf,
-		InputRecord: &types.InputRecord{Version: 1, RoundNumber: irRound, Epoch: epoch, Hash: root, BlockHash: blockHash, SummaryValue: []byte{}},
+		InputRecord: &types.InputRecord{Version: 1, RoundNumber: irRound, Epoch: epoch, Hash: root, PreviousHash: prevHash, BlockHash: blockHash, SummaryValue: []byte{}},
 		UnicitySeal: &types.UnicitySeal{Version: 1, RootChainRoundNumber: sealRound},
 	}
 	b, err := types.Cbor.Marshal(&uc)
@@ -72,7 +72,7 @@ func TestSameRootCompatibleLookupIsConstantInK(t *testing.T) {
 		require.NoError(t, err)
 		ucs := make([]*types.UnicityCertificate, k+1)
 		for i := 1; i <= k; i++ {
-			b := compatUC(t, root, uint64(i), 1, []byte{byte(i)}, []byte("conf"), uint64(i))
+			b := compatUC(t, root, uint64(i), 1, []byte{byte(i)}, []byte{9}, []byte("conf"), uint64(i))
 			publishSameRoot(t, c, w, i, root, b)
 			ucs[i] = decodeTestUC(t, b)
 		}
@@ -88,11 +88,14 @@ func TestSameRootCompatibleLookupIsConstantInK(t *testing.T) {
 		idx = append(idx, float64(c.compatProbes-before)/20)
 		// an incompatible repeat: a miss, then the "is the root known" question: both single probes
 		before = c.compatProbes
-		other := decodeTestUC(t, compatUC(t, root, 1, 2, []byte{1}, []byte("conf"), 1)) // other epoch
+		other := decodeTestUC(t, compatUC(t, root, 1, 2, []byte{1}, []byte{9}, []byte("conf"), 1)) // other epoch
 		_, ok := c.ViewForRootCompatible(root, CompatDigest(other))
 		require.False(t, ok)
+		prev := decodeTestUC(t, compatUC(t, root, 1, 1, []byte{1}, []byte{8}, []byte("conf"), 1)) // other previous hash
+		_, ok = c.ViewForRootCompatible(root, CompatDigest(prev))
+		require.False(t, ok, "the previous hash is part of the binding")
 		require.True(t, c.HasCertifiedRoot(root))
-		require.Equal(t, uint64(2), c.compatProbes-before)
+		require.Equal(t, uint64(3), c.compatProbes-before)
 
 		before = c.compatProbes
 		for rep := 0; rep < 20; rep++ {
@@ -101,6 +104,20 @@ func TestSameRootCompatibleLookupIsConstantInK(t *testing.T) {
 			require.EqualValues(t, 1, id.Number.Uint64())
 		}
 		scan = append(scan, float64(c.compatProbes-before)/20)
+		// The answer does not come from the same-root chain: sever it (and the by-root head) and the oldest state
+		// is still found, by the index alone.
+		c.mu.Lock()
+		for v := c.head; v != nil; v = v.next {
+			v.rootOlder, v.rootNewer = nil, nil
+		}
+		c.byRoot = map[string]*view{}
+		c.mu.Unlock()
+		for _, i := range []int{1, k / 2, k} {
+			id, ok := c.ViewForRootCompatible(root, CompatDigest(ucs[i]))
+			require.True(t, ok)
+			require.EqualValues(t, i, id.Number.Uint64())
+		}
+		require.True(t, c.HasCertifiedRoot(root))
 		require.NoError(t, c.Close())
 	}
 	for _, p := range idx {
@@ -125,7 +142,7 @@ func TestCompatibleLookupEqualsTheScanOnRandomSequences(t *testing.T) {
 		n := 0
 		mk := func() (root, uc []byte) {
 			root = roots[rng.Intn(len(roots))]
-			uc = compatUC(t, root, uint64(rng.Intn(3)), uint64(rng.Intn(2)), []byte{byte(rng.Intn(2))}, confs[rng.Intn(2)], uint64(1+rng.Intn(6)))
+			uc = compatUC(t, root, uint64(rng.Intn(3)), uint64(rng.Intn(2)), []byte{byte(rng.Intn(2))}, []byte{byte(rng.Intn(2))}, confs[rng.Intn(2)], uint64(1+rng.Intn(6)))
 			return
 		}
 		for step := 0; step < 120; step++ {

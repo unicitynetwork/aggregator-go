@@ -324,6 +324,12 @@ func Test_Sink_RejectsIncompatibleAttachments(t *testing.T) {
 		err = e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, g2, nil, 0, false))
 		require.ErrorIs(t, err, proofpub.ErrIncompatibleCertification)
 	})
+	t.Run("different previous hash on the same state hash", func(t *testing.T) {
+		g := prooftest.New(t, 2, 1, root, 96)
+		g.UC.InputRecord.PreviousHash = prooftest.Hash("another predecessor")
+		err := e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, g, nil, 0, false))
+		require.ErrorIs(t, err, proofpub.ErrIncompatibleCertification)
+	})
 	t.Run("finalized material for a block identity with another configuration", func(t *testing.T) {
 		g := prooftest.New(t, 2, 1, root, 93)
 		g.UC.ShardConfHash = prooftest.Hash("elsewhere")
