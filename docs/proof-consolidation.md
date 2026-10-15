@@ -85,8 +85,9 @@ CONSOLIDATION_E2E_SHARDS=4,8 go test -tags e2e_bft ./test/integration -run TestB
 - The root is a host process of the `ubft` binary built from the bft-core module version pinned in `go.mod` (it contains the
   sidecar producer); MongoDB and Redis run in Docker. The aggregators run in-process (production wiring: A4 publication,
   `service.BatchHandlerFor`), so the harness fits the 2 CPU / 3 GiB colima VM. `UBFT_BIN` may point at a prebuilt binary.
-- The trusted topology (shard IDs and shard configuration hashes) is written in the `BFT_CONSOLIDATION_TOPOLOGY_FILE` format and
-  is also the source of the CLI's `confHash` values.
+- Topology pins are optional (T2): by default the e2e configures none and the authenticated view (committed by the root quorum's
+  seal) supplies the scheme and configuration hashes; `CONSOLIDATION_E2E_PINNED=1` additionally pins them in the
+  `BFT_CONSOLIDATION_TOPOLOGY_FILE` format on the aggregators and as `confHash` in the CLI config (all shards or none).
 - Writers submit continuously on every shard (progress is asserted: accepted writes and new finalized blocks on every shard in both phases, and the states submitted while consolidations run must get proofs; `CONSOLIDATION_E2E_NEGATIVE=stop-writers` stops the writers first and must fail) while the built `cmd/consolidate-proofs` binary runs repeatedly. Original proofs
   come from different seals. Each bundle is checked with the full `InclusionProofV2.Verify` and native `UnicityCertificate.Verify`
   against the real trust base, with one identical master seal, preserved reference times, and the counters
@@ -106,7 +107,7 @@ Per phase (12 s, ~21 root rounds), per shard: accepted writes ≈ 46–56, final
 | 4 | 12 | 3 | 3 | 4 / 2 | 756 B | 24 017 | 82 / 0 |
 | 8 | 24 | 4 | 4 | 8 / 2 | 1 508 B | 49 833 | 171 / 0 |
 
-(An earlier, faster run on a quieter VM did 40 and 8 consolidations; counts depend on host load, the checks do not.)
+(Consolidation counts depend on host load: a run after merging S1/T2 with no pins did 48/48 (4 shards) and 37/37 (8 shards); the checks do not.)
 
 Every bundle: 1 quorum check, m body checks, L leaf checks; every output proof passed the full `InclusionProofV2.Verify` and
 native `UnicityCertificate.Verify` against the real trust base under one identical master seal. What the run establishes:
