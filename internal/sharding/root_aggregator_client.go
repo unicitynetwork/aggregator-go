@@ -54,7 +54,7 @@ func NewRootAggregatorClient(rpcURL string) *RootAggregatorClient {
 		MaxIdleConnsPerHost:   10,
 	}
 	return &RootAggregatorClient{
-		rpcURL:     rpcURL,
+		rpcURL: rpcURL,
 		httpClient: &http.Client{
 			Timeout:   10 * time.Second,
 			Transport: transport,

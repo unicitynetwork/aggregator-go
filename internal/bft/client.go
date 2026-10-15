@@ -328,6 +328,7 @@ func (c *BFTClientImpl) Stop() {
 }
 
 func (c *BFTClientImpl) sendHandshake(ctx context.Context, bftNetwork *BftNetwork, nodeID string) error {
+	metrics.BFTHandshakesTotal.WithLabelValues(c.shardID.String()).Inc()
 	c.logger.WithContext(ctx).Debug("sending handshake to root chain")
 	if bftNetwork == nil {
 		return errors.New("BFT network is not initialized")

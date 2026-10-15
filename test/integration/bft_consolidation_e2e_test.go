@@ -332,14 +332,15 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 
 	// ---- phase 1: writes only; phase 2: writes + repeated consolidations ----
 	type snapshot struct {
-		responses, repeats, blocks, subs []float64
-		round                            uint64
+		responses, repeats, handshakes, blocks, subs []float64
+		round                                        uint64
 	}
 	take := func() snapshot {
 		sn := snapshot{round: rootRound(t, root)}
 		for i, sh := range shards {
 			sn.responses = append(sn.responses, promtest.ToFloat64(metrics.BFTCertificationResponsesTotal.WithLabelValues(sh.id.String())))
 			sn.repeats = append(sn.repeats, promtest.ToFloat64(metrics.BFTCertificationResponseRepeatsTotal.WithLabelValues(sh.id.String())))
+			sn.handshakes = append(sn.handshakes, promtest.ToFloat64(metrics.BFTHandshakesTotal.WithLabelValues(sh.id.String())))
 			sn.blocks = append(sn.blocks, float64(blockHeight(t, sh.url)))
 			sn.subs = append(sn.subs, float64(subs[i].Load()))
 		}
@@ -350,6 +351,7 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 		for i := range shards {
 			pc.Responses = append(pc.Responses, b.responses[i]-a.responses[i])
 			pc.Repeats = append(pc.Repeats, b.repeats[i]-a.repeats[i])
+			pc.Handshakes = append(pc.Handshakes, b.handshakes[i]-a.handshakes[i])
 			pc.Blocks = append(pc.Blocks, b.blocks[i]-a.blocks[i])
 			pc.Submitted = append(pc.Submitted, b.subs[i]-a.subs[i])
 		}

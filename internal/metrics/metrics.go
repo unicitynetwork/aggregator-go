@@ -237,6 +237,16 @@ var (
 		[]string{"shard"},
 	)
 
+	// BFTHandshakesTotal counts handshakes sent to the root; each may legitimately be answered by a
+	// re-delivery of the last certification response.
+	BFTHandshakesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_bft_handshakes_total",
+			Help: "Handshakes sent to the BFT root, by shard.",
+		},
+		[]string{"shard"},
+	)
+
 	BFTPartitionViewTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aggregator_bft_partition_view_total",
