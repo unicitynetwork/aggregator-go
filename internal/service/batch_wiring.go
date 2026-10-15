@@ -33,7 +33,7 @@ func NewBatchProofHandler(cfg *config.Config, rm any, storage interfaces.Storage
 	}
 	records, ok := storage.AggregatorRecordStorage().(BatchRecordSource)
 	if !ok {
-		return UnsupportedRPC, "record storage lacks the bounded size projection"
+		return UnsupportedRPC, "record storage lacks the bulk size/record projection"
 	}
 	routed, ok := svc.(interface{ ShardValidator() BatchShardValidator })
 	if !ok {

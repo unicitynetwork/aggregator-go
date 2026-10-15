@@ -750,7 +750,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	} else {
 		// The state is committed and the block is finalized in storage; finalizationMu
 		// keeps the backend at exactly this state. Failures never fail finalization.
-		rm.proofPub.PublishFinalized(ctx, block)
+		rm.proofPub.PublishFinalizedAdmitted(ctx, block)
 	}
 	metrics.SMTCommitDuration.Observe(smtCommitDuration.Seconds())
 
@@ -777,7 +777,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		// Disk: the committed state is now the published proof view and no later commit
 		// can start before this returns, so the retained snapshot is exactly this block.
 		// A backend without read-view support leaves the publisher nil (no-op).
-		rm.proofPub.PublishFinalized(ctx, block)
+		rm.proofPub.PublishFinalizedAdmitted(ctx, block)
 	}
 	if !diskFinalize {
 		rm.finalizationMu.Unlock()

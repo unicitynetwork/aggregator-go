@@ -90,21 +90,30 @@ func (p *Publisher) Catalog() *proofview.Catalog {
 // committed: if it cannot publish, the latest published view would be older than the
 // local head, so latest is marked unavailable.
 func (p *Publisher) PublishFinalized(ctx context.Context, block *models.Block) {
-	p.publish(ctx, block, true, false)
+	p.publish(ctx, block, true, false, false)
+}
+
+// PublishFinalizedAdmitted is PublishFinalized for the live path where block.PartitionView
+// is the view the BFT client authenticated at intake for exactly block.UnicityCertificate
+// (taken from its staging cache, keyed by the complete UC digest). That admitted material
+// is reused as is instead of being authenticated a second time inside the commit lock;
+// restored, recovered and startup material always goes through the revalidating paths.
+func (p *Publisher) PublishFinalizedAdmitted(ctx context.Context, block *models.Block) {
+	p.publish(ctx, block, true, false, true)
 }
 
 // EnsurePublished publishes the committed state for the block when it is the
 // backend's current state (startup, retries, follower replay). A failure leaves the
 // catalog untouched: the state may legitimately have moved on.
 func (p *Publisher) EnsurePublished(ctx context.Context, block *models.Block) {
-	p.publish(ctx, block, false, false)
+	p.publish(ctx, block, false, false, false)
 }
 
 // EnsurePublishedAtStartup is EnsurePublished for a freshly restored backend which does
 // not know its committed block number: the caller has verified that the restored root is
 // the latest finalized block's root. It must only be given that latest block.
 func (p *Publisher) EnsurePublishedAtStartup(ctx context.Context, latest *models.Block) {
-	p.publish(ctx, latest, false, true)
+	p.publish(ctx, latest, false, true, false)
 }
 
 // InvalidateLatest makes latest unavailable (state advanced but could not be published).
@@ -114,7 +123,7 @@ func (p *Publisher) InvalidateLatest() {
 	}
 }
 
-func (p *Publisher) publish(ctx context.Context, block *models.Block, strict, unknownCommittedOK bool) {
+func (p *Publisher) publish(ctx context.Context, block *models.Block, strict, unknownCommittedOK, admitted bool) {
 	if p == nil {
 		return
 	}
@@ -140,11 +149,16 @@ func (p *Publisher) publish(ctx context.Context, block *models.Block, strict, un
 	}
 	// The configuration identity of a state is the one its accepted UC carries, never a
 	// process-wide startup value.
-	lineage, err := ucLineage(block.UnicityCertificate)
-	if err != nil {
-		fail(ResultNoConfig, err)
+	var uc types.UnicityCertificate // decoded once for lineage and view revalidation
+	if err := types.Cbor.Unmarshal(block.UnicityCertificate, &uc); err != nil {
+		fail(ResultNoConfig, fmt.Errorf("decoding UC: %w", err))
 		return
 	}
+	if len(uc.ShardConfHash) != proofmaterial.ConfHashSize {
+		fail(ResultNoConfig, errors.New("UC carries no shard configuration identity"))
+		return
+	}
+	lineage := append([]byte(nil), uc.ShardConfHash...)
 	// The block must be the one the backend is committed at: a historical block whose
 	// root merely equals the current one (eg consecutive empty rounds) must never be
 	// recreated as a view, nor replace latest. Callers hold the commit ordering lock.
@@ -176,7 +190,7 @@ func (p *Publisher) publish(ctx context.Context, block *models.Block, strict, un
 		Block:  proofview.BlockIdentity{Number: block.Index, ConfigLineage: lineage},
 		Root:   append([]byte(nil), block.RootHash...),
 		Reader: rv,
-		Cert:   proofview.Certification{UC: block.UnicityCertificate, PartitionView: p.revalidatedView(ctx, block)},
+		Cert:   proofview.Certification{UC: block.UnicityCertificate, PartitionView: p.viewFor(ctx, block, &uc, admitted)},
 	})
 	if err != nil {
 		// ErrBudget already made latest unavailable inside the catalog
@@ -188,18 +202,27 @@ func (p *Publisher) publish(ctx context.Context, block *models.Block, strict, un
 
 // revalidatedView re-checks the block's partition view against its own UC. A view
 // that does not validate is dropped (the certification is published without it).
-func (p *Publisher) revalidatedView(ctx context.Context, block *models.Block) []byte {
+func (p *Publisher) viewFor(ctx context.Context, block *models.Block, uc *types.UnicityCertificate, admitted bool) []byte {
 	if len(block.PartitionView) == 0 {
 		return nil
 	}
-	var uc types.UnicityCertificate
+	if admitted {
+		metrics.ProofViewPublicationTotal.WithLabelValues("view_admitted").Inc()
+		return append([]byte(nil), block.PartitionView...)
+	}
+	return p.revalidatedView(ctx, block, uc)
+}
+
+// revalidatedView re-authenticates a stored view against its own UC with the trusted seal
+// verifier. A view that does not authenticate is dropped (the certification is published
+// without it); without a verifier nothing stored is republished.
+func (p *Publisher) revalidatedView(ctx context.Context, block *models.Block, uc *types.UnicityCertificate) []byte {
 	var verifier types.SealVerifier
 	if p.sealVerifier != nil {
 		verifier = p.sealVerifier(ctx)
 	}
-	// fail closed: without an authenticating verifier a stored view is not republished
-	if err := types.Cbor.Unmarshal(block.UnicityCertificate, &uc); err == nil && p.partition != 0 && verifier != nil {
-		if _, view, err := proofmaterial.ValidateView(block.PartitionView, &uc, p.partition, verifier, p.topology); err == nil {
+	if p.partition != 0 && verifier != nil {
+		if _, view, err := proofmaterial.ValidateView(block.PartitionView, uc, p.partition, verifier, p.topology); err == nil {
 			return view
 		} else {
 			p.log.WithContext(ctx).Warn("Dropping stored partition view which does not validate against its UC",
@@ -229,18 +252,26 @@ func (p *Publisher) PublishProofMaterial(ctx context.Context, m *proofmaterial.M
 	if m.Kind == proofmaterial.KindFinalized && m.HasBlock {
 		id = proofview.BlockIdentity{Number: api.NewBigIntFromUint64(m.BlockNumber), ConfigLineage: lineage}
 	} else {
-		// repeat / duplicate: only onto the retained state with a compatible accepted
-		// identity, never selected by the state hash alone
-		found, refUC, ok := p.catalog.ViewForRoot(root)
-		if !ok {
-			metrics.ProofViewPublicationTotal.WithLabelValues(ResultAttachMiss).Inc()
-			return proofview.ErrViewNotRetained
+		if m.Kind == proofmaterial.KindSidecarFill {
+			// a late view belongs to the exact certification it arrived with
+			var ok bool
+			if id, _, ok = p.catalog.ViewForDigest(m.UCDigest); !ok {
+				metrics.ProofViewPublicationTotal.WithLabelValues(ResultAttachMiss).Inc()
+				return proofview.ErrViewNotRetained
+			}
+		} else {
+			// repeat/timeout UC: onto the retained state of the same root whose accepted
+			// input record and configuration it repeats, never by the root alone
+			var ok bool
+			if id, ok = p.catalog.ViewForRootMatching(root, func(ref []byte) bool { return compatible(ref, m.UC) == nil }); !ok {
+				if _, any := p.catalog.ViewForRootMatching(root, func([]byte) bool { return true }); any {
+					metrics.ProofViewPublicationTotal.WithLabelValues(ResultIncompatible).Inc()
+					return ErrIncompatibleCertification
+				}
+				metrics.ProofViewPublicationTotal.WithLabelValues(ResultAttachMiss).Inc()
+				return proofview.ErrViewNotRetained
+			}
 		}
-		if err := compatible(refUC, m.UC); err != nil {
-			metrics.ProofViewPublicationTotal.WithLabelValues(ResultIncompatible).Inc()
-			return err
-		}
-		id = found
 	}
 	err := p.catalog.AttachCertification(ctx, id, root, proofview.Certification{UC: m.UCBytes, PartitionView: m.PartitionView})
 	switch {
@@ -259,18 +290,6 @@ func (p *Publisher) PublishProofMaterial(ctx context.Context, m *proofmaterial.M
 // ErrIncompatibleCertification: the certification is not for the retained state's accepted
 // input record / shard configuration (an unsupported boundary, eg an epoch change).
 var ErrIncompatibleCertification = errors.New("certification is incompatible with the retained state")
-
-// ucLineage extracts the shard configuration identity of an accepted UC.
-func ucLineage(ucBytes []byte) ([]byte, error) {
-	var uc types.UnicityCertificate
-	if err := types.Cbor.Unmarshal(ucBytes, &uc); err != nil {
-		return nil, fmt.Errorf("decoding UC: %w", err)
-	}
-	if len(uc.ShardConfHash) != proofmaterial.ConfHashSize {
-		return nil, errors.New("UC carries no shard configuration identity")
-	}
-	return append([]byte(nil), uc.ShardConfHash...), nil
-}
 
 // compatible requires the new certification to repeat the retained state's accepted
 // input record (round, epoch, state, previous and block hashes) and shard configuration.
