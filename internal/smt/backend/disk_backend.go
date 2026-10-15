@@ -30,9 +30,11 @@ type DiskBackend struct {
 	proofView   *diskProofView
 
 	// retained read views, see RetainReadView
-	retainMu     sync.Mutex
-	retained     []*diskReadView // surviving snapshot-holding views in capture order
-	retainClosed bool
+	retainMu      sync.Mutex
+	retainedHead  *diskReadView // surviving snapshot-holding views in capture order (linked list)
+	retainedTail  *diskReadView
+	retainedCount int
+	retainClosed  bool
 }
 
 func NewDiskBackend(store storage.Store, opts persist.Options) (*DiskBackend, error) {

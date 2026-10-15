@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"sync"
 	"time"
 
@@ -75,7 +74,7 @@ func (b *DiskBackend) RetainReadView(ctx context.Context) (ReadView, error) {
 	if reader != nil {
 		metrics.SMTDiskProofSnapshotsActive.Inc()
 		// a view without a snapshot pins nothing and takes no part in the lineage
-		b.retained = append(b.retained, v)
+		b.linkRetainedLocked(v)
 	}
 	return v, nil
 }
@@ -85,29 +84,77 @@ func (b *DiskBackend) RetainReadView(ctx context.Context) (ReadView, error) {
 func (b *DiskBackend) closeRetainedViews() {
 	b.retainMu.Lock()
 	b.retainClosed = true
-	views := slices.Clone(b.retained)
+	var views []*diskReadView
+	for v := b.retainedHead; v != nil; v = v.next {
+		views = append(views, v)
+	}
 	b.retainMu.Unlock()
 	for _, v := range views {
 		_ = v.Close()
 	}
 }
 
+// linkRetainedLocked appends v to the lineage of surviving snapshot-holding views.
+func (b *DiskBackend) linkRetainedLocked(v *diskReadView) {
+	v.prev = b.retainedTail
+	if b.retainedTail != nil {
+		b.retainedTail.next = v
+	} else {
+		b.retainedHead = v
+	}
+	b.retainedTail = v
+	v.linked = true
+	b.retainedCount++
+}
+
+// forgetRetainedView unlinks v from the lineage: the interval it covered is
+// inherited by its predecessor. O(1), idempotent.
 func (b *DiskBackend) forgetRetainedView(v *diskReadView) {
 	b.retainMu.Lock()
-	b.retained = slices.DeleteFunc(b.retained, func(o *diskReadView) bool { return o == v })
-	b.retainMu.Unlock()
+	defer b.retainMu.Unlock()
+	if !v.linked {
+		return
+	}
+	v.linked = false
+	if v.prev != nil {
+		v.prev.next = v.next
+	} else {
+		b.retainedHead = v.next
+	}
+	if v.next != nil {
+		v.next.prev = v.prev
+	} else {
+		b.retainedTail = v.prev
+	}
+	v.prev, v.next = nil, nil
+	b.retainedCount--
 }
 
 // lineageEnd is the write volume where the charge of v ends: the capture of
-// the next surviving view, or the current volume for the newest survivor.
+// the next surviving view, or the current volume for the newest survivor. O(1).
 func (b *DiskBackend) lineageEnd(v *diskReadView, current uint64) uint64 {
 	b.retainMu.Lock()
 	defer b.retainMu.Unlock()
-	i := slices.Index(b.retained, v)
-	if i < 0 || i+1 >= len(b.retained) {
-		return current
+	if v.linked && v.next != nil {
+		return v.next.lineageStart
 	}
-	return b.retained[i+1].lineageStart
+	return current
+}
+
+// RetainedBytesTotal is the sum of RetainedBytes over all open views, in O(1):
+// everything written since the oldest surviving view was captured, counted once.
+func (b *DiskBackend) RetainedBytesTotal() uint64 {
+	volume, ok := b.store.(storage.WriteVolumeReporter)
+	if !ok {
+		return 0
+	}
+	now := volume.WrittenBytes()
+	b.retainMu.Lock()
+	defer b.retainMu.Unlock()
+	if b.retainedHead == nil || now < b.retainedHead.lineageStart {
+		return 0
+	}
+	return now - b.retainedHead.lineageStart
 }
 
 type diskReadView struct {
@@ -124,6 +171,9 @@ type diskReadView struct {
 	closed bool
 
 	lineageStart uint64
+	// lineage links of the surviving snapshot-holding views (guarded by owner.retainMu)
+	prev, next *diskReadView
+	linked     bool
 }
 
 func (v *diskReadView) RootHash() []byte {
@@ -192,12 +242,23 @@ func (v *diskReadView) RetainedBytes() uint64 {
 	if closed || !v.hasSnapshot {
 		return 0
 	}
+	v.owner.retainMu.Lock()
+	linked := v.linked
+	v.owner.retainMu.Unlock()
+	if !linked {
+		return 0 // retired from the accounting: its interval is charged to its predecessor
+	}
 	end := v.owner.lineageEnd(v, v.volume.WrittenBytes())
 	if end < v.lineageStart {
 		return 0
 	}
 	return end - v.lineageStart
 }
+
+// RetireAccounting removes the view from the retention accounting ahead of Close
+// (the interval it covered is inherited by its predecessor). The view stays
+// readable until Close. O(1), idempotent.
+func (v *diskReadView) RetireAccounting() { v.owner.forgetRetainedView(v) }
 
 func (v *diskReadView) Close() error {
 	v.mu.Lock()
@@ -222,7 +283,9 @@ func (v *diskReadView) Close() error {
 }
 
 var (
-	_ ReadView         = (*diskReadView)(nil)
-	_ BatchReadView    = (*diskReadView)(nil)
-	_ ReadViewRetainer = (*DiskBackend)(nil)
+	_ ReadView            = (*diskReadView)(nil)
+	_ BatchReadView       = (*diskReadView)(nil)
+	_ ReadViewRetainer    = (*DiskBackend)(nil)
+	_ RetentionAccountant = (*DiskBackend)(nil)
+	_ AccountingRetirer   = (*diskReadView)(nil)
 )

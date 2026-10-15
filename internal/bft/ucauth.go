@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 
@@ -31,16 +32,50 @@ type ucAuthenticator struct {
 
 	mu    sync.Mutex
 	known map[[sha256.Size]byte]struct{}
+	// authorities caches the admitted trust base of an epoch with its content digest. Admitted
+	// trust bases are immutable (the store refuses to replace them), so a validated entry never
+	// goes stale; only positive results are cached.
+	authorities map[uint64]*authorityEntry
+	// ends caches KNOWN epoch ends (epoch -> start round of the next epoch). A known boundary
+	// never changes either. An unknown boundary is NEVER cached beyond one operation: history
+	// may be admitted at any time (also by another node sharing the store), and the retirement
+	// check must see it on the next certificate.
+	ends map[uint64]uint64
+
+	// counters of the work done, the hardware-independent metrics of the cost model
+	authorityLoads atomic.Int64 // trust base store reads
+	historyLookups atomic.Int64 // next-epoch history reads
+	sealEncodes    atomic.Int64 // complete seal encodings + digests
+	quorumChecks   atomic.Int64 // native seal verifications
 }
 
-const maxAuthenticatedSeals = 256
+type authorityEntry struct {
+	tb     *types.RootTrustBaseV1
+	digest [sha256.Size]byte
+}
+
+const (
+	maxAuthenticatedSeals = 256
+	maxCachedEpochs       = 64
+)
 
 func newUCAuthenticator(network types.NetworkID, store TrustBaseStore) *ucAuthenticator {
-	return &ucAuthenticator{network: network, store: store, known: map[[sha256.Size]byte]struct{}{}}
+	return &ucAuthenticator{
+		network: network, store: store, known: map[[sha256.Size]byte]struct{}{},
+		authorities: map[uint64]*authorityEntry{}, ends: map[uint64]uint64{},
+	}
 }
 
-// trustBase resolves the trust base of exactly the requested epoch of the configured network.
-func (a *ucAuthenticator) trustBase(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
+// authority resolves the trust base of exactly the requested epoch of the configured network,
+// from the cache once it has been validated.
+func (a *ucAuthenticator) authority(ctx context.Context, epoch uint64) (*authorityEntry, error) {
+	a.mu.Lock()
+	e := a.authorities[epoch]
+	a.mu.Unlock()
+	if e != nil {
+		return e, nil
+	}
+	a.authorityLoads.Add(1)
 	tb, err := a.store.GetByEpoch(ctx, epoch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load trust base for epoch %d: %w", epoch, err)
@@ -54,7 +89,67 @@ func (a *ucAuthenticator) trustBase(ctx context.Context, epoch uint64) (*types.R
 	if tb.GetNetworkID() != a.network {
 		return nil, fmt.Errorf("trust base of epoch %d is of network %d, configured network is %d", epoch, tb.GetNetworkID(), a.network)
 	}
-	return tb, nil
+	tbHash, err := tb.Hash(crypto.SHA256)
+	if err != nil {
+		return nil, fmt.Errorf("hashing trust base: %w", err)
+	}
+	e = &authorityEntry{tb: tb}
+	copy(e.digest[:], tbHash)
+	a.mu.Lock()
+	if len(a.authorities) >= maxCachedEpochs {
+		clear(a.authorities)
+	}
+	a.authorities[epoch] = e
+	a.mu.Unlock()
+	return e, nil
+}
+
+// trustBase resolves the trust base of exactly the requested epoch of the configured network.
+func (a *ucAuthenticator) trustBase(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
+	e, err := a.authority(ctx, epoch)
+	if err != nil {
+		return nil, err
+	}
+	return e.tb, nil
+}
+
+// authOp is the scope of one intake operation (one received response: its UC and its
+// partition view). It holds a snapshot of the authority and history it resolved, so that
+// the UC and the view do not resolve them (or encode the same seal) twice. It must not
+// outlive the operation: the history snapshot is consistent only for it.
+type authOp struct {
+	a      *ucAuthenticator
+	ctx    context.Context
+	epochs map[uint64]*opEpoch
+	seals  map[*types.UnicitySeal]error
+}
+
+type opEpoch struct {
+	auth      *authorityEntry
+	err       error
+	nextKnown bool
+	next      uint64
+	histErr   error
+}
+
+// begin starts an intake operation.
+func (a *ucAuthenticator) begin(ctx context.Context) *authOp {
+	return &authOp{a: a, ctx: ctx, epochs: map[uint64]*opEpoch{}, seals: map[*types.UnicitySeal]error{}}
+}
+
+// epoch resolves the authority and the known end of the epoch once per operation.
+func (o *authOp) epoch(epoch uint64) *opEpoch {
+	if e, ok := o.epochs[epoch]; ok {
+		return e
+	}
+	e := &opEpoch{}
+	o.epochs[epoch] = e
+	e.auth, e.err = o.a.authority(o.ctx, epoch)
+	if e.err != nil {
+		return e
+	}
+	e.next, e.nextKnown, e.histErr = o.a.epochEnd(o.ctx, epoch)
+	return e
 }
 
 // validateUCShape rejects certificates with missing parts or null path elements, which the
@@ -78,8 +173,14 @@ func validateUCShape(uc *types.UnicityCertificate) error {
 	return nil
 }
 
-// verifyUC authenticates the certificate of the shard.
+// verifyUC authenticates the certificate of the shard in a one-call operation.
 func (a *ucAuthenticator) verifyUC(ctx context.Context, uc *types.UnicityCertificate, partition types.PartitionID, shard types.ShardID) error {
+	return a.begin(ctx).verifyUC(uc, partition, shard)
+}
+
+// verifyUC authenticates the certificate of the shard.
+func (o *authOp) verifyUC(uc *types.UnicityCertificate, partition types.PartitionID, shard types.ShardID) error {
+	a := o.a
 	if err := validateUCShape(uc); err != nil {
 		return fmt.Errorf("malformed unicity certificate: %w", err)
 	}
@@ -100,7 +201,7 @@ func (a *ucAuthenticator) verifyUC(ctx context.Context, uc *types.UnicityCertifi
 	if string(root) != string(uc.UnicitySeal.Hash) {
 		return fmt.Errorf("unicity seal hash %X does not match with the root hash of the unicity tree %X", uc.UnicitySeal.Hash, root)
 	}
-	return a.verifySeal(ctx, uc.UnicitySeal)
+	return o.verifySeal(uc.UnicitySeal)
 }
 
 // AdmittedTrustBases is the optional lookup of trust bases already admitted to the local
@@ -109,10 +210,32 @@ type AdmittedTrustBases interface {
 	GetAdmitted(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, bool, error)
 }
 
-// nextEpochStart returns the start round of the epoch following "epoch" if that trust base
+// epochEnd returns the start round of the epoch following "epoch" if that trust base
 // is already admitted locally. Retired authority may not certify at or after it. An unknown
 // future boundary is not an error (nothing proves freshness without it, as for ordinary UCs).
+// Known boundaries are cached for good; unknown ones are looked up again by every operation.
+func (a *ucAuthenticator) epochEnd(ctx context.Context, epoch uint64) (uint64, bool, error) {
+	a.mu.Lock()
+	next, ok := a.ends[epoch]
+	a.mu.Unlock()
+	if ok {
+		return next, true, nil
+	}
+	next, known, err := a.nextEpochStart(ctx, epoch)
+	if err != nil || !known {
+		return 0, false, err
+	}
+	a.mu.Lock()
+	if len(a.ends) >= maxCachedEpochs {
+		clear(a.ends)
+	}
+	a.ends[epoch] = next
+	a.mu.Unlock()
+	return next, true, nil
+}
+
 func (a *ucAuthenticator) nextEpochStart(ctx context.Context, epoch uint64) (uint64, bool, error) {
+	a.historyLookups.Add(1)
 	var next *types.RootTrustBaseV1
 	if h, ok := a.store.(AdmittedTrustBases); ok {
 		tb, known, err := h.GetAdmitted(ctx, epoch+1)
@@ -142,35 +265,48 @@ func (a *ucAuthenticator) nextEpochStart(ctx context.Context, epoch uint64) (uin
 	return next.GetEpochStart(), true, nil
 }
 
-// verifySeal authenticates the complete seal under the trust base of its own epoch, inside
-// the interval of that epoch: the known end boundary is checked on EVERY call, before any
-// memoized verdict is used, so history learned later invalidates cached seals.
+// verifySeal authenticates the complete seal in a one-call operation.
 func (a *ucAuthenticator) verifySeal(ctx context.Context, seal *types.UnicitySeal) error {
+	return a.begin(ctx).verifySeal(seal)
+}
+
+// verifySeal authenticates the complete seal under the trust base of its own epoch, inside
+// the interval of that epoch: the known end boundary is checked on EVERY authentication
+// (against the operation's snapshot of the history), before any memoized verdict is used,
+// so history learned later retires cached seals. The same seal object is judged once per
+// operation.
+func (o *authOp) verifySeal(seal *types.UnicitySeal) error {
 	if seal == nil {
 		return types.ErrUnicitySealIsNil
 	}
-	tb, err := a.trustBase(ctx, seal.Epoch)
-	if err != nil {
+	if err, ok := o.seals[seal]; ok {
 		return err
 	}
-	next, known, err := a.nextEpochStart(ctx, seal.Epoch)
-	if err != nil {
-		return err
+	err := o.verifySealUncached(seal)
+	o.seals[seal] = err
+	return err
+}
+
+func (o *authOp) verifySealUncached(seal *types.UnicitySeal) error {
+	a := o.a
+	ep := o.epoch(seal.Epoch)
+	if ep.err != nil {
+		return ep.err
 	}
-	if known && seal.RootChainRoundNumber >= next {
+	if ep.histErr != nil {
+		return ep.histErr
+	}
+	if ep.nextKnown && seal.RootChainRoundNumber >= ep.next {
 		return fmt.Errorf("seal round %d is at or after the start of the next epoch %d (round %d): epoch %d authority has retired",
-			seal.RootChainRoundNumber, seal.Epoch+1, next, seal.Epoch)
+			seal.RootChainRoundNumber, seal.Epoch+1, ep.next, seal.Epoch)
 	}
-	tbHash, err := tb.Hash(crypto.SHA256)
-	if err != nil {
-		return fmt.Errorf("hashing trust base: %w", err)
-	}
+	a.sealEncodes.Add(1)
 	sealBytes, err := seal.MarshalCBOR()
 	if err != nil {
 		return fmt.Errorf("encoding unicity seal: %w", err)
 	}
 	h := sha256.New()
-	h.Write(tbHash)
+	h.Write(ep.auth.digest[:])
 	h.Write(sealBytes)
 	var key [sha256.Size]byte
 	copy(key[:], h.Sum(nil))
@@ -181,7 +317,8 @@ func (a *ucAuthenticator) verifySeal(ctx context.Context, seal *types.UnicitySea
 		return nil
 	}
 	// network, exact epoch, round >= epoch start, quorum
-	if err := types.TrustBaseSealVerifier(tb).VerifySeal(seal); err != nil {
+	a.quorumChecks.Add(1)
+	if err := types.TrustBaseSealVerifier(ep.auth.tb).VerifySeal(seal); err != nil {
 		return err
 	}
 	a.mu.Lock()
@@ -193,9 +330,14 @@ func (a *ucAuthenticator) verifySeal(ctx context.Context, seal *types.UnicitySea
 	return nil
 }
 
-// sealVerifier is the types.SealVerifier of the authenticator bound to a request context.
+// sealVerifier is the types.SealVerifier of a one-call operation bound to a request context.
 func (a *ucAuthenticator) sealVerifier(ctx context.Context) types.SealVerifier {
-	return sealVerifierFunc(func(seal *types.UnicitySeal) error { return a.verifySeal(ctx, seal) })
+	return a.begin(ctx).sealVerifier()
+}
+
+// sealVerifier is the types.SealVerifier of the operation.
+func (o *authOp) sealVerifier() types.SealVerifier {
+	return sealVerifierFunc(o.verifySeal)
 }
 
 type sealVerifierFunc func(*types.UnicitySeal) error
