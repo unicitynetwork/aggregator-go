@@ -39,7 +39,7 @@ UC_MEASURE=1 go test -tags rocksdb -count=1 -timeout 60m -run 'Test_ScalingReten
 
 | Curve | Hardware-independent metric | Expected | Measured slope | Verdict |
 |---|---|---|---|---|
-| batch size L | database commands per batch (real Mongo, command monitor) | 0 (constant 2) | 0.00 | **O(1)**; was 2L before the `$in` batching |
+| batch size L | database commands per batch, all commands incl. `getMore` (real Mongo, command monitor) | 0 (constant 2) | 0.00 | **O(1)**; was 2L before the `$in` batching |
 | batch size L | response bytes | 1 (+ one fixed partition view) | 0.88 | linear in L plus the fixed view |
 | batch size L | proof path nodes (sum of SMT siblings) | 1 | 1.01 | L x depth |
 | batch size L | allocations / allocated bytes | 1 | 0.97 / 0.96 | linear |
@@ -51,9 +51,9 @@ UC_MEASURE=1 go test -tags rocksdb -count=1 -timeout 60m -run 'Test_ScalingReten
 | SMT size N, RocksDB retention | accounted / physical bytes per view | ~0.1 | 0.12 / 0.06 | independent of tree size |
 | block size B, RocksDB retention | accounted / physical bytes per view | 1 | 0.89 / 0.87 | linear in churn |
 | retained views V | `RetainedBytes` reads per catalog operation | 0 if O(1) bookkeeping | **1.0** (Publish 1.02, Acquire+Release 1.04, Stats 1.00) | **linear in V: confirms audit item 1** |
-| retained views V | time of Acquire+Release / Stats | 0 | 1.01 / 1.30 | linear to superlinear (each read also scans the reader lineage) |
-| captures R with the oldest view pinned (V = 4) | Stats time | 0 | 0.79 | grows with R: lineage metadata, confirms the H dependence |
-| attachments U (1..64) | retained attachment bytes / attach time | 1 / 0 | 1.00 / 0.07 | storage linear by design, no measurable scan cost at U <= 64 |
+| retained views V | time of Acquire+Release / Stats | 0 | 1.25 / 1.49 | linear to superlinear (each read also scans the reader lineage) |
+| captures R with the oldest view pinned (V = 4) | lineage entries kept / entries visited per Stats call (counters) | 0 | 0.96 / 0.99 | grow with R although V = 4: confirms the H dependence |
+| attachments U (1..64) | measured attachment bytes / digest comparisons per attach (counter) | 1 / 0 or 1 | 1.00 / 1.00 | storage linear by design; linear dedup scan, but no visible time cost at U <= 64 (time slope 0.00) |
 | RocksDB proofs, L = 1..256 | union build: `GetNodes` calls per batch | 0 | 0.00 (constant 18 = tree depth) | O(depth) round trips, independent of L |
 | RocksDB proofs, L = 1..256 | node reads: single proofs vs union build | 1 vs <1 | 1.00 vs 0.90 | shared path nodes read once (1.7x fewer reads at L = 256) |
 
@@ -83,38 +83,32 @@ Theta(L(C + depth)) plus one partition view). The 1,528 B partition view (3,056 
 
 ### 1.2 Database commands per batch, real MongoDB
 
-Counted with a driver command monitor (`aggregate` commands; the 128- and 256-ID rows also show two extra non-aggregate commands from the driver, unrelated to L).
+Counted with a driver command monitor. **Every command counts** (aggregate and getMore alike; only connection and session housekeeping is excluded). The cursors are exhausted by the first reply (the aggregate batch size is the chunk size + 1, #193 `769a0fd`); with the driver default first batch of 101 documents the count would have been a staircase, 2 x (1 + floor((L-1)/101)) per cursor pair, i.e. 4 commands at L >= 102 and 6 at L > 202.
 
-MongoDB 7.0 in a container, 256 finalized records. Before the batching change the service issued 2 x L sequential queries per batch.
+| L | commands per batch (all) | of which aggregate | of which getMore | response B | time relative to L=1 | time per ID relative |
+|---|---|---|---|---|---|---|
+| 1 | 2 | 2 | 0 | 5856 | 1.0x | 1.00x |
+| 2 | 2 | 2 | 0 | 8527 | 1.1x | 0.57x |
+| 4 | 2 | 2 | 0 | 14061 | 1.2x | 0.31x |
+| 8 | 2 | 2 | 0 | 25001 | 1.5x | 0.19x |
+| 16 | 2 | 2 | 0 | 46753 | 2.1x | 0.13x |
+| 32 | 2 | 2 | 0 | 90769 | 3.3x | 0.10x |
+| 64 | 2 | 2 | 0 | 178801 | 6.2x | 0.10x |
+| 128 | 2 | 2 | 0 | 354033 | 10.8x | 0.08x |
+| 256 | 2 | 2 | 0 | 706353 | 19.0x | 0.07x |
 
-| L | aggregate commands per batch | all commands per batch | response B | time relative to L=1 | time per ID relative |
-|---|---|---|---|---|---|
-| 1 | 2 | 2 | 5856 | 1.0x | 1.00x |
-| 2 | 2 | 2 | 8527 | 0.5x | 0.23x |
-| 4 | 2 | 2 | 14061 | 0.5x | 0.12x |
-| 8 | 2 | 2 | 25001 | 0.5x | 0.06x |
-| 16 | 2 | 2 | 46753 | 0.8x | 0.05x |
-| 32 | 2 | 2 | 90769 | 5.8x | 0.18x |
-| 64 | 2 | 2 | 178801 | 13.3x | 0.21x |
-| 128 | 2 | 4 | 354033 | 8.0x | 0.06x |
-| 256 | 2 | 4 | 706353 | 19.6x | 0.08x |
-
-Log-log slopes over L = 1..256: database aggregate commands -0.00 (expect 0: constant), time 0.71 (the fixed round trips dominate small L, so the curve is concave: the slope over the upper range L = 16..256 is 0.98)
-2026/10/15 14:09:14 🐳 Stopping container: fa80ba82ed23
-2026/10/15 14:09:20 ✅ Container stopped: fa80ba82ed23
-2026/10/15 14:09:20 🐳 Terminating container: fa80ba82ed23
-2026/10/15 14:09:21 🚫 Container terminated: fa80ba82ed23
+Log-log slopes over L = 1..256: database commands per batch (all) -0.00 (expect 0: constant 2), relative time 0.54 (the fixed round trips dominate small L; upper range L = 16..256: 0.81)
 
 **Before / after the `$in` batching** (same code path, same host; before = commit `2b27bad`: one size projection and one record fetch per ID, i.e. exactly 2L sequential commands by construction):
 
 | L | commands before | commands after | time relative to L=1 before | time relative to L=1 after |
 |---|---|---|---|---|
 | 1 | 2 | 2 | 1x | 1x |
-| 16 | 32 | 2 | 21x | 0.8x |
-| 256 | 512 | 2 | 240x | 19.6x |
+| 16 | 32 | 2 | 21x | 2.1x |
+| 256 | 512 | 2 | 240x | 19.0x |
 
 Before the change, time was proportional to L (slope about 1 from L = 1: 240x for 256x the IDs, each ID paying two round trips); after it the fixed two round trips dominate small L and the curve flattens
-(whole-range slope 0.71, upper range 0.98, where record bytes and proof building take over). Relative times are noisy on this host; the command counts are exact and are the claim.
+(whole-range slope 0.54, upper range 0.81, where record bytes and proof building take over). Relative times are noisy on this host; the command counts are exact and are the claim.
 
 ### 1.3 SMT size N (L = 16)
 
@@ -240,53 +234,56 @@ N = 2,000, B = 10 new leaves per block, V retained views, one attachment each
 | V | RetainedBytes reads per Publish | per AcquireLatest+Release | per Stats | Publish time (relative to V=1) | AcquireLatest+Release time (relative) | Stats time (relative) |
 |---|---|---|---|---|---|---|
 | 1 | 3 | 2 | 1 | 1.0x | 1.0x | 1.0x |
-| 2 | 9 | 6 | 2 | 0.7x | 1.2x | 0.8x |
-| 4 | 17 | 12 | 4 | 0.6x | 1.2x | 1.3x |
-| 8 | 33 | 24 | 8 | 1.2x | 2.0x | 2.8x |
-| 16 | 65 | 48 | 16 | 0.7x | 4.0x | 7.2x |
-| 32 | 129 | 96 | 32 | 1.3x | 11.3x | 32.4x |
-| 64 | 257 | 192 | 64 | 0.8x | 33.8x | 143.5x |
-| 128 | 513 | 384 | 128 | 0.9x | 112.5x | 131.3x |
-| 256 | 1025 | 768 | 256 | 1.5x | 145.2x | 798.7x |
+| 2 | 9 | 6 | 2 | 1.1x | 1.2x | 1.8x |
+| 4 | 17 | 12 | 4 | 1.0x | 1.7x | 3.5x |
+| 8 | 33 | 24 | 8 | 1.0x | 2.8x | 8.2x |
+| 16 | 65 | 48 | 16 | 1.0x | 6.4x | 22.7x |
+| 32 | 129 | 96 | 32 | 1.2x | 18.4x | 72.7x |
+| 64 | 257 | 192 | 64 | 1.5x | 63.5x | 251.5x |
+| 128 | 513 | 384 | 128 | 2.6x | 224.5x | 904.4x |
+| 256 | 1025 | 768 | 256 | 7.1x | 878.5x | 3501.7x |
 
-Log-log slopes over V = 1..256: RetainedBytes reads per Publish 1.02, per AcquireLatest+Release 1.04, per Stats 1.00 (a constant-time catalog would be 0; each retained reader is read once per sweep, so V is slope 1); time: Publish 0.07, AcquireLatest+Release 1.01, Stats 1.30 (each read also scans the reader's lineage, so time exceeds the read count by about one more power of V)
+Log-log slopes over V = 1..256: RetainedBytes reads per Publish 1.02, per AcquireLatest+Release 1.04, per Stats 1.00 (a constant-time catalog would be 0; each retained reader is read once per sweep, so V is slope 1); time: Publish 0.28, AcquireLatest+Release 1.25, Stats 1.49 (each read also scans the reader's lineage, so time exceeds the read count by about one more power of V)
 
 Every ordinary catalog operation reads every retained reader a constant number of times (about 4V reads per Publish, 3V per Acquire+Release, V per Stats): slope 1 in V. Because each read scans the lineage as well, time per Acquire+Release and per Stats grows faster than the read count
-(Stats time slope 1.30 over V = 1..256, about 800x from V = 1 to 256 in this run, against a 256x increase in reads). This is the catalog accounting cost identified in the audit (item 1); with the default V = 16 it is small, but the exponent, not the constant, is what the curve shows.
+(relative time slope 1.49 for Stats over V = 1..256 in this run, against a 256x increase in reads; 1.30 in an earlier run, so the exponent is between 1.3 and 1.5 on this noisy host). This is the catalog accounting cost identified in the audit (item 1); with the default V = 16 it is small, but the exponent, not the constant, is what the curve shows.
 
 ### 3.2 Oldest view pinned while captures accumulate (V = 4)
 
-V = 4 retained views, oldest view pinned by a lease, N = 2,000, B = 10; R captures after the pinned view
+V = 4 retained views, oldest view pinned by a lease, N = 2,000, B = 10; R = captures after the pinned view (exact)
 
-| R | Stats time (relative to R=4) | AcquireLatest+Release time (relative) | Publish time (relative) | retained bytes (accounted) |
-|---|---|---|---|---|
-| 4 | 1.0x | 1.0x | 1.0x | 3181906 |
-| 16 | 8.0x | 7.0x | 1.1x | 6399304 |
-| 64 | 114.6x | 7.5x | 3.0x | 9742568 |
-| 256 | 24.3x | 6.1x | 5.7x | 13141416 |
-| 1024 | 136.7x | 42.7x | 2.5x | 29231016 |
+| R | lineage entries kept (H) | lineage entries visited per Stats call | RetainedBytes reads per Stats call | Stats time (relative to R=4) | AcquireLatest+Release time (relative) | retained bytes (accounted) |
+|---|---|---|---|---|---|---|
+| 4 | 5 | 17 | 4 | 1.0x | 1.0x | 95292 |
+| 16 | 17 | 65 | 4 | 2.3x | 1.6x | 375292 |
+| 64 | 65 | 257 | 4 | 7.5x | 4.3x | 1503298 |
+| 256 | 257 | 1025 | 4 | 28.4x | 15.5x | 6295542 |
+| 1024 | 1025 | 4097 | 4 | 111.8x | 58.4x | 27350712 |
 
-Log-log slopes over R = 4..1024: Stats 0.79, AcquireLatest+Release 0.53, Publish 0.25. With V bounded these would be 0 if catalog bookkeeping were independent of captures since the oldest pin; a positive slope is the lineage metadata growing with R (the audit's H dependence).
+Log-log slopes over R = 4..1024: lineage entries kept 0.96, entries visited per Stats call 0.99 (both expect 1: the metadata and the per-query scan grow with the captures since the pinned view although only V = 4 views are retained; a bounded structure would give 0); relative time: Stats 0.86, AcquireLatest+Release 0.75.
 
-With one view pinned, the memory lineage keeps an entry for every capture since it was taken, although only four views are retained: per-operation catalog time grows with the number of captures R, not with V (the audit's H dependence). Publish time is dominated by the SMT commit and is nearly flat.
+With one view pinned, the memory lineage keeps an entry for every capture since it was taken, although only four views are retained, and every retained-bytes query scans from the oldest entry. The counters show it directly and exactly: lineage entries kept grow as R + 1 (slope 0.96) and
+the entries visited by one `Stats` call as 4R + 1 (slope 0.99, with the reads per call constant at 4), while a structure bounded by V would be flat. Each point is measured at exactly the labelled R (no captures happen during a measurement); the time columns are relative only.
+This is the audit's H dependence, now established by counters rather than by time.
 
 ### 3.3 Attachments per view U = 1..64 (V = 4)
 
 V = 4, each state keeps up to U attachments (UC with 4-signature seal and an 8-shard view)
 
-| U | attachment bytes retained per view | catalog retained bytes (attachments + readers) | AttachCertification time (relative to U=1) | allocs per attach |
-|---|---|---|---|---|
-| 1 | 2409 | 61018 | 1.0x | 66 |
-| 2 | 4818 | 63427 | 1.5x | 66 |
-| 4 | 9636 | 68245 | 2.3x | 65 |
-| 8 | 19272 | 77881 | 1.9x | 65 |
-| 16 | 38544 | 97153 | 1.6x | 65 |
-| 32 | 77088 | 135697 | 1.7x | 65 |
-| 64 | 154176 | 212785 | 1.6x | 65 |
+| U | catalog retained bytes (measured) | attachment bytes retained (measured: growth over U=1) | digest comparisons per attach | allocs per attach | attach time (relative to U=1) |
+|---|---|---|---|---|---|
+| 1 | 61018 | 2409 | 1.0 | 66 | 1.0x |
+| 2 | 63427 | 4818 | 2.0 | 66 | 0.9x |
+| 4 | 68245 | 9636 | 4.0 | 65 | 0.9x |
+| 8 | 77881 | 19272 | 8.0 | 65 | 0.9x |
+| 16 | 97153 | 38544 | 16.0 | 65 | 0.9x |
+| 32 | 135697 | 77088 | 32.0 | 65 | 1.0x |
+| 64 | 212785 | 154176 | 64.0 | 65 | 1.0x |
 
-Log-log slopes over U = 1..64: retained attachment bytes 1.00 (expect 1: storage is linear in U by design), attach time 0.07 (a hash lookup would be 0; the audit expects a scan of the attachment list)
+Log-log slopes over U = 1..64: measured attachment bytes retained 1.00 (expect 1: storage is linear in U by design), digest comparisons per attach 1.00 (expect 1 for a linear dedup scan, 0 for an index), attach time 0.02 (relative)
 
-Attachment storage is linear in U by design (about 2.4 KB per attachment: UC with 4 signatures plus an 8-shard view). Adding an attachment shows no measurable dependence on U up to 64 (slope 0.07; allocations constant at 65).
+The attachment bytes are the catalog's own measured accounting (its growth over the U = 1 catalog), not computed from the inputs: linear in U (slope 1.00, about 2.4 KB per attachment: UC with 4 signatures plus an 8-shard view). The dedup scan is linear in U as the audit expects
+(exactly U digest comparisons per attach, slope 1.00), but each comparison is a 32-byte compare and attach time is flat at U <= 64 (relative time slope 0.00): the linear term is real and invisible at these sizes.
 
 ## 4. Disk proof node reads (RocksDB snapshot, N = 100,000)
 

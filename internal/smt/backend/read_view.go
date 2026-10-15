@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -81,6 +82,19 @@ func (b *MemoryBackend) RetainReadView(ctx context.Context) (ReadView, error) {
 type lineage struct {
 	mu      sync.Mutex
 	entries []*lineageEntry // oldest first
+
+	// visited counts the lineage entries examined by retained-byte queries (observability
+	// for the scaling measurements: each query scans from the oldest entry).
+	visited atomic.Int64
+}
+
+// LineageStats reports the number of lineage entries currently kept (including dead
+// interior entries awaiting trimming) and the cumulative number of entries examined by
+// RetainedBytes queries. It is observability for the scaling measurements.
+func (b *MemoryBackend) LineageStats() (entries int, visited int64) {
+	b.lineage.mu.Lock()
+	defer b.lineage.mu.Unlock()
+	return len(b.lineage.entries), b.lineage.visited.Load()
 }
 
 type lineageEntry struct {
@@ -106,6 +120,7 @@ func (l *lineage) retained(e *lineageEntry) uint64 {
 	total := uint64(smt.ReadViewOverheadBytes)
 	after := false
 	for _, x := range l.entries {
+		l.visited.Add(1)
 		if x == e {
 			after = true
 			continue

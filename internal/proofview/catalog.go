@@ -101,8 +101,9 @@ type Catalog struct {
 	curRound uint64
 	closed   bool
 
-	evictions     uint64
-	pressureKills uint64
+	evictions         uint64
+	attachComparisons uint64
+	pressureKills     uint64
 }
 
 // NewCatalog creates an empty catalog.
@@ -130,19 +131,23 @@ type Stats struct {
 	Evictions     uint64
 	PressureKills uint64
 	LatestStale   bool
+	// AttachComparisons is the cumulative number of attachment digest comparisons made by
+	// AttachCertification (observability for the scaling measurements).
+	AttachComparisons uint64
 }
 
 func (c *Catalog) Stats() Stats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return Stats{
-		Views:         len(c.views),
-		RetiredPinned: len(c.retired),
-		ActivePins:    len(c.leases),
-		RetainedBytes: c.retainedBytesLocked(),
-		Evictions:     c.evictions,
-		PressureKills: c.pressureKills,
-		LatestStale:   c.latestStale,
+		Views:             len(c.views),
+		RetiredPinned:     len(c.retired),
+		ActivePins:        len(c.leases),
+		RetainedBytes:     c.retainedBytesLocked(),
+		Evictions:         c.evictions,
+		PressureKills:     c.pressureKills,
+		LatestStale:       c.latestStale,
+		AttachComparisons: c.attachComparisons,
 	}
 }
 
@@ -290,6 +295,7 @@ func (c *Catalog) AttachCertification(ctx context.Context, block BlockIdentity, 
 // and is dropped, so redelivery can never promote it over a newer certification.
 func (c *Catalog) attachLocked(v *view, att *attachment, toClose []backend.ReadView) ([]backend.ReadView, error) {
 	for i, old := range v.atts {
+		c.attachComparisons++
 		if old.digest != att.digest {
 			continue
 		}

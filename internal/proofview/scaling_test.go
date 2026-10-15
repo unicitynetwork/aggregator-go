@@ -103,28 +103,39 @@ func geometricInts(from, to int) []int {
 	return out
 }
 
-// Sweep: capture count R while the oldest view stays pinned (V = 4). The memory
-// lineage keeps an entry for every capture since the pinned view.
+// Sweep: capture count R while the oldest view stays pinned (V = 4). The memory lineage keeps
+// an entry for every capture since the pinned view. Each point is measured at exactly the
+// labelled R (no captures happen during a measurement). The hardware independent metrics are
+// the lineage entries kept (H) and the lineage entries visited by one Stats call (every
+// retained-byte query scans from the oldest entry); time is relative information.
 func Test_ScalingCatalogPinnedOldest(t *testing.T) {
 	measure.Require(t)
 	ctx := context.Background()
 	limits := bigBudget()
 	limits.MaxViews = 4
 	m := newMemChain(t, limits)
+	var reads atomic.Int64
+	m.wrap = func(r backend.ReadView) backend.ReadView { return countingReader{r, &reads} }
 	rootA := m.publishBlock(2000)
 	pin, err := m.c.AcquireRoot(ctx, rootA)
 	require.NoError(t, err)
 	defer pin.Release()
 
 	var sb strings.Builder
-	sb.WriteString("V = 4 retained views, oldest view pinned by a lease, N = 2,000, B = 10; R captures after the pinned view\n\n| R | Stats time (relative to R=4) | AcquireLatest+Release time (relative) | Publish time (relative) | retained bytes (accounted) |\n|---|---|---|---|---|\n")
-	var xs, st, at, pt []float64
-	var s0, a0, p0 float64
+	sb.WriteString("V = 4 retained views, oldest view pinned by a lease, N = 2,000, B = 10; R = captures after the pinned view (exact)\n\n| R | lineage entries kept (H) | lineage entries visited per Stats call | RetainedBytes reads per Stats call | Stats time (relative to R=4) | AcquireLatest+Release time (relative) | retained bytes (accounted) |\n|---|---|---|---|---|---|---|\n")
+	var xs, hs, visited, st, at []float64
+	var s0, a0 float64
 	captured := 0
 	for _, R := range []int{4, 16, 64, 256, 1024} {
 		for ; captured < R; captured++ {
 			m.publishBlock(10)
 		}
+		entries, v0 := m.b.LineageStats()
+		reads.Store(0)
+		_ = m.c.Stats()
+		_, v1 := m.b.LineageStats()
+		perStats := v1 - v0
+		statReads := reads.Load()
 		stc := measure.CostOf(40*time.Millisecond, func() { _ = m.c.Stats() })
 		atc := measure.CostOf(40*time.Millisecond, func() {
 			l, err := m.c.AcquireLatest(ctx)
@@ -132,30 +143,33 @@ func Test_ScalingCatalogPinnedOldest(t *testing.T) {
 				l.Release()
 			}
 		})
-		ptc := measure.CostOf(40*time.Millisecond, func() { m.publishBlock(10); captured++ })
 		if s0 == 0 {
-			s0, a0, p0 = stc.Nanos, atc.Nanos, ptc.Nanos
+			s0, a0 = stc.Nanos, atc.Nanos
 		}
-		fmt.Fprintf(&sb, "| %d | %.1fx | %.1fx | %.1fx | %d |\n", R, stc.Nanos/s0, atc.Nanos/a0, ptc.Nanos/p0, m.c.Stats().RetainedBytes)
+		fmt.Fprintf(&sb, "| %d | %d | %d | %d | %.1fx | %.1fx | %d |\n", R, entries, perStats, statReads, stc.Nanos/s0, atc.Nanos/a0, m.c.Stats().RetainedBytes)
 		xs = append(xs, float64(R))
+		hs = append(hs, float64(entries))
+		visited = append(visited, float64(perStats))
 		st = append(st, stc.Nanos)
 		at = append(at, atc.Nanos)
-		pt = append(pt, ptc.Nanos)
 	}
-	fmt.Fprintf(&sb, "\nLog-log slopes over R = 4..1024: Stats %s, AcquireLatest+Release %s, Publish %s. With V bounded these would be 0 if catalog bookkeeping were independent of captures since the oldest pin; "+
-		"a positive slope is the lineage metadata growing with R (the audit's H dependence).\n", measure.FmtSlope(xs, st), measure.FmtSlope(xs, at), measure.FmtSlope(xs, pt))
+	fmt.Fprintf(&sb, "\nLog-log slopes over R = 4..1024: lineage entries kept %s, entries visited per Stats call %s (both expect 1: the metadata and the per-query scan grow with the captures since the pinned view although only V = 4 views are retained; "+
+		"a bounded structure would give 0); relative time: Stats %s, AcquireLatest+Release %s.\n", measure.FmtSlope(xs, hs), measure.FmtSlope(xs, visited), measure.FmtSlope(xs, st), measure.FmtSlope(xs, at))
 	t.Logf("catalog: pinned oldest view sweep\n%s", sb.String())
 }
 
 // Sweep: attachments per view U = 1..64 (V = 4, same state, newer seals), real UCs
-// (4-signature seal, 8-shard partition view).
+// (4-signature seal, 8-shard partition view). Counters: attachment digest comparisons per
+// attach, allocations, and the catalog's own retained-byte accounting (measured, not
+// computed from the inputs): its growth over the U = 1 catalog is the attachment storage.
 func Test_ScalingCatalogAttachments(t *testing.T) {
 	measure.Require(t)
 	ctx := context.Background()
 	var sb strings.Builder
-	sb.WriteString("V = 4, each state keeps up to U attachments (UC with 4-signature seal and an 8-shard view)\n\n| U | attachment bytes retained per view | catalog retained bytes (attachments + readers) | AttachCertification time (relative to U=1) | allocs per attach |\n|---|---|---|---|---|\n")
-	var xs, bytesCol, at []float64
+	sb.WriteString("V = 4, each state keeps up to U attachments (UC with 4-signature seal and an 8-shard view)\n\n| U | catalog retained bytes (measured) | attachment bytes retained (measured: growth over U=1) | digest comparisons per attach | allocs per attach | attach time (relative to U=1) |\n|---|---|---|---|---|---|\n")
+	var xs, grown, cmps, at []float64
 	var a0 float64
+	var base uint64
 	for _, U := range geometricInts(1, 64) {
 		limits := bigBudget()
 		limits.MaxViews = 4
@@ -175,22 +189,26 @@ func Test_ScalingCatalogAttachments(t *testing.T) {
 		for _, cc := range certs[:U] { // fill the view to U attachments
 			require.NoError(t, m.c.AttachCertification(ctx, block(m.block), latestRoot, Certification{UC: cc.UC, PartitionView: cc.View}))
 		}
+		retained := m.c.Stats().RetainedBytes // U attachments on the newest state; the others hold the original one
 		next := U
+		compBefore := m.c.Stats().AttachComparisons
 		c := measure.CostOfN(timed, func() { // each newer UC evicts the oldest once the view is full
 			cc := certs[next]
 			next++
 			require.NoError(t, m.c.AttachCertification(ctx, block(m.block), latestRoot, Certification{UC: cc.UC, PartitionView: cc.View}))
 		})
-		if a0 == 0 {
-			a0 = c.Nanos
+		perAttach := float64(m.c.Stats().AttachComparisons-compBefore) / timed
+		if base == 0 {
+			base, a0 = retained, c.Nanos
 		}
-		per := len(certs[0].UC) + len(certs[0].View) + attachmentOverhead
-		fmt.Fprintf(&sb, "| %d | %d | %d | %.1fx | %.0f |\n", U, U*per, m.c.Stats().RetainedBytes, c.Nanos/a0, c.Allocs)
+		growth := int64(retained) - int64(base)
+		fmt.Fprintf(&sb, "| %d | %d | %d | %.1f | %.0f | %.1fx |\n", U, retained, growth+int64(len(certs[0].UC)+len(certs[0].View)+attachmentOverhead), perAttach, c.Allocs, c.Nanos/a0)
 		xs = append(xs, float64(U))
-		bytesCol = append(bytesCol, float64(U*per))
+		grown = append(grown, float64(growth+int64(len(certs[0].UC)+len(certs[0].View)+attachmentOverhead)))
+		cmps = append(cmps, perAttach)
 		at = append(at, c.Nanos)
 	}
-	fmt.Fprintf(&sb, "\nLog-log slopes over U = 1..64: retained attachment bytes %s (expect 1: storage is linear in U by design), attach time %s (a hash lookup would be 0; the audit expects a scan of the attachment list)\n",
-		measure.FmtSlope(xs, bytesCol), measure.FmtSlope(xs, at))
+	fmt.Fprintf(&sb, "\nLog-log slopes over U = 1..64: measured attachment bytes retained %s (expect 1: storage is linear in U by design), digest comparisons per attach %s (expect 1 for a linear dedup scan, 0 for an index), attach time %s (relative)\n",
+		measure.FmtSlope(xs, grown), measure.FmtSlope(xs, cmps), measure.FmtSlope(xs, at))
 	t.Logf("catalog: attachments sweep\n%s", sb.String())
 }

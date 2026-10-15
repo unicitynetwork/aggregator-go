@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"math/bits"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -251,8 +252,18 @@ func Test_ScalingBatchIDsMongo(t *testing.T) {
 	t.Cleanup(func() { _ = mc.Terminate(context.Background()) })
 	uri, err := mc.ConnectionString(ctx)
 	require.NoError(t, err)
+	// every command counts (aggregate and getMore alike), except connection and session housekeeping
+	var cmu sync.Mutex
 	commands := map[string]int{}
-	monitor := &event.CommandMonitor{Started: func(_ context.Context, ev *event.CommandStartedEvent) { commands[ev.CommandName]++ }}
+	monitor := &event.CommandMonitor{Started: func(_ context.Context, ev *event.CommandStartedEvent) {
+		switch ev.CommandName {
+		case "hello", "isMaster", "ismaster", "endSessions", "saslStart", "saslContinue", "buildInfo", "ping":
+			return
+		}
+		cmu.Lock()
+		commands[ev.CommandName]++
+		cmu.Unlock()
+	}}
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri).SetMonitor(monitor))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Disconnect(context.Background()) })
@@ -273,34 +284,41 @@ func Test_ScalingBatchIDsMongo(t *testing.T) {
 	e.svc.records = store
 
 	var sb strings.Builder
-	sb.WriteString("MongoDB 7.0 in a container, 256 finalized records. Before the batching change the service issued 2 x L sequential queries per batch.\n\n| L | aggregate commands per batch | all commands per batch | response B | time relative to L=1 | time per ID relative |\n|---|---|---|---|---|---|\n")
+	sb.WriteString("MongoDB 7.0 in a container, 256 finalized records. Every command counts (aggregate and getMore alike). Before the batching change the service issued 2 x L sequential queries per batch.\n\n| L | commands per batch (all) | of which aggregate | of which getMore | response B | time relative to L=1 | time per ID relative |\n|---|---|---|---|---|---|---|\n")
 	var xs, cmds, tm []float64
 	var t1 float64
+	snapshot := func() map[string]int {
+		cmu.Lock()
+		defer cmu.Unlock()
+		out := map[string]int{}
+		for k, v := range commands {
+			out[k] = v
+		}
+		return out
+	}
 	for _, L := range geometric(1, 256, 2) {
 		req := e.request(ids[:L], nil)
-		before := map[string]int{}
-		for k, v := range commands {
-			before[k] = v
-		}
+		before := snapshot()
 		resp, berr := e.svc.GetInclusionProofsV1(ctx, req)
 		require.Nil(t, berr)
-		agg := commands["aggregate"] - before["aggregate"]
+		after := snapshot()
 		total := 0
-		for k, v := range commands {
+		for k, v := range after {
 			total += v - before[k]
 		}
+		agg, more := after["aggregate"]-before["aggregate"], after["getMore"]-before["getMore"]
 		data, _ := json.Marshal(jsonrpc.NewResponse(resp, 1))
 		c := measure.CostOf(300*time.Millisecond, func() { _, _ = e.svc.GetInclusionProofsV1(ctx, req) })
 		if L == 1 {
 			t1 = c.Nanos
 		}
-		fmt.Fprintf(&sb, "| %d | %d | %d | %d | %.1fx | %.2fx |\n", L, agg, total, len(data), c.Nanos/t1, c.Nanos/t1/float64(L))
-		require.Equal(t, 2, agg, "L=%d: one size projection and one record load", L)
+		fmt.Fprintf(&sb, "| %d | %d | %d | %d | %d | %.1fx | %.2fx |\n", L, total, agg, more, len(data), c.Nanos/t1, c.Nanos/t1/float64(L))
+		require.Equal(t, 2, total, "L=%d: one size projection and one record load, no getMore", L)
 		xs = append(xs, float64(L))
-		cmds = append(cmds, float64(agg))
+		cmds = append(cmds, float64(total))
 		tm = append(tm, c.Nanos)
 	}
-	fmt.Fprintf(&sb, "\nLog-log slopes over L = 1..256: database aggregate commands %s (expect 0: constant), time %s (the fixed round trips dominate small L, so the curve is concave: the slope over the upper range L = 16..256 is %s)\n",
+	fmt.Fprintf(&sb, "\nLog-log slopes over L = 1..256: database commands per batch (all) %s (expect 0: constant 2), relative time %s (the fixed round trips dominate small L; upper range L = 16..256: %s)\n",
 		measure.FmtSlope(xs, cmds), measure.FmtSlope(xs, tm), measure.FmtSlope(xs[4:], tm[4:]))
 	t.Logf("IDs-per-batch sweep, real MongoDB\n%s", sb.String())
 }
