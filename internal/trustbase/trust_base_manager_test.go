@@ -194,3 +194,82 @@ type mockBFTRestClient struct {
 func (m *mockBFTRestClient) GetTrustBases(ctx context.Context, epoch1, epoch2 uint64) ([]*types.RootTrustBaseV1, error) {
 	return m.GetTrustBasesFunc(ctx, epoch1, epoch2)
 }
+
+type countingStore struct {
+	*memStore
+	gets int
+}
+
+func (c *countingStore) GetByEpoch(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
+	c.gets++
+	return c.memStore.GetByEpoch(ctx, epoch)
+}
+
+func TestTrustBaseManagerBoundedCatchUp(t *testing.T) {
+	log, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+	anchor, anchorSigners := genesis(t, types.NetworkLocal, 3)
+
+	t.Run("multi-epoch catch-up from installed head", func(t *testing.T) {
+		chain := []*types.RootTrustBaseV1{anchor}
+		signers := anchorSigners
+		for range 4 {
+			tb, s := next(t, chain[len(chain)-1], types.NetworkLocal, signers)
+			chain = append(chain, tb)
+			signers = s
+		}
+		store := &memStore{tbs: map[uint64]*types.RootTrustBaseV1{1: anchor}}
+		rest := &mockBFTRestClient{GetTrustBasesFunc: func(_ context.Context, e, _ uint64) ([]*types.RootTrustBaseV1, error) {
+			return []*types.RootTrustBaseV1{chain[e-1]}, nil
+		}}
+		m := NewTrustBaseManager(log, store, rest, NewTrustBaseValidator(store))
+		got, err := m.GetByEpoch(t.Context(), 5)
+		require.NoError(t, err)
+		require.Equal(t, uint64(5), got.GetEpoch())
+		require.Len(t, store.tbs, 5)
+	})
+
+	t.Run("far-future epoch costs bounded lookups and no REST call", func(t *testing.T) {
+		for _, epoch := range []uint64{maxCatchUpEpochs + 2, 4096, 1_000_000_000, ^uint64(0)} {
+			store := &countingStore{memStore: &memStore{tbs: map[uint64]*types.RootTrustBaseV1{1: anchor}}}
+			restCalls := 0
+			rest := &mockBFTRestClient{GetTrustBasesFunc: func(context.Context, uint64, uint64) ([]*types.RootTrustBaseV1, error) {
+				restCalls++
+				return nil, nil
+			}}
+			m := NewTrustBaseManager(log, store, rest, NewTrustBaseValidator(store))
+			_, err := m.GetByEpoch(t.Context(), epoch)
+			require.ErrorContains(t, err, "beyond the installed chain")
+			require.Zero(t, restCalls)
+			require.LessOrEqual(t, store.gets, int(maxCatchUpEpochs)+2)
+			require.Less(t, len(err.Error()), 300)
+		}
+	})
+
+	t.Run("REST failure stops catch-up at first unavailable epoch", func(t *testing.T) {
+		store := &countingStore{memStore: &memStore{tbs: map[uint64]*types.RootTrustBaseV1{1: anchor}}}
+		restCalls := 0
+		rest := &mockBFTRestClient{GetTrustBasesFunc: func(context.Context, uint64, uint64) ([]*types.RootTrustBaseV1, error) {
+			restCalls++
+			return nil, nil
+		}}
+		m := NewTrustBaseManager(log, store, rest, NewTrustBaseValidator(store))
+		_, err := m.GetByEpoch(t.Context(), 10)
+		require.Error(t, err)
+		require.Equal(t, 1, restCalls)
+		require.Less(t, len(err.Error()), 500)
+	})
+
+	t.Run("cancelled context aborts before any work", func(t *testing.T) {
+		store := &countingStore{memStore: &memStore{tbs: map[uint64]*types.RootTrustBaseV1{1: anchor}}}
+		rest := &mockBFTRestClient{GetTrustBasesFunc: func(context.Context, uint64, uint64) ([]*types.RootTrustBaseV1, error) {
+			t.Fatal("REST must not be called after cancellation")
+			return nil, nil
+		}}
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		m := NewTrustBaseManager(log, store, rest, NewTrustBaseValidator(store))
+		_, err := m.GetByEpoch(ctx, 5)
+		require.ErrorIs(t, err, context.Canceled)
+	})
+}
