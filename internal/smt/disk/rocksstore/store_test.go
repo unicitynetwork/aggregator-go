@@ -243,3 +243,27 @@ func keyWithFirstByte(firstByte byte) disk.Key {
 	}
 	return key
 }
+
+func TestWrittenBytesIsMonotonicAndCountsCommittedBatchesOnly(t *testing.T) {
+	store := openTestStore(t, t.TempDir(), Options{DisableWAL: true, NoSyncWrites: true})
+	defer store.Close()
+	require.Zero(t, store.WrittenBytes())
+
+	// an abandoned batch writes nothing
+	abandoned := store.NewBatch()
+	require.NoError(t, abandoned.SetNode(disk.RootNodeKey(), make([]byte, 100)))
+	require.NoError(t, abandoned.Close())
+	require.Zero(t, store.WrittenBytes())
+
+	batch := store.NewBatch()
+	require.NoError(t, batch.SetNode(disk.RootNodeKey(), make([]byte, 100)))
+	require.NoError(t, batch.Commit())
+	afterSet := store.WrittenBytes()
+	require.GreaterOrEqual(t, afterSet, uint64(100))
+
+	// deletes conservatively charge the old version a pinned snapshot keeps alive
+	batch = store.NewBatch()
+	require.NoError(t, batch.DeleteNode(disk.RootNodeKey()))
+	require.NoError(t, batch.Commit())
+	require.Greater(t, store.WrittenBytes(), afterSet)
+}
