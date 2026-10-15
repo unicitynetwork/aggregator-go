@@ -32,7 +32,9 @@ type ReadView interface {
 	RootHash() []byte
 	// GetInclusionCert builds the v2 inclusion certificate for the raw key
 	// against the retained root. It honors ctx cancellation where the backend
-	// can observe it.
+	// can observe it. A key with no leaf in the retained state returns an error
+	// wrapping ErrPublishedProofLeafNotFound for every backend; any other error
+	// is an operational failure.
 	GetInclusionCert(ctx context.Context, key []byte) (*api.InclusionCert, error)
 	// RetainedBytes is a conservative estimate of the incremental storage this
 	// view keeps alive beyond the live state, including shared nodes counted
@@ -160,7 +162,12 @@ func (v *memoryReadView) GetInclusionCert(ctx context.Context, key []byte) (*api
 	if v.closed {
 		return nil, ErrReadViewClosed
 	}
-	return v.view.GetInclusionCert(key)
+	cert, err := v.view.GetInclusionCert(key)
+	if errors.Is(err, smt.ErrLeafNotFound) {
+		// the contract of ReadView: an absent leaf is ErrPublishedProofLeafNotFound
+		return nil, fmt.Errorf("%w: %v", ErrPublishedProofLeafNotFound, err)
+	}
+	return cert, err
 }
 
 func (v *memoryReadView) RetainedBytes() uint64 {

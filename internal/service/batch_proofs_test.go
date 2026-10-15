@@ -47,36 +47,49 @@ func (f *fakeShard) ValidateShardID(id api.StateID) error {
 }
 
 type fakeRecords struct {
-	sizes   map[string]int64 // overrides the computed stored size
-	loads   int              // GetByStateID calls (full materializations)
+	sizes   map[string]int64 // overrides the computed stored size, by StateID.String()
+	loaded  int              // records returned by GetFinalizedByStateIDs (full materializations)
 	mu      sync.Mutex
-	records map[string]*models.AggregatorRecord
+	records map[string]*models.AggregatorRecord // by string(id)
 	err     error
 	delay   time.Duration
-	calls   int
+	calls   int // GetFinalizedByStateIDs calls
+	sizeQ   int // GetStoredSizesByStateIDs calls
 }
 
-func (f *fakeRecords) GetStoredSizeByStateID(ctx context.Context, id api.StateID) (int64, bool, error) {
+func (f *fakeRecords) GetStoredSizesByStateIDs(ctx context.Context, ids []api.StateID) (map[string]int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.sizeQ++
 	if f.err != nil {
-		return 0, false, f.err
+		return nil, f.err
 	}
-	r := f.records[string(id)]
-	if r == nil {
-		return 0, false, nil
+	out := make(map[string]int64, len(ids))
+	for _, id := range ids {
+		r := f.records[string(id)]
+		if r == nil {
+			continue
+		}
+		if n, ok := f.sizes[id.String()]; ok {
+			out[id.String()] = n
+			continue
+		}
+		out[id.String()] = int64(200 + len(r.CertificationData.Witness) + len(r.CertificationData.OwnerPredicate.Params))
 	}
-	if n, ok := f.sizes[string(id)]; ok {
-		return n, true, nil
-	}
-	return int64(200 + len(r.CertificationData.Witness) + len(r.CertificationData.OwnerPredicate.Params)), true, nil
+	return out, nil
 }
 
-func (f *fakeRecords) GetByStateID(ctx context.Context, id api.StateID) (*models.AggregatorRecord, error) {
+func (f *fakeRecords) GetFinalizedByStateIDs(ctx context.Context, ids []api.StateID) (map[string]*models.AggregatorRecord, error) {
 	f.mu.Lock()
 	f.calls++
-	f.loads++
-	r, err, d := f.records[string(id)], f.err, f.delay
+	d, err := f.delay, f.err
+	out := make(map[string]*models.AggregatorRecord, len(ids))
+	for _, id := range ids {
+		if r := f.records[string(id)]; r != nil {
+			out[id.String()] = r
+		}
+	}
+	f.loaded += len(out)
 	f.mu.Unlock()
 	if d > 0 {
 		select {
@@ -85,7 +98,7 @@ func (f *fakeRecords) GetByStateID(ctx context.Context, id api.StateID) (*models
 			return nil, ctx.Err()
 		}
 	}
-	return r, err
+	return out, err
 }
 
 // readerView adapts a frozen SMT view to backend.ReadView.
@@ -387,13 +400,13 @@ type hookRecords struct {
 	onCall func()
 }
 
-func (h *hookRecords) GetStoredSizeByStateID(ctx context.Context, id api.StateID) (int64, bool, error) {
-	return h.inner.GetStoredSizeByStateID(ctx, id)
+func (h *hookRecords) GetStoredSizesByStateIDs(ctx context.Context, ids []api.StateID) (map[string]int64, error) {
+	return h.inner.GetStoredSizesByStateIDs(ctx, ids)
 }
 
-func (h *hookRecords) GetByStateID(ctx context.Context, id api.StateID) (*models.AggregatorRecord, error) {
+func (h *hookRecords) GetFinalizedByStateIDs(ctx context.Context, ids []api.StateID) (map[string]*models.AggregatorRecord, error) {
 	h.onCall()
-	return h.inner.GetByStateID(ctx, id)
+	return h.inner.GetFinalizedByStateIDs(ctx, ids)
 }
 
 func TestBatch_RPCErrorShapes(t *testing.T) {
@@ -422,14 +435,14 @@ func TestBatch_OversizedStoredRecordIsNeverMaterialized(t *testing.T) {
 	e := newBatchEnv(t, proofview.DefaultLimits())
 	ids := e.addRecords(4, 1000)
 	e.finalize([]byte("pv"))
-	e.recs.sizes = map[string]int64{string(ids[2]): 64 << 20} // huge stored witness/predicate
+	e.recs.sizes = map[string]int64{ids[2].String(): 64 << 20} // huge stored witness/predicate
 
 	_, err := e.svc.GetInclusionProofsV1(context.Background(), e.request(ids, nil))
 	requireBatchErr(t, err, jsonrpc.LimitExceededCode, "limit_exceeded", "response_bytes")
 	e.recs.mu.Lock()
-	loads := e.recs.loads
+	loaded := e.recs.loaded
 	e.recs.mu.Unlock()
-	require.Equal(t, 2, loads, "only the two records before the oversized one were loaded; the oversized one never was")
+	require.Zero(t, loaded, "the oversized record is rejected from the size projection; no record is loaded at all")
 }
 
 func TestBatch_SizeProjectionErrorsAndMisses(t *testing.T) {
@@ -449,4 +462,137 @@ func TestBatch_SizeProjectionErrorsAndMisses(t *testing.T) {
 	e.recs.mu.Unlock()
 	_, err = e.svc.GetInclusionProofsV1(context.Background(), e.request(ids, nil))
 	requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_not_included")
+}
+
+// Regression: a finalized record whose leaf is absent from the pinned view is an
+// availability outcome, not an internal error.
+func TestBatch_AbsentLeafInPinnedViewIsStateNotIncluded(t *testing.T) {
+	e := newBatchEnv(t, proofview.DefaultLimits())
+	ids := e.addRecords(3, 1000)
+	e.finalize([]byte("pv"))
+	// a record finalized later than the pinned view: stored, but its leaf is not in the root
+	extra := e.addRecordNoLeaf(1000)
+	_, err := e.svc.GetInclusionProofsV1(context.Background(), e.request(append([]api.StateID{ids[0]}, extra), nil))
+	requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_not_included")
+	require.True(t, err.Retryable)
+}
+
+// addRecordNoLeaf stores a record without adding its leaf to the tree.
+func (e *batchEnv) addRecordNoLeaf(refTime uint64) api.StateID {
+	i := len(e.ids) + 1000
+	cd := models.CertificationData{
+		OwnerPredicate:  api.Predicate{Engine: 1, Code: []byte{1}, Params: bytes.Repeat([]byte{2}, 33)},
+		SourceStateHash: bytes.Repeat([]byte{byte(i), byte(i >> 8), 5}, 11)[:32],
+		TransactionHash: api.RequireNewImprintV2(strings.Repeat(fmt.Sprintf("%02x", byte(i+1)), 32)),
+		Witness:         bytes.Repeat([]byte{4}, 65),
+	}
+	id, err := cd.ToAPI().CreateStateID()
+	require.NoError(e.t, err)
+	e.recs.mu.Lock()
+	e.records[string(id)] = &models.AggregatorRecord{Version: 2, StateID: id, CertificationData: cd, ReferenceTime: refTime,
+		BlockNumber: api.NewBigIntFromUint64(e.blocks)}
+	e.recs.mu.Unlock()
+	return id
+}
+
+// Regression: lease cancellation (pressure or lease deadline) interrupts an
+// in-flight database call; the request context alone previously bounded it.
+func TestBatch_LeaseCancellationInterruptsInFlightDatabaseCall(t *testing.T) {
+	limits := proofview.DefaultLimits()
+	limits.MaxLeaseDuration = 150 * time.Millisecond
+	e := newBatchEnv(t, limits)
+	ids := e.addRecords(2, 1000)
+	e.finalize([]byte("pv"))
+	e.recs.delay = 10 * time.Second // the database call would outlast the 5 s request timeout
+
+	start := time.Now()
+	_, err := e.svc.GetInclusionProofsV1(context.Background(), e.request(ids, nil))
+	requireBatchErr(t, err, jsonrpc.ConcurrencyLimitCode, "busy", "deadline")
+	require.Less(t, time.Since(start), 2*time.Second, "the call was cut by the lease, not by the request timeout")
+}
+
+func TestBatch_LeaseCancelledByPressureInterruptsDatabaseCall(t *testing.T) {
+	limits := proofview.DefaultLimits()
+	limits.MaxViews = 1
+	e := newBatchEnv(t, limits)
+	ids := e.addRecords(2, 1000)
+	e.finalize([]byte("pv"))
+	started := make(chan struct{})
+	var once sync.Once
+	e.svc.records = &hookRecords{inner: e.recs, onCall: func() { once.Do(func() { close(started) }) }}
+	e.recs.delay = 10 * time.Second
+
+	done := make(chan *BatchError, 1)
+	go func() {
+		_, err := e.svc.GetInclusionProofsV1(context.Background(), e.request(ids, nil))
+		done <- err
+	}()
+	<-started
+	// closing the catalog cancels every lease, as pressure cancellation does
+	require.NoError(t, e.catalog.Close())
+
+	select {
+	case err := <-done:
+		requireBatchErr(t, err, jsonrpc.ConcurrencyLimitCode, "busy", "deadline")
+	case <-time.After(3 * time.Second):
+		t.Fatal("database call was not interrupted by lease cancellation")
+	}
+}
+
+// The number of database round trips per batch is constant: one size projection
+// and one record load, whatever the number of IDs; none is loaded when the batch
+// is rejected by the preflight.
+func TestBatch_ConstantDatabaseRoundTripsPerBatch(t *testing.T) {
+	e := newBatchEnv(t, proofview.DefaultLimits())
+	ids := e.addRecords(256, 1000)
+	e.finalize([]byte("pv"))
+
+	for _, n := range []int{1, 2, 16, 100, 256} {
+		e.recs.mu.Lock()
+		e.recs.sizeQ, e.recs.calls = 0, 0
+		e.recs.mu.Unlock()
+		resp, err := e.svc.GetInclusionProofsV1(context.Background(), e.request(ids[:n], nil))
+		require.Nil(t, err, n)
+		require.Len(t, resp.Proofs, n)
+		e.recs.mu.Lock()
+		require.Equal(t, 1, e.recs.sizeQ, "%d IDs: one size query", n)
+		require.Equal(t, 1, e.recs.calls, "%d IDs: one record query", n)
+		e.recs.mu.Unlock()
+	}
+
+	// over-budget or missing: a single size query, no load
+	e.recs.mu.Lock()
+	e.recs.sizeQ, e.recs.calls = 0, 0
+	e.recs.sizes = map[string]int64{ids[200].String(): 64 << 20}
+	e.recs.mu.Unlock()
+	_, err := e.svc.GetInclusionProofsV1(context.Background(), e.request(ids, nil))
+	requireBatchErr(t, err, jsonrpc.LimitExceededCode, "limit_exceeded", "response_bytes")
+	e.recs.mu.Lock()
+	require.Equal(t, 1, e.recs.sizeQ)
+	require.Zero(t, e.recs.calls)
+	e.recs.mu.Unlock()
+}
+
+func TestBatch_RequestOrderAndAllOrNoneWithBatchedLookups(t *testing.T) {
+	e := newBatchEnv(t, proofview.DefaultLimits())
+	ids := e.addRecords(6, 1000)
+	e.finalize([]byte("pv"))
+	req := []api.StateID{ids[5], ids[0], ids[3], ids[1]}
+	resp, err := e.svc.GetInclusionProofsV1(context.Background(), e.request(req, nil))
+	require.Nil(t, err)
+	for i, id := range req {
+		want := e.records[string(id)]
+		require.Equal(t, want.CertificationData.ToAPI().SourceStateHash, resp.Proofs[i].InclusionProof.CertificationData.SourceStateHash, "position %d", i)
+	}
+	// one absent ID fails the whole call, and nothing is loaded
+	absent := e.addRecordNoLeaf(1000)
+	delete(e.records, string(absent))
+	e.recs.mu.Lock()
+	e.recs.calls = 0
+	e.recs.mu.Unlock()
+	_, err = e.svc.GetInclusionProofsV1(context.Background(), e.request(append(req, absent), nil))
+	requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_not_included")
+	e.recs.mu.Lock()
+	require.Zero(t, e.recs.calls)
+	e.recs.mu.Unlock()
 }

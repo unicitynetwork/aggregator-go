@@ -259,3 +259,59 @@ func TestBatchRPC_BoundedWriterMatchesMarshalAndLimitIsExact(t *testing.T) {
 	require.Equal(t, string(want)+"\n", got)
 	require.Contains(t, got, `"partitionView":"090807"`)
 }
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// Regression (security): an outer body cap applies before the envelope is
+// decoded, for every method, so an oversized body is never read into memory.
+func TestRPC_OuterBodyCapIsEnforcedBeforeDecoding(t *testing.T) {
+	var n int
+	rpc := batchServer(t, config.ShardingModeStandalone, echoHandler(&n))
+	rpc.SetMaxRequestBodyBytes(4096)
+	huge := strings.Repeat("a", 8<<20)
+
+	for _, method := range []string{"get_inclusion_proof.v2", "get_inclusion_proofs.v1", "unknown_method"} {
+		cr := &countingReader{r: strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":{"x":"` + huge + `"}}`)}
+		req := httptest.NewRequest(http.MethodPost, "/", cr)
+		rec := httptest.NewRecorder()
+		rpc.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, method)
+		require.Equal(t, `{"jsonrpc":"2.0","error":{"code":-32007,"message":"Limit exceeded","data":{"reason":"limit_exceeded","detail":"request_bytes","retryable":false,"limit":4096}},"id":null}`+"\n", rec.Body.String(), method)
+		require.LessOrEqual(t, cr.n, int64(4096+1), "%s: only the ceiling (plus one byte) may be read, read %d", method, cr.n)
+	}
+	require.Zero(t, n)
+
+	// a trailing tail on a batch request cannot slip past the ceiling either
+	valid := `{"jsonrpc":"2.0","id":1,"method":"get_inclusion_proofs.v1","params":{"stateIds":["` + strings.Repeat("ab", 32) + `"]}}`
+	cr := &countingReader{r: strings.NewReader(valid + strings.Repeat(" ", 8<<20))}
+	rec := httptest.NewRecorder()
+	rpc.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", cr))
+	require.Contains(t, rec.Body.String(), `"detail":"request_bytes"`)
+	require.LessOrEqual(t, cr.n, int64(4096+1))
+
+	// requests under the ceiling are unaffected
+	require.Contains(t, postRPCReader(t, rpc, strings.NewReader(valid)), `"result"`)
+}
+
+func TestRPC_DefaultOuterBodyCeiling(t *testing.T) {
+	require.EqualValues(t, 16<<20, jsonrpc.DefaultMaxRequestBodyBytes)
+	rpc := batchServer(t, config.ShardingModeStandalone, echoHandler(new(int)))
+	// larger than the batch limits, far below the ceiling: still the batch-specific error, not 413
+	pad := strings.Repeat(" ", 1<<20)
+	rec := httptest.NewRecorder()
+	rpc.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"get_inclusion_proofs.v1","params":{}}`+pad)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), `"detail":"request_bytes"`)
+	// the legacy v2 method accepts a large (1 MiB) request as before
+	_, body := postRPC(t, rpc, `{"jsonrpc":"2.0","id":7,`+pad+`"method":"get_inclusion_proof.v2","params":{"stateId":"`+strings.Repeat("ab", 32)+`"}}`)
+	require.Equal(t, goldenV2Success, body)
+}
