@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"math/big"
 	"testing"
 
@@ -41,4 +42,37 @@ func createTestBlock() *Block {
 		},
 		ParentBlockNumber: 7,
 	}
+}
+
+func TestBlockBSONPartitionViewRoundTrip(t *testing.T) {
+	block := NewBlock(api.NewBigIntFromUint64(5), "unicity", 0, "1.0", "mainnet",
+		api.NewHexBytes([]byte{1}), api.NewHexBytes([]byte{2}), api.NewHexBytes([]byte{3}), 7)
+
+	t.Run("without view stays null", func(t *testing.T) {
+		bb, err := block.ToBSON()
+		require.NoError(t, err)
+		require.Empty(t, bb.PartitionView)
+		back, err := bb.FromBSON()
+		require.NoError(t, err)
+		require.Nil(t, back.PartitionView)
+	})
+
+	t.Run("with view", func(t *testing.T) {
+		b := *block
+		b.PartitionView = api.NewHexBytes([]byte{0x83, 0x01, 0x02, 0x80})
+		bb, err := b.ToBSON()
+		require.NoError(t, err)
+		require.Equal(t, "83010280", bb.PartitionView)
+		back, err := bb.FromBSON()
+		require.NoError(t, err)
+		require.Equal(t, b.PartitionView, back.PartitionView)
+	})
+
+	t.Run("not part of the JSON API", func(t *testing.T) {
+		b := *block
+		b.PartitionView = api.NewHexBytes([]byte{1})
+		data, err := json.Marshal(&b)
+		require.NoError(t, err)
+		require.NotContains(t, string(data), "artitionView")
+	})
 }

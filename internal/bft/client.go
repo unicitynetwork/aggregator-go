@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -81,6 +83,15 @@ type (
 		certRequestTime atomic.Int64
 
 		trustBaseStore TrustBaseStore
+
+		// Optional proof material (partition view sidecar) intake. Staged views are
+		// keyed by complete UC digest and published only once that exact UC is accepted.
+		proofStaging  *proofmaterial.Staging
+		proofSink     atomic.Pointer[proofmaterial.Sink]
+		proofTopology proofmaterial.TopologyProvider
+		publishedMu   sync.Mutex
+		published     map[proofmaterial.Digest]bool // recent published UC digests -> had a view
+		publishedFIFO []proofmaterial.Digest
 	}
 
 	BFTClient interface {
@@ -141,6 +152,8 @@ func NewBFTClient(
 		trustBaseStore: trustBaseStore,
 		conf:           conf,
 		eventBus:       eventBus,
+		proofStaging:   proofmaterial.NewStaging(proofmaterial.DefaultStagingEntries),
+		published:      map[proofmaterial.Digest]bool{},
 	}
 	bftClient.status.Store(idle)
 	bftClient.luc.Store(luc)
@@ -376,6 +389,13 @@ func (c *BFTClientImpl) handleMessage(ctx context.Context, msg any) {
 		if err := c.handleCertificationResponse(ctx, mt); err != nil {
 			c.logger.WithContext(ctx).Error("error processing CertificationResponse message", "error", err.Error())
 		}
+	case *certification.CertificationResponseV2:
+		c.logger.WithContext(ctx).Info("received CertificationResponseV2")
+		// The envelope is already structurally valid (version, framing). The ordinary
+		// response goes through the unchanged handler; the opaque view is optional.
+		if err := c.handleCertificationResponse(ctx, mt.Legacy()); err != nil {
+			c.logger.WithContext(ctx).Error("error processing CertificationResponseV2 message", "error", err.Error())
+		}
 	default:
 		c.logger.WithContext(ctx).Info("received unknown message")
 	}
@@ -404,7 +424,14 @@ func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *cer
 		return fmt.Errorf("got CertificationResponse for a wrong shard %s - %s", cr.Partition, cr.Shard)
 	}
 
-	return c.handleUnicityCertificate(ctx, &cr.UC, &cr.Technical)
+	// Only the response's own UC is processed; the view's other leaves are never dispatched.
+	c.stagePartitionView(ctx, cr)
+
+	if err := c.handleUnicityCertificate(ctx, &cr.UC, &cr.Technical); err != nil {
+		return err
+	}
+	c.publishSidecarFill(ctx, &cr.UC)
+	return nil
 }
 
 func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
@@ -473,6 +500,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		// cleanup succeeds, so a failed cleanup can be retried by the next UC.
 		c.luc.Store(uc)
 		c.lastRootRound.Store(uc.GetRootRoundNumber())
+		c.publishProofMaterial(ctx, uc, proofmaterial.KindRepeat, 0, false)
 
 		// Start new round immediately with the next expected round
 		nextRoundNumber := big.NewInt(0)
@@ -522,6 +550,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 			return err
 		}
 		if recovered {
+			c.publishProofMaterial(ctx, uc, proofmaterial.KindFinalized, uc.GetRoundNumber(), true)
 			c.logger.WithContext(ctx).Info("Durable proposal finalized from initialization UC",
 				"ucRound", uc.GetRoundNumber(),
 				"nextRoundNumber", nextRoundNumber.String())
@@ -631,6 +660,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 					return fmt.Errorf("failed to finalize durable proposal: %w", err)
 				}
 				if recovered {
+					c.publishProofMaterial(ctx, uc, proofmaterial.KindFinalized, expectedRound, true)
 					c.logger.WithContext(ctx).Info("Durable proposal finalized from UC",
 						"ucRound", expectedRound,
 						"nextRoundNumber", nextRoundNumber.String())
@@ -700,6 +730,11 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		return fmt.Errorf("failed to encode unicity certificate: %w", err)
 	}
 	c.proposedBlock.UnicityCertificate = api.NewHexBytes(ucCbor)
+	// Persist the view only when it was received for exactly these UC bytes.
+	c.proposedBlock.PartitionView = nil
+	if view, ok := c.proofStaging.Get(sha256.Sum256(ucCbor)); ok {
+		c.proposedBlock.PartitionView = api.NewHexBytes(view)
+	}
 
 	if c.resumedDurableProposal {
 		finalizer, ok := c.roundManager.(DurableProposalFinalizer)
@@ -725,6 +760,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 			rollbackInitialization()
 			return fmt.Errorf("resumed durable proposal %s was not finalized", c.proposedBlock.Index.String())
 		}
+		c.publishProofMaterial(ctx, uc, proofmaterial.KindFinalized, c.proposedBlock.Index.Uint64(), true)
 		c.proposedBlock = nil
 		c.resumedDurableProposal = false
 
@@ -751,6 +787,8 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		return fmt.Errorf("failed to finalize block after retries: %w", err)
 	}
 
+	c.publishProofMaterial(ctx, uc, proofmaterial.KindFinalized, c.proposedBlock.Index.Uint64(), true)
+
 	// Clear the proposed block after finalization
 	c.proposedBlock = nil
 	c.resumedDurableProposal = false
@@ -765,6 +803,114 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 			"error", err.Error())
 	}
 	return err
+}
+
+// SetProofMaterialSink sets the consumer of published proof material (A4 wires the
+// retained-view catalog here). Safe to call before or after Start; nil resets to discard.
+func (c *BFTClientImpl) SetProofMaterialSink(sink proofmaterial.Sink) {
+	if sink == nil {
+		c.proofSink.Store(nil)
+		return
+	}
+	c.proofSink.Store(&sink)
+}
+
+// SetProofTopologyProvider sets the optional trusted topology source used to validate
+// partition views. Call before Start.
+func (c *BFTClientImpl) SetProofTopologyProvider(p proofmaterial.TopologyProvider) {
+	c.proofTopology = p
+}
+
+// stagePartitionView validates the sidecar of an already authenticated UC and stages it.
+// Every failure only means missing proof material (metric + bounded log).
+func (c *BFTClientImpl) stagePartitionView(ctx context.Context, cr *certification.CertificationResponse) {
+	if cr.PartitionView == nil {
+		return // legacy v1 response, or v2 with null view
+	}
+	result, view, err := proofmaterial.ValidateView(cr.PartitionView, &cr.UC, c.partitionID, c.proofTopology)
+	metrics.BFTPartitionViewTotal.WithLabelValues(result).Inc()
+	if err != nil {
+		c.logger.WithContext(ctx).Warn("Ignoring partition view sidecar",
+			"result", result, "error", truncate(err.Error(), 200), "rootRound", cr.UC.GetRootRoundNumber())
+		return
+	}
+	digest, _, err := proofmaterial.DigestOfUC(&cr.UC)
+	if err != nil {
+		return
+	}
+	c.proofStaging.Put(digest, view)
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+const maxPublishedTracked = 16
+
+// publishProofMaterial hands the accepted UC (with its staged view, if any) to the sink.
+// Sink failures never affect certification.
+func (c *BFTClientImpl) publishProofMaterial(ctx context.Context, uc *types.UnicityCertificate, kind proofmaterial.Kind, blockNumber uint64, hasBlock bool) {
+	digest, ucBytes, err := proofmaterial.DigestOfUC(uc)
+	if err != nil {
+		c.logger.WithContext(ctx).Warn("Not publishing proof material", "error", err.Error())
+		return
+	}
+	view, _ := c.proofStaging.Get(digest)
+	c.deliverProofMaterial(ctx, &proofmaterial.Material{
+		Kind: kind, UC: uc, UCBytes: ucBytes, UCDigest: digest,
+		PartitionView: view, BlockNumber: blockNumber, HasBlock: hasBlock,
+	})
+}
+
+func (c *BFTClientImpl) deliverProofMaterial(ctx context.Context, m *proofmaterial.Material) {
+	c.publishedMu.Lock()
+	if c.published == nil {
+		c.published = map[proofmaterial.Digest]bool{}
+	}
+	if _, seen := c.published[m.UCDigest]; !seen {
+		c.publishedFIFO = append(c.publishedFIFO, m.UCDigest)
+		if len(c.publishedFIFO) > maxPublishedTracked {
+			delete(c.published, c.publishedFIFO[0])
+			c.publishedFIFO = c.publishedFIFO[1:]
+		}
+	}
+	c.published[m.UCDigest] = len(m.PartitionView) > 0
+	c.publishedMu.Unlock()
+
+	sink := c.proofSink.Load()
+	if sink == nil {
+		return
+	}
+	if err := (*sink).PublishProofMaterial(ctx, m); err != nil {
+		c.logger.WithContext(ctx).Warn("Publishing proof material failed",
+			"kind", m.Kind.String(), "error", err.Error())
+	}
+}
+
+// publishSidecarFill handles a duplicate delivery of an already published UC which
+// carried a valid view the earlier publication lacked. The UC must be the one this
+// client already accepted and published; nothing is re-executed.
+func (c *BFTClientImpl) publishSidecarFill(ctx context.Context, uc *types.UnicityCertificate) {
+	digest, ucBytes, err := proofmaterial.DigestOfUC(uc)
+	if err != nil {
+		return
+	}
+	view, ok := c.proofStaging.Get(digest)
+	if !ok {
+		return
+	}
+	c.publishedMu.Lock()
+	hadView, seen := c.published[digest]
+	c.publishedMu.Unlock()
+	if !seen || hadView {
+		return
+	}
+	c.deliverProofMaterial(ctx, &proofmaterial.Material{
+		Kind: proofmaterial.KindSidecarFill, UC: uc, UCBytes: ucBytes, UCDigest: digest, PartitionView: view,
+	})
 }
 
 func (c *BFTClientImpl) publishFatalError(ctx context.Context, err error) {
