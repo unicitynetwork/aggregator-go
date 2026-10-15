@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial/prooftest"
+	"github.com/unicitynetwork/aggregator-go/internal/proofpub"
+	"github.com/unicitynetwork/aggregator-go/internal/proofview"
+	"github.com/unicitynetwork/bft-go-base/types"
 	"math/big"
 	"sort"
 	"sync/atomic"
@@ -687,3 +691,50 @@ var (
 	_ smtbackend.DiskBacked         = (*fakeDiskBackend)(nil)
 	_ smtbackend.ProofViewPublisher = (*fakeDiskBackend)(nil)
 )
+
+// A follower retains and publishes the state a sync run ends at, with the persisted
+// UC and (revalidated) partition view of that block, so it can serve it after promotion.
+func TestBlockSyncerPublishesFinalStateOfRun(t *testing.T) {
+	ctx := t.Context()
+	storage := testutil.SetupTestStorage(t, config.Config{
+		Database: config.DatabaseConfig{
+			Database: "test_block_sync_publish", ConnectTimeout: 30 * time.Second, ServerSelectionTimeout: 5 * time.Second,
+			SocketTimeout: 30 * time.Second, MaxPoolSize: 100, MinPoolSize: 5, MaxConnIdleTime: 5 * time.Minute,
+		},
+	})
+	log := testBlockSyncerLogger(t)
+	smtInstance := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
+	backend := smtbackend.NewMemoryBackend(smtInstance)
+	catalog, err := proofview.NewCatalog(proofview.DefaultLimits())
+	require.NoError(t, err)
+	defer catalog.Close()
+	pub := proofpub.New(catalog, backend, prooftest.Partition, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80).Provider(t), []byte("lineage"), log)
+	require.NotNil(t, pub)
+
+	syncer := NewBlockSyncer(log, &mockLeaderSelector{}, storage, backend, 0, time.Second, state.NewSyncStateTracker())
+	syncer.SetViewPublisher(pub)
+
+	root := createBlock(t, storage, 1)
+	f := prooftest.New(t, 2, 1, root, 81)
+	uc, err := types.Cbor.Marshal(f.UC)
+	require.NoError(t, err)
+	block, err := storage.BlockStorage().GetByNumber(ctx, api.NewBigIntFromUint64(1))
+	require.NoError(t, err)
+	block.UnicityCertificate = api.NewHexBytes(uc)
+	block.PartitionView = api.NewHexBytes(f.Raw)
+	require.NoError(t, storage.BlockStorage().(interface {
+		SetFinalizedWithCertificate(context.Context, *models.Block) error
+	}).SetFinalizedWithCertificate(ctx, block))
+
+	_, err = catalog.AcquireLatest(ctx)
+	require.ErrorIs(t, err, proofview.ErrNoFinalizedView, "nothing published before the replay")
+
+	require.NoError(t, syncer.SyncToLatestBlock(ctx))
+
+	l, err := catalog.AcquireLatest(ctx)
+	require.NoError(t, err)
+	defer l.Release()
+	require.Equal(t, []byte(root), l.Root())
+	require.Equal(t, uc, l.UC())
+	require.Equal(t, f.Raw, l.PartitionView(), "persisted view travels with the block to followers")
+}

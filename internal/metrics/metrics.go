@@ -216,6 +216,22 @@ var (
 		},
 	)
 
+	BFTPartitionViewTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_bft_partition_view_total",
+			Help: "Partition view sidecars received with certification responses by outcome (ok, missing, malformed, invalid, too_large, ...).",
+		},
+		[]string{"result"},
+	)
+
+	ProofViewPublicationTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_proofview_publication_total",
+			Help: "Retained finalized proof view publications by outcome.",
+		},
+		[]string{"result"},
+	)
+
 	BFTErrorsTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "aggregator_bft_errors_total",

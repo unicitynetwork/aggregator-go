@@ -44,10 +44,15 @@ func (rm *RoundManager) FinalizeCertifiedProposal(
 			block.Index.String(), block.RootHash.String(), rootHash.String())
 	}
 	if block.Finalized {
+		rm.proofPub.EnsurePublished(ctx, block)
 		return true, nil
 	}
 	if block.Status != "" && block.Status != models.FinalityStatusProposed && block.Status != models.FinalityStatusFinalizing {
 		return false, nil
+	}
+	if !bytes.Equal(block.UnicityCertificate, unicityCertificate) {
+		// a persisted partition view belongs to the UC bytes it arrived with
+		block.PartitionView = nil
 	}
 	block.UnicityCertificate = unicityCertificate
 
@@ -138,6 +143,8 @@ func (rm *RoundManager) FinalizeCertifiedProposal(
 		}
 		proofViewPublished = true
 	}
+	// finalizationMu is held: the backend is at exactly this finalized state.
+	rm.proofPub.PublishFinalized(ctx, block)
 	rm.stateTracker.SetLastSyncedBlock(block.Index.Int)
 	rm.ackRecoveredProposalCommitments(ctx, block.Index, stateIDs)
 	rm.logger.WithContext(ctx).Info("Durable proposal finalized",
