@@ -28,6 +28,11 @@ type DiskBackend struct {
 
 	proofViewMu sync.RWMutex
 	proofView   *diskProofView
+
+	// retained read views, see RetainReadView
+	retainMu     sync.Mutex
+	retained     []*diskReadView // surviving snapshot-holding views in capture order
+	retainClosed bool
 }
 
 func NewDiskBackend(store storage.Store, opts persist.Options) (*DiskBackend, error) {
@@ -270,6 +275,9 @@ func (b *DiskBackend) Close() error {
 	if b == nil || b.store == nil {
 		return nil
 	}
+	// outstanding retained views hold store read snapshots, which the store
+	// cannot close under; shut them down first (in-flight reads complete)
+	b.closeRetainedViews()
 	b.proofViewMu.Lock()
 	if b.proofView != nil {
 		b.proofView.close()

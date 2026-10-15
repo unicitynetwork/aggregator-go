@@ -498,3 +498,32 @@ func TestCheckLeaf_StateOfAnotherShard(t *testing.T) {
 	requireOutcome(t, err, OutcomeBindingMismatch)
 	require.Contains(t, err.Error(), "does not belong to shard")
 }
+
+func TestRootRoundBound_ShardOfMaximumRound(t *testing.T) {
+	f := newFixture(t, ts())
+	sid0, sid1 := f.view.Leaves[0].ShardID, f.view.Leaves[1].ShardID
+	for name, tc := range map[string]struct {
+		r0, r1 uint64
+		want   types.ShardID
+		round  uint64
+	}{
+		"later maximum on shard 1":    {f.round - 10, f.round - 2, sid1, f.round - 2},
+		"later maximum on shard 0":    {f.round - 2, f.round - 10, sid0, f.round - 2},
+		"equal rounds: first wins":    {f.round - 3, f.round - 3, sid0, f.round - 3},
+		"equal rounds, shard 1 first": {f.round - 3, f.round - 3, sid1, f.round - 3},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ev := []Evidence{f.evidenceAt(0, tc.r0), f.evidenceAt(1, tc.r1)}
+			if name == "equal rounds, shard 1 first" {
+				ev = []Evidence{ev[1], ev[0]}
+			}
+			b, err := f.session().AuthenticateEvidence(ev)
+			require.NoError(t, err)
+			require.Equal(t, tc.round, b.Round())
+			require.True(t, b.Shard().Equal(tc.want), "got %q want %q", b.Shard(), tc.want)
+			// the shard is an admitted participant of the topology
+			order, _ := types.CanonicalShardOrder(f.policy.Topology.Scheme)
+			require.Contains(t, order, b.Shard())
+		})
+	}
+}

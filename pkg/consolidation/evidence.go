@@ -81,6 +81,7 @@ func (s *Session) AuthenticateEvidence(ev []Evidence) (*RootRoundBound, error) {
 	}
 	var round uint64
 	var network types.NetworkID
+	var bestShard types.ShardID
 	inputs := map[string][sha256.Size]byte{}
 	for i, e := range ev {
 		if e.Request == nil || e.Proof == nil {
@@ -107,9 +108,11 @@ func (s *Session) AuthenticateEvidence(ev []Evidence) (*RootRoundBound, error) {
 		if err := s.verifySeal(seal, func(c *Counters) { c.EvidenceQuorumChecks++ }); err != nil {
 			return nil, fail(OutcomeUnauthenticated, i, err, "evidence seal")
 		}
-		round = max(round, seal.RootChainRoundNumber)
+		if i == 0 || seal.RootChainRoundNumber > round {
+			round, bestShard = seal.RootChainRoundNumber, uc.ShardTreeCertificate.Shard
+		}
 	}
-	return &RootRoundBound{round: round, network: network, lineage: s.policy.id(), session: s, inputs: inputs}, nil
+	return &RootRoundBound{round: round, shard: bestShard, network: network, lineage: s.policy.id(), session: s, inputs: inputs}, nil
 }
 
 func (s *Session) checkEvidenceProof(i int, e Evidence) (*types.UnicityCertificate, error) {
