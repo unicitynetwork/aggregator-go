@@ -55,7 +55,7 @@ func (s *proofPubBase) newRM() (*RoundManager, *proofview.Catalog) {
 		state.NewSyncStateTracker(), nil, events.NewEventBus(s.log),
 		smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)), nil)
 	s.Require().NoError(err)
-	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
+	cat, err := newProofViewCatalog(proofview.DefaultLimits(), rm.smtBackend)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = cat.Close() })
 	rm.proofPub = proofpub.New(cat, rm.smtBackend, prooftest.Partition, nil, s.log)

@@ -48,7 +48,7 @@ type recoveryEnv struct {
 func newRecoveryEnv(t *testing.T) *recoveryEnv {
 	log := newTestLogger(t)
 	b := smtbackend.NewMemoryBackend(smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)))
-	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
+	cat, err := newProofViewCatalog(proofview.DefaultLimits(), b)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cat.Close() })
 	topo := prooftest.New(t, 2, 1, prooftest.Hash("x"), 80)
