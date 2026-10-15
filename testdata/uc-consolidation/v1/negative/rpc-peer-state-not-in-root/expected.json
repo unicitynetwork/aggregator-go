@@ -8,8 +8,8 @@
     "shard": "11",
     "code": -32008,
     "reason": "proof_unavailable",
-    "detail": "state_not_included",
-    "retryable": true
+    "detail": "state_not_in_root",
+    "retryable": false
   },
   "changedFiles": [
     "responses.json"

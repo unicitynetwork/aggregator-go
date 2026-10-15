@@ -481,7 +481,8 @@ func TestCorpusRPCFailuresAreNotIntegrityFailures(t *testing.T) {
 	}
 	for _, want := range []string{
 		"proof_unavailable/view_not_retained", "proof_unavailable/no_finalized_view", "proof_unavailable/partition_view_unavailable",
-		"proof_unavailable/state_not_included", "proof_unavailable/unsupported_configuration",
+		"proof_unavailable/state_pending", "proof_unavailable/state_expired", "proof_unavailable/state_unknown", "proof_unavailable/state_not_in_root",
+		"proof_unavailable/unsupported_configuration",
 		"busy/active_requests", "busy/pinned_views", "busy/retention_budget", "busy/deadline",
 		"limit_exceeded/state_count", "limit_exceeded/request_bytes", "limit_exceeded/response_bytes",
 		"invalid_request/duplicate_state_id", "invalid_request/wrong_shard",

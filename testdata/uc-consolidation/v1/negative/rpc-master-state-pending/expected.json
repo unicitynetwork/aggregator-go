@@ -8,7 +8,7 @@
     "shard": "00",
     "code": -32008,
     "reason": "proof_unavailable",
-    "detail": "state_not_included",
+    "detail": "state_pending",
     "retryable": true
   },
   "changedFiles": [

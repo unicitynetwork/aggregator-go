@@ -7,8 +7,14 @@
       "message": "Proof unavailable",
       "data": {
         "reason": "proof_unavailable",
-        "detail": "state_not_included",
-        "retryable": true
+        "detail": "state_pending",
+        "retryable": true,
+        "indexes": {
+          "pending": [
+            0,
+            2
+          ]
+        }
       }
     }
   },
