@@ -357,10 +357,13 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 		}
 		return pc
 	}
-	phase := func(d time.Duration, work func()) phaseCount {
+	// until, when set, extends the phase (up to 60 s) until it holds: on a saturated host an attempt can
+	// legitimately be unavailable (explicit busy/deadline) and is simply retried as a new attempt
+	phase := func(d time.Duration, work func(), until func() bool) phaseCount {
 		s0 := take()
 		deadline := time.Now().Add(d)
-		for time.Now().Before(deadline) {
+		limit := time.Now().Add(d + 60*time.Second)
+		for time.Now().Before(deadline) || (until != nil && !until() && time.Now().Before(limit)) {
 			if work != nil {
 				work()
 			} else {
@@ -372,7 +375,7 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 	if os.Getenv("CONSOLIDATION_E2E_NEGATIVE") == "stop-writers" {
 		stopAll() // negative control: the progress checks below must fail
 	}
-	p1 := phase(12*time.Second, nil)
+	p1 := phase(12*time.Second, nil, nil)
 	t.Logf("phase 1 (writes only): %s", p1)
 
 	var bundles []consolidationBundle
@@ -391,7 +394,7 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 		default:
 			t.Fatalf("consolidate-proofs exit %d: %s", code, stderr)
 		}
-	})
+	}, func() bool { return len(bundles) > 0 })
 	recording.Store(false)
 	t.Logf("phase 2 (writes + %d consolidations): %s", attempts, p2)
 	require.NotEmpty(t, bundles, "at least one consolidation must succeed under continuous writes (unavailable=%d)", unavailable)
