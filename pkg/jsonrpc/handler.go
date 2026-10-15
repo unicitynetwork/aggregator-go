@@ -3,6 +3,7 @@ package jsonrpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"sync"
@@ -25,7 +26,39 @@ type Server struct {
 	logger           *logger.Logger
 	concurrencyLimit int
 	activeSemaphore  chan struct{}
+	maxBodyBytes     int64
 	mutex            sync.RWMutex
+}
+
+// DefaultMaxRequestBodyBytes is the outer ceiling on any JSON-RPC request body,
+// applied before the envelope is decoded. It is deliberately generous so no
+// existing method is affected; method-specific limits (for example
+// get_inclusion_proofs.v1's 64 KiB) are stricter and checked after the decode.
+const DefaultMaxRequestBodyBytes = 16 << 20
+
+// SetMaxRequestBodyBytes sets the outer request body ceiling; n <= 0 restores
+// the default.
+func (s *Server) SetMaxRequestBodyBytes(n int64) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if n <= 0 {
+		n = DefaultMaxRequestBodyBytes
+	}
+	s.maxBodyBytes = n
+}
+
+func (s *Server) bodyCeiling() int64 {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	if s.maxBodyBytes <= 0 {
+		return DefaultMaxRequestBodyBytes
+	}
+	return s.maxBodyBytes
+}
+
+func isBodyTooLarge(err error) bool {
+	var mbe *http.MaxBytesError
+	return errors.As(err, &mbe)
 }
 
 // MiddlewareFunc represents middleware for JSON-RPC requests
@@ -111,8 +144,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Parse request. The ID is kept raw so that method-limited requests can
 	// validate its original encoding and echo it without number conversion.
 	var env rawRequest
+	// Outer cap: no more than the ceiling is ever read from the connection, so
+	// the envelope decode below cannot allocate an unbounded body.
+	ceiling := s.bodyCeiling()
+	r.Body = http.MaxBytesReader(w, r.Body, ceiling)
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&env); err != nil {
+		if isBodyTooLarge(err) {
+			recordMetrics("unknown", "error")
+			n := int(ceiling)
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			s.writeErrorResponse(w, NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "request_bytes", false, &n), nil)
+			return
+		}
 		s.logger.WithContext(ctx).Error("Failed to parse JSON-RPC request", "error", err.Error())
 		recordMetrics("unknown", "error")
 		s.writeErrorResponse(w, ErrParseError, nil)
@@ -237,6 +281,10 @@ func checkRequestBody(l MethodLimits, dec *json.Decoder, body io.Reader) *Error 
 		if err != nil {
 			if err == io.EOF {
 				return nil
+			}
+			if isBodyTooLarge(err) {
+				lim := l.MaxRequestBytes
+				return NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "request_bytes", false, &lim)
 			}
 			return NewDetailedError(InvalidRequestCode, "Invalid Request", "invalid_request", "invalid_envelope", false, nil)
 		}
