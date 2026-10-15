@@ -420,8 +420,11 @@ func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *cer
 		return fmt.Errorf("invalid CertificationResponse: %w", err)
 	}
 
-	// verify UC: configured network, exact root epoch, epoch start and quorum
-	if err := c.authn.verifyUC(ctx, &cr.UC, c.partitionID, c.shardID); err != nil {
+	// verify UC: configured network, exact root epoch, epoch start and quorum; the partition
+	// view of the same response is authenticated within the same operation (one resolution of
+	// the authority and history, one judgment of the shared seal)
+	op := c.authn.begin(ctx)
+	if err := op.verifyUC(&cr.UC, c.partitionID, c.shardID); err != nil {
 		return fmt.Errorf("failed to verify UC: %w", err)
 	}
 
@@ -433,7 +436,7 @@ func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *cer
 	}
 
 	// Only the response's own UC is processed; the view's other leaves are never dispatched.
-	c.stagePartitionView(ctx, cr)
+	c.stagePartitionViewOp(ctx, op, cr)
 
 	if err := c.handleUnicityCertificate(ctx, &cr.UC, &cr.Technical); err != nil {
 		return err
@@ -866,7 +869,15 @@ func (c *BFTClientImpl) stagePartitionView(ctx context.Context, cr *certificatio
 	if cr.PartitionView == nil {
 		return // legacy v1 response, or v2 with null view
 	}
-	result, view, err := proofmaterial.ValidateView(cr.PartitionView, &cr.UC, c.partitionID, c.authn.sealVerifier(ctx), c.proofTopology)
+	c.stagePartitionViewOp(ctx, c.authn.begin(ctx), cr)
+}
+
+// stagePartitionViewOp is stagePartitionView within the intake operation "op".
+func (c *BFTClientImpl) stagePartitionViewOp(ctx context.Context, op *authOp, cr *certification.CertificationResponse) {
+	if cr.PartitionView == nil {
+		return
+	}
+	result, view, err := proofmaterial.ValidateView(cr.PartitionView, &cr.UC, c.partitionID, op.sealVerifier(), c.proofTopology)
 	metrics.BFTPartitionViewTotal.WithLabelValues(result).Inc()
 	if err != nil {
 		c.logger.WithContext(ctx).Warn("Ignoring partition view sidecar",
