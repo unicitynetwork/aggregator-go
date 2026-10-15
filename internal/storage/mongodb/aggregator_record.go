@@ -249,6 +249,15 @@ func finalizedByStateIDsPipeline(stateIDs []string) mongo.Pipeline {
 	}
 }
 
+// batchAggregateOptions makes the first reply carry every result of a chunk of n
+// state IDs (at most n documents, one per state ID), so the cursor is exhausted
+// by the aggregate command itself: the default first batch of 101 documents would
+// otherwise cost an extra getMore round trip per step for n > 100. (A reply is
+// still limited to 16 MiB by the server; larger results fall back to getMore.)
+func batchAggregateOptions(n int) *options.AggregateOptions {
+	return options.Aggregate().SetBatchSize(int32(n + 1))
+}
+
 func stateIDStrings(ids []api.StateID) []string {
 	out := make([]string, len(ids))
 	for i, id := range ids {
@@ -268,7 +277,7 @@ func (ars *AggregatorRecordStorage) GetStoredSizesByStateIDs(ctx context.Context
 		to := min(from+batchLookupChunk, len(stateIDs))
 		pipeline := append(finalizedByStateIDsPipeline(stateIDStrings(stateIDs[from:to])),
 			bson.D{{Key: "$project", Value: bson.M{"_id": 0, "stateId": 1, "size": bson.M{"$bsonSize": "$$ROOT"}}}})
-		cursor, err := ars.collection.Aggregate(ctx, pipeline)
+		cursor, err := ars.collection.Aggregate(ctx, pipeline, batchAggregateOptions(to-from))
 		if err != nil {
 			return nil, fmt.Errorf("failed to get aggregator record sizes by state IDs: %w", err)
 		}
@@ -294,7 +303,7 @@ func (ars *AggregatorRecordStorage) GetFinalizedByStateIDs(ctx context.Context, 
 	records := make(map[string]*models.AggregatorRecord, len(stateIDs))
 	for from := 0; from < len(stateIDs); from += batchLookupChunk {
 		to := min(from+batchLookupChunk, len(stateIDs))
-		cursor, err := ars.collection.Aggregate(ctx, finalizedByStateIDsPipeline(stateIDStrings(stateIDs[from:to])))
+		cursor, err := ars.collection.Aggregate(ctx, finalizedByStateIDsPipeline(stateIDStrings(stateIDs[from:to])), batchAggregateOptions(to-from))
 		if err != nil {
 			return nil, fmt.Errorf("failed to get finalized aggregator records by state IDs: %w", err)
 		}
