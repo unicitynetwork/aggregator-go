@@ -109,8 +109,9 @@ type Position struct{ Shard, Proof int }
 
 // Client runs consolidation attempts. It is safe for concurrent use.
 type Client struct {
-	cfg  Config
-	http *http.Client
+	cfg   Config
+	http  *http.Client
+	order []types.ShardID // canonical order of the routable shards
 }
 
 // New validates the configuration and creates a client.
@@ -118,7 +119,20 @@ func New(cfg Config) (*Client, error) {
 	if cfg.Resolver == nil && cfg.ResolverContext == nil {
 		return nil, &Error{Kind: KindInput, Err: errors.New("trust base resolver is required")}
 	}
-	order, err := types.CanonicalShardOrder(cfg.Policy.Topology.Scheme)
+	// Endpoints only route requests. A pinned topology (optional) must contain them; without
+	// pins the endpoints must at least form a complete shard scheme (the authenticated view
+	// then decides which shards participate and with which configuration).
+	scheme := cfg.Policy.Topology.Scheme
+	pinned := len(scheme) > 0 || len(cfg.Policy.Topology.ShardConfHashes) > 0
+	if !pinned {
+		scheme = nil
+		for _, ep := range cfg.Endpoints {
+			if ep.ShardID.Length() > 0 {
+				scheme = append(scheme, ep.ShardID)
+			}
+		}
+	}
+	order, err := types.CanonicalShardOrder(scheme)
 	if err != nil {
 		return nil, &Error{Kind: KindInput, Err: err}
 	}
@@ -145,7 +159,7 @@ func New(cfg Config) (*Client, error) {
 	if h == nil {
 		h = &http.Client{}
 	}
-	return &Client{cfg: cfg, http: h}, nil
+	return &Client{cfg: cfg, http: h, order: order}, nil
 }
 
 // resolve runs trust resolution bounded by the attempt context.
@@ -348,7 +362,7 @@ func (c *Client) group(items []Item) ([]*shardGroup, error) {
 		}
 		g.items = append(g.items, i)
 	}
-	order, _ := types.CanonicalShardOrder(c.cfg.Policy.Topology.Scheme)
+	order := c.order
 	var groups []*shardGroup
 	for _, id := range order {
 		if g := byShard[id.Key()]; g != nil {

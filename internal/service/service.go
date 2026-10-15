@@ -160,6 +160,11 @@ func NewAggregatorService(cfg *config.Config,
 }
 
 // CertificationRequest handles certification request submission
+// ShardValidator exposes the shard routing check used for certification requests.
+func (as *AggregatorService) ShardValidator() BatchShardValidator {
+	return as.certificationRequestValidator
+}
+
 func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.CertificationRequest) (*api.CertificationResponse, error) {
 	// Create certificationRequest with aggregate count
 	aggregateCount := req.AggregateRequestCount

@@ -410,6 +410,7 @@ func (c *BFTClientImpl) handleMessage(ctx context.Context, msg any) {
 }
 
 func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *certification.CertificationResponse) error {
+	metrics.BFTCertificationResponsesTotal.WithLabelValues(c.shardID.String()).Inc()
 	c.lastCertResponseTime.Store(time.Now().UnixMilli())
 
 	// malformed nested shapes (null path elements) are rejected before anything evaluates them
@@ -842,6 +843,15 @@ func proofTopologyFromConfig(conf *config.BFTConfig) (proofmaterial.TopologyProv
 		return nil, err
 	}
 	return t, nil
+}
+
+// ProofTopology returns the optional independently pinned topology (nil: none configured).
+func (c *BFTClientImpl) ProofTopology() proofmaterial.TopologyProvider { return c.proofTopology }
+
+// SealVerifier returns the client's trusted seal verifier (authority resolved from the
+// admitted trust history) for re-authenticating stored material.
+func (c *BFTClientImpl) SealVerifier(ctx context.Context) types.SealVerifier {
+	return c.authn.sealVerifier(ctx)
 }
 
 // SetProofMaterialSink sets the consumer of published proof material (A4 wires the

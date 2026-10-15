@@ -247,3 +247,22 @@ func TestCLI_HTTPFailureBodiesAreOperational(t *testing.T) {
 		require.Contains(t, errb.String(), `"detail":"http_503"`, name)
 	}
 }
+
+func TestCLI_UnpinnedConfig(t *testing.T) {
+	e := setup(t, 4)
+	var cfg Config
+	raw, _ := os.ReadFile(e.cfg)
+	require.NoError(t, json.Unmarshal(raw, &cfg))
+	for i := range cfg.Shards {
+		cfg.Shards[i].ConfHash = ""
+	}
+	e.cfg = writeJSON(t, e.dir, "config-unpinned.json", cfg)
+	var out, errb bytes.Buffer
+	require.Equal(t, exitOK, run([]string{"-config", e.cfg, "-in", e.in}, &out, &errb), errb.String())
+
+	// pinning is all-or-none
+	cfg.Shards[0].ConfHash = hex.EncodeToString(e.sim.Policy.Topology.ShardConfHashes[e.sim.Shards[0].ID.Key()])
+	e.cfg = writeJSON(t, e.dir, "config-partial.json", cfg)
+	errb.Reset()
+	require.Equal(t, exitInput, run([]string{"-config", e.cfg, "-in", e.in}, &out, &errb))
+}

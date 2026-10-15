@@ -3,7 +3,6 @@ package round
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"errors"
 	"fmt"
 	"math/big"
@@ -1318,6 +1317,9 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 			if err := LoadRecoveredNodesIntoBackend(activeCtx, rm.logger, rm.storage, rm.smtBackend, recoveryResult.BlockNumber, recoveryResult.StateIDs); err != nil {
 				return fmt.Errorf("failed to load recovered nodes into SMT: %w", err)
 			}
+			rm.finalizationMu.Lock()
+			rm.publishRecoveredBlock(activeCtx, recoveryResult.BlockNumber)
+			rm.finalizationMu.Unlock()
 		}
 	}
 
@@ -1809,19 +1811,12 @@ func (rm *RoundManager) initProofViews(cfg *config.Config, client *bft.BFTClient
 	if err != nil {
 		return fmt.Errorf("failed to create proof view catalog: %w", err)
 	}
-	lineage, err := cfg.BFT.ShardConf.Hash(crypto.SHA256)
-	if err != nil {
-		return fmt.Errorf("failed to hash shard configuration: %w", err)
-	}
-	topology, err := bft.ProofTopologyFromConfig(&cfg.BFT)
-	if err != nil {
-		return fmt.Errorf("invalid consolidation topology: %w", err)
-	}
-	rm.proofPub = proofpub.New(catalog, rm.smtBackend, cfg.BFT.ShardConf.PartitionID, topology, lineage, rm.logger)
+	rm.proofPub = proofpub.New(catalog, rm.smtBackend, cfg.BFT.ShardConf.PartitionID, client.ProofTopology(), rm.logger)
 	if rm.proofPub == nil {
 		_ = catalog.Close()
 		return nil
 	}
+	rm.proofPub.SetSealVerifier(client.SealVerifier)
 	client.SetProofMaterialSink(rm.proofPub)
 	return nil
 }
@@ -1846,5 +1841,22 @@ func (rm *RoundManager) publishStartupView(ctx context.Context) {
 		}
 		return
 	}
-	rm.proofPub.EnsurePublished(ctx, latest)
+	rm.proofPub.EnsurePublishedAtStartup(ctx, latest)
+}
+
+// publishRecoveredBlock publishes a block finalized by recovery once the backend and
+// storage agree on it. The caller holds finalizationMu (commit ordering). If the block
+// cannot be published, latest is invalidated rather than left at an older block.
+func (rm *RoundManager) publishRecoveredBlock(ctx context.Context, blockNumber *api.BigInt) {
+	if rm.proofPub == nil || blockNumber == nil {
+		return
+	}
+	block, err := rm.storage.BlockStorage().GetByNumber(ctx, blockNumber)
+	if err != nil || block == nil {
+		rm.logger.WithContext(ctx).Warn("Recovered block cannot be loaded for proof view publication",
+			"blockNumber", blockNumber.String())
+		rm.proofPub.InvalidateLatest()
+		return
+	}
+	rm.proofPub.PublishFinalized(ctx, block)
 }

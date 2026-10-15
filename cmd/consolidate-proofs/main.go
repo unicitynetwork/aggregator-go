@@ -51,7 +51,7 @@ type Config struct {
 
 // ShardConfig is one shard endpoint. ShardBits is the shard ID as a bit string
 // ("" for a single-shard partition, "01" for shard 01); ConfHash is the
-// admitted shard configuration hash (hex, 32 bytes).
+// OPTIONAL independently admitted shard configuration hash (hex, 32 bytes); all shards or none.
 type ShardConfig struct {
 	ShardBits string `json:"shardBits"`
 	URL       string `json:"url"`
@@ -225,18 +225,25 @@ func loadConfig(path, master string, timeout time.Duration) (*client.Config, err
 		if err != nil {
 			return nil, err
 		}
-		h, err := hex.DecodeString(s.ConfHash)
-		if err != nil || len(h) != 32 {
-			return nil, fmt.Errorf("shard %q: confHash must be 32 bytes hex", s.ShardBits)
+		if s.ConfHash != "" { // optional pin; the authenticated view carries the topology
+			h, err := hex.DecodeString(s.ConfHash)
+			if err != nil || len(h) != 32 {
+				return nil, fmt.Errorf("shard %q: confHash must be 32 bytes hex", s.ShardBits)
+			}
+			hashes[id.Key()] = h
 		}
-		hashes[id.Key()] = h
 		cfg.Endpoints = append(cfg.Endpoints, client.Endpoint{ShardID: id, URL: s.URL})
 		if id.Length() > 0 {
 			scheme = append(scheme, id)
 		}
 	}
-	cfg.Policy = consolidation.Policy{PartitionID: types.PartitionID(cf.PartitionID),
-		Topology: types.PartitionViewTopology{Scheme: scheme, ShardConfHashes: hashes}}
+	if n := len(hashes); n != 0 && n != len(cf.Shards) {
+		return nil, errors.New("confHash must be given for every shard or for none (pinning is all-or-none)")
+	}
+	cfg.Policy = consolidation.Policy{PartitionID: types.PartitionID(cf.PartitionID)}
+	if len(hashes) > 0 {
+		cfg.Policy.Topology = types.PartitionViewTopology{Scheme: scheme, ShardConfHashes: hashes}
+	}
 	if master != "" {
 		m, err := shardFromBits(master)
 		if err != nil {

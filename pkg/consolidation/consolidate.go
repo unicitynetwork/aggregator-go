@@ -109,9 +109,6 @@ func (s *Session) AuthenticateMaster(bound *RootRoundBound, master ShardResult, 
 	if err := bound.covers([]ShardResult{master}); err != nil {
 		return nil, err
 	}
-	if err := bound.coversShard(0, master); err != nil {
-		return nil, err
-	}
 	view, err := types.DecodePartitionViewV1(partitionView)
 	if err != nil {
 		return nil, fail(OutcomeInvalidInput, -1, err, "partition view")
@@ -147,6 +144,9 @@ func (s *Session) AuthenticateMaster(bound *RootRoundBound, master ShardResult, 
 	round := enclosing.UnicitySeal.RootChainRoundNumber
 	if round < bound.round {
 		return nil, fail(OutcomeStale, -1, nil, "master seal root round %d is below required %d", round, bound.round)
+	}
+	if err := bound.coversShard(0, master); err != nil {
+		return nil, err
 	}
 	return &AuthenticatedMaster{session: s, master: master, bound: bound, view: view, ucs: ucs, round: round}, nil
 }

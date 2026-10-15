@@ -180,7 +180,11 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 		uploadShardConf(t, root.restURL, shards[i].conf)
 	}
 
-	// trusted topology, in the BFT_CONSOLIDATION_TOPOLOGY_FILE format, loaded from a file
+	// By default no independent pins are configured: the authenticated view (committed by the
+	// root quorum's seal) carries the topology and configuration hashes. CONSOLIDATION_E2E_PINNED=1
+	// additionally pins them in the BFT_CONSOLIDATION_TOPOLOGY_FILE format (loaded from a file),
+	// on the aggregators and in the CLI configuration.
+	pinned := os.Getenv("CONSOLIDATION_E2E_PINNED") == "1"
 	var topo []config.ConsolidationShard
 	for _, s := range shards {
 		h, err := s.conf.Hash(crypto.SHA256)
@@ -196,6 +200,9 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(raw, &loaded))
 	require.Len(t, loaded, n)
+	if !pinned {
+		loaded = nil
+	}
 
 	for i, s := range shards {
 		s.stop = startConsolidationAggregator(ctx, t, consolidationAggOpts{
@@ -308,7 +315,7 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 
 	// ---- consolidation inputs for the CLI ----
 	dir := t.TempDir()
-	cfgFile := writeConsolidationConfig(t, dir, n, shards, loaded, root)
+	cfgFile := writeConsolidationConfig(t, dir, n, shards, loaded, root, pinned)
 	var in struct {
 		Items []map[string]string `json:"items"`
 	}
@@ -498,7 +505,7 @@ func runCLI(t *testing.T, cli, cfg, in, out string) (int, string) {
 	return -1, ""
 }
 
-func writeConsolidationConfig(t *testing.T, dir string, n int, shards []*e2eShard, topo []config.ConsolidationShard, root *bftRootInfo) string {
+func writeConsolidationConfig(t *testing.T, dir string, n int, shards []*e2eShard, topo []config.ConsolidationShard, root *bftRootInfo, pinned bool) string {
 	t.Helper()
 	tbJSON, err := json.Marshal(root.trustBase)
 	require.NoError(t, err)
@@ -515,12 +522,13 @@ func writeConsolidationConfig(t *testing.T, dir string, n int, shards []*e2eShar
 		TimeoutSeconds float64    `json:"timeoutSeconds"`
 	}{PartitionID: uint32(bftPartitionID), TrustBases: []string{"trust-base.json"}, TimeoutSeconds: 20}
 	byKey := map[string]string{}
-	for _, t := range topo { // the trusted topology file is the single source of the config hashes
+	for _, t := range topo { // optional pins: the topology file is the single source of the config hashes
 		byKey[t.ShardID.Key()] = t.ConfigHash
 	}
 	for _, s := range shards {
 		cfg.Shards = append(cfg.Shards, shardCfg{ShardBits: s.id.String(), URL: s.url, ConfHash: byKey[s.id.Key()]})
 	}
+	_ = pinned
 	b, _ := json.Marshal(cfg)
 	p := filepath.Join(dir, "config.json")
 	require.NoError(t, os.WriteFile(p, b, 0o600))
@@ -615,7 +623,8 @@ func startConsolidationAggregator(ctx context.Context, t *testing.T, o consolida
 	svc, err := service.NewService(aggCtx, cfg, log, mgr, queue, stor, nil)
 	require.NoError(t, err)
 	srv := gateway.NewServer(cfg, log, svc)
-	srv.SetBatchProofHandler(service.BatchHandlerFor(cfg, svc, mgr, stor))
+	batchHandler, _ := service.NewBatchProofHandler(cfg, mgr, stor, svc)
+	srv.SetBatchProofHandler(batchHandler)
 	go func() { _ = srv.Start() }()
 	time.Sleep(200 * time.Millisecond)
 

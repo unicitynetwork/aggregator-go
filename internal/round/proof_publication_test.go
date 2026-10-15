@@ -58,7 +58,7 @@ func (s *proofPubBase) newRM() (*RoundManager, *proofview.Catalog) {
 	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = cat.Close() })
-	rm.proofPub = proofpub.New(cat, rm.smtBackend, prooftest.Partition, prooftest.New(s.T(), 2, 1, prooftest.Hash("x"), 80).Provider(s.T()), []byte("lineage"), s.log)
+	rm.proofPub = proofpub.New(cat, rm.smtBackend, prooftest.Partition, prooftest.New(s.T(), 2, 1, prooftest.Hash("x"), 80).Provider(s.T()), s.log)
 	s.Require().NotNil(rm.proofPub)
 	return rm, cat
 }

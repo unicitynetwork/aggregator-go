@@ -570,6 +570,7 @@ func (rm *RoundManager) reconcileRecoveredFinalization(ctx context.Context, reco
 	}
 	rm.roundMutex.Unlock()
 
+	rm.publishRecoveredBlock(ctx, blockNumber)
 	rm.clearProofStateIDsPending(recoveryResult.StateIDs)
 	return nil
 }

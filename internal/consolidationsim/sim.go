@@ -173,6 +173,14 @@ func (s *Sim) Resolver() consolidation.TrustBaseResolver {
 	return func(*types.UnicitySeal) (types.RootTrustBase, error) { return s.TB, nil }
 }
 
+// UnpinnedClientConfig is ClientConfig without an independently pinned topology:
+// the authenticated view alone decides the topology and configuration hashes.
+func (s *Sim) UnpinnedClientConfig() client.Config {
+	cfg := s.ClientConfig()
+	cfg.Policy.Topology = types.PartitionViewTopology{}
+	return cfg
+}
+
 // ClientConfig is a ready client configuration with one endpoint per shard.
 func (s *Sim) ClientConfig() client.Config {
 	cfg := client.Config{Policy: s.Policy, Resolver: s.Resolver()}

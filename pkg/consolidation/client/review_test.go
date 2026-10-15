@@ -451,3 +451,22 @@ func TestConsolidate_HTTPStatusIndependentOfBody(t *testing.T) {
 		})
 	}
 }
+
+// Without independent pins the authenticated view decides the topology (T2).
+func TestConsolidate_UnpinnedTopology(t *testing.T) {
+	for _, n := range []int{1, 4} {
+		sim, items := scenario(t, n, 2)
+		c, err := client.New(sim.UnpinnedClientConfig())
+		require.NoError(t, err)
+		res, err := c.Consolidate(context.Background(), items)
+		require.NoError(t, err)
+		require.Equal(t, n, res.Stats.Requests)
+		require.Equal(t, 1, res.Counters.QuorumChecks)
+	}
+	// endpoints that do not form a complete scheme are a configuration error
+	sim, _ := scenario(t, 4, 1)
+	cfg := sim.UnpinnedClientConfig()
+	cfg.Endpoints = cfg.Endpoints[:3]
+	_, err := client.New(cfg)
+	requireClientErr(t, err, client.KindInput, "")
+}

@@ -1,6 +1,7 @@
 package round
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -219,6 +220,7 @@ func testProofUC(parentRound, rootRound uint64, rootHash api.HexBytes) (api.HexB
 			RoundNumber: parentRound,
 			Hash:        hex.Bytes(rootHash),
 		},
+		ShardConfHash: bytes.Repeat([]byte{0xc0}, 32),
 		UnicitySeal: &types.UnicitySeal{
 			RootChainRoundNumber: rootRound,
 		},
