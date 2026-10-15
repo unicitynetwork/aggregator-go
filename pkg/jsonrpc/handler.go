@@ -1,6 +1,7 @@
 package jsonrpc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -19,6 +20,7 @@ type HandlerFunc func(ctx context.Context, params json.RawMessage) (interface{},
 // Server represents a JSON-RPC server
 type Server struct {
 	handlers         map[string]HandlerFunc
+	limits           map[string]MethodLimits
 	middleware       []MiddlewareFunc
 	logger           *logger.Logger
 	concurrencyLimit int
@@ -33,6 +35,7 @@ type MiddlewareFunc func(ctx context.Context, req *Request, next func(context.Co
 func NewServer(logger *logger.Logger, concurrencyLimit int) *Server {
 	return &Server{
 		handlers:         make(map[string]HandlerFunc),
+		limits:           make(map[string]MethodLimits),
 		middleware:       make([]MiddlewareFunc, 0),
 		logger:           logger,
 		concurrencyLimit: concurrencyLimit,
@@ -45,6 +48,22 @@ func (s *Server) RegisterMethod(method string, handler HandlerFunc) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	s.handlers[method] = handler
+}
+
+// RegisterMethodWithLimits registers a handler with method-specific request and
+// response bounds.
+func (s *Server) RegisterMethodWithLimits(method string, handler HandlerFunc, limits MethodLimits) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.handlers[method] = handler
+	s.limits[method] = limits
+}
+
+func (s *Server) methodLimits(method string) (MethodLimits, bool) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	l, ok := s.limits[method]
+	return l, ok
 }
 
 // AddMiddleware adds middleware to the server
@@ -91,7 +110,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Parse request
 	var req Request
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&req); err != nil {
 		s.logger.WithContext(ctx).Error("Failed to parse JSON-RPC request", "error", err.Error())
 		recordMetrics("unknown", "error")
 		s.writeErrorResponse(w, ErrParseError, nil)
@@ -104,6 +124,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		recordMetrics("unknown", "error")
 		s.writeErrorResponse(w, ErrInvalidRequest, req.ID)
 		return
+	}
+
+	limits, limited := s.methodLimits(req.Method)
+	if limited {
+		if rpcErr := checkRequestLimits(limits, &req, dec.InputOffset()); rpcErr != nil {
+			recordMetrics(metrics.NormalizeMethod(req.Method), "error")
+			// an oversized ID is never echoed back
+			id := req.ID
+			if rpcErr.Data.(ErrorData).Detail == "invalid_id" {
+				id = nil
+			}
+			s.writeErrorResponse(w, rpcErr, id)
+			return
+		}
 	}
 
 	// Add client's JSON-RPC ID to context for end-to-end tracing
@@ -119,7 +153,49 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	recordMetrics(method, result)
 
 	// Write response
+	if limited && limits.MaxResponseBytes > 0 {
+		s.writeLimitedResponse(w, response, limits.MaxResponseBytes)
+		return
+	}
 	s.writeJSONResponse(w, response)
+}
+
+func checkRequestLimits(l MethodLimits, req *Request, requestBytes int64) *Error {
+	if l.MaxIDBytes > 0 {
+		id, err := json.Marshal(req.ID)
+		if err != nil || len(id) > l.MaxIDBytes {
+			return NewDetailedError(InvalidParamsCode, "Invalid params", "invalid_request", "invalid_id", false, nil)
+		}
+	}
+	if l.MaxRequestBytes > 0 && requestBytes > int64(l.MaxRequestBytes) {
+		n := l.MaxRequestBytes
+		return NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "request_bytes", false, &n)
+	}
+	if l.MaxParamsBytes > 0 && len(req.Params) > l.MaxParamsBytes {
+		n := l.MaxParamsBytes
+		return NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "request_bytes", false, &n)
+	}
+	return nil
+}
+
+// writeLimitedResponse serializes the complete response first and writes it
+// only when it fits the limit.
+func (s *Server) writeLimitedResponse(w http.ResponseWriter, response *Response, max int) {
+	var buf bytes.Buffer
+	err := json.NewEncoder(&buf).Encode(response)
+	if err == nil && buf.Len() > max {
+		n := max
+		buf.Reset()
+		err = json.NewEncoder(&buf).Encode(NewErrorResponse(
+			NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "response_bytes", false, &n), response.ID))
+	}
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to encode JSON response")
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(buf.Bytes())
 }
 
 // processRequest processes a JSON-RPC request
