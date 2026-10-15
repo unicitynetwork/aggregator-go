@@ -24,12 +24,17 @@ type Evidence struct {
 // lineage. Its fields are unexported so a bound cannot be forged or lowered.
 type RootRoundBound struct {
 	round   uint64
+	shard   types.ShardID
 	network types.NetworkID
 	lineage []byte
 }
 
 // Round returns the authenticated minimal root chain round.
 func (b *RootRoundBound) Round() uint64 { return b.round }
+
+// Shard returns the shard of the (first) evidence that carries the maximum
+// round: the preferred master.
+func (b *RootRoundBound) Shard() types.ShardID { return b.shard }
 
 // AuthenticateEvidence authenticates every original proof (request binding,
 // leaf path to its UC, shard and partition path to its seal hash, and the seal
@@ -41,6 +46,7 @@ func (s *Session) AuthenticateEvidence(ev []Evidence) (*RootRoundBound, error) {
 		return nil, fail(OutcomeUnavailable, -1, nil, "no original evidence")
 	}
 	var round uint64
+	var shard types.ShardID
 	var network types.NetworkID
 	for i, e := range ev {
 		if e.Request == nil || e.Proof == nil {
@@ -59,9 +65,11 @@ func (s *Session) AuthenticateEvidence(ev []Evidence) (*RootRoundBound, error) {
 		if err := s.verifySeal(seal, func(c *Counters) { c.EvidenceQuorumChecks++ }); err != nil {
 			return nil, fail(OutcomeUnauthenticated, i, err, "evidence seal")
 		}
-		round = max(round, seal.RootChainRoundNumber)
+		if i == 0 || seal.RootChainRoundNumber > round {
+			round, shard = seal.RootChainRoundNumber, uc.ShardTreeCertificate.Shard
+		}
 	}
-	return &RootRoundBound{round: round, network: network, lineage: s.policy.id()}, nil
+	return &RootRoundBound{round: round, shard: shard, network: network, lineage: s.policy.id()}, nil
 }
 
 func (s *Session) checkEvidenceProof(i int, e Evidence) (*types.UnicityCertificate, error) {
