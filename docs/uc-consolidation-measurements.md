@@ -226,10 +226,11 @@ The retention budget (256 MiB) is divided by the accounted bytes per view to giv
 
 ## 3. Catalog bookkeeping (real memory backend, instrumented readers)
 
-The retained-view catalog was measured twice: before the catalog/lineage indexing fix (#200, the audit's item 1) and on the merged code, which keeps an O(1) retained-bytes total (`proofview.AccountantFor`) and an attachment digest index.
+The retained-view catalog was measured twice: before the catalog/lineage indexing fix (#200, the audit's item 1) and on the merged code, which can keep an O(1) retained-bytes total (`proofview.AccountantFor`) and has an attachment digest index.
+
+> **Correction.** An earlier revision of this document said the production wiring already used the accountant. It did not: the production constructor (`RoundManager.initProofViews`) called `proofview.NewCatalog(limits)` without it, so production ran the linear fallback (O(V) totals, and pressure passes of O(V) each) and the "with the backend accountant (production wiring)" tables describe the configuration measured with `AccountantFor` passed explicitly. Production now builds the catalog through `newProofViewCatalog`, which passes `proofview.AccountantFor(backend)` (memory and RocksDB backends; checked by `TestProductionCatalogConstructorWiresTheAccountant`, which counts accounting reads through the real constructor and shows they are flat in V, while the fallback is not). The publication lookups by certification digest also scanned the retained views; they are an index probe now (`TestDigestLookupDoesNotScanTheRetainedViews`). Numbers below were not re-measured for this correction.
 The "before" numbers are from the earlier revision of this document (same sweeps, same host); the "after" tables below are regenerated on the merged code, once without the backend accountant (the catalog sums its readers, the fallback)
-and once with it. (The production round manager constructs the catalog with the accountant from #205 on; before that, `initProofViews` called `NewCatalog(limits)` without it, so
-the "without accountant" tables describe what production did until then. Section 5 runs the integrated path on both.)
+and once with it (the wiring production uses since the correction above).
 
 ### 3.1 Retained views V = 1..256 (no pressure)
 
@@ -253,7 +254,7 @@ N = 2,000, B = 10 new leaves per block, V retained views, one attachment each
 
 Log-log slopes over V = 1..256: RetainedBytes reads per Publish 1.02, per AcquireLatest+Release 1.04, per Stats 1.00 (0 for a constant-time catalog; 1 when each retained reader is read once per operation); relative time: Publish 0.10, AcquireLatest+Release 0.57, Stats 0.91
 
-**With the backend accountant (wired in production by #205)**
+**With the backend accountant (production wiring since the correction above)**
 
 N = 2,000, B = 10 new leaves per block, V retained views, one attachment each
 
@@ -297,7 +298,7 @@ V = 4 retained views, oldest view pinned by a lease, N = 2,000, B = 10; R = capt
 
 Log-log slopes over R = 4..1024: RetainedBytes reads per Stats call -0.00 (bounded by V = 4, so 0); relative time: Stats -0.01, AcquireLatest+Release -0.05 (0 when the per-operation work does not depend on the captures since the pinned view).
 
-**With the backend accountant (wired in production by #205)**
+**With the backend accountant (production wiring since the correction above)**
 
 V = 4 retained views, oldest view pinned by a lease, N = 2,000, B = 10; R = captures after the pinned view (exact)
 
