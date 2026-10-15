@@ -21,7 +21,7 @@ import (
 
 func attachDiskProofPub(t *testing.T, rm *RoundManager) *proofview.Catalog {
 	t.Helper()
-	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
+	cat, err := newProofViewCatalog(proofview.DefaultLimits(), rm.smtBackend)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cat.Close() })
 	rm.proofPub = proofpub.New(cat, rm.smtBackend, prooftest.Partition, nil, newTestLogger(t))
