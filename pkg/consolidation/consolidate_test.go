@@ -95,7 +95,7 @@ func TestConsolidate_RMin(t *testing.T) {
 	// a master seal older than the authenticated evidence is stale
 	f = newFixture(t, ts())
 	s := f.session()
-	f.in.Bound, err = s.AuthenticateEvidence([]Evidence{f.evidenceAt(0, f.round+1)})
+	f.in.Bound, err = s.AuthenticateEvidence([]Evidence{f.evidenceAt(0, f.round+1), f.evidenceAt(1, f.round-5)})
 	require.NoError(t, err)
 	_, err = s.Consolidate(f.in)
 	requireOutcome(t, err, OutcomeStale)
@@ -213,22 +213,114 @@ func TestConsolidate_InputsAndOutputsAreIndependent(t *testing.T) {
 
 func TestConsolidate_UnauthenticatedMaster(t *testing.T) {
 	f := newFixture(t, ts())
-	// a different authority never accepts the master seal
+	// the authority accepts the evidence seals but not the master seal
 	other := newFixture(t, ts())
-	var err error
-	f.in.Bound, err = f.session().AuthenticateEvidence(f.defaultEvidence())
+	var tb types.RootTrustBase = f.tb
+	s, err := NewSession(f.policy, func(*types.UnicitySeal) (types.RootTrustBase, error) { return tb, nil })
 	require.NoError(t, err)
-	s, err := NewSession(f.policy, other.resolver())
+	f.in.Bound, err = s.AuthenticateEvidence(f.defaultEvidence())
 	require.NoError(t, err)
-	_, err = f.consolidate(s)
+	tb = other.tb
+	_, err = s.Consolidate(f.in)
 	requireOutcome(t, err, OutcomeUnauthenticated)
 	require.Equal(t, 1, s.Counters().QuorumChecks)
 
 	// a resolver failure is not authentication either
-	s, err = NewSession(f.policy, func(*types.UnicitySeal) (types.RootTrustBase, error) { return nil, errors.New("unknown epoch") })
+	f = newFixture(t, ts())
+	fail := false
+	s, err = NewSession(f.policy, func(*types.UnicitySeal) (types.RootTrustBase, error) {
+		if fail {
+			return nil, errors.New("unknown epoch")
+		}
+		return f.tb, nil
+	})
 	require.NoError(t, err)
-	_, err = f.consolidate(s)
+	f.in.Bound, err = s.AuthenticateEvidence(f.defaultEvidence())
+	require.NoError(t, err)
+	fail = true
+	_, err = s.Consolidate(f.in)
 	requireOutcome(t, err, OutcomeUnauthenticated)
+}
+
+func TestConsolidate_BoundIsBoundToSessionAndRequiredInputs(t *testing.T) {
+	// (a) a bound issued under another signing authority (same policy and network) is refused
+	f := newFixture(t, ts())
+	foreign := newFixture(t, ts())
+	foreign.policy = f.policy
+	fs, err := NewSession(foreign.policy, foreign.resolver())
+	require.NoError(t, err)
+	// the foreign authority authenticates *its own* evidence, which is not ours; even with
+	// our evidence re-signed by it, the session identity differs
+	f.in.Bound, err = fs.AuthenticateEvidence(foreign.defaultEvidence())
+	require.NoError(t, err)
+	_, err = f.session().Consolidate(f.in)
+	requireOutcome(t, err, OutcomeIncompatibleLineage)
+
+	// (b) authenticating only the older of two required inputs does not allow a lower master round
+	f = newFixture(t, ts())
+	s := f.session()
+	f.in.Bound, err = s.AuthenticateEvidence([]Evidence{f.evidenceAt(0, f.round-10)})
+	require.NoError(t, err)
+	_, err = s.Consolidate(f.in)
+	requireOutcome(t, err, OutcomeIncompatibleLineage)
+	require.Contains(t, err.Error(), "not covered")
+}
+
+func TestAuthenticateEvidence_RejectsDuplicateAndAlteredData(t *testing.T) {
+	f := newFixture(t, ts())
+	e := f.evidenceAt(0, f.round-1)
+	_, err := f.session().AuthenticateEvidence([]Evidence{e, e})
+	requireOutcome(t, err, OutcomeInvalidInput)
+
+	// a request whose data differs from the authenticated evidence is not covered
+	f = newFixture(t, ts())
+	s := f.session()
+	f.in.Bound, err = s.AuthenticateEvidence(f.defaultEvidence())
+	require.NoError(t, err)
+	r := *f.in.Peers[0].Requests[0]
+	r.CertificationData.Witness = append([]byte(nil), r.CertificationData.Witness...)
+	r.CertificationData.Witness[0] ^= 1
+	f.in.Peers[0].Requests = []*api.CertificationRequest{&r}
+	_, err = s.Consolidate(f.in)
+	requireOutcome(t, err, OutcomeIncompatibleLineage)
+}
+
+func TestAuthenticateEvidence_NullPathStepIsTypedNotPanic(t *testing.T) {
+	f := newFixture(t, ts())
+	ev := f.defaultEvidence()
+	uc := mustUC(t, ev[0].Proof.UnicityCertificate)
+	require.NotEmpty(t, uc.UnicityTreeCertificate.HashSteps)
+	uc.UnicityTreeCertificate.HashSteps[0] = nil
+	var err error
+	ev[0].Proof.UnicityCertificate, err = types.Cbor.Marshal(uc)
+	require.NoError(t, err)
+	require.NotPanics(t, func() { _, err = f.session().AuthenticateEvidence(ev) })
+	requireOutcome(t, err, OutcomeInvalidInput)
+	require.Contains(t, err.Error(), "null")
+}
+
+func TestAuthenticateEvidence_FullLeafRules(t *testing.T) {
+	// state outside the certified shard: valid seal and matching path, wrong shard
+	f := newFixture(t, ts())
+	e0, e1 := f.evidenceAt(0, f.round-1), f.evidenceAt(1, f.round-1)
+	swapped := Evidence{Request: e1.Request, Proof: e1.Proof}
+	cp := *e1.Proof
+	cp.UnicityCertificate = e0.Proof.UnicityCertificate // shard 0 certificate, shard 1 state
+	swapped.Proof = &cp
+	_, err := f.session().AuthenticateEvidence([]Evidence{swapped})
+	requireOutcome(t, err, OutcomeBindingMismatch)
+	require.Contains(t, err.Error(), "does not belong to shard")
+
+	// reference time after the evidence UC timestamp
+	f = newFixture(t, fixtureOpts{refTime: 2001, timestamp: 2000})
+	_, err = f.session().AuthenticateEvidence(f.defaultEvidence())
+	requireOutcome(t, err, OutcomeReferenceTime)
+
+	// expired at its reference time
+	exp := uint64(1000)
+	f = newFixture(t, fixtureOpts{refTime: 1000, timestamp: 2000, expiresAt: &exp})
+	_, err = f.session().AuthenticateEvidence(f.defaultEvidence())
+	requireOutcome(t, err, OutcomeExpired)
 }
 
 func TestConsolidate_AlteredSealWitnessMisses(t *testing.T) {

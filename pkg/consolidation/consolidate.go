@@ -70,14 +70,18 @@ func (s *Session) Consolidate(in *Input) (*Output, error) {
 	if in.Bound == nil {
 		return nil, fail(OutcomeUnavailable, -1, nil, "authenticated minimal root round is unknown")
 	}
-	if !bytes.Equal(in.Bound.lineage, s.policy.id()) {
-		return nil, fail(OutcomeIncompatibleLineage, -1, nil, "root round bound was derived under another policy")
+	if in.Bound.session != s || !bytes.Equal(in.Bound.lineage, s.policy.id()) {
+		return nil, fail(OutcomeIncompatibleLineage, -1, nil, "root round bound was not issued by this verification session")
 	}
 	if len(in.PartitionView) == 0 {
 		return nil, fail(OutcomeUnavailable, -1, nil, "master response carries no partition view")
 	}
 	batches := append([]ShardResult{in.Master}, in.Peers...)
 	if err := s.checkBatches(batches); err != nil {
+		return nil, err
+	}
+
+	if err := in.Bound.covers(batches); err != nil {
 		return nil, err
 	}
 
@@ -224,6 +228,9 @@ func (s *Session) checkBody(bi int, shard types.ShardID, uc *types.UnicityCertif
 		return nil
 	}
 	s.count(func(c *Counters) { c.BodyChecks++ })
+	if err := checkPathSteps(bi, uc); err != nil {
+		return err
+	}
 	if err := uc.IsValid(s.policy.PartitionID, shard, s.policy.Topology.ShardConfHashes[shard.Key()]); err != nil {
 		return fail(OutcomeInvalidInput, bi, err, "assembled unicity certificate")
 	}
@@ -247,6 +254,12 @@ func (s *Session) checkBody(bi int, shard types.ShardID, uc *types.UnicityCertif
 // membership and the path to the target input record hash.
 func (s *Session) checkLeaf(bi int, req *api.CertificationRequest, p *api.InclusionProofV2, target *types.UnicityCertificate) error {
 	s.count(func(c *Counters) { c.LeafChecks++ })
+	return leafRules(bi, req, p, target)
+}
+
+// leafRules are the complete per-input rules, shared by output verification
+// and original-evidence authentication (which counts separately).
+func leafRules(bi int, req *api.CertificationRequest, p *api.InclusionProofV2, target *types.UnicityCertificate) error {
 	if err := p.CheckRequestBinding(req); err != nil {
 		return fail(OutcomeBindingMismatch, bi, err, "state %s", req.StateID)
 	}
@@ -272,6 +285,21 @@ func (s *Session) checkLeaf(bi int, req *api.CertificationRequest, p *api.Inclus
 	}
 	if err := p.VerifyLeafPath(req, target.InputRecord.Hash); err != nil {
 		return fail(OutcomeBindingMismatch, bi, err, "state %s", req.StateID)
+	}
+	return nil
+}
+
+// checkPathSteps rejects null entries in the partition path before it is
+// evaluated: the native evaluation dereferences every step, and the UC checks
+// do not validate them.
+func checkPathSteps(idx int, uc *types.UnicityCertificate) error {
+	if uc.UnicityTreeCertificate == nil {
+		return fail(OutcomeInvalidInput, idx, nil, "unicity certificate lacks the unicity tree certificate")
+	}
+	for i, step := range uc.UnicityTreeCertificate.HashSteps {
+		if step == nil {
+			return fail(OutcomeInvalidInput, idx, nil, "unicity tree certificate hash step %d is null", i)
+		}
 	}
 	return nil
 }
