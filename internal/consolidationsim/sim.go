@@ -318,6 +318,32 @@ func (s *Sim) UseFinalization(n int) {
 	s.mu.Unlock()
 }
 
+// LatestRound is the root chain round of the newest finalization's master seal.
+func (s *Sim) LatestRound() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.fins[len(s.fins)-1].seal.RootChainRoundNumber
+}
+
+// NextTrustBase is the epoch-2 trust base starting at root round start: same root nodes,
+// hash-linked to and signed by the epoch-1 authority (it verifies against Sim.TB).
+func (s *Sim) NextTrustBase(start uint64) (*types.RootTrustBaseV1, error) {
+	prev := s.TB.(*types.RootTrustBaseV1)
+	h, err := prev.Hash(crypto.SHA256)
+	if err != nil {
+		return nil, err
+	}
+	next, err := types.NewTrustBase(prev.GetNetworkID(), prev.GetRootNodes(), types.WithEpoch(2), types.WithEpochStart(start),
+		types.WithPreviousTrustBaseHash(h))
+	if err != nil {
+		return nil, err
+	}
+	if err := next.Sign("root-1", s.signer); err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
 // Latest returns the index of the newest finalization.
 func (s *Sim) Latest() int { return len(s.fins) }
 

@@ -267,6 +267,36 @@ func loadConfig(path, master string, timeout time.Duration) (*client.Config, err
 		}
 		tbs = append(tbs, tb)
 	}
+	// the installed history must be a verified chain: every epoch is signed by its predecessor
+	byEpoch := map[uint64]map[types.NetworkID]*types.RootTrustBaseV1{}
+	for _, tb := range tbs {
+		if byEpoch[tb.GetEpoch()] == nil {
+			byEpoch[tb.GetEpoch()] = map[types.NetworkID]*types.RootTrustBaseV1{}
+		}
+		if byEpoch[tb.GetEpoch()][tb.GetNetworkID()] != nil {
+			return nil, fmt.Errorf("duplicate trust base for network %d epoch %d", tb.GetNetworkID(), tb.GetEpoch())
+		}
+		byEpoch[tb.GetEpoch()][tb.GetNetworkID()] = tb
+	}
+	for _, tb := range tbs {
+		if tb.GetEpoch() <= 1 {
+			continue
+		}
+		prev := byEpoch[tb.GetEpoch()-1][tb.GetNetworkID()]
+		if prev == nil {
+			continue // only the installed part of the history is known
+		}
+		if err := tb.Verify(prev); err != nil {
+			return nil, fmt.Errorf("trust base epoch %d does not verify against epoch %d: %w", tb.GetEpoch(), prev.GetEpoch(), err)
+		}
+	}
+	// a known successor epoch bounds the interval its predecessor's authority may certify in
+	cfg.EpochEnd = func(seal *types.UnicitySeal) (uint64, bool, error) {
+		if next := byEpoch[seal.Epoch+1][seal.NetworkID]; next != nil {
+			return next.GetEpochStart(), true, nil
+		}
+		return 0, false, nil
+	}
 	cfg.Resolver = func(seal *types.UnicitySeal) (types.RootTrustBase, error) {
 		for _, tb := range tbs {
 			if tb.GetNetworkID() == seal.NetworkID && tb.GetEpoch() == seal.Epoch {

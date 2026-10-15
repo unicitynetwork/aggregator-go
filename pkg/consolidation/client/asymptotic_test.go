@@ -120,3 +120,25 @@ func TestClient_RoutingVisitsAreDepthPerItem(t *testing.T) {
 		require.Equal(t, len(items)*(depth+1), res.Stats.RoutingVisits, "S=%d: L·(depth+1) trie visits", S)
 	}
 }
+
+// Certificate derivation never scans the view per participating shard: the view is visited a
+// constant number of times per master (index + private copy + tree build = 3S), whatever m is,
+// and each derivation costs only its shard path depth.
+func TestSession_DerivationDoesNotScanTheViewPerShard(t *testing.T) {
+	const S = 8
+	for _, m := range []int{1, 2, 4, 8} {
+		sim, items := build(t, S, m, 2)
+		c := run(t, sim, items).Counters
+		require.Equal(t, m, c.UCDerivations)
+		require.Equal(t, 3*S, c.ViewLeafVisits, "m=%d: Θ(S) once, not Θ(m·S)", m)
+		require.Equal(t, 3*m, c.ShardPathSteps, "m=%d: the sum of the %d shard depths (3 each)", m, m)
+	}
+	// and the visits grow linearly with S (not with m·S) when sweeping the partition size
+	for _, S := range []int{2, 4, 8} {
+		sim, items := build(t, S, 2, 2)
+		c := run(t, sim, items).Counters
+		require.Equal(t, 3*S, c.ViewLeafVisits, "S=%d", S)
+		depth := map[int]int{2: 1, 4: 2, 8: 3}[S]
+		require.Equal(t, 2*depth, c.ShardPathSteps, "S=%d", S)
+	}
+}

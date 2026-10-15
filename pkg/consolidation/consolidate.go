@@ -10,6 +10,7 @@ import (
 	"crypto"
 	"errors"
 	"slices"
+	"sync"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -70,11 +71,67 @@ type AuthenticatedMaster struct {
 	session *Session
 	master  ShardResult
 	bound   *RootRoundBound
-	view    *types.PartitionViewV1
+	view    *types.PartitionViewV1 // the authenticated view's private copy
 	av      *types.AuthenticatedPartitionView
+	// enclosing is the master UC the view was authenticated against; its seal and
+	// partition path are shared by every derived certificate (copied per certificate).
+	enclosing *types.UnicityCertificate
+
+	// tree is built once, lazily, from the authenticated view; shard certificates are then
+	// derived per shard in O(depth) without scanning the view.
+	deriveOnce sync.Once
+	tree       types.ShardTree
+	sealBytes  []byte
+	pathBytes  []byte
+	deriveErr  error
 	// leafIdx indexes the authenticated view's leaves by shard (built once, O(S))
 	leafIdx map[string]int
 	round   uint64
+}
+
+// certificate derives the ordinary UC of the shard at leaf index i from the authenticated
+// view. The shard tree is built once (S leaf visits); each derivation then costs the shard's
+// path depth, never a scan of the view. The result has private copies of the seal and paths.
+func (m *AuthenticatedMaster) certificate(i int) (*types.UnicityCertificate, error) {
+	s := m.session
+	m.deriveOnce.Do(func() {
+		inputs := make([]types.ShardTreeInput, len(m.view.Leaves))
+		for j := range m.view.Leaves {
+			l := &m.view.Leaves[j]
+			inputs[j] = types.ShardTreeInput{Shard: l.ShardID, IR: l.InputRecord, TRHash: l.TRHash, ShardConfHash: l.ShardConfHash}
+		}
+		s.count(func(c *Counters) { c.ViewLeafVisits += len(inputs) })
+		if m.tree, m.deriveErr = types.CreateShardTree(m.av.Scheme(), inputs, crypto.SHA256); m.deriveErr != nil {
+			return
+		}
+		if m.sealBytes, m.deriveErr = m.enclosing.UnicitySeal.MarshalCBOR(); m.deriveErr != nil {
+			return
+		}
+		m.pathBytes, m.deriveErr = m.enclosing.UnicityTreeCertificate.MarshalCBOR()
+	})
+	if m.deriveErr != nil {
+		return nil, m.deriveErr
+	}
+	l := m.view.Leaves[i].Clone()
+	stc, err := m.tree.Certificate(l.ShardID)
+	if err != nil {
+		return nil, err
+	}
+	s.count(func(c *Counters) { c.ShardPathSteps += len(stc.SiblingHashes) })
+	siblings := make([][]byte, len(stc.SiblingHashes))
+	for j, h := range stc.SiblingHashes { // the tree shares hash slices between shards
+		siblings[j] = bytes.Clone(h)
+	}
+	stc.SiblingHashes = siblings
+	seal, utc := &types.UnicitySeal{}, &types.UnicityTreeCertificate{}
+	if err := seal.UnmarshalCBOR(m.sealBytes); err != nil {
+		return nil, err
+	}
+	if err := utc.UnmarshalCBOR(m.pathBytes); err != nil {
+		return nil, err
+	}
+	return &types.UnicityCertificate{Version: 1, InputRecord: l.InputRecord, TRHash: l.TRHash, ShardConfHash: l.ShardConfHash,
+		ShardTreeCertificate: stc, UnicityTreeCertificate: utc, UnicitySeal: seal}, nil
 }
 
 // leaf looks a shard up in the authenticated view: one hash probe.
@@ -158,7 +215,8 @@ func (s *Session) AuthenticateMaster(bound *RootRoundBound, master ShardResult, 
 	for i := range view.Leaves {
 		leafIdx[view.Leaves[i].ShardID.Key()] = i
 	}
-	return &AuthenticatedMaster{session: s, master: master, bound: bound, view: view, av: av, leafIdx: leafIdx, round: round}, nil
+	s.count(func(c *Counters) { c.ViewLeafVisits += 2 * len(view.Leaves) }) // index + private view copy
+	return &AuthenticatedMaster{session: s, master: master, bound: bound, view: av.View(), av: av, enclosing: enclosing, leafIdx: leafIdx, round: round}, nil
 }
 
 // Complete verifies the peers' exact-root batches against the authenticated
@@ -185,7 +243,7 @@ func (s *Session) Complete(m *AuthenticatedMaster, peers []ShardResult) (*Output
 		}
 		// derive the shard's certificate lazily: only the m participating shards, never all S
 		s.count(func(c *Counters) { c.UCDerivations++ })
-		target, err := m.av.Certificate(b.ShardID)
+		target, err := m.certificate(idx)
 		if err != nil {
 			return nil, fail(OutcomeInvalidInput, bi, err, "assembling certificate of shard %q", b.ShardID)
 		}

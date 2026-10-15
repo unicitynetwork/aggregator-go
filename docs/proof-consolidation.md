@@ -92,7 +92,12 @@ CONSOLIDATION_E2E_SHARDS=4,8 go test -tags e2e_bft ./test/integration -run TestB
   come from different seals. Each bundle is checked with the full `InclusionProofV2.Verify` and native `UnicityCertificate.Verify`
   against the real trust base, with one identical master seal, preserved reference times, and the counters
   (1 quorum / m bodies / L leaves, m requests in 2 waves).
-- Root-to-shard message count: the counter `aggregator_bft_certification_responses_total{shard}` counts certification response
+- Epoch end: the client takes `Config.EpochEnd` (the CLI derives it from the installed trust base history, which must form a
+  verified chain; a successor epoch bounds its predecessor) and enforces it on every seal authentication: accepted at
+  start−1, rejected at/after the successor's start.
+- Root-to-shard message count (re-deliveries): `aggregator_bft_certification_response_repeats_total{shard}` counts responses
+  whose root round does not advance; consolidation traffic must not raise it over the equal-work baseline phase, which detects
+  one duplicate per block even at a single finalized block (unit-tested at the minimum workload). The counter `aggregator_bft_certification_responses_total{shard}` counts certification response
   messages received per shard. Every finalized block is delivered by one response, so each shard's responses are compared with its
   finalized blocks (`get_block_height`): with consolidation traffic a shard may not receive more than its blocks plus the extra
   responses (timeout repeats) it already received in the equal-work writes-only baseline phase, plus 2. The rule is unit-tested
@@ -131,7 +136,7 @@ optional (the hashes can then come from the shard configurations directly).
 | per-input rules (binding, expiry, reference time, shard membership, leaf path) | O(1) per input, never memoized | `LeafChecks == L` |
 | seal quorum | one per distinct complete seal + authority + policy | `QuorumChecks`, `EvidenceQuorumChecks` |
 | shard lookups in the authenticated view | one hash probe per lookup (index built once, O(S)) | `ShardLeafProbes` |
-| derived shard certificates | only the m participating shards, lazily | `UCDerivations == m` |
+| derived shard certificates | only the m participating shards, lazily; the shard tree is built once per master (own derivation: the dependency's `Certificate(shard)` scans the view per call) | `UCDerivations == m`, `ViewLeafVisits == 3S` independent of m, `ShardPathSteps == Σ depth` |
 | endpoint routing | binary trie, O(shard depth) per input (log S balanced, ≤ key width) | `Stats.RoutingVisits == Σ (depth+1)` |
 
 Memoization keys commit to the complete canonical bytes (and, for seals, the resolved authority content and policy

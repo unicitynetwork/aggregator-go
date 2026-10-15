@@ -64,6 +64,11 @@ type Config struct {
 	// waiting for it (the call itself cannot be interrupted, its result is
 	// discarded). Prefer ResolverContext for resolvers that can block.
 	Resolver consolidation.TrustBaseResolver
+	// EpochEnd, when set, reports the start round of the epoch following a seal's epoch if
+	// the trusted history already knows it. It is enforced on every seal authentication
+	// (evidence and master): a seal at or after that round is outside its authority's
+	// interval. It must be quick and must not block.
+	EpochEnd consolidation.EpochEndResolver
 	// ResolverContext, when set, is used instead of Resolver and receives the
 	// attempt context, which it must honor.
 	ResolverContext func(ctx context.Context, seal *types.UnicitySeal) (types.RootTrustBase, error)
@@ -236,7 +241,16 @@ func (c *Client) Consolidate(ctx context.Context, items []Item) (*Result, error)
 	resolver := func(seal *types.UnicitySeal) (types.RootTrustBase, error) {
 		return c.resolve(ctx, seal)
 	}
-	session, err := consolidation.NewSession(c.cfg.Policy, resolver)
+	var sopts []consolidation.SessionOption
+	if c.cfg.EpochEnd != nil {
+		sopts = append(sopts, consolidation.WithEpochEnd(func(seal *types.UnicitySeal) (uint64, bool, error) {
+			if err := ctx.Err(); err != nil {
+				return 0, false, err
+			}
+			return c.cfg.EpochEnd(seal)
+		}))
+	}
+	session, err := consolidation.NewSession(c.cfg.Policy, resolver, sopts...)
 	if err != nil {
 		return nil, libError(err)
 	}

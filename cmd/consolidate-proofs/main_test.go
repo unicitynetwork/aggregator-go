@@ -266,3 +266,49 @@ func TestCLI_UnpinnedConfig(t *testing.T) {
 	errb.Reset()
 	require.Equal(t, exitInput, run([]string{"-config", e.cfg, "-in", e.in}, &out, &errb))
 }
+
+// The CLI's installed trust base history bounds the authority of an epoch.
+func TestCLI_EpochEndFromInstalledHistory(t *testing.T) {
+	e := setup(t, 2)
+	round := e.sim.LatestRound()
+	var cfg Config
+	raw, _ := os.ReadFile(e.cfg)
+	require.NoError(t, json.Unmarshal(raw, &cfg))
+	cfg.TrustBases = []string{"trust-base.json", "trust-base-2.json"}
+	tb1, _ := os.ReadFile(filepath.Join(e.dir, "tb.json"))
+	require.NoError(t, os.WriteFile(filepath.Join(e.dir, "trust-base.json"), tb1, 0o600))
+
+	writeNext := func(start uint64) {
+		next, err := e.sim.NextTrustBase(start)
+		require.NoError(t, err)
+		b, err := json.Marshal(next)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(e.dir, "trust-base-2.json"), b, 0o600))
+	}
+	runWith := func() (int, string) {
+		e.cfg = writeJSON(t, e.dir, "config-history.json", cfg)
+		var out, errb bytes.Buffer
+		code := run([]string{"-config", e.cfg, "-in", e.in}, &out, &errb)
+		return code, errb.String()
+	}
+
+	writeNext(round + 1) // successor starts after the master seal: accepted (start-1)
+	code, msg := runWith()
+	require.Equal(t, exitOK, code, msg)
+
+	writeNext(round) // successor starts at the master seal's round: rejected
+	code, msg = runWith()
+	require.Equal(t, exitRejected, code, msg)
+	require.Contains(t, msg, `"outcome":"unauthenticated"`)
+
+	// a successor which is not signed by its predecessor is a configuration error (fail closed)
+	other, err := consolidationsim.NewWithSeed(2, "unrelated")
+	require.NoError(t, err)
+	defer other.Close()
+	bad, err := other.NextTrustBase(round + 1)
+	require.NoError(t, err)
+	b, _ := json.Marshal(bad)
+	require.NoError(t, os.WriteFile(filepath.Join(e.dir, "trust-base-2.json"), b, 0o600))
+	code, msg = runWith()
+	require.Equal(t, exitInput, code, msg)
+}

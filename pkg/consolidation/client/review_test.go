@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -469,4 +470,39 @@ func TestConsolidate_UnpinnedTopology(t *testing.T) {
 	cfg.Endpoints = cfg.Endpoints[:3]
 	_, err := client.New(cfg)
 	requireClientErr(t, err, client.KindInput, "")
+}
+
+// The known end of an authority's epoch is enforced for the master and the evidence seals.
+func TestConsolidate_EpochEndEnforced(t *testing.T) {
+	sim, items := scenario(t, 4, 1)
+	end := func(start uint64) func(*client.Config) {
+		return func(c *client.Config) {
+			c.EpochEnd = func(*types.UnicitySeal) (uint64, bool, error) { return start, true, nil }
+		}
+	}
+	round := sim.LatestRound()
+
+	// accepted one round before the successor epoch starts
+	_, err := newClient(t, sim, end(round+1)).Consolidate(context.Background(), items)
+	require.NoError(t, err)
+
+	// rejected at and after the start (master seal)
+	for _, start := range []uint64{round, round - 1} {
+		_, err = newClient(t, sim, end(start)).Consolidate(context.Background(), items)
+		ce := requireClientErr(t, err, client.KindVerification, "")
+		require.Equal(t, consolidation.OutcomeUnauthenticated, ce.Outcome, "start=%d", start)
+	}
+
+	// an unknown end (history does not know the successor) does not restrict
+	_, err = newClient(t, sim, func(c *client.Config) {
+		c.EpochEnd = func(*types.UnicitySeal) (uint64, bool, error) { return 0, false, nil }
+	}).Consolidate(context.Background(), items)
+	require.NoError(t, err)
+
+	// a failing history lookup fails closed
+	_, err = newClient(t, sim, func(c *client.Config) {
+		c.EpochEnd = func(*types.UnicitySeal) (uint64, bool, error) { return 0, false, errors.New("history unavailable") }
+	}).Consolidate(context.Background(), items)
+	ce := requireClientErr(t, err, client.KindVerification, "")
+	require.Equal(t, consolidation.OutcomeUnauthenticated, ce.Outcome)
 }

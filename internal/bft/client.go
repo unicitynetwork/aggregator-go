@@ -89,6 +89,8 @@ type (
 		proofStaging  *proofmaterial.Staging
 		proofSink     atomic.Pointer[proofmaterial.Sink]
 		proofTopology proofmaterial.TopologyProvider
+		// lastResponseRound is the newest root round seen in a certification response.
+		lastResponseRound atomic.Uint64
 		// authn is the boundary which authenticates received certificates
 		authn         *ucAuthenticator
 		publishedMu   sync.Mutex
@@ -411,6 +413,7 @@ func (c *BFTClientImpl) handleMessage(ctx context.Context, msg any) {
 
 func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *certification.CertificationResponse) error {
 	metrics.BFTCertificationResponsesTotal.WithLabelValues(c.shardID.String()).Inc()
+	c.noteResponseRound(cr)
 	c.lastCertResponseTime.Store(time.Now().UnixMilli())
 
 	// malformed nested shapes (null path elements) are rejected before anything evaluates them
@@ -847,6 +850,26 @@ func proofTopologyFromConfig(conf *config.BFTConfig) (proofmaterial.TopologyProv
 
 // ProofTopology returns the optional independently pinned topology (nil: none configured).
 func (c *BFTClientImpl) ProofTopology() proofmaterial.TopologyProvider { return c.proofTopology }
+
+// noteResponseRound counts re-deliveries: a response whose seal round is not newer than the
+// newest round already received repeats a certification (no new work for the root).
+func (c *BFTClientImpl) noteResponseRound(cr *certification.CertificationResponse) {
+	if cr == nil || cr.UC.UnicitySeal == nil {
+		return
+	}
+	round := cr.UC.UnicitySeal.RootChainRoundNumber
+	for {
+		last := c.lastResponseRound.Load()
+		if round > last {
+			if c.lastResponseRound.CompareAndSwap(last, round) {
+				return
+			}
+			continue
+		}
+		metrics.BFTCertificationResponseRepeatsTotal.WithLabelValues(c.shardID.String()).Inc()
+		return
+	}
+}
 
 // SealVerifier returns the client's trusted seal verifier (authority resolved from the
 // admitted trust history) for re-authenticating stored material.
