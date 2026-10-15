@@ -2,6 +2,7 @@ package trustbase
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -63,4 +64,44 @@ type mockBFTRestClient struct {
 
 func (m *mockBFTRestClient) GetTrustBases(ctx context.Context, epoch1, epoch2 uint64) ([]*types.RootTrustBaseV1, error) {
 	return m.GetTrustBasesFunc(ctx, epoch1, epoch2)
+}
+
+// GetAdmitted reports only locally admitted history: it never asks the BFT node and never stores.
+func TestTrustBaseManager_GetAdmittedIsLocalOnly(t *testing.T) {
+	log, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+	rootNodes, _ := newRootNodes(t, 3)
+	tb, err := types.NewTrustBase(types.NetworkLocal, rootNodes, types.WithEpoch(2), types.WithEpochStart(80))
+	require.NoError(t, err)
+
+	fetched := false
+	rest := &mockBFTRestClient{GetTrustBasesFunc: func(context.Context, uint64, uint64) ([]*types.RootTrustBaseV1, error) {
+		fetched = true
+		return []*types.RootTrustBaseV1{tb}, nil
+	}}
+	store := &mockStorage{GetByEpochFunc: func(_ context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
+		if epoch == 2 {
+			return tb, nil
+		}
+		return nil, interfaces.ErrTrustBaseNotFound
+	}}
+	m := NewTrustBaseManager(log, store, rest, NewTrustBaseValidator(store))
+
+	got, ok, err := m.GetAdmitted(t.Context(), 2)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint64(80), got.GetEpochStart())
+
+	got, ok, err = m.GetAdmitted(t.Context(), 3)
+	require.NoError(t, err)
+	require.False(t, ok, "unknown history is not an error")
+	require.Nil(t, got)
+
+	store.GetByEpochFunc = func(context.Context, uint64) (*types.RootTrustBaseV1, error) { return nil, errors.New("database down") }
+	_, ok, err = m.GetAdmitted(t.Context(), 3)
+	require.Error(t, err, "a storage failure is not 'unknown'")
+	require.False(t, ok)
+
+	require.False(t, fetched, "the BFT node is never asked")
+	require.Empty(t, store.stored, "nothing is stored")
 }

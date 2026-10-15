@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -101,7 +103,48 @@ func (a *ucAuthenticator) verifyUC(ctx context.Context, uc *types.UnicityCertifi
 	return a.verifySeal(ctx, uc.UnicitySeal)
 }
 
-// verifySeal authenticates the complete seal under the trust base of its own epoch.
+// AdmittedTrustBases is the optional lookup of trust bases already admitted to the local
+// history. It must never fetch: an unknown epoch is (nil, false, nil).
+type AdmittedTrustBases interface {
+	GetAdmitted(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, bool, error)
+}
+
+// nextEpochStart returns the start round of the epoch following "epoch" if that trust base
+// is already admitted locally. Retired authority may not certify at or after it. An unknown
+// future boundary is not an error (nothing proves freshness without it, as for ordinary UCs).
+func (a *ucAuthenticator) nextEpochStart(ctx context.Context, epoch uint64) (uint64, bool, error) {
+	var next *types.RootTrustBaseV1
+	if h, ok := a.store.(AdmittedTrustBases); ok {
+		tb, known, err := h.GetAdmitted(ctx, epoch+1)
+		if err != nil {
+			return 0, false, err
+		}
+		if !known {
+			return 0, false, nil
+		}
+		next = tb
+	} else {
+		tb, err := a.store.GetByEpoch(ctx, epoch+1)
+		if err != nil {
+			if errors.Is(err, interfaces.ErrTrustBaseNotFound) {
+				return 0, false, nil
+			}
+			return 0, false, fmt.Errorf("failed to load trust base for epoch %d: %w", epoch+1, err)
+		}
+		next = tb
+	}
+	if next == nil {
+		return 0, false, nil
+	}
+	if next.GetEpoch() != epoch+1 || next.GetNetworkID() != a.network {
+		return 0, false, fmt.Errorf("history entry for epoch %d is of epoch %d, network %d", epoch+1, next.GetEpoch(), next.GetNetworkID())
+	}
+	return next.GetEpochStart(), true, nil
+}
+
+// verifySeal authenticates the complete seal under the trust base of its own epoch, inside
+// the interval of that epoch: the known end boundary is checked on EVERY call, before any
+// memoized verdict is used, so history learned later invalidates cached seals.
 func (a *ucAuthenticator) verifySeal(ctx context.Context, seal *types.UnicitySeal) error {
 	if seal == nil {
 		return types.ErrUnicitySealIsNil
@@ -109,6 +152,14 @@ func (a *ucAuthenticator) verifySeal(ctx context.Context, seal *types.UnicitySea
 	tb, err := a.trustBase(ctx, seal.Epoch)
 	if err != nil {
 		return err
+	}
+	next, known, err := a.nextEpochStart(ctx, seal.Epoch)
+	if err != nil {
+		return err
+	}
+	if known && seal.RootChainRoundNumber >= next {
+		return fmt.Errorf("seal round %d is at or after the start of the next epoch %d (round %d): epoch %d authority has retired",
+			seal.RootChainRoundNumber, seal.Epoch+1, next, seal.Epoch)
 	}
 	tbHash, err := tb.Hash(crypto.SHA256)
 	if err != nil {

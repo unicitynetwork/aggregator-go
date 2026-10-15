@@ -12,6 +12,7 @@ import (
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 
 	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -48,6 +49,8 @@ type Fixture struct {
 	// TrustBase is the authority which signed the seal; Signer its key.
 	TrustBase *types.RootTrustBaseV1
 	Signer    abcrypto.Signer
+	// TR is the technical record of the shard of UC; UC.TRHash is its hash.
+	TR certification.TechnicalRecord
 }
 
 // NetworkID of the fixture authority.
@@ -58,6 +61,9 @@ const NetworkID types.NetworkID = 3
 func New(t testing.TB, bits int, round uint64, stateHash []byte, rootRound uint64) *Fixture {
 	scheme := Scheme(bits)
 	order, err := types.CanonicalShardOrder(scheme)
+	require.NoError(t, err)
+	tr := certification.TechnicalRecord{Round: round + 1, Epoch: 1, Leader: "leader", FeeHash: Hash("fees"), StatHash: Hash("stat")}
+	trHash, err := tr.Hash()
 	require.NoError(t, err)
 	v := &types.PartitionViewV1{Version: 1, PartitionID: Partition}
 	var inputs []types.ShardTreeInput
@@ -72,6 +78,9 @@ func New(t testing.TB, bits int, round uint64, stateHash []byte, rootRound uint6
 			ir.Hash, ir.BlockHash = stateHash, stateHash
 		}
 		leaf := types.PartitionViewLeafV1{ShardID: id, InputRecord: ir, TRHash: Hash("tr-" + id.String()), ShardConfHash: Hash("conf-" + id.String())}
+		if i == 0 {
+			leaf.TRHash = trHash
+		}
 		confHashes[id.Key()] = leaf.ShardConfHash
 		v.Leaves = append(v.Leaves, leaf)
 		inputs = append(inputs, types.ShardTreeInput{Shard: id, IR: ir, TRHash: leaf.TRHash, ShardConfHash: leaf.ShardConfHash})
@@ -102,7 +111,7 @@ func New(t testing.TB, bits int, round uint64, stateHash []byte, rootRound uint6
 	raw, err := types.Cbor.Marshal(v)
 	require.NoError(t, err)
 	return &Fixture{
-		TrustBase: tb, Signer: signer,
+		TrustBase: tb, Signer: signer, TR: tr,
 		View: v, Raw: raw, Topo: types.PartitionViewTopology{Scheme: scheme, ShardConfHashes: confHashes}, Shard: order[0],
 		UC: &types.UnicityCertificate{Version: 1, InputRecord: l.InputRecord, TRHash: l.TRHash, ShardConfHash: l.ShardConfHash,
 			ShardTreeCertificate: stc, UnicityTreeCertificate: utc, UnicitySeal: seal},

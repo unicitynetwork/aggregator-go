@@ -35,6 +35,7 @@ type Counters struct {
 type Session struct {
 	policy   Policy
 	resolver TrustBaseResolver
+	epochEnd EpochEndResolver
 
 	mu       sync.Mutex
 	seals    map[string]struct{}
@@ -42,15 +43,31 @@ type Session struct {
 	counters Counters
 }
 
+// EpochEndResolver returns the start round of the epoch following the seal's epoch if the
+// resolver's authenticated history already knows it (known=false otherwise). A seal at or
+// after that round is outside the interval its epoch's authority may certify in.
+type EpochEndResolver func(seal *types.UnicitySeal) (nextEpochStart uint64, known bool, err error)
+
+// SessionOption configures a Session.
+type SessionOption func(*Session)
+
+// WithEpochEnd makes the session enforce the known end boundary of the seal's epoch on
+// every authentication, also for seals it has authenticated before.
+func WithEpochEnd(r EpochEndResolver) SessionOption { return func(s *Session) { s.epochEnd = r } }
+
 // NewSession creates the operation session for the policy.
-func NewSession(policy Policy, resolver TrustBaseResolver) (*Session, error) {
+func NewSession(policy Policy, resolver TrustBaseResolver, opts ...SessionOption) (*Session, error) {
 	if resolver == nil {
 		return nil, fail(OutcomeInvalidInput, -1, nil, "trust base resolver is required")
 	}
 	if err := policy.validate(); err != nil {
 		return nil, err
 	}
-	return &Session{policy: policy, resolver: resolver, seals: map[string]struct{}{}, bodies: map[string]struct{}{}}, nil
+	s := &Session{policy: policy, resolver: resolver, seals: map[string]struct{}{}, bodies: map[string]struct{}{}}
+	for _, o := range opts {
+		o(s)
+	}
+	return s, nil
 }
 
 // Counters returns a snapshot of the instrumentation counters.
@@ -104,6 +121,16 @@ func (s *Session) verifySeal(seal *types.UnicitySeal, count func(*Counters)) err
 	authority, err := authorityIdentity(tb)
 	if err != nil {
 		return &sealError{err}
+	}
+	if s.epochEnd != nil {
+		// before the memo: history learned after a successful check still applies
+		next, known, err := s.epochEnd(seal)
+		if err != nil {
+			return &sealError{fmt.Errorf("resolving epoch end: %w", err)}
+		}
+		if known && seal.RootChainRoundNumber >= next {
+			return &sealError{fmt.Errorf("seal round %d is at or after the start of the next epoch (round %d)", seal.RootChainRoundNumber, next)}
+		}
 	}
 	key := sealKey(sealBytes, authority, s.policy.id())
 	if s.seen(s.seals, key) {

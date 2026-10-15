@@ -41,6 +41,21 @@ func NewTrustBaseManager(log *logger.Logger, trustBaseStore TrustBaseStore, bftR
 	}
 }
 
+// GetAdmitted returns the trust base of the epoch only if it is already admitted to the
+// local store. It never asks the BFT node and never stores anything: it is the lookup for
+// history the aggregator already knows (for example the start of the next epoch, which
+// ends the interval an epoch's keys may certify in).
+func (s *TrustBaseManager) GetAdmitted(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, bool, error) {
+	tb, err := s.trustBaseStore.GetByEpoch(ctx, epoch)
+	if err != nil {
+		if errors.Is(err, interfaces.ErrTrustBaseNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("failed to load admitted trust base for epoch %d: %w", epoch, err)
+	}
+	return tb, tb != nil, nil
+}
+
 // GetByEpoch returns trust base from (in order of precedence):
 // cache -> storage -> BFT node -> error if not found.
 // If new trust base is found from BFT node then the trust base is persisted to TrustBaseStore before returning.

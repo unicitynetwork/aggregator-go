@@ -14,6 +14,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial"
 	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial/prooftest"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -52,7 +53,7 @@ func proposeBlock(c *BFTClientImpl, number uint64, root []byte) {
 }
 
 func response(f *prooftest.Fixture, view []byte) *certification.CertificationResponse {
-	return &certification.CertificationResponse{Partition: prooftest.Partition, Shard: f.Shard, UC: *f.UC, PartitionView: view}
+	return &certification.CertificationResponse{Partition: prooftest.Partition, Shard: f.Shard, Technical: f.TR, UC: *f.UC, PartitionView: view}
 }
 
 func Test_ProofMaterial_FinalizedWithView(t *testing.T) {
@@ -351,7 +352,7 @@ func (s stubTrustBases) GetByEpoch(_ context.Context, epoch uint64) (*types.Root
 			return tb, nil
 		}
 	}
-	return nil, errors.New("trust base not found")
+	return nil, interfaces.ErrTrustBaseNotFound
 }
 
 // wrongEpochStore answers every request with one fixed trust base, whatever epoch was asked

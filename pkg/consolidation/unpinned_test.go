@@ -2,6 +2,7 @@ package consolidation
 
 import (
 	"crypto"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -79,5 +80,46 @@ func TestConsolidate_EvidenceShardMustMatchConsolidatedShard(t *testing.T) {
 		f.in.Bound = bound
 		_, err = s.Consolidate(f.in)
 	}
+	require.Error(t, err)
+}
+
+// A known end of the seal's epoch bounds the authority, also for seals the session has
+// already authenticated before the history was learned.
+func TestSession_KnownEpochEndRetiresTheMasterSeal(t *testing.T) {
+	f := newFixture(t, ts())
+	end := uint64(0) // next epoch start, unknown while zero
+	s, err := NewSession(f.policy, f.resolver(), WithEpochEnd(func(seal *types.UnicitySeal) (uint64, bool, error) {
+		return end, end != 0, nil
+	}))
+	require.NoError(t, err)
+	_, err = f.consolidate(s)
+	require.NoError(t, err)
+
+	// start-1 is still inside the epoch: accepted, served by the memo
+	end = f.round + 1
+	_, err = s.Consolidate(f.in)
+	require.NoError(t, err)
+
+	// the boundary equals the round of the seal: retired, though the seal was authenticated before
+	end = f.round
+	_, err = s.Consolidate(f.in)
+	requireOutcome(t, err, OutcomeUnauthenticated)
+	end = f.round - 1
+	_, err = s.Consolidate(f.in)
+	requireOutcome(t, err, OutcomeUnauthenticated)
+
+	// a cold session with the history refuses as well, evidence included
+	f2 := newFixture(t, ts())
+	end2 := f2.round - 5
+	s2, err := NewSession(f2.policy, f2.resolver(), WithEpochEnd(func(*types.UnicitySeal) (uint64, bool, error) { return end2, true, nil }))
+	require.NoError(t, err)
+	_, err = f2.consolidate(s2)
+	require.Error(t, err)
+
+	// resolver failure is not "unknown"
+	f3 := newFixture(t, ts())
+	s3, err := NewSession(f3.policy, f3.resolver(), WithEpochEnd(func(*types.UnicitySeal) (uint64, bool, error) { return 0, false, errors.New("history unavailable") }))
+	require.NoError(t, err)
+	_, err = f3.consolidate(s3)
 	require.Error(t, err)
 }
