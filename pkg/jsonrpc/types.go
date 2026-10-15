@@ -52,6 +52,10 @@ const (
 	DatabaseErrorCode      = -32004
 	ConsensusErrorCode     = -32005
 	ConcurrencyLimitCode   = -32006
+	// LimitExceededCode is a method-specific size/count limit (get_inclusion_proofs.v1).
+	LimitExceededCode = -32007
+	// ProofUnavailableCode: the requested proof material cannot be served (get_inclusion_proofs.v1).
+	ProofUnavailableCode = -32008
 )
 
 // Predefined errors
@@ -141,4 +145,36 @@ func (r *Request) UnmarshalParams(v interface{}) error {
 	}
 
 	return json.Unmarshal(r.Params, v)
+}
+
+// ErrorData is the structured data of the get_inclusion_proofs.v1 errors:
+// {"reason":"proof_unavailable","detail":"view_not_retained","retryable":true}.
+// Limit is a bounded integer only for limit errors.
+type ErrorData struct {
+	Reason    string `json:"reason"`
+	Detail    string `json:"detail"`
+	Retryable bool   `json:"retryable"`
+	Limit     *int   `json:"limit,omitempty"`
+}
+
+// NewDetailedError creates an error carrying ErrorData.
+func NewDetailedError(code int, message, reason, detail string, retryable bool, limit *int) *Error {
+	return &Error{Code: code, Message: message, Data: ErrorData{Reason: reason, Detail: detail, Retryable: retryable, Limit: limit}}
+}
+
+// MethodLimits are request/response bounds applied to one method before its
+// handler runs (and, for the response, before any byte is written). Zero means
+// unlimited. They are checked after the generic envelope decode, so they do not
+// replace the deployment's ingress body cap.
+type MethodLimits struct {
+	// MaxRequestBytes bounds the bytes of the JSON-RPC request object.
+	MaxRequestBytes int
+	// MaxParamsBytes bounds the raw params.
+	MaxParamsBytes int
+	// MaxIDBytes bounds the JSON encoding of the request ID.
+	MaxIDBytes int
+	// MaxResponseBytes bounds the complete serialized response, including the
+	// envelope and request ID. An oversized success is replaced by a
+	// limit_exceeded/response_bytes error; nothing partial is ever written.
+	MaxResponseBytes int
 }
