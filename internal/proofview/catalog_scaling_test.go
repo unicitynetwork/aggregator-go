@@ -89,6 +89,31 @@ func checkInvariants(t testing.TB, c *Catalog) {
 		held += v.attIdx.size()
 	}
 	require.Equal(t, held, indexed)
+	// the composite index holds exactly the live views with a certification, under their latest one
+	wantIn, wantRoots := 0, map[string]int{}
+	for v := c.head; v != nil; v = v.next {
+		if v.attTail == nil {
+			require.False(t, v.compatIn)
+			continue
+		}
+		wantIn++
+		wantRoots[string(v.root)]++
+		require.True(t, v.compatIn)
+		require.Equal(t, compatKey{root: string(v.root), digest: v.attTail.compat}, v.compat)
+		cs := c.byCompat[v.compat]
+		require.NotNil(t, cs)
+		require.Contains(t, cs.views, v)
+		for o := range cs.views {
+			require.LessOrEqual(t, o.seq, cs.newest.seq, "newest is the newest holder")
+		}
+	}
+	gotIn := 0
+	for _, cs := range c.byCompat {
+		require.NotEmpty(t, cs.views)
+		gotIn += len(cs.views)
+	}
+	require.Equal(t, wantIn, gotIn)
+	require.Equal(t, wantRoots, c.rootCertified)
 	var retiredViews, retiredAtts uint64
 	for v := range c.retired {
 		require.True(t, v.retired)

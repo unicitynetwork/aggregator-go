@@ -29,19 +29,26 @@ func (c *Catalog) ViewForDigest(digest [sha256.Size]byte) (BlockIdentity, []byte
 	return BlockIdentity{}, nil, false
 }
 
-// ViewForRootMatching returns the identity of the newest retained view with the given
-// root whose latest certification satisfies match (eg is the same input record and
-// configuration), without pinning it. Equal roots across blocks never select a view on
-// the root alone.
-func (c *Catalog) ViewForRootMatching(root []byte, match func(latestUC []byte) bool) (BlockIdentity, bool) {
+// ViewForRootCompatible returns the identity of the newest retained view of the given root whose latest
+// certification has this CompatDigest (the same accepted input record and configuration), without pinning
+// it. Equal roots across blocks never select a view on the root alone. It is a single index probe,
+// independent of how many retained states share the root.
+func (c *Catalog) ViewForRootCompatible(root []byte, compat [sha256.Size]byte) (BlockIdentity, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for v := c.byRoot[string(root)]; v != nil; v = v.rootOlder {
-		if v.attTail != nil && match(v.attTail.uc) {
-			return v.block.clone(), true
-		}
+	c.compatProbes++
+	if cs := c.byCompat[compatKey{root: string(root), digest: compat}]; cs != nil && cs.newest != nil {
+		return cs.newest.block.clone(), true
 	}
 	return BlockIdentity{}, false
+}
+
+// HasCertifiedRoot reports whether some retained view of the root has a certification (O(1)).
+func (c *Catalog) HasCertifiedRoot(root []byte) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.compatProbes++
+	return c.rootCertified[string(root)] > 0
 }
 
 // PartitionViewForDigest returns a copy of the partition view attached to the retained

@@ -263,8 +263,8 @@ func (p *Publisher) PublishProofMaterial(ctx context.Context, m *proofmaterial.M
 			// repeat/timeout UC: onto the retained state of the same root whose accepted
 			// input record and configuration it repeats, never by the root alone
 			var ok bool
-			if id, ok = p.catalog.ViewForRootMatching(root, func(ref []byte) bool { return compatible(ref, m.UC) == nil }); !ok {
-				if _, any := p.catalog.ViewForRootMatching(root, func([]byte) bool { return true }); any {
+			if id, ok = p.catalog.ViewForRootCompatible(root, proofview.CompatDigest(m.UC)); !ok {
+				if p.catalog.HasCertifiedRoot(root) {
 					metrics.ProofViewPublicationTotal.WithLabelValues(ResultIncompatible).Inc()
 					return ErrIncompatibleCertification
 				}
@@ -290,23 +290,5 @@ func (p *Publisher) PublishProofMaterial(ctx context.Context, m *proofmaterial.M
 // ErrIncompatibleCertification: the certification is not for the retained state's accepted
 // input record / shard configuration (an unsupported boundary, eg an epoch change).
 var ErrIncompatibleCertification = errors.New("certification is incompatible with the retained state")
-
-// compatible requires the new certification to repeat the retained state's accepted
-// input record (round, epoch, state, previous and block hashes) and shard configuration.
-func compatible(refUCBytes []byte, uc *types.UnicityCertificate) error {
-	var ref types.UnicityCertificate
-	if err := types.Cbor.Unmarshal(refUCBytes, &ref); err != nil || ref.InputRecord == nil || uc.InputRecord == nil {
-		return fmt.Errorf("%w: unreadable reference", ErrIncompatibleCertification)
-	}
-	a, b := ref.InputRecord, uc.InputRecord
-	if a.RoundNumber != b.RoundNumber || a.Epoch != b.Epoch ||
-		!bytes.Equal(a.Hash, b.Hash) || !bytes.Equal(a.PreviousHash, b.PreviousHash) || !bytes.Equal(a.BlockHash, b.BlockHash) {
-		return fmt.Errorf("%w: input record differs", ErrIncompatibleCertification)
-	}
-	if !bytes.Equal(ref.ShardConfHash, uc.ShardConfHash) {
-		return fmt.Errorf("%w: shard configuration differs", ErrIncompatibleCertification)
-	}
-	return nil
-}
 
 var _ proofmaterial.Sink = (*Publisher)(nil)

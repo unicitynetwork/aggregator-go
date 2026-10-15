@@ -94,7 +94,7 @@ func newRefAttachment(cert Certification, root []byte) (*refAttachment, error) {
 	if len(cert.UC) == 0 {
 		return nil, fmt.Errorf("%w: missing UC", ErrInvalidPublication)
 	}
-	got, round, err := decodeUC(cert.UC)
+	got, round, _, err := decodeUC(cert.UC)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidPublication, err)
 	}

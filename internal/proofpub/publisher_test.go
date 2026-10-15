@@ -248,7 +248,9 @@ func Test_HistoricalRetryWithSameRootNeverRegressesLatest(t *testing.T) {
 	l := latest(t, e.cat)
 	require.EqualValues(t, 18, l.Block().Number.Uint64(), "latest must not regress to block 1")
 	require.Equal(t, []byte(head.UnicityCertificate), l.UC())
-	id, found := e.cat.ViewForRootMatching(root, func([]byte) bool { return true })
+	var ucHead types.UnicityCertificate
+	require.NoError(t, types.Cbor.Unmarshal(head.UnicityCertificate, &ucHead))
+	id, found := e.cat.ViewForRootCompatible(root, proofview.CompatDigest(&ucHead))
 	require.True(t, found)
 	require.EqualValues(t, 18, id.Number.Uint64())
 
@@ -320,6 +322,12 @@ func Test_Sink_RejectsIncompatibleAttachments(t *testing.T) {
 		require.ErrorIs(t, err, proofpub.ErrIncompatibleCertification)
 		g2 := prooftest.New(t, 2, 2, root, 92) // other shard round, same root
 		err = e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, g2, nil, 0, false))
+		require.ErrorIs(t, err, proofpub.ErrIncompatibleCertification)
+	})
+	t.Run("different previous hash on the same state hash", func(t *testing.T) {
+		g := prooftest.New(t, 2, 1, root, 96)
+		g.UC.InputRecord.PreviousHash = prooftest.Hash("another predecessor")
+		err := e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, g, nil, 0, false))
 		require.ErrorIs(t, err, proofpub.ErrIncompatibleCertification)
 	})
 	t.Run("finalized material for a block identity with another configuration", func(t *testing.T) {
