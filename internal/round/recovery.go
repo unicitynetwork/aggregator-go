@@ -49,6 +49,10 @@ func (rm *RoundManager) FinalizeCertifiedProposal(
 	if block.Status != "" && block.Status != models.FinalityStatusProposed && block.Status != models.FinalityStatusFinalizing {
 		return false, nil
 	}
+	if !bytes.Equal(block.UnicityCertificate, unicityCertificate) {
+		// a persisted partition view belongs to the UC bytes it arrived with
+		block.PartitionView = nil
+	}
 	block.UnicityCertificate = unicityCertificate
 
 	records, err := loadAggregatorRecordsForBlockAnyFinalization(ctx, rm.storage, block)

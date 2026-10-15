@@ -87,6 +87,11 @@ func NewLibP2PNetwork(ctx context.Context, peer *network.Peer, logger *logger.Lo
 			ProtocolID: network.ProtocolUnicityCertificates,
 			TypeFn:     func() any { return &certification.CertificationResponse{} },
 		},
+		{
+			ProtocolID:   network.ProtocolUnicityCertificatesV2,
+			MaxFrameSize: certification.MaxCertificationResponseV2Frame,
+			TypeFn:       func() any { return &certification.CertificationResponseV2{} },
+		},
 	}
 	if err = n.RegisterReceiveProtocols(receiveProtocolDescriptions); err != nil {
 		return nil, fmt.Errorf("registering receive protocols: %w", err)
