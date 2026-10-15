@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go/modules/mongodb"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
@@ -405,4 +406,37 @@ func TestAggregatorRecordStorage_RoundTrip(t *testing.T) {
 	require.NotNil(t, retrieved)
 	require.Equal(t, record.StateID, retrieved.StateID)
 	require.Equal(t, record.CertificationData.SourceStateHash, retrieved.CertificationData.SourceStateHash)
+}
+
+func TestAggregatorRecordStorage_StoredSizeProjection(t *testing.T) {
+	db := setupAggregatorRecordTestDB(t)
+	storage := NewAggregatorRecordStorage(db)
+	ctx := context.Background()
+	require.NoError(t, storage.CreateIndexes(ctx))
+
+	finalizedState := testStateIDHex("0f11")
+	proposedState := testStateIDHex("0f12")
+	require.NoError(t, storage.StoreBatch(ctx, []*models.AggregatorRecord{
+		createTestAggregatorRecord(finalizedState, 710, 0),
+		createTestAggregatorRecord(proposedState, 711, 1),
+	}))
+	storeTestBlock(t, ctx, db, 710, true)
+	storeTestBlock(t, ctx, db, 711, false)
+
+	size, found, err := storage.GetStoredSizeByStateID(ctx, api.RequireNewImprintV2(finalizedState))
+	require.NoError(t, err)
+	require.True(t, found)
+
+	// it is the BSON size of the stored document, read without decoding it
+	var raw bson.Raw
+	require.NoError(t, db.Collection(aggregatorRecordCollection).FindOne(ctx, bson.M{"stateId": api.RequireNewImprintV2(finalizedState).String()}).Decode(&raw))
+	require.EqualValues(t, len(raw), size)
+
+	// only finalized records are visible, as for GetByStateID
+	_, found, err = storage.GetStoredSizeByStateID(ctx, api.RequireNewImprintV2(proposedState))
+	require.NoError(t, err)
+	require.False(t, found)
+	_, found, err = storage.GetStoredSizeByStateID(ctx, api.RequireNewImprintV2(testStateIDHex("0fff")))
+	require.NoError(t, err)
+	require.False(t, found)
 }

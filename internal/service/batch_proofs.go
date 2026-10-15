@@ -11,6 +11,8 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/proofview"
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	"github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
@@ -68,8 +70,22 @@ func (s catalogSource) AcquireRoot(ctx context.Context, root []byte) (BatchLease
 // BatchRecordSource loads finalized, immutable records by state ID. The
 // storage's AggregatorRecordStorage satisfies it.
 type BatchRecordSource interface {
+	// GetStoredSizeByStateID returns the stored size of the finalized record
+	// without loading it (a bounded server-side projection); found is false if
+	// there is none. It is consulted before GetByStateID so a record that cannot
+	// fit the response budget is never materialized.
+	GetStoredSizeByStateID(ctx context.Context, stateID api.StateID) (size int64, found bool, err error)
 	GetByStateID(ctx context.Context, stateID api.StateID) (*models.AggregatorRecord, error)
 }
+
+// encodedSizeFactor converts a record's stored size to a conservative upper
+// bound of its contribution to the serialized response (hex expansion of the
+// CBOR proof element), and responseElementOverhead covers quoting, separator
+// and the fixed proof fields.
+const (
+	encodedSizeFactor       = 2
+	responseElementOverhead = 512
+)
 
 // BatchShardValidator checks that a state ID routes to this shard.
 type BatchShardValidator interface {
@@ -216,6 +232,15 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 	}
 	defer lease.Release()
 
+	// All database and proof work runs under a context cancelled by the request
+	// (and its execution deadline) and by the lease, so pressure cancellation or
+	// the lease deadline interrupts an in-flight database call too.
+	work, cancelWork := context.WithCancel(ctx)
+	defer cancelWork()
+	stopWatch := context.AfterFunc(lease.Context(), cancelWork)
+	defer stopWatch()
+	ctx = work
+
 	var view []byte
 	if latest {
 		if view = lease.PartitionView(); len(view) == 0 {
@@ -238,6 +263,21 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 		}
 		if err := lctx.Err(); err != nil {
 			return nil, ctxError(err)
+		}
+		// Preflight: reject before loading or encoding a record that cannot fit
+		// the remaining response budget.
+		stored, found, serr := s.records.GetStoredSizeByStateID(ctx, req.StateIDs[i])
+		if serr != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, ctxError(cerr)
+			}
+			return nil, &BatchError{Code: jsonrpc.DatabaseErrorCode, Message: "Database error", Internal: serr}
+		}
+		if !found {
+			return nil, unavailable("state_not_included")
+		}
+		if stored < 0 || int64(size)+stored*encodedSizeFactor+responseElementOverhead > int64(s.maxBytes) {
+			return nil, limitExceeded(api.DetailResponseBytes, s.maxBytes)
 		}
 		p, berr := s.buildProof(ctx, lease, req.StateIDs[i], key, blk, ucBytes)
 		if berr != nil {
@@ -277,6 +317,10 @@ func (s *BatchProofService) buildProof(ctx context.Context, lease BatchLease, id
 		}
 		if cerr := lease.Context().Err(); cerr != nil {
 			return nil, ctxError(cerr)
+		}
+		if errors.Is(err, backend.ErrPublishedProofLeafNotFound) || errors.Is(err, smt.ErrLeafNotFound) {
+			// the record is finalized but its leaf is not in the pinned root
+			return nil, unavailable("state_not_included")
 		}
 		return nil, &BatchError{Code: jsonrpc.InternalErrorCode, Message: "Internal error", Internal: fmt.Errorf("inclusion cert: %w", err)}
 	}

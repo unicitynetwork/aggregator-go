@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -106,4 +107,27 @@ func TestInclusionProofsResponseJSONShape(t *testing.T) {
 	b, err = json.Marshal(&GetInclusionProofsResponseV1{Proofs: []*GetInclusionProofResponseV2{}, PartitionView: HexBytes{0xab}})
 	require.NoError(t, err)
 	require.Equal(t, `{"proofs":[],"partitionView":"ab"}`, string(b))
+}
+
+func TestAppendJSONBoundedMatchesMarshalAndStopsEarly(t *testing.T) {
+	mk := func(n, witness int) *GetInclusionProofsResponseV1 {
+		proofs := make([]*GetInclusionProofResponseV2, n)
+		for i := range proofs {
+			rt := uint64(7)
+			proofs[i] = &GetInclusionProofResponseV2{BlockNumber: uint64(i), InclusionProof: &InclusionProofV2{
+				CertificationData: &CertificationData{Version: CertificationDataVersion, OwnerPredicate: Predicate{Engine: 1, Code: []byte{1}, Params: []byte{2}},
+					SourceStateHash: bytes.Repeat([]byte{3}, 32), TransactionHash: RequireNewImprintV2(strings.Repeat("22", 32)), Witness: bytes.Repeat([]byte{4}, witness)},
+				ReferenceTime: &rt, CertificateBytes: make([]byte, BitmapSize), UnicityCertificate: []byte{0x01}}}
+		}
+		return &GetInclusionProofsResponseV1{Proofs: proofs}
+	}
+	for _, r := range []*GetInclusionProofsResponseV1{mk(0, 1), mk(3, 65), {Proofs: mk(2, 10).Proofs, PartitionView: HexBytes{1, 2, 0xff}}} {
+		want, err := json.Marshal(r)
+		require.NoError(t, err)
+		got, err := r.AppendJSONBounded(nil, len(want))
+		require.NoError(t, err)
+		require.Equal(t, string(want), string(got))
+		_, err = r.AppendJSONBounded(nil, len(want)-1)
+		require.ErrorIs(t, err, ErrBoundedOutputExceeded)
+	}
 }
