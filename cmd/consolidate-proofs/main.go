@@ -35,6 +35,7 @@ const (
 	exitInput       = 2 // bad flags, configuration or input files
 	exitUnavailable = 3 // explicit unavailable outcome; inputs intact, nothing resubmitted
 	exitRejected    = 4 // refused: server rejection, malformed response or verification failure
+	exitOutput      = 5 // the bundle could not be delivered (stdout or output file)
 )
 
 // Config is the trusted deployment configuration.
@@ -145,11 +146,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	data = append(data, '\n')
 	if *outPath == "" {
-		_, _ = stdout.Write(data)
+		n, err := stdout.Write(data)
+		if err == nil && n < len(data) {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
+			return fail(stderr, exitOutput, "output", fmt.Errorf("writing bundle to stdout: %w", err))
+		}
 		return exitOK
 	}
 	if err := writeAtomic(*outPath, data); err != nil {
-		return fail(stderr, exitInput, "output", err)
+		return fail(stderr, exitOutput, "output", err)
 	}
 	return exitOK
 }

@@ -58,5 +58,5 @@ consolidate-proofs -config config.json -in items.json [-out bundle.json] [-maste
 
 `items.json`: `{"items":[{"request":"<hex CBOR CertificationRequest>","proof":"<hex CBOR get_inclusion_proof.v2 result>"}]}`.
 The output bundle (`version`, `masterShard`, `rootRound`, `stats`, `counters`, `proofs[]` in input order, `unicityCertificates`)
-is written atomically (temp file + rename) only on success. Exit codes: 0 ok, 2 input/config, 3 unavailable, 4 refused.
+is written atomically (temp file + rename) only on success. Exit codes: 0 ok, 2 input/config, 3 unavailable, 4 refused, 5 the bundle could not be delivered (stdout/file write failure).
 A structured error object is printed to stderr.

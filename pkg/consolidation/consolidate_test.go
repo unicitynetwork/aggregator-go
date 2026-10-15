@@ -527,3 +527,34 @@ func TestRootRoundBound_ShardOfMaximumRound(t *testing.T) {
 		})
 	}
 }
+
+func TestAuthenticateMaster_Stage(t *testing.T) {
+	f := newFixture(t, ts())
+	s := f.session()
+	b, err := s.AuthenticateEvidence(f.defaultEvidence())
+	require.NoError(t, err)
+	m, err := s.AuthenticateMaster(b, f.in.Master, f.in.PartitionView)
+	require.NoError(t, err)
+	require.Equal(t, f.round, m.Round())
+	require.Equal(t, 1, s.Counters().QuorumChecks)
+	root, err := m.PeerRoot(f.in.Peers[0].ShardID)
+	require.NoError(t, err)
+	require.Equal(t, f.view.Leaves[1].InputRecord.Hash, root)
+	_, err = m.PeerRoot(types.ShardID{})
+	requireOutcome(t, err, OutcomeBindingMismatch)
+
+	// completing reuses the verified master: still one quorum check
+	out, err := s.Complete(m, f.in.Peers)
+	require.NoError(t, err)
+	require.Len(t, out.Shards, 2)
+	require.Equal(t, 1, s.Counters().QuorumChecks)
+
+	// a master authenticated by another session is refused
+	_, err = f.session().Complete(m, f.in.Peers)
+	requireOutcome(t, err, OutcomeInvalidInput)
+	// bad view / signature stop at the master stage
+	_, err = s.AuthenticateMaster(b, f.in.Master, f.in.PartitionView[:len(f.in.PartitionView)-1])
+	requireOutcome(t, err, OutcomeInvalidInput)
+	_, err = s.AuthenticateMaster(nil, f.in.Master, f.in.PartitionView)
+	requireOutcome(t, err, OutcomeUnavailable)
+}

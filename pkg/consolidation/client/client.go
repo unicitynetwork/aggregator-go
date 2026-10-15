@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -30,6 +31,9 @@ import (
 
 // Method is the only JSON-RPC method this client calls.
 const Method = "get_inclusion_proofs.v1"
+
+// requestID is the JSON-RPC id of every request (one request per connection use).
+const requestID = 1
 
 const (
 	// DefaultTimeout is the default total deadline of one attempt.
@@ -150,9 +154,30 @@ func (c *Client) Consolidate(ctx context.Context, items []Item) (*Result, error)
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
 
-	session, err := consolidation.NewSession(c.cfg.Policy, c.cfg.Resolver)
+	// trust resolution cooperates with the attempt context
+	resolver := func(seal *types.UnicitySeal) (types.RootTrustBase, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return c.cfg.Resolver(seal)
+	}
+	session, err := consolidation.NewSession(c.cfg.Policy, resolver)
 	if err != nil {
 		return nil, libError(err)
+	}
+	// ctxFail reports a done attempt context as the typed unavailable outcome, also
+	// when a local verification error was merely a consequence of it
+	ctxFail := func() error {
+		if ctx.Err() == nil {
+			return nil
+		}
+		return transportError(ctx, types.ShardID{}, ctx.Err())
+	}
+	libFail := func(err error) error {
+		if cerr := ctxFail(); cerr != nil {
+			return cerr
+		}
+		return libError(err)
 	}
 	groups, err := c.group(items)
 	if err != nil {
@@ -166,7 +191,10 @@ func (c *Client) Consolidate(ctx context.Context, items []Item) (*Result, error)
 	}
 	bound, err := session.AuthenticateEvidence(ev)
 	if err != nil {
-		return nil, libError(err)
+		return nil, libFail(err)
+	}
+	if err := ctxFail(); err != nil {
+		return nil, err
 	}
 
 	master, err := c.pickMaster(groups, bound)
@@ -185,11 +213,19 @@ func (c *Client) Consolidate(ctx context.Context, items []Item) (*Result, error)
 		return nil, &Error{Kind: KindUnavailable, Shard: mg.ep.ShardID, Detail: "partition_view_unavailable", Err: errors.New("master response carries no partition view")}
 	}
 	stats.PartitionViewBytes = len(mres.view)
-	view, verr := types.DecodePartitionViewV1(mres.view)
-	if verr != nil {
-		return nil, &Error{Kind: KindInvalidResponse, Shard: mg.ep.ShardID, Err: verr}
-	}
 	stats.Waves = 1
+	if err := ctxFail(); err != nil {
+		return nil, err
+	}
+
+	// authenticate the master (view/UC binding, trusted seal, R >= R_min) before any peer is contacted
+	am, err := session.AuthenticateMaster(bound, shardResult(mg, items, mres), mres.view)
+	if err != nil {
+		return nil, libFail(err)
+	}
+	if err := ctxFail(); err != nil {
+		return nil, err
+	}
 
 	// wave 2: exact roots of the other participating shards, bounded parallel
 	peers := make([]*shardGroup, 0, len(groups)-1)
@@ -198,12 +234,12 @@ func (c *Client) Consolidate(ctx context.Context, items []Item) (*Result, error)
 		if gi == master {
 			continue
 		}
-		idx := slices.IndexFunc(view.Leaves, func(l types.PartitionViewLeafV1) bool { return l.ShardID.Equal(g.ep.ShardID) })
-		if idx < 0 || view.Leaves[idx].InputRecord == nil {
-			return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: errors.New("shard is not in the master view")}
+		root, err := am.PeerRoot(g.ep.ShardID)
+		if err != nil {
+			return nil, libFail(err)
 		}
 		peers = append(peers, g)
-		roots = append(roots, slices.Clone(view.Leaves[idx].InputRecord.Hash))
+		roots = append(roots, root)
 	}
 	pres, err := c.fetchAll(ctx, peers, roots, items, &stats)
 	if err != nil {
@@ -212,14 +248,21 @@ func (c *Client) Consolidate(ctx context.Context, items []Item) (*Result, error)
 	if len(peers) > 0 {
 		stats.Waves = 2
 	}
-
-	in := &consolidation.Input{Bound: bound, PartitionView: mres.view, Master: shardResult(mg, items, mres)}
-	for i, g := range peers {
-		in.Peers = append(in.Peers, shardResult(g, items, pres[i]))
+	if err := ctxFail(); err != nil {
+		return nil, err
 	}
-	out, err := session.Consolidate(in)
+
+	var peerResults []consolidation.ShardResult
+	for i, g := range peers {
+		peerResults = append(peerResults, shardResult(g, items, pres[i]))
+	}
+	out, err := session.Complete(am, peerResults)
 	if err != nil {
-		return nil, libError(err)
+		return nil, libFail(err)
+	}
+	// never publish success for a done attempt
+	if err := ctxFail(); err != nil {
+		return nil, err
 	}
 
 	res := &Result{Output: out, Order: make([]Position, len(items)), Counters: session.Counters(), Stats: stats}
@@ -312,7 +355,7 @@ func (c *Client) fetchAll(ctx context.Context, groups []*shardGroup, roots [][]b
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			case <-ctx.Done():
-				errs[i] = ctx.Err()
+				errs[i] = transportError(ctx, groups[i].ep.ShardID, ctx.Err())
 				return
 			}
 			var local Stats
@@ -330,24 +373,29 @@ func (c *Client) fetchAll(ctx context.Context, groups []*shardGroup, roots [][]b
 		}()
 	}
 	wg.Wait()
-	// prefer a real failure over the cancellations it caused
+	// prefer the originating failure over the cancellations it caused
 	var first error
-	for i, err := range errs {
+	for _, err := range errs {
 		if err == nil {
 			continue
 		}
-		if !errors.Is(err, context.Canceled) {
+		if !isContextError(err) {
 			return nil, err
 		}
 		if first == nil {
 			first = err
 		}
-		_ = i
 	}
 	if first != nil {
-		return nil, &Error{Kind: KindUnavailable, Detail: "cancelled", Err: first}
+		return nil, first
 	}
 	return res, nil
+}
+
+// isContextError reports a typed error that only reflects cancellation or an expired deadline.
+func isContextError(err error) bool {
+	var ce *Error
+	return errors.As(err, &ce) && ce.Kind == KindUnavailable && (ce.Detail == "cancelled" || ce.Detail == "deadline")
 }
 
 type rpcRequest struct {
@@ -363,16 +411,25 @@ type rpcParams struct {
 }
 
 type rpcResponse struct {
-	Result *struct {
-		Proofs        []*api.GetInclusionProofResponseV2 `json:"proofs"`
-		PartitionView api.HexBytes                       `json:"partitionView"`
-	} `json:"result"`
-	Error *struct {
-		Code    int             `json:"code"`
-		Message string          `json:"message"`
-		Data    json.RawMessage `json:"data"`
-	} `json:"error"`
-	ID json.RawMessage `json:"id"`
+	JSONRPC string          `json:"jsonrpc"`
+	Result  json.RawMessage `json:"result"`
+	Error   json.RawMessage `json:"error"`
+	ID      json.RawMessage `json:"id"`
+}
+
+type rpcResult struct {
+	Proofs        []*api.GetInclusionProofResponseV2 `json:"proofs"`
+	PartitionView api.HexBytes                       `json:"partitionView"`
+}
+
+type rpcErrorBody struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data"`
+}
+
+func present(raw json.RawMessage) bool {
+	return len(raw) > 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 
 // fetch makes exactly one request for the group's items; root nil means latest.
@@ -385,7 +442,7 @@ func (c *Client) fetch(ctx context.Context, g *shardGroup, items []Item, root []
 	if root != nil {
 		stateRoot = hex.EncodeToString(root)
 	}
-	body, err := json.Marshal(rpcRequest{JSONRPC: jsonrpc.Version, ID: 1, Method: Method, Params: rpcParams{StateIDs: ids, StateRoot: stateRoot}})
+	body, err := json.Marshal(rpcRequest{JSONRPC: jsonrpc.Version, ID: requestID, Method: Method, Params: rpcParams{StateIDs: ids, StateRoot: stateRoot}})
 	if err != nil {
 		return nil, &Error{Kind: KindInput, Shard: g.ep.ShardID, Err: err}
 	}
@@ -415,19 +472,37 @@ func (c *Client) fetch(ctx context.Context, g *shardGroup, items []Item, root []
 		}
 		return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: err}
 	}
-	if rr.Error != nil {
-		return nil, rpcError(g.ep.ShardID, rr.Error.Code, rr.Error.Message, rr.Error.Data)
+	invalid := func(format string, a ...any) error {
+		return &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: fmt.Errorf(format, a...)}
 	}
-	if rr.Result == nil {
-		return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: errors.New("response has neither result nor error")}
+	if rr.JSONRPC != jsonrpc.Version {
+		return nil, invalid("response jsonrpc version %q, want %q", rr.JSONRPC, jsonrpc.Version)
 	}
-	if len(rr.Result.Proofs) != len(g.items) {
-		return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: fmt.Errorf("got %d proofs for %d states", len(rr.Result.Proofs), len(g.items))}
+	if string(bytes.TrimSpace(rr.ID)) != strconv.Itoa(requestID) {
+		return nil, invalid("response id %s does not match request id %d", rr.ID, requestID)
 	}
-	for i, p := range rr.Result.Proofs {
+	hasResult, hasError := present(rr.Result), present(rr.Error)
+	if hasResult == hasError {
+		return nil, invalid("response must carry exactly one of result and error")
+	}
+	if hasError {
+		var eb rpcErrorBody
+		if err := json.Unmarshal(rr.Error, &eb); err != nil {
+			return nil, invalid("malformed error object: %v", err)
+		}
+		return nil, rpcError(g.ep.ShardID, eb.Code, eb.Message, eb.Data)
+	}
+	var res rpcResult
+	if err := json.Unmarshal(rr.Result, &res); err != nil {
+		return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: err}
+	}
+	if len(res.Proofs) != len(g.items) {
+		return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: fmt.Errorf("got %d proofs for %d states", len(res.Proofs), len(g.items))}
+	}
+	for i, p := range res.Proofs {
 		if p == nil || p.InclusionProof == nil {
 			return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: fmt.Errorf("proof %d is empty", i)}
 		}
 	}
-	return &batchResponse{proofs: rr.Result.Proofs, view: rr.Result.PartitionView}, nil
+	return &batchResponse{proofs: res.Proofs, view: res.PartitionView}, nil
 }

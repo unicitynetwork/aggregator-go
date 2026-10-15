@@ -1,0 +1,232 @@
+package client_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/aggregator-go/internal/consolidationsim"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
+	"github.com/unicitynetwork/aggregator-go/pkg/consolidation"
+	"github.com/unicitynetwork/aggregator-go/pkg/consolidation/client"
+)
+
+func peerCalls(sim *consolidationsim.Sim) int {
+	n := 0
+	for _, sh := range sim.Shards[:len(sim.Shards)-1] {
+		n += len(sh.Calls())
+	}
+	return n
+}
+
+// tamperMaster rewrites the master's response through fn (a decoded result object).
+func tamperMaster(sim *consolidationsim.Sim, fn func(res map[string]any)) {
+	m := sim.Shards[len(sim.Shards)-1]
+	m.Hook = func(w http.ResponseWriter, body []byte) bool {
+		m.Hook = nil
+		env := serveReal(m, body)
+		fn(env["result"].(map[string]any))
+		_ = json.NewEncoder(w).Encode(env)
+		return true
+	}
+}
+
+// serveReal runs the shard's real handler and returns the decoded envelope.
+func serveReal(sh *consolidationsim.Shard, body []byte) map[string]any {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	sh.Server.Config.Handler.ServeHTTP(rec, req)
+	var env map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &env)
+	return env
+}
+
+func corruptSeal(t *testing.T, res map[string]any) {
+	proofs := res["proofs"].([]any)
+	for i, p := range proofs {
+		raw, err := hex.DecodeString(p.(string))
+		require.NoError(t, err)
+		var pr api.GetInclusionProofResponseV2
+		require.NoError(t, types.Cbor.Unmarshal(raw, &pr))
+		var uc types.UnicityCertificate
+		require.NoError(t, types.Cbor.Unmarshal(pr.InclusionProof.UnicityCertificate, &uc))
+		for k := range uc.UnicitySeal.Signatures {
+			uc.UnicitySeal.Signatures[k][0] ^= 0xff
+		}
+		pr.InclusionProof.UnicityCertificate, err = types.Cbor.Marshal(&uc)
+		require.NoError(t, err)
+		raw, err = types.Cbor.Marshal(&pr)
+		require.NoError(t, err)
+		proofs[i] = hex.EncodeToString(raw)
+	}
+}
+
+func corruptView(t *testing.T, res map[string]any) {
+	raw, err := hex.DecodeString(res["partitionView"].(string))
+	require.NoError(t, err)
+	v, err := types.DecodePartitionViewV1(raw)
+	require.NoError(t, err)
+	v.Leaves[0].InputRecord.RoundNumber++
+	raw, err = v.MarshalCBOR()
+	require.NoError(t, err)
+	res["partitionView"] = hex.EncodeToString(raw)
+}
+
+// Master authentication happens before any peer request.
+func TestConsolidate_MasterAuthenticatedBeforePeers(t *testing.T) {
+	t.Run("bad master seal signature", func(t *testing.T) {
+		sim, items := scenario(t, 4, 1)
+		for _, sh := range sim.Shards[:3] {
+			sh.Hook = func(w http.ResponseWriter, _ []byte) bool {
+				http.Error(w, "down", http.StatusServiceUnavailable)
+				return true
+			}
+		}
+		tamperMaster(sim, func(res map[string]any) { corruptSeal(t, res) })
+		_, err := newClient(t, sim, nil).Consolidate(context.Background(), items)
+		ce := requireClientErr(t, err, client.KindVerification, "")
+		require.Equal(t, consolidation.OutcomeUnauthenticated, ce.Outcome)
+		require.Zero(t, peerCalls(sim), "no peer is contacted for an invalid master")
+	})
+	t.Run("view of another partition state", func(t *testing.T) {
+		sim, items := scenario(t, 4, 1)
+		tamperMaster(sim, func(res map[string]any) { corruptView(t, res) })
+		_, err := newClient(t, sim, nil).Consolidate(context.Background(), items)
+		ce := requireClientErr(t, err, client.KindVerification, "")
+		require.Contains(t, []consolidation.Outcome{consolidation.OutcomeInvalidInput, consolidation.OutcomeUnauthenticated}, ce.Outcome)
+		require.Zero(t, peerCalls(sim))
+	})
+	t.Run("insufficient master round", func(t *testing.T) {
+		sim, items := scenario(t, 4, 1)
+		// the newest evidence is in finalization 3; a master that answers with the
+		// (genuine) finalization 2 is below R_min
+		m := sim.Shards[0]
+		m.Hook = func(w http.ResponseWriter, body []byte) bool {
+			m.Hook = nil
+			sim.UseFinalization(2)
+			return false
+		}
+		master := sim.Shards[0].ID
+		_, err := newClient(t, sim, func(c *client.Config) { c.Master = &master }).Consolidate(context.Background(), items)
+		ce := requireClientErr(t, err, client.KindVerification, "")
+		require.Equal(t, consolidation.OutcomeStale, ce.Outcome)
+		require.Equal(t, 0, peerCalls2(sim, 0))
+	})
+}
+
+func peerCalls2(sim *consolidationsim.Sim, master int) int {
+	n := 0
+	for i, sh := range sim.Shards {
+		if i != master {
+			n += len(sh.Calls())
+		}
+	}
+	return n
+}
+
+// Cancellation and deadlines are honored during local verification and before success.
+func TestConsolidate_ContextHonoredDuringVerification(t *testing.T) {
+	t.Run("cancelled by the resolver during final verification (one shard)", func(t *testing.T) {
+		sim, items := scenario(t, 1, 2)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var calls atomic.Int32
+		res, err := newClient(t, sim, func(c *client.Config) {
+			inner := c.Resolver
+			c.Resolver = func(s *types.UnicitySeal) (types.RootTrustBase, error) {
+				if calls.Add(1) > 2 { // after evidence + master authentication: final stage
+					cancel()
+				}
+				return inner(s)
+			}
+		}).Consolidate(ctx, items)
+		require.Nil(t, res, "no success for a cancelled attempt")
+		requireClientErr(t, err, client.KindUnavailable, "cancelled")
+		require.True(t, client.IsUnavailable(err))
+	})
+	t.Run("deadline expiring inside the resolver", func(t *testing.T) {
+		sim, items := scenario(t, 2, 1)
+		res, err := newClient(t, sim, func(c *client.Config) {
+			c.Timeout = 80 * time.Millisecond
+			inner := c.Resolver
+			c.Resolver = func(s *types.UnicitySeal) (types.RootTrustBase, error) {
+				time.Sleep(150 * time.Millisecond)
+				return inner(s)
+			}
+		}).Consolidate(context.Background(), items)
+		require.Nil(t, res)
+		requireClientErr(t, err, client.KindUnavailable, "deadline")
+	})
+	t.Run("already cancelled", func(t *testing.T) {
+		sim, items := scenario(t, 2, 1)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := newClient(t, sim, nil).Consolidate(ctx, items)
+		require.True(t, client.IsUnavailable(err), "%v", err)
+	})
+}
+
+// A deadline reaching queued second-wave work is typed unavailable.
+func TestConsolidate_DeadlineWithQueuedPeers(t *testing.T) {
+	sim, items := scenario(t, 8, 1)
+	for _, sh := range sim.Shards[:7] {
+		sh.Delay = 2 * time.Second
+	}
+	_, err := newClient(t, sim, func(c *client.Config) { c.MaxParallel = 1; c.Timeout = 300 * time.Millisecond }).Consolidate(context.Background(), items)
+	requireClientErr(t, err, client.KindUnavailable, "deadline")
+	require.True(t, client.IsUnavailable(err))
+}
+
+func TestConsolidate_QueuedCancellationKeepsOriginatingFailure(t *testing.T) {
+	sim, items := scenario(t, 8, 1)
+	// peer 0 fails fast with a rejection; queued peers (MaxParallel=1) are cancelled afterwards
+	sim.Shards[0].Hook = func(w http.ResponseWriter, _ []byte) bool {
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": 1,
+			"error": map[string]any{"code": -32602, "message": "x", "data": map[string]any{"reason": "invalid_request", "detail": "wrong_shard"}}})
+		return true
+	}
+	for _, sh := range sim.Shards[1:7] {
+		sh.Delay = time.Second
+	}
+	_, err := newClient(t, sim, func(c *client.Config) { c.MaxParallel = 1 }).Consolidate(context.Background(), items)
+	requireClientErr(t, err, client.KindRejected, "wrong_shard")
+}
+
+// The JSON-RPC envelope is validated before its content is classified.
+func TestConsolidate_EnvelopeValidation(t *testing.T) {
+	cases := map[string]func(env map[string]any){
+		"wrong id":         func(env map[string]any) { env["id"] = 99 },
+		"null id":          func(env map[string]any) { env["id"] = nil },
+		"wrong version":    func(env map[string]any) { env["jsonrpc"] = "1.0" },
+		"missing version":  func(env map[string]any) { delete(env, "jsonrpc") },
+		"result and error": func(env map[string]any) { env["error"] = map[string]any{"code": -32008, "message": "x"} },
+		"neither":          func(env map[string]any) { delete(env, "result") },
+		"null result":      func(env map[string]any) { env["result"] = nil },
+	}
+	for name, mut := range cases {
+		t.Run(name, func(t *testing.T) {
+			sim, items := scenario(t, 2, 1)
+			m := sim.Shards[len(sim.Shards)-1]
+			m.Hook = func(w http.ResponseWriter, body []byte) bool {
+				m.Hook = nil
+				env := serveReal(m, body)
+				mut(env)
+				_ = json.NewEncoder(w).Encode(env)
+				return true
+			}
+			_, err := newClient(t, sim, nil).Consolidate(context.Background(), items)
+			requireClientErr(t, err, client.KindInvalidResponse, "")
+		})
+	}
+}
+
+var _ = api.StateTreeKeyLengthBytes

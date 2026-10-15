@@ -47,7 +47,7 @@ type Shard struct {
 
 	sim     *Sim
 	tree    *smt.ThreadSafeSMT
-	prev    *smt.ReadView
+	prevSeq uint64
 	records map[string]*record
 	snaps   []*snapshot
 
@@ -92,6 +92,8 @@ type Sim struct {
 	RefTime uint64
 	// Retain bounds how many finalizations exact-root requests can still address (0 = all).
 	Retain int
+	// latestOverride makes "latest" requests serve this finalization (1-based; 0 = newest).
+	latestOverride int
 
 	mu     sync.RWMutex // Finalize against serving
 	signer abcrypto.Signer
@@ -227,8 +229,8 @@ func (s *Sim) Finalize() int {
 	var inputs []types.ShardTreeInput
 	for i, id := range order {
 		sh := s.Shards[i]
-		rv := sh.tree.FreezeReadView(sh.prev)
-		sh.prev = rv
+		rv := sh.tree.FreezeReadView(sh.prevSeq)
+		sh.prevSeq = rv.Seq()
 		sn := &snapshot{view: rv, root: rv.RootHashRaw(), block: uint64(idx), finalize: idx}
 		sh.snaps = append(sh.snaps, sn)
 		for _, r := range sh.records {
@@ -299,6 +301,13 @@ func (s *Sim) Item(shard int, req *api.CertificationRequest, fin int) client.Ite
 		panic(err)
 	}
 	return client.Item{Request: req, Proof: proof.InclusionProof}
+}
+
+// UseFinalization makes "latest" requests serve finalization n (1-based) instead of the newest.
+func (s *Sim) UseFinalization(n int) {
+	s.mu.Lock()
+	s.latestOverride = n
+	s.mu.Unlock()
 }
 
 // Latest returns the index of the newest finalization.
@@ -398,6 +407,9 @@ func (sh *Shard) serve(w http.ResponseWriter, r *http.Request) {
 	var f *finalization
 	if pr.Root == nil {
 		f = fins[len(fins)-1]
+		if o := sh.sim.latestOverride; o > 0 {
+			f = fins[o-1]
+		}
 	} else {
 		for i := len(fins) - 1; i >= 0; i-- {
 			if sh.sim.Retain > 0 && len(fins)-i > sh.sim.Retain {

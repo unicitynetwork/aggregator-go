@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -169,4 +170,30 @@ func TestCLI_ExitCodes(t *testing.T) {
 	errb.Reset()
 	require.Equal(t, exitRejected, run([]string{"-config", e.cfg, "-in", e.in}, &out, &errb), errb.String())
 	require.Contains(t, errb.String(), `"outcome":"unauthenticated"`)
+}
+
+type failingWriter struct{ n int }
+
+func (w failingWriter) Write(p []byte) (int, error) {
+	if w.n < 0 {
+		return 0, io.ErrClosedPipe
+	}
+	return w.n, nil // short write
+}
+
+func TestCLI_StdoutWriteFailureIsNotSuccess(t *testing.T) {
+	e := setup(t, 2)
+	for name, w := range map[string]failingWriter{"closed pipe": {-1}, "short write": {3}} {
+		var errb bytes.Buffer
+		code := run([]string{"-config", e.cfg, "-in", e.in}, w, &errb)
+		require.Equal(t, exitOutput, code, name)
+		require.Contains(t, errb.String(), `"kind":"output"`)
+	}
+}
+
+func TestCLI_UnwritableOutputFile(t *testing.T) {
+	e := setup(t, 2)
+	var out, errb bytes.Buffer
+	code := run([]string{"-config", e.cfg, "-in", e.in, "-out", filepath.Join(e.dir, "no-such-dir", "b.json")}, &out, &errb)
+	require.Equal(t, exitOutput, code)
 }

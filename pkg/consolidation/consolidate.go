@@ -61,40 +61,63 @@ type Output struct {
 	Shards []ShardOutput
 }
 
-// Consolidate authenticates the master view and rebuilds all proofs. Counters
-// of the session report the verification work done.
-func (s *Session) Consolidate(in *Input) (*Output, error) {
-	if in == nil {
-		return nil, fail(OutcomeInvalidInput, -1, nil, "nil input")
+// AuthenticatedMaster is the master view after it was authenticated: the
+// common master UC/view binding, the trusted seal (one quorum check) and the
+// round bound. It is the only way to obtain peer roots, so peers are never
+// contacted for an unauthenticated master, and its verified material is reused
+// for the final assembly. It can only be produced by Session.AuthenticateMaster.
+type AuthenticatedMaster struct {
+	session   *Session
+	master    ShardResult
+	bound     *RootRoundBound
+	view      *types.PartitionViewV1
+	enclosing *types.UnicityCertificate
+	ucs       []*types.UnicityCertificate
+	round     uint64
+}
+
+// Round is the authenticated root chain round of the master seal.
+func (m *AuthenticatedMaster) Round() uint64 { return m.round }
+
+// PeerRoot returns the target state root the authenticated view commits to for
+// a shard (the exact root to request from that shard's aggregator).
+func (m *AuthenticatedMaster) PeerRoot(shard types.ShardID) ([]byte, error) {
+	idx := slices.IndexFunc(m.view.Leaves, func(l types.PartitionViewLeafV1) bool { return l.ShardID.Equal(shard) })
+	if idx < 0 || m.view.Leaves[idx].InputRecord == nil {
+		return nil, fail(OutcomeBindingMismatch, -1, nil, "shard %q is not in the master view", shard)
 	}
-	if in.Bound == nil {
+	return slices.Clone(m.view.Leaves[idx].InputRecord.Hash), nil
+}
+
+// AuthenticateMaster authenticates the master's latest batch and partition view
+// before anything is requested from other shards: bound issuance and coverage of
+// the master's requests, view/UC binding, the trusted seal and R >= R_min.
+func (s *Session) AuthenticateMaster(bound *RootRoundBound, master ShardResult, partitionView []byte) (*AuthenticatedMaster, error) {
+	if bound == nil {
 		return nil, fail(OutcomeUnavailable, -1, nil, "authenticated minimal root round is unknown")
 	}
-	if in.Bound.session != s || !bytes.Equal(in.Bound.lineage, s.policy.id()) {
+	if bound.session != s || !bytes.Equal(bound.lineage, s.policy.id()) {
 		return nil, fail(OutcomeIncompatibleLineage, -1, nil, "root round bound was not issued by this verification session")
 	}
-	if len(in.PartitionView) == 0 {
+	if len(partitionView) == 0 {
 		return nil, fail(OutcomeUnavailable, -1, nil, "master response carries no partition view")
 	}
-	batches := append([]ShardResult{in.Master}, in.Peers...)
-	if err := s.checkBatches(batches); err != nil {
+	if err := s.checkBatches([]ShardResult{master}); err != nil {
 		return nil, err
 	}
-
-	if err := in.Bound.covers(batches); err != nil {
+	if err := bound.covers([]ShardResult{master}); err != nil {
 		return nil, err
 	}
-
-	view, err := types.DecodePartitionViewV1(in.PartitionView)
+	view, err := types.DecodePartitionViewV1(partitionView)
 	if err != nil {
 		return nil, fail(OutcomeInvalidInput, -1, err, "partition view")
 	}
-	enclosing, err := decodeCommonUC(in.Master.Proofs, 0)
+	enclosing, err := decodeCommonUC(master.Proofs, 0)
 	if err != nil {
 		return nil, err
 	}
-	if !enclosing.ShardTreeCertificate.Shard.Equal(in.Master.ShardID) {
-		return nil, fail(OutcomeBindingMismatch, 0, nil, "master UC is of shard %q, not %q", enclosing.ShardTreeCertificate.Shard, in.Master.ShardID)
+	if !enclosing.ShardTreeCertificate.Shard.Equal(master.ShardID) {
+		return nil, fail(OutcomeBindingMismatch, 0, nil, "master UC is of shard %q, not %q", enclosing.ShardTreeCertificate.Shard, master.ShardID)
 	}
 
 	// 1 quorum check (memoized per complete seal)
@@ -106,27 +129,56 @@ func (s *Session) Consolidate(in *Input) (*Output, error) {
 		}
 		return nil, fail(OutcomeInvalidInput, -1, err, "master partition view")
 	}
-	if enclosing.UnicitySeal.NetworkID != in.Bound.network {
-		return nil, fail(OutcomeIncompatibleLineage, -1, nil, "master seal is of network %d, bound of network %d", enclosing.UnicitySeal.NetworkID, in.Bound.network)
+	if enclosing.UnicitySeal.NetworkID != bound.network {
+		return nil, fail(OutcomeIncompatibleLineage, -1, nil, "master seal is of network %d, bound of network %d", enclosing.UnicitySeal.NetworkID, bound.network)
 	}
 	round := enclosing.UnicitySeal.RootChainRoundNumber
-	if round < in.Bound.round {
-		return nil, fail(OutcomeStale, -1, nil, "master seal root round %d is below required %d", round, in.Bound.round)
+	if round < bound.round {
+		return nil, fail(OutcomeStale, -1, nil, "master seal root round %d is below required %d", round, bound.round)
 	}
+	return &AuthenticatedMaster{session: s, master: master, bound: bound, view: view, enclosing: enclosing, ucs: ucs, round: round}, nil
+}
 
-	out := &Output{MasterShard: in.Master.ShardID, RootRound: round}
+// Complete verifies the peers' exact-root batches against the authenticated
+// master and rebuilds every shard's proofs.
+func (s *Session) Complete(m *AuthenticatedMaster, peers []ShardResult) (*Output, error) {
+	if m == nil || m.session != s {
+		return nil, fail(OutcomeInvalidInput, -1, nil, "master was not authenticated by this session")
+	}
+	batches := append([]ShardResult{m.master}, peers...)
+	if err := s.checkBatches(batches); err != nil {
+		return nil, err
+	}
+	if err := m.bound.covers(batches); err != nil {
+		return nil, err
+	}
+	out := &Output{MasterShard: m.master.ShardID, RootRound: m.round}
 	for bi, b := range batches {
-		idx := slices.IndexFunc(view.Leaves, func(l types.PartitionViewLeafV1) bool { return l.ShardID.Equal(b.ShardID) })
+		idx := slices.IndexFunc(m.view.Leaves, func(l types.PartitionViewLeafV1) bool { return l.ShardID.Equal(b.ShardID) })
 		if idx < 0 {
 			return nil, fail(OutcomeBindingMismatch, bi, nil, "shard %q is not in the master view", b.ShardID)
 		}
-		so, err := s.consolidateShard(bi, b, ucs[idx])
+		so, err := s.consolidateShard(bi, b, m.ucs[idx])
 		if err != nil {
 			return nil, err
 		}
 		out.Shards = append(out.Shards, *so)
 	}
 	return out, nil
+}
+
+// Consolidate authenticates the master view and rebuilds all proofs
+// (AuthenticateMaster followed by Complete). Counters of the session report the
+// verification work done.
+func (s *Session) Consolidate(in *Input) (*Output, error) {
+	if in == nil {
+		return nil, fail(OutcomeInvalidInput, -1, nil, "nil input")
+	}
+	m, err := s.AuthenticateMaster(in.Bound, in.Master, in.PartitionView)
+	if err != nil {
+		return nil, err
+	}
+	return s.Complete(m, in.Peers)
 }
 
 // checkBatches validates the shape of the inputs.
