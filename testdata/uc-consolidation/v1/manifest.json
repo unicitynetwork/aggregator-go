@@ -5,7 +5,7 @@
     "command": "UC_FIXTURE_AGGREGATOR_COMMIT=$(git rev-parse HEAD) go run ./cmd/gen-uc-consolidation-fixtures -out testdata/uc-consolidation/v1",
     "toolchain": "go1.27.2",
     "commits": {
-      "aggregator-go": "6a6d6ff8d2161c280d7c46bfde3e6a9f4856e641",
+      "aggregator-go": "b063f164b1bda06fc6ad89f18cba85e19a7f8bfa",
       "bft-core": "39340692da3a",
       "bft-go-base": "6251c1d73eee"
     },
@@ -24,7 +24,7 @@
   "notes": [
     "uint64 values in JSON are decimal strings; CBOR and proofs are lowercase hex or .cbor files",
     "a case directory holds the files of testdata layout; a negative directory holds only the complete mutated files plus expected.json naming its base case",
-    "evaluation order: view_codec (partition view alone), evidence (authenticate originals, R_min), consolidate",
+    "evaluation order: view_codec (partition view alone, extra check), policy (trusted context), evidence (authenticate originals, R_min), rpc (classify failed batch calls: availability is not an integrity failure), consolidate",
     "producer.json replays the root chain blocks byte for byte (bft-core rootchain/testutils/ucfixture)",
     "seal signatures are deterministic secp256k1 with public test keys; no production credentials"
   ],
@@ -90,7 +90,56 @@
       "kind": "negative",
       "stage": "consolidate",
       "outcome": "invalid_input",
-      "description": "a shard outside the admitted topology is added"
+      "description": "a shard outside the admitted topology is added to the view"
+    },
+    {
+      "name": "negative/view-overlapping-prefix",
+      "kind": "negative",
+      "stage": "consolidate",
+      "outcome": "invalid_input",
+      "description": "a leaf for a shard which is a prefix of another admitted shard"
+    },
+    {
+      "name": "negative/view-incomplete-prefix-coverage",
+      "kind": "negative",
+      "stage": "consolidate",
+      "outcome": "invalid_input",
+      "description": "leaves cover only part of the shard tree (a shard replaced by a deeper one)"
+    },
+    {
+      "name": "negative/context-incomplete-scheme",
+      "kind": "negative",
+      "stage": "policy",
+      "outcome": "invalid_input",
+      "description": "trusted topology does not cover the whole shard tree"
+    },
+    {
+      "name": "negative/context-overlapping-scheme",
+      "kind": "negative",
+      "stage": "policy",
+      "outcome": "invalid_input",
+      "description": "trusted topology with overlapping shard prefixes"
+    },
+    {
+      "name": "negative/context-network-mismatch",
+      "kind": "negative",
+      "stage": "policy",
+      "outcome": "incompatible_lineage",
+      "description": "declared network of the trusted context differs from the installed authority"
+    },
+    {
+      "name": "negative/view-input-record-version",
+      "kind": "negative",
+      "stage": "view_codec",
+      "outcome": "rejected",
+      "description": "unsupported input record version in a leaf"
+    },
+    {
+      "name": "negative/seal-version",
+      "kind": "negative",
+      "stage": "consolidate",
+      "outcome": "invalid_input",
+      "description": "unsupported unicity seal version in the enclosing UC"
     },
     {
       "name": "negative/view-reordered",
@@ -518,6 +567,160 @@
       "stage": "consolidate",
       "outcome": "binding_mismatch",
       "description": "peer response carries the master's proofs"
+    },
+    {
+      "name": "negative/rpc-master-view-not-retained",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "unavailable",
+      "description": "master batch call failed with a JSON-RPC error: Proof unavailable"
+    },
+    {
+      "name": "negative/rpc-master-no-finalized-view",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "unavailable",
+      "description": "master batch call failed with a JSON-RPC error: Proof unavailable"
+    },
+    {
+      "name": "negative/rpc-master-partition-view-unavailable",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "unavailable",
+      "description": "master batch call failed with a JSON-RPC error: Proof unavailable"
+    },
+    {
+      "name": "negative/rpc-master-state-not-included",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "unavailable",
+      "description": "master batch call failed with a JSON-RPC error: Proof unavailable"
+    },
+    {
+      "name": "negative/rpc-master-unsupported-configuration",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "unsupported",
+      "description": "master batch call failed with a JSON-RPC error: Proof unavailable"
+    },
+    {
+      "name": "negative/rpc-master-busy-active-requests",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "busy",
+      "description": "master batch call failed with a JSON-RPC error: Concurrency limit exceeded"
+    },
+    {
+      "name": "negative/rpc-master-busy-pinned-views",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "busy",
+      "description": "master batch call failed with a JSON-RPC error: Concurrency limit exceeded"
+    },
+    {
+      "name": "negative/rpc-master-busy-retention-budget",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "busy",
+      "description": "master batch call failed with a JSON-RPC error: Concurrency limit exceeded"
+    },
+    {
+      "name": "negative/rpc-master-busy-deadline",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "busy",
+      "description": "master batch call failed with a JSON-RPC error: Concurrency limit exceeded"
+    },
+    {
+      "name": "negative/rpc-master-busy-bare",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "busy",
+      "description": "master batch call failed with a JSON-RPC error: Concurrency limit exceeded"
+    },
+    {
+      "name": "negative/rpc-master-limit-state-count",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "limit_exceeded",
+      "description": "master batch call failed with a JSON-RPC error: Limit exceeded"
+    },
+    {
+      "name": "negative/rpc-master-limit-request-bytes",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "limit_exceeded",
+      "description": "master batch call failed with a JSON-RPC error: Limit exceeded"
+    },
+    {
+      "name": "negative/rpc-master-limit-response-bytes",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "limit_exceeded",
+      "description": "master batch call failed with a JSON-RPC error: Limit exceeded"
+    },
+    {
+      "name": "negative/rpc-master-invalid-duplicate-state-id",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "invalid_request",
+      "description": "master batch call failed with a JSON-RPC error: Invalid params"
+    },
+    {
+      "name": "negative/rpc-master-invalid-wrong-shard",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "invalid_request",
+      "description": "master batch call failed with a JSON-RPC error: Invalid params"
+    },
+    {
+      "name": "negative/rpc-master-method-not-found",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "unsupported_method",
+      "description": "master batch call failed with a JSON-RPC error: Method not found"
+    },
+    {
+      "name": "negative/rpc-master-database-error",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "infrastructure",
+      "description": "master batch call failed with a JSON-RPC error: Database error"
+    },
+    {
+      "name": "negative/rpc-peer-view-not-retained",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "unavailable",
+      "description": "peer batch call failed with a JSON-RPC error: Proof unavailable"
+    },
+    {
+      "name": "negative/rpc-peer-state-not-included",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "unavailable",
+      "description": "peer batch call failed with a JSON-RPC error: Proof unavailable"
+    },
+    {
+      "name": "negative/rpc-peer-busy-pinned-views",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "busy",
+      "description": "peer batch call failed with a JSON-RPC error: Concurrency limit exceeded"
+    },
+    {
+      "name": "negative/rpc-peer-limit-response-bytes",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "limit_exceeded",
+      "description": "peer batch call failed with a JSON-RPC error: Limit exceeded"
+    },
+    {
+      "name": "negative/rpc-peer-unsupported-configuration",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "unsupported",
+      "description": "peer batch call failed with a JSON-RPC error: Proof unavailable"
     }
   ],
   "sha256": {
@@ -534,6 +737,12 @@
     "large-values/trust-base.cbor": "a2909914b7a076efbeb839650f273ade6802f236970461c5dcb19dcbdd204446",
     "large-values/ucs/0.cbor": "b602e0ced43ddb9899fe95524df130065ab11dab18aedfb1b4a6ada471971076",
     "large-values/ucs/1.cbor": "64d0e6c9a5e8405127fc6920f9bf5a740582b4ecfe1118c2344be2b4cc8e89a4",
+    "negative/context-incomplete-scheme/context.json": "1be9867e17d0c5deca8245c3847a8f6bff1276fc7eabb86a3f4d6af25f19af25",
+    "negative/context-incomplete-scheme/expected.json": "8f45a6ba0470a4350e2bb1957f8425a3fa398fc5ab5c43c1124e220409b2b1b1",
+    "negative/context-network-mismatch/context.json": "bc83f972e817f563cf614a4e1b1f708f7d73fa36b165f026633103034ea15c9b",
+    "negative/context-network-mismatch/expected.json": "86946a50a10bdef5a2987c30080cfa3ccada956e9d13285d6b0112a29f0d479e",
+    "negative/context-overlapping-scheme/context.json": "e85606e66e29a05e1dc6c86d9ea5586f1b6dbed3e37f58b4522dadb59e64d2db",
+    "negative/context-overlapping-scheme/expected.json": "44785ce76c5ed3ebae2182b0cd1ea2948634d4c4c00dc0a1c6d63b8ba394579c",
     "negative/context-wrong-config-participant/context.json": "ecaa1c6170cabed54b9edd0e892fd2a6c0410c2cd4f0960e1e758d65f32129b3",
     "negative/context-wrong-config-participant/expected.json": "e94a83918e1f6294986d9692cd260fc848552a80dcd5b0dfe9a5720d5f5fc4ab",
     "negative/context-wrong-partition/context.json": "ed579ee924bf7aa0afc49f0e36ef459258065e33a8b64d365d850fb41bab1c34",
@@ -580,6 +789,50 @@
     "negative/rmin-master-stale/requests.json": "2d3a391f249be4d1dddbbc739d806ad215961eb5f81ddb9ffc4a35ef7d9bb2fb",
     "negative/rmin-unknown/expected.json": "0bd4be14c35caac49d32033a80f7d3ec22972cb98bba89b1f382960c7ea6b393",
     "negative/rmin-unknown/requests.json": "5e97af7d3d2682f2b60a098c300595864fe2db816a0dd74eb246f4e1f564a891",
+    "negative/rpc-master-busy-active-requests/expected.json": "b598c5f8a340885b204f0d15f5e6705d9c84d3dd840892c99ee5125001824675",
+    "negative/rpc-master-busy-active-requests/responses.json": "837cfbcff99f542c7250f5dc3d8b6e584d558a58a7ff187bd99c96eb4900f43c",
+    "negative/rpc-master-busy-bare/expected.json": "097beb25bf4fbc200588bc8b7d7b18a39e26d0ebe44ea297f1f8683f1d1d5826",
+    "negative/rpc-master-busy-bare/responses.json": "f672c5e74d0b4f813fb5a9e49cb809af7c2f98b6d539995470d2868574910325",
+    "negative/rpc-master-busy-deadline/expected.json": "521f273ff30c9fe9355927a0fdad631165ee44387e5fa0ee83ff11ed75ec8781",
+    "negative/rpc-master-busy-deadline/responses.json": "5b2e1674e3f9e49f1bf7dbf9d7141d3712b9fedc9e60e68b1e6cc1f383f6151d",
+    "negative/rpc-master-busy-pinned-views/expected.json": "780b8a8a9f1be018947576125e781c57587e3db129ca07eb685636efe9e33b3b",
+    "negative/rpc-master-busy-pinned-views/responses.json": "a8c658f688175a35466f5dc98ec014fdadfbb06d93eef7b4a363c82027413b57",
+    "negative/rpc-master-busy-retention-budget/expected.json": "7b008da8e2c5399ecfe26a21d178a90baa3240e7b11c2e4ac3d2079cf7899aaa",
+    "negative/rpc-master-busy-retention-budget/responses.json": "5fe1e6b9a96477f4acc18284639d1957f2d9cc50a79fd18decbcc1e829755d2b",
+    "negative/rpc-master-database-error/expected.json": "ee1a7996b7bfd56498d726c37316d4e5fda3a5668a717f93b0186fd2a312f14d",
+    "negative/rpc-master-database-error/responses.json": "290279c77dc857dc482b906960e57f22ab8fce657bf70ffb289ce03940e11976",
+    "negative/rpc-master-invalid-duplicate-state-id/expected.json": "e541473560e8270b03758ba7d412c52deb0c6dbfba39b6b3bedbc436834e8ab5",
+    "negative/rpc-master-invalid-duplicate-state-id/responses.json": "5b402cb789cea30a9632cf88ddebe6c3dafaed5699d7c734193520e1ecb11864",
+    "negative/rpc-master-invalid-wrong-shard/expected.json": "fed3cc212aae21d62176633470a980b4c05a2c8af9fa32e2fd2e91dfc4b0ee38",
+    "negative/rpc-master-invalid-wrong-shard/responses.json": "4a6f7f6d714152d0cf4bdcf0813e51339d80a79e28b662f6bef606e6a5291fbc",
+    "negative/rpc-master-limit-request-bytes/expected.json": "dbc93a5ab97d237c4f2a8e6dc88b780a518d2a8561ecae1e7bbdc3b47b7888b2",
+    "negative/rpc-master-limit-request-bytes/responses.json": "f79fe949d7c68205617caf075cd73671a251f668d5780f2f4a5b3cc41a6d96b9",
+    "negative/rpc-master-limit-response-bytes/expected.json": "1a062189a600fe7db4e666e40a04755ba33206d4bdbca74062b81ae270b7df87",
+    "negative/rpc-master-limit-response-bytes/responses.json": "bf7199abc418be9bef3200106a85fcd5425ec9620ed557981f155ad886a4bff8",
+    "negative/rpc-master-limit-state-count/expected.json": "764cbe602c95cdc4dcc23cc782c70f80cfa5e95ecf5b0de41dff8643706c4a5e",
+    "negative/rpc-master-limit-state-count/responses.json": "49257be757c0cf80883fb420352f93167f256e879194cd221219b0beeb92682e",
+    "negative/rpc-master-method-not-found/expected.json": "7896e118a556ad082fbae16803a85494414b2aee2b03348a63a39479988f0e00",
+    "negative/rpc-master-method-not-found/responses.json": "d0b1b8653df24305e1ae1554aedd4962c4b84e611386636426d0fcf587469a32",
+    "negative/rpc-master-no-finalized-view/expected.json": "91294f9df0bee1456ba5b0695e5d64290dcb48edcc4f01e2f9538e8faa2385a4",
+    "negative/rpc-master-no-finalized-view/responses.json": "1bb8669d397b3ac2ca243694c79cca80b0ec7664838a3266293958bd8441fb65",
+    "negative/rpc-master-partition-view-unavailable/expected.json": "4f3c3050626a31049025d5fe37738170039f62dc63f0dc456999de57c029fde9",
+    "negative/rpc-master-partition-view-unavailable/responses.json": "a2480bcc6f63331260a5a64ae812aa8a88c021f1be5bfca489e2d42e13229b05",
+    "negative/rpc-master-state-not-included/expected.json": "3dc62a7e1653e540e1f448c75945824eb67581bbd10bf942af2e354fce6218b9",
+    "negative/rpc-master-state-not-included/responses.json": "ad4d70c251b059dea32f1d258c37fab09c95ea40412c96da979159bc1b58cb1b",
+    "negative/rpc-master-unsupported-configuration/expected.json": "ce39148715340a02919efd98020139e59afdcd506015c7851ee04b699fe776d7",
+    "negative/rpc-master-unsupported-configuration/responses.json": "23c8058f5c561e545e6c0e01ef5ee6a5fa9d506ebefa86ac11678018ae758ff9",
+    "negative/rpc-master-view-not-retained/expected.json": "6fe231251720efb7d82ce600ca345badc1307e5c678fedeaa1379aadfb4e1d5e",
+    "negative/rpc-master-view-not-retained/responses.json": "166dcd678ef385d53430f36ba4b376e1b557c9a8ee5249bc85443e562bf1dca8",
+    "negative/rpc-peer-busy-pinned-views/expected.json": "56fab02a8212fbc3f95afb6115036b92726f2cd7f2a483648c0f5229890511b7",
+    "negative/rpc-peer-busy-pinned-views/responses.json": "ef9780704f23553a001a4d5f934f13391c615d2205cab08e6ec351e2b003d5ad",
+    "negative/rpc-peer-limit-response-bytes/expected.json": "e5df898a4bbe3d21c99079797f7670f94a1cd3e94c340f3f30647064ac028975",
+    "negative/rpc-peer-limit-response-bytes/responses.json": "f28b4a2ec5e82d9a043d93b4a22f7d2329ed083f9410b876de85d4ec2d49f0b7",
+    "negative/rpc-peer-state-not-included/expected.json": "b9f52cc52a1518947ff6bc4d14e933261523609f344a298850ea1138409fe1fb",
+    "negative/rpc-peer-state-not-included/responses.json": "2aefb5fa26884a60cfdce0d6073dc5a879cf55a31ea48c526917a6f53bb4c894",
+    "negative/rpc-peer-unsupported-configuration/expected.json": "15e53b24316bbd5c0ea958c6b8cfa233209597b5fa22d7c319a527ee93519a9c",
+    "negative/rpc-peer-unsupported-configuration/responses.json": "1b9fdfa93476685f67eababca1dabc63b9d36931c0e93b5a61ca1d2fd9220ef7",
+    "negative/rpc-peer-view-not-retained/expected.json": "4f20e9c11b64cf7be3c365d682c9ddd8f75048b00e848b150d80d99b36a97a3a",
+    "negative/rpc-peer-view-not-retained/responses.json": "7d909571e42dfc01d3ea33fb07f103518d781582719d09d51dda6e8edf56179a",
     "negative/seal-epoch/expected.json": "a6545e42ce3e0dc79d76f272e8e2f315c5044ca65d19f6fb8e31676203655401",
     "negative/seal-epoch/responses.json": "aa6096c4d909854dad7475f72f6e32a067aaa081b30986f2d82b6d3ddc7f67be",
     "negative/seal-hash/expected.json": "76ae534b3377e82c63886b4958dd7f6544828912a6de2e47141c89a00084e1a1",
@@ -600,11 +853,14 @@
     "negative/seal-signatures-missing/responses.json": "a598d3994bb65cbdb9984c7447437bffc8781d11b222096e1f8c4b6a9344b538",
     "negative/seal-timestamp/expected.json": "9ad6c02d40a0ef9f609778c1183bc57cb0f3836abd1adca0e503b271fcb923d1",
     "negative/seal-timestamp/responses.json": "8c9589d203e9755a96bbbdd6f4a2bc2eebbcf61ca6a3e73b3b6a0abd7fd72769",
+    "negative/seal-version/expected.json": "2e12038b407a32070134b9e2dba58194c27cd20fd5c262e06449fdb6f1bbe48e",
+    "negative/seal-version/responses.json": "6f930427df9f0d18b105abe3d6512aa89fe385df699a63afc4b9429b8ab9f852",
     "negative/trust-base-other-authority/expected.json": "38f9615aa28a283f3f46ee83ba415880fc7c29b2398c2c098327867cb34ec16e",
     "negative/trust-base-other-authority/trust-base.cbor": "22eecdb90df3cc7b7d522ebe950e9de1d1a497049ab2698a1d1c9f36430e5278",
     "negative/trust-base-other-epoch/expected.json": "4fdd13594aab8af8f9a443a16a9f28b79d696f20c9c039081889d91eed664b19",
     "negative/trust-base-other-epoch/trust-base.cbor": "40d8223f44a3d0adccda98a75d372265cd45a7a1e20bf0f8e8d589829919b691",
-    "negative/trust-base-other-network/expected.json": "f781fbce1ba3978c75d4a601ec13f6e6c43501453335f1d732917e21d8987cdb",
+    "negative/trust-base-other-network/context.json": "bc83f972e817f563cf614a4e1b1f708f7d73fa36b165f026633103034ea15c9b",
+    "negative/trust-base-other-network/expected.json": "68caf48f6ad686ac4470f8495744519a681525aee2530a33eaa7e01dbc1d8034",
     "negative/trust-base-other-network/trust-base.cbor": "f3bb14b06515e037ddadd2449f27f52269ed853c84085e2f64b6e28fe25b3ea7",
     "negative/uc-flip-partition-path-hash/expected.json": "3adc9884968da13cb905483be36c8643f7c0c9a123ae2a93c03ebfb30dbb4e37",
     "negative/uc-flip-partition-path-hash/responses.json": "d117fb5d024cbbddd135a645e06920b92ff5e5e1d46411562af02d164894928a",
@@ -619,9 +875,9 @@
     "negative/view-duplicate-shard/expected.json": "3d51a6659acec6d0cdc75fd13c6d37beb5c20726c1c50e28a4a0cd778c408ac5",
     "negative/view-duplicate-shard/partition-view.cbor": "0f2980425967473f4e4845e31b8b2e8b77b01607dab7be011af363009d2e4bd8",
     "negative/view-duplicate-shard/responses.json": "33c917141eb85996ecd439eaee2120d20ce51f9af2b15a4df79d05cfac8e7ed3",
-    "negative/view-extra-shard/expected.json": "373fe068cb3b5739245afac2fbe84c3c88b1a08bd490cdf959c8205fb4d2e947",
-    "negative/view-extra-shard/partition-view.cbor": "692e3e08f2dffd59b5b435a252fd8221333643b7161d40e45b2598174fd33a2a",
-    "negative/view-extra-shard/responses.json": "39f60a339357690ad392749e4c31ec39d1de097a7adcbf6e158ec98337811f07",
+    "negative/view-extra-shard/expected.json": "3f9c4195822d46e0b638f4f4b807c5753afcba8a242a3193a12c7c55225d51d6",
+    "negative/view-extra-shard/partition-view.cbor": "cb89e108ca790ddd0510f3505aedf5acbeffabd43312b6809d205a85e77f1648",
+    "negative/view-extra-shard/responses.json": "2a9b08233937cba4cf0f4cabc368f896948b1014ac315b72f95aed657ba46773",
     "negative/view-flip-block-hash/expected.json": "9890f69eef8e96d76d9e1b0cd094bf1c33a2713fb0c5bfa1d7b77baefb7bfa68",
     "negative/view-flip-block-hash/partition-view.cbor": "8c2dab2a312add9ab2c6c998ad0488e7e1ff506c47d3bd6d723c09f1fdc4ed4c",
     "negative/view-flip-block-hash/responses.json": "68005d8f3b32838170d3df6369f8d820e77897b30a068e614d0c7f9b64e5f2e4",
@@ -655,6 +911,12 @@
     "negative/view-flip-tr-hash/expected.json": "91ca25179269dfb008340cd37210230939a69eb08996d942c60660712583f636",
     "negative/view-flip-tr-hash/partition-view.cbor": "05932c014fdeab5bd0d0e0fc583e95006914b7db9069439e7e4e736c7728ebf1",
     "negative/view-flip-tr-hash/responses.json": "040482ffe48390fa617abec4abc8aa3438c1264664ff046cba2029d8672c6f16",
+    "negative/view-incomplete-prefix-coverage/expected.json": "588c17a729c4ac687854ce226c029cafb06eede26a6f312a616f5cf8c898c1be",
+    "negative/view-incomplete-prefix-coverage/partition-view.cbor": "eb5cae55e3303ed1fb6e6bd56f5e11c36dfdee0f61dc5338da638630966e8e8d",
+    "negative/view-incomplete-prefix-coverage/responses.json": "478ca8fc9910a6fc95934e65cffc036506170f7d69f66289f10e86403feab96c",
+    "negative/view-input-record-version/expected.json": "0691bf858bc316ece278b36edb8c9f08a94c705f426f309268fc1c051a07efef",
+    "negative/view-input-record-version/partition-view.cbor": "6d2dccaac9fb8800e910e60f9558e3227604ccb9121910fc41b324d9945d3808",
+    "negative/view-input-record-version/responses.json": "7200eda82621e5eb8f1e59cd83f2843a31758d2396fb791afb5d29514a894a10",
     "negative/view-malformed-end-marker/expected.json": "202d1681b7b3cad67ec1e99710d8d28239d571235d617b48aae9bf4b56404994",
     "negative/view-malformed-end-marker/partition-view.cbor": "c4ae6311bde765b31a6ad0968a2bf3aef926e9e73cfa18516d7289b736aa527a",
     "negative/view-malformed-end-marker/responses.json": "b8fd9908c66021cbe0e14d9aa2e628980eceb6622f0718e5f0691d3dc4f18aa0",
@@ -667,6 +929,9 @@
     "negative/view-over-limit-size/expected.json": "27d161ca6fdf12325e5bdc25b4d6ec214b44ec933867e2984dda44b2bb126937",
     "negative/view-over-limit-size/partition-view.cbor": "1eb84daf5a1728c4834c1c30215e63102c2afa86d4cc958bb277fcf918e62bef",
     "negative/view-over-limit-size/responses.json": "ed2f0ff16254f85bb597ef0cfeab5656d8f617080f3e6ee3222034a12532f3aa",
+    "negative/view-overlapping-prefix/expected.json": "f399476e03cfa820c500e8f73fb9008b3d23189f7fe84c8b88e30a7fd347920e",
+    "negative/view-overlapping-prefix/partition-view.cbor": "aaf50b759c61884751caf9b6eec63a314ea88e1a4cc890a66aed4a2b522d1403",
+    "negative/view-overlapping-prefix/responses.json": "8146314f37c079d97fe700e6ece5d584b2f97acda31deeb2fb5f9ce1f883d0ca",
     "negative/view-reordered/expected.json": "13377d732ff802d8ff9a68ccca37e83510e500b3193faf1c2770eb048e537a04",
     "negative/view-reordered/partition-view.cbor": "c78d06e33f04cd473fd8907a93477f775a4b100a957344c1805fdbb60063508a",
     "negative/view-reordered/responses.json": "08bef5a6ef70835e297a03bd344229f00f959b77c54a45e777656ae2dc354ad8",

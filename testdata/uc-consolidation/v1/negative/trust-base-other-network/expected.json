@@ -4,6 +4,7 @@
   "stage": "evidence",
   "outcome": "unauthenticated",
   "changedFiles": [
+    "context.json",
     "trust-base.cbor"
   ]
 }

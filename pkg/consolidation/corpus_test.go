@@ -329,12 +329,13 @@ func TestCorpusNegativeCases(t *testing.T) {
 		t.Run(c.Name, func(t *testing.T) {
 			dir := caseFiles(all, c.Name)
 			var exp struct {
-				Base            string   `json:"base"`
-				Stage           string   `json:"stage"`
-				Outcome         string   `json:"outcome"`
-				PipelineOutcome string   `json:"pipelineOutcome"`
-				ChangedFiles    []string `json:"changedFiles"`
-				RemovedFiles    []string `json:"removedFiles"`
+				Base            string                          `json:"base"`
+				Stage           string                          `json:"stage"`
+				Outcome         string                          `json:"outcome"`
+				PipelineOutcome string                          `json:"pipelineOutcome"`
+				RPC             *consolidationcorpus.RPCFailure `json:"rpc"`
+				ChangedFiles    []string                        `json:"changedFiles"`
+				RemovedFiles    []string                        `json:"removedFiles"`
 			}
 			require.NoError(t, dir.Decode(consolidationcorpus.FileExpected, &exp))
 			require.Equal(t, "shards-4", exp.Base)
@@ -352,13 +353,14 @@ func TestCorpusNegativeCases(t *testing.T) {
 			require.Equal(t, exp.Stage, res.Stage)
 			require.Equal(t, exp.Outcome, res.Outcome)
 			require.Equal(t, exp.PipelineOutcome, res.PipelineOutcome)
+			require.Equal(t, exp.RPC, res.RPC)
 			require.Equal(t, c.Stage, exp.Stage)
 			require.Equal(t, c.Outcome, exp.Outcome)
 			require.NotEqual(t, consolidationcorpus.StageOK, res.Stage, "a tampered input is never accepted")
 			require.Empty(t, res.Bundle)
 		})
 	}
-	require.GreaterOrEqual(t, n, 50)
+	require.GreaterOrEqual(t, n, 80)
 }
 
 // Every unauthenticated outcome is exercised, and no tampered case may be
@@ -427,4 +429,83 @@ func TestCorpusIsNotRegeneratedByTests(t *testing.T) {
 	st, err := os.Stat(filepath.Join(corpusDir, "manifest.json"))
 	require.NoError(t, err)
 	require.False(t, st.IsDir())
+}
+
+// Failed batch calls keep what the wire said: availability, capacity and
+// unsupported configuration are distinguishable from integrity failures.
+func TestCorpusRPCFailuresAreNotIntegrityFailures(t *testing.T) {
+	m, all := loadManifest(t)
+	base := caseFiles(all, "shards-4")
+	reasons := map[string]bool{}
+	classes := map[string]bool{}
+	roles := map[string]bool{}
+	for _, c := range m.Cases {
+		if c.Kind != "negative" || c.Stage != consolidationcorpus.StageRPC {
+			continue
+		}
+		dir := caseFiles(all, c.Name)
+		files := base.Clone()
+		for n, b := range dir {
+			if n != consolidationcorpus.FileExpected {
+				files[n] = b
+			}
+		}
+		var resps consolidationcorpus.Responses
+		require.NoError(t, files.Decode(consolidationcorpus.FileResponses, &resps))
+		res, err := consolidationcorpus.Evaluate(files)
+		require.NoError(t, err)
+		require.Equal(t, consolidationcorpus.StageRPC, res.Stage, c.Name)
+		require.NotNil(t, res.RPC)
+		// the outcome is a wire classification, never an integrity outcome of the verifier
+		require.NotContains(t, []string{"binding_mismatch", "unauthenticated", "stale", "expired", "reference_time_after_target"}, res.Outcome)
+		failed := resps.Master.Error
+		if res.RPC.Role == "peer" {
+			failed = resps.Peers[0].Response.Error
+		}
+		require.NotNil(t, failed)
+		require.Equal(t, failed.Code, res.RPC.Code)
+		if failed.Data != nil {
+			require.Equal(t, failed.Data.Retryable, res.RPC.Retryable, "retryability comes from the wire")
+			require.Equal(t, failed.Data.Detail, res.RPC.Detail)
+			reasons[failed.Data.Reason+"/"+failed.Data.Detail] = true
+		}
+		classes[res.Outcome] = true
+		roles[res.RPC.Role] = true
+		// nonretryable classes are never retryable by default
+		if res.Outcome == consolidationcorpus.RPCLimitExceeded || res.Outcome == consolidationcorpus.RPCUnsupported || res.Outcome == consolidationcorpus.RPCInvalid {
+			require.False(t, res.RPC.Retryable, c.Name)
+		}
+		if res.Outcome == consolidationcorpus.RPCLimitExceeded {
+			require.NotNil(t, res.RPC.Limit, "limit errors carry the limit")
+		}
+	}
+	for _, want := range []string{
+		"proof_unavailable/view_not_retained", "proof_unavailable/no_finalized_view", "proof_unavailable/partition_view_unavailable",
+		"proof_unavailable/state_not_included", "proof_unavailable/unsupported_configuration",
+		"busy/active_requests", "busy/pinned_views", "busy/retention_budget", "busy/deadline",
+		"limit_exceeded/state_count", "limit_exceeded/request_bytes", "limit_exceeded/response_bytes",
+		"invalid_request/duplicate_state_id", "invalid_request/wrong_shard",
+	} {
+		require.True(t, reasons[want], "no fixture for %s", want)
+	}
+	for _, class := range []string{"unavailable", "unsupported", "busy", "limit_exceeded", "invalid_request", "unsupported_method", "infrastructure"} {
+		require.True(t, classes[class], class)
+	}
+	require.True(t, roles["master"] && roles["peer"])
+}
+
+func TestCorpusContextNetworkIsEnforced(t *testing.T) {
+	_, all := loadManifest(t)
+	files := caseFiles(all, "shards-4")
+	res, err := consolidationcorpus.Evaluate(files)
+	require.NoError(t, err)
+	require.Equal(t, consolidationcorpus.StageOK, res.Stage)
+	var ctx consolidationcorpus.Context
+	require.NoError(t, files.Decode(consolidationcorpus.FileContext, &ctx))
+	ctx.NetworkID++
+	require.NoError(t, files.Encode(consolidationcorpus.FileContext, ctx))
+	res, err = consolidationcorpus.Evaluate(files)
+	require.NoError(t, err)
+	require.Equal(t, consolidationcorpus.StagePolicy, res.Stage)
+	require.Equal(t, "incompatible_lineage", res.Outcome)
 }
