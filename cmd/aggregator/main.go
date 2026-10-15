@@ -248,6 +248,7 @@ func main() {
 
 	// Initialize gateway server
 	server := gateway.NewServer(cfg, log, aggregatorService)
+	server.SetBatchProofHandler(service.BatchHandlerFor(cfg, aggregatorService, roundManager, storageInstance))
 
 	// Start server in a goroutine
 	go func() {

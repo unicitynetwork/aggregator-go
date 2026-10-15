@@ -216,6 +216,15 @@ var (
 		},
 	)
 
+	// BFTCertificationResponsesTotal counts certification response messages received
+	// from the BFT root (one per root->shard message, whatever its protocol version).
+	BFTCertificationResponsesTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_bft_certification_responses_total",
+			Help: "Certification response messages received from the BFT root.",
+		},
+	)
+
 	BFTPartitionViewTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aggregator_bft_partition_view_total",
