@@ -287,8 +287,8 @@ func attachmentCount(c *Catalog) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	n := 0
-	for _, v := range c.views {
-		n += len(v.atts)
+	for v := c.head; v != nil; v = v.next {
+		n += v.attN
 	}
 	return n
 }
