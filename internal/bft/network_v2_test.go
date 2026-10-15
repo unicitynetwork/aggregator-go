@@ -52,7 +52,7 @@ func Test_BftNetwork_ReceivesV1AndV2(t *testing.T) {
 
 	cr := &certification.CertificationResponse{
 		Partition: 1,
-		UC: types.UnicityCertificate{Version: 1, UnicityTreeCertificate: &types.UnicityTreeCertificate{Version: 1, Partition: 1}},
+		UC:        types.UnicityCertificate{Version: 1, UnicityTreeCertificate: &types.UnicityTreeCertificate{Version: 1, Partition: 1}},
 	}
 	require.NoError(t, cr.SetTechnicalRecord(certification.TechnicalRecord{Round: 9, Epoch: 1, Leader: "1", StatHash: []byte{1}, FeeHash: []byte{2}}))
 	cr.PartitionView = []byte{0x83, 0x01, 0x02, 0x80}

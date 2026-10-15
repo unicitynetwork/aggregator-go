@@ -224,6 +224,14 @@ var (
 		[]string{"result"},
 	)
 
+	ProofViewPublicationTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_proofview_publication_total",
+			Help: "Retained finalized proof view publications by outcome.",
+		},
+		[]string{"result"},
+	)
+
 	BFTErrorsTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "aggregator_bft_errors_total",

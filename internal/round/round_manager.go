@@ -3,6 +3,7 @@ package round
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"errors"
 	"fmt"
 	"math/big"
@@ -20,6 +21,8 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/proofpub"
+	"github.com/unicitynetwork/aggregator-go/internal/proofview"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
@@ -115,8 +118,11 @@ type RoundManager struct {
 	smtBackend      smtbackend.Backend
 	rootClient      RootAggregatorClient
 	bftClient       bft.BFTClient
-	stateTracker    *state.Tracker
-	eventBus        *events.EventBus
+	// proofPub publishes finalized states to the retained-view catalog; nil when
+	// consolidation proof views are not supported by this deployment.
+	proofPub     *proofpub.Publisher
+	stateTracker *state.Tracker
+	eventBus     *events.EventBus
 
 	// Round management
 	currentRound *Round
@@ -260,9 +266,13 @@ func NewRoundManagerWithBackend(
 	if cfg.Sharding.Mode == config.ShardingModeStandalone || cfg.Sharding.Mode == config.ShardingModeBFTShard {
 		if cfg.BFT.Enabled {
 			var err error
-			rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, trustBaseProvider, luc, logger, eventBus)
+			bftClient, err := bft.NewBFTClient(ctx, &cfg.BFT, rm, trustBaseProvider, luc, logger, eventBus)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create BFT client: %w", err)
+			}
+			rm.bftClient = bftClient
+			if err := rm.initProofViews(cfg, bftClient); err != nil {
+				return nil, err
 			}
 		} else {
 			nextBlockNumber := api.NewBigInt(nil)
@@ -336,6 +346,8 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 			return fmt.Errorf("failed to restore SMT from storage: %w", err)
 		}
 	}
+
+	rm.publishStartupView(ctx)
 
 	rm.logger.Info("Round Manager started successfully.")
 	return nil
@@ -1780,4 +1792,55 @@ func (rm *RoundManager) stopCommitmentPrefetcherAndWait() bool {
 		<-done
 	}
 	return true
+}
+
+// initProofViews creates the retained-view catalog and connects it to finalization
+// and to the BFT client's proof material. Backends which cannot retain read views
+// simply leave consolidation proof views unavailable.
+func (rm *RoundManager) initProofViews(cfg *config.Config, client *bft.BFTClientImpl) error {
+	if cfg.BFT.ShardConf == nil {
+		return nil
+	}
+	limits, err := proofview.LimitsFromConfig(cfg.SMT)
+	if err != nil {
+		return fmt.Errorf("invalid proof view retention limits: %w", err)
+	}
+	catalog, err := proofview.NewCatalog(limits)
+	if err != nil {
+		return fmt.Errorf("failed to create proof view catalog: %w", err)
+	}
+	lineage, err := cfg.BFT.ShardConf.Hash(crypto.SHA256)
+	if err != nil {
+		return fmt.Errorf("failed to hash shard configuration: %w", err)
+	}
+	rm.proofPub = proofpub.New(catalog, rm.smtBackend, cfg.BFT.ShardConf.PartitionID, lineage, rm.logger)
+	if rm.proofPub == nil {
+		_ = catalog.Close()
+		return nil
+	}
+	client.SetProofMaterialSink(rm.proofPub)
+	return nil
+}
+
+// ProofViewPublisher returns the retained-view publisher (nil if unsupported).
+func (rm *RoundManager) ProofViewPublisher() *proofpub.Publisher { return rm.proofPub }
+
+// ProofViewCatalog returns the retained-view catalog (nil if unsupported).
+func (rm *RoundManager) ProofViewCatalog() *proofview.Catalog { return rm.proofPub.Catalog() }
+
+// publishStartupView publishes the validated current local state after recovery:
+// the latest finalized block, if the restored backend is exactly at its root.
+// History is not rebuilt from storage.
+func (rm *RoundManager) publishStartupView(ctx context.Context) {
+	if rm.proofPub == nil || rm.storage == nil || rm.storage.BlockStorage() == nil {
+		return
+	}
+	latest, err := rm.storage.BlockStorage().GetLatest(ctx)
+	if err != nil || latest == nil {
+		if err != nil {
+			rm.logger.WithContext(ctx).Warn("Cannot load latest block to publish proof view", "error", err.Error())
+		}
+		return
+	}
+	rm.proofPub.EnsurePublished(ctx, latest)
 }
