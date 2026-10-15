@@ -35,6 +35,8 @@ import (
 
 	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+	mongoContainer "github.com/testcontainers/testcontainers-go/modules/mongodb"
+	redisContainer "github.com/testcontainers/testcontainers-go/modules/redis"
 	cmdbft "github.com/unicitynetwork/bft-core/cli/ubft/cmd"
 	bfttypes "github.com/unicitynetwork/bft-go-base/types"
 
@@ -60,9 +62,8 @@ func TestBFTConsolidationE2E(t *testing.T) {
 	}
 	ubft := buildBinary(t, os.Getenv("UBFT_BIN"), "github.com/unicitynetwork/bft-core/cli/ubft", "ubft")
 	cli := buildBinary(t, "", "github.com/unicitynetwork/aggregator-go/cmd/consolidate-proofs", "consolidate-proofs")
-	ctx := t.Context()
-	mongoURI := startMongo(ctx, t)
-	redisHost, redisPort := startRedis(ctx, t)
+	mongoURI := startMongoCleanly(t)
+	redisHost, redisPort := startRedisCleanly(t)
 
 	for _, s := range strings.Split(counts, ",") {
 		n, err := strconv.Atoi(strings.TrimSpace(s))
@@ -537,7 +538,7 @@ func startConsolidationAggregator(ctx context.Context, t *testing.T, o consolida
 			BootstrapConnectRetry: 3, BootstrapConnectRetryDelay: 2,
 			HeartbeatInterval: time.Second, InactivityTimeout: 10 * time.Second,
 		},
-		Signing:    config.SigningConfig{KeyConf: keyConf},
+		Signing: config.SigningConfig{KeyConf: keyConf},
 		Processing: config.ProcessingConfig{BatchLimit: 1000, MaxCommitmentsPerRound: 1000, CommitmentStreamBufferSize: 50000,
 			CollectPhaseDuration: 200 * time.Millisecond, CollectMiniBatchSize: 500, SkipDuplicateCheck: true},
 		Storage: config.StorageConfig{UseRedisForCommitments: true, RedisStreamName: o.stream, RedisFlushInterval: 100 * time.Millisecond,
@@ -575,4 +576,52 @@ func startConsolidationAggregator(ctx context.Context, t *testing.T, o consolida
 		queue.Close(sctx)
 		_ = stor.Close(sctx)
 	}
+}
+
+// The shared helpers terminate their containers with the (already cancelled) test
+// context and leak them on a loaded VM; these always terminate with a fresh context.
+func startMongoCleanly(t *testing.T) string {
+	t.Helper()
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ { // the shared colima VM can be too busy to finish a start in time
+		c, err := mongoContainer.Run(context.Background(), "mongo:7.0", mongoContainer.WithReplicaSet("rs0"))
+		if c != nil {
+			t.Cleanup(func() { _ = c.Terminate(context.Background()) })
+		}
+		if err != nil {
+			lastErr = err
+			t.Logf("mongo start attempt %d failed: %v", attempt+1, err)
+			continue
+		}
+		uri, err := c.ConnectionString(context.Background())
+		require.NoError(t, err)
+		return uri + "&directConnection=true"
+	}
+	require.NoError(t, lastErr)
+	return ""
+}
+
+func startRedisCleanly(t *testing.T) (string, int) {
+	t.Helper()
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		c, err := redisContainer.Run(context.Background(), "redis:7-alpine")
+		if c != nil {
+			t.Cleanup(func() { _ = c.Terminate(context.Background()) })
+		}
+		if err != nil {
+			lastErr = err
+			t.Logf("redis start attempt %d failed: %v", attempt+1, err)
+			continue
+		}
+		host, err := c.Host(context.Background())
+		require.NoError(t, err)
+		mapped, err := c.MappedPort(context.Background(), "6379")
+		require.NoError(t, err)
+		port, err := strconv.Atoi(mapped.Port())
+		require.NoError(t, err)
+		return host, port
+	}
+	require.NoError(t, lastErr)
+	return "", 0
 }

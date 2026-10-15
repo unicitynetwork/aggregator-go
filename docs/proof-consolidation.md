@@ -82,3 +82,16 @@ CONSOLIDATION_E2E_SHARDS=4,8 go test -tags e2e_bft ./test/integration -run TestB
   (1 quorum / m bodies / L leaves, m requests in 2 waves).
 - Root-to-shard message count: the new counter `aggregator_bft_certification_responses_total` counts certification response
   messages received. The test asserts responses per shard per root round ≤ 1 and equal (±0.25) with and without consolidation traffic.
+
+### Recorded live run (colima 2 CPU / 3 GiB, shared with other jobs)
+
+| Shards | Items (originals under ≥2 seals) | Consolidations under continuous writes | Success | Requests / waves | Partition view | Response bytes (all shards) | Sidecars ok / missing | Responses per shard per root round (writes only → with consolidation) |
+|---|---|---|---|---|---|---|---|---|
+| 4 | 12 | 40 | 40 | 4 / 2 | 756 B | 24 471 | 89 / 0 | 0.333 → 0.250 |
+| 8 | 24 | 8 | 8 | 8 / 2 | 1 508 B | 49 835 | 247 / 0 | 0.167 → 0.150 |
+
+Every bundle: 1 quorum check, m body checks, L leaf checks; every output proof passed the full `InclusionProofV2.Verify` and
+native `UnicityCertificate.Verify` against the real trust base under one identical master seal. The root-to-shard message rate
+is unchanged by consolidation traffic (the test also bounds it at ≤ 1 response per shard per root round). The topology file
+is the current source of the admitted configuration hashes; the e2e only consumes it through the CLI config, so it keeps
+working when the file becomes optional (the hashes can then come from the shard configurations directly).
