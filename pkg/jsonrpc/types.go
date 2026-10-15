@@ -156,6 +156,14 @@ type ErrorData struct {
 	Detail    string `json:"detail"`
 	Retryable bool   `json:"retryable"`
 	Limit     *int   `json:"limit,omitempty"`
+	// Indexes lists the offending request indexes per class (eg the pending, expired and
+	// unknown state IDs of a batch). Bounded by the request's own size limit.
+	Indexes map[string][]int `json:"indexes,omitempty"`
+}
+
+// NewDetailedErrorWithIndexes is NewDetailedError with per-class offending request indexes.
+func NewDetailedErrorWithIndexes(code int, message, reason, detail string, retryable bool, indexes map[string][]int) *Error {
+	return &Error{Code: code, Message: message, Data: ErrorData{Reason: reason, Detail: detail, Retryable: retryable, Indexes: indexes}}
 }
 
 // NewDetailedError creates an error carrying ErrorData.

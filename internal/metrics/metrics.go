@@ -263,6 +263,35 @@ var (
 		[]string{"result"},
 	)
 
+	ProofStatusPending = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "aggregator_proof_status_pending",
+			Help: "State IDs currently marked pending (admitted, not yet in a published certified state).",
+		},
+	)
+
+	ProofStatusExpired = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "aggregator_proof_status_expired_remembered",
+			Help: "Recently expired state IDs currently remembered (bounded by count and TTL).",
+		},
+	)
+
+	ProofStatusExpiredEvictions = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_proof_status_expired_evictions_total",
+			Help: "Expired state IDs forgotten because of the count or TTL cap.",
+		},
+	)
+
+	ProofStatusServedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_proof_status_served_total",
+			Help: "Proof status hints served by method and status.",
+		},
+		[]string{"method", "status"},
+	)
+
 	BFTErrorsTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "aggregator_bft_errors_total",

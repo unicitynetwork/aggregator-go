@@ -37,7 +37,7 @@ func (p prebuiltLease) GetInclusionCert(key []byte) (*api.InclusionCert, error) 
 
 // prebuildCerts builds all proofs of the batch from the one pinned lease in a single
 // pass when the lease supports it. A key absent from the pinned root is a nil entry, not
-// an error: the per-key loop then reports state_not_included at that exact state, in
+// an error: the per-key loop then reports the absent state (classified by absentError), in
 // request order, with no further materialization (a client cannot make the batch fall
 // back to per-key builds by including an absent ID).
 func prebuildCerts(ctx context.Context, lease BatchLease, keys [][]byte) (BatchLease, *BatchError) {

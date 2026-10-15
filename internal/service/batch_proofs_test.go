@@ -241,7 +241,7 @@ func TestBatch_ExactRootOmitsViewAndNeverSubstitutes(t *testing.T) {
 
 	// a state finalized after the exact root is not in that view: all-or-none
 	_, err = e.svc.GetInclusionProofsV1(context.Background(), e.request(append(append([]api.StateID{}, first...), second[0]), root1))
-	requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_not_included")
+	requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_not_in_root")
 
 	// an unknown root is not retained and nothing newer is substituted
 	_, err = e.svc.GetInclusionProofsV1(context.Background(), e.request(first, bytes.Repeat([]byte{9}, 32)))
@@ -274,7 +274,7 @@ func TestBatch_MissingStateFailsWholeCall(t *testing.T) {
 	e.finalize([]byte{1})
 	missing := api.StateID(bytes.Repeat([]byte{7}, 32))
 	_, err := e.svc.GetInclusionProofsV1(context.Background(), e.request([]api.StateID{ids[0], missing, ids[1]}, nil))
-	requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_not_included")
+	requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_unknown")
 	require.False(t, err.Retryable == false && err.Reason == "")
 }
 
@@ -461,7 +461,7 @@ func TestBatch_SizeProjectionErrorsAndMisses(t *testing.T) {
 	delete(e.records, string(ids[1]))
 	e.recs.mu.Unlock()
 	_, err = e.svc.GetInclusionProofsV1(context.Background(), e.request(ids, nil))
-	requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_not_included")
+	requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_unknown")
 }
 
 // Regression: a finalized record whose leaf is absent from the pinned view is an
@@ -473,7 +473,7 @@ func TestBatch_AbsentLeafInPinnedViewIsStateNotIncluded(t *testing.T) {
 	// a record finalized later than the pinned view: stored, but its leaf is not in the root
 	extra := e.addRecordNoLeaf(1000)
 	_, err := e.svc.GetInclusionProofsV1(context.Background(), e.request(append([]api.StateID{ids[0]}, extra), nil))
-	requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_not_included")
+	requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_pending")
 	require.True(t, err.Retryable)
 }
 
@@ -584,15 +584,17 @@ func TestBatch_RequestOrderAndAllOrNoneWithBatchedLookups(t *testing.T) {
 		want := e.records[string(id)]
 		require.Equal(t, want.CertificationData.ToAPI().SourceStateHash, resp.Proofs[i].InclusionProof.CertificationData.SourceStateHash, "position %d", i)
 	}
-	// one absent ID fails the whole call, and nothing is loaded
+	// one absent ID fails the whole call; the present IDs are still examined (one record
+	// load) so the error lists every offending index
 	absent := e.addRecordNoLeaf(1000)
 	delete(e.records, string(absent))
 	e.recs.mu.Lock()
 	e.recs.calls = 0
 	e.recs.mu.Unlock()
 	_, err = e.svc.GetInclusionProofsV1(context.Background(), e.request(append(req, absent), nil))
-	requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_not_included")
+	requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_unknown")
+	require.Equal(t, map[string][]int{"unknown": {4}}, err.Indexes)
 	e.recs.mu.Lock()
-	require.Zero(t, e.recs.calls)
+	require.Equal(t, 1, e.recs.calls)
 	e.recs.mu.Unlock()
 }

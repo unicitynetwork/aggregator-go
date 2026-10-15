@@ -55,6 +55,8 @@ func (rm *RoundManager) processMiniBatchForRound(ctx context.Context, round *Rou
 					"effectiveTimeout", commitment.EffectiveTimeout,
 					"referenceTime", round.ReferenceTime)
 				metrics.CommitmentsDroppedExpired.Inc()
+				// remembered (bounded) so status queries can say "expired", not "unknown"
+				rm.statusTracker.MarkExpired(commitment.StateID)
 				expired = append(expired, interfaces.CertificationRequestAck{
 					StateID:  commitment.StateID,
 					StreamID: commitment.StreamID,

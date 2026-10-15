@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/proofview"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
@@ -103,6 +105,8 @@ type BatchError struct {
 	Detail    string
 	Retryable bool
 	Limit     *int
+	// Indexes lists offending request indexes per class (state status errors).
+	Indexes map[string][]int
 	// Internal is the underlying cause of infrastructure errors; it is never
 	// exposed to the client.
 	Internal error
@@ -122,6 +126,9 @@ func (e *BatchError) Unwrap() error { return e.Internal }
 func (e *BatchError) RPCError() *jsonrpc.Error {
 	if e.Reason == "" { // infrastructure error: no database text, no detail
 		return jsonrpc.NewError(e.Code, e.Message, nil)
+	}
+	if len(e.Indexes) > 0 {
+		return jsonrpc.NewDetailedErrorWithIndexes(e.Code, e.Message, e.Reason, e.Detail, e.Retryable, e.Indexes)
 	}
 	return jsonrpc.NewDetailedError(e.Code, e.Message, e.Reason, e.Detail, e.Retryable, e.Limit)
 }
@@ -163,6 +170,7 @@ type BatchProofService struct {
 	timeout  time.Duration
 	maxBytes int
 	mode     string
+	status   BatchStatusSource
 }
 
 // BatchProofConfig configures the service. Zero values take the plan defaults.
@@ -171,6 +179,14 @@ type BatchProofConfig struct {
 	MaxExecution  time.Duration
 	// MaxResponseBytes bounds the serialized response (estimated while building).
 	MaxResponseBytes int
+	// Status answers the unauthenticated pending/expired/unknown hint of a state ID from
+	// memory (the round manager). Nil answers unknown for every absent state.
+	Status BatchStatusSource
+}
+
+// BatchStatusSource is the O(1) in-memory proof status lookup.
+type BatchStatusSource interface {
+	ProofStatus(stateID api.StateID) api.ProofStatus
 }
 
 // NewBatchProofService creates the service.
@@ -185,7 +201,7 @@ func NewBatchProofService(views BatchViewSource, records BatchRecordSource, shar
 		cfg.MaxResponseBytes = api.InclusionProofsMaxResponseBytes
 	}
 	return &BatchProofService{views: views, records: records, shard: shard, slots: make(chan struct{}, cfg.MaxConcurrent),
-		timeout: cfg.MaxExecution, maxBytes: cfg.MaxResponseBytes}
+		timeout: cfg.MaxExecution, maxBytes: cfg.MaxResponseBytes, status: cfg.Status}
 }
 
 // GetInclusionProofsV1 returns proofs for every state ID, in request order,
@@ -268,34 +284,47 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 	if serr != nil {
 		return nil, dbError(ctx, serr)
 	}
-	// Preflight in request order: a missing record or an over-budget estimate is
-	// reported before any record is loaded.
-	budget := int64(len(view)*2 + 128)
-	for _, id := range req.StateIDs {
-		stored, ok := sizes[id.String()]
-		if !ok {
-			return nil, unavailable("state_not_included")
+	// States without a stored finalized record are classified from the one size projection
+	// already in hand. Every other state is still examined, so that the error lists all
+	// offending indexes; that costs the one record load of the successful path, never more:
+	// the batch is at most two database commands.
+	present := make([]api.StateID, 0, len(req.StateIDs))
+	presentKeys := make([][]byte, 0, len(req.StateIDs))
+	for i, id := range req.StateIDs {
+		if _, ok := sizes[id.String()]; ok {
+			present = append(present, id)
+			presentKeys = append(presentKeys, keys[i])
 		}
+	}
+	// Preflight in request order: an over-budget estimate is reported before any record
+	// is loaded.
+	budget := int64(len(view)*2 + 128)
+	for _, id := range present {
+		stored := sizes[id.String()]
 		budget += stored*encodedSizeFactor + responseElementOverhead
 		if stored < 0 || budget > int64(s.maxBytes) {
 			return nil, limitExceeded(api.DetailResponseBytes, s.maxBytes)
 		}
 	}
+	if len(present) == 0 {
+		return nil, s.absentError(req, latest, allIndexes(len(req.StateIDs)), nil)
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, ctxError(err)
 	}
-	records, lerr := s.records.GetFinalizedByStateIDs(ctx, req.StateIDs)
+	records, lerr := s.records.GetFinalizedByStateIDs(ctx, present)
 	if lerr != nil {
 		return nil, dbError(ctx, lerr)
 	}
 
 	// Proofs of the whole batch come from the one pinned lease in a single pass.
-	lease, perr := prebuildCerts(ctx, lease, keys)
+	lease, perr := prebuildCerts(ctx, lease, presentKeys)
 	if perr != nil {
 		return nil, perr
 	}
 
 	proofs := make([]*api.GetInclusionProofResponseV2, len(keys))
+	var noRecord, absent []int
 	size := len(view)*2 + 128
 	lctx := lease.Context()
 	for i, key := range keys {
@@ -305,7 +334,16 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 		if err := lctx.Err(); err != nil {
 			return nil, ctxError(err)
 		}
-		p, berr := s.buildProof(ctx, lease, records[req.StateIDs[i].String()], key, blk, ucBytes)
+		rec := records[req.StateIDs[i].String()]
+		if rec == nil {
+			noRecord = append(noRecord, i) // no stored finalized record (not in the projection, or not finalized)
+			continue
+		}
+		p, berr := s.buildProof(ctx, lease, rec, key, blk, ucBytes)
+		if berr == errAbsentFromView {
+			absent = append(absent, i) // keep going: every offending index is reported
+			continue
+		}
 		if berr != nil {
 			return nil, berr
 		}
@@ -318,7 +356,81 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 			return nil, limitExceeded(api.DetailResponseBytes, s.maxBytes)
 		}
 	}
+	if len(noRecord) > 0 || len(absent) > 0 {
+		return nil, s.absentError(req, latest, noRecord, absent)
+	}
 	return &api.GetInclusionProofsResponseV1{Proofs: proofs, PartitionView: view}, nil
+}
+
+// errAbsentFromView is the internal marker of a state which has no proof in the pinned view.
+var errAbsentFromView = &BatchError{Code: jsonrpc.InternalErrorCode, Message: "Internal error", Internal: errors.New("state absent from the pinned view")}
+
+// Status details of get_inclusion_proofs.v1 for states without a proof.
+const (
+	detailStatePending   = "state_pending"
+	detailStateExpired   = "state_expired"
+	detailStateUnknown   = "state_unknown"
+	detailStateNotInRoot = "state_not_in_root"
+)
+
+func allIndexes(n int) []int {
+	out := make([]int, n)
+	for i := range out {
+		out[i] = i
+	}
+	return out
+}
+
+// absentError turns the states without a proof into the typed error of the request kind.
+//
+// Exact-root requests: every such state is absent from that retained root (state_not_in_root,
+// not retryable). Latest requests: noRecord are states without a stored finalized record, and
+// absentInView have a record which the pinned view does not contain yet; each is classified from
+// the in-memory status hint. A state with a record, which the status memory does not know, is
+// pending (finalized after the pinned view). With mixed outcomes unknown takes precedence over
+// expired, which takes precedence over pending; only pending is retryable. The error data lists
+// the offending request indexes per class.
+func (s *BatchProofService) absentError(req *api.GetInclusionProofsRequestV1, latest bool, noRecord, absentInView []int) *BatchError {
+	if !latest {
+		idx := append(append([]int(nil), noRecord...), absentInView...)
+		sort.Ints(idx)
+		metrics.ProofStatusServedTotal.WithLabelValues("get_inclusion_proofs.v1", "not_in_root").Add(float64(len(idx)))
+		e := unavailable(detailStateNotInRoot).nonRetryable()
+		e.Indexes = map[string][]int{"not_in_root": idx}
+		return e
+	}
+	classes := map[string][]int{}
+	classify := func(i int, hasRecord bool) {
+		st := api.ProofStatusUnknown
+		if s.status != nil {
+			st = s.status.ProofStatus(req.StateIDs[i])
+		}
+		if st == api.ProofStatusUnknown && hasRecord {
+			st = api.ProofStatusPending
+		}
+		classes[string(st)] = append(classes[string(st)], i)
+	}
+	for _, i := range noRecord {
+		classify(i, false)
+	}
+	for _, i := range absentInView {
+		classify(i, true)
+	}
+	for k := range classes {
+		sort.Ints(classes[k])
+		metrics.ProofStatusServedTotal.WithLabelValues("get_inclusion_proofs.v1", k).Add(float64(len(classes[k])))
+	}
+	var e *BatchError
+	switch {
+	case len(classes[string(api.ProofStatusUnknown)]) > 0:
+		e = unavailable(detailStateUnknown).nonRetryable()
+	case len(classes[string(api.ProofStatusExpired)]) > 0:
+		e = unavailable(detailStateExpired).nonRetryable()
+	default:
+		e = unavailable(detailStatePending) // retryable
+	}
+	e.Indexes = classes
+	return e
 }
 
 func dbError(ctx context.Context, err error) *BatchError {
@@ -331,7 +443,7 @@ func dbError(ctx context.Context, err error) *BatchError {
 func (s *BatchProofService) buildProof(ctx context.Context, lease BatchLease, rec *models.AggregatorRecord, key []byte, blk proofview.BlockIdentity, ucBytes []byte) (*api.GetInclusionProofResponseV2, *BatchError) {
 	// the record must be a finalized state of the pinned view
 	if rec == nil || rec.BlockNumber == nil || blk.Number == nil || rec.BlockNumber.Cmp(blk.Number.Int) > 0 {
-		return nil, unavailable("state_not_included")
+		return nil, errAbsentFromView
 	}
 	if rec.Version != 2 {
 		return nil, &BatchError{Code: jsonrpc.InternalErrorCode, Message: "Internal error", Internal: fmt.Errorf("aggregator record version %d, want 2", rec.Version)}
@@ -346,7 +458,7 @@ func (s *BatchProofService) buildProof(ctx context.Context, lease BatchLease, re
 		}
 		if errors.Is(err, backend.ErrPublishedProofLeafNotFound) || errors.Is(err, smt.ErrLeafNotFound) {
 			// the record is finalized but its leaf is not in the pinned root
-			return nil, unavailable("state_not_included")
+			return nil, errAbsentFromView
 		}
 		return nil, &BatchError{Code: jsonrpc.InternalErrorCode, Message: "Internal error", Internal: fmt.Errorf("inclusion cert: %w", err)}
 	}
@@ -356,7 +468,7 @@ func (s *BatchProofService) buildProof(ctx context.Context, lease BatchLease, re
 		return nil, &BatchError{Code: jsonrpc.InternalErrorCode, Message: "Internal error", Internal: errors.New("record without transaction hash")}
 	}
 	if err := cert.Verify(key, api.LeafValue(cd.TransactionHash.DataBytes(), rec.ReferenceTime), lease.Root(), api.InclusionProofV2HashAlgorithm); err != nil {
-		return nil, unavailable("state_not_included")
+		return nil, errAbsentFromView
 	}
 	certBytes, err := cert.MarshalBinary()
 	if err != nil {

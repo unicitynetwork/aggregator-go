@@ -23,6 +23,10 @@ whose finalization publishes retained views; parent/child aggregation answers `-
 | -32602 | Invalid params | `invalid_request`: `malformed_params`, `invalid_state_id`, `duplicate_state_id`, `wrong_shard`, `invalid_state_root`, `invalid_id` |
 | -32007 | Limit exceeded | `limit_exceeded`: `state_count`, `request_bytes`, `response_bytes` (+ `limit`) |
 | -32006 | Concurrency limit exceeded | `busy`: `active_requests`, `pinned_views`, `retention_budget`, `deadline` (retryable) |
-| -32008 | Proof unavailable | `proof_unavailable`: `state_not_included`, `view_not_retained`, `no_finalized_view`, `partition_view_unavailable`, `unsupported_configuration` |
+| -32008 | Proof unavailable | `proof_unavailable`: `state_pending` (retryable), `state_expired`, `state_unknown`, `state_not_in_root`, `view_not_retained`, `no_finalized_view`, `partition_view_unavailable`, `unsupported_configuration` |
 
 Database failures stay `-32004` without database text.
+
+`state_pending` / `state_expired` / `state_unknown` (latest requests) and `state_not_in_root` (exact-root requests) carry
+`data.indexes` with the offending request indexes per class; see [proof-status.md](proof-status.md) for the contract,
+precedence and the limits of the (unauthenticated) hint.

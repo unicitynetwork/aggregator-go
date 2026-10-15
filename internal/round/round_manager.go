@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/proofpub"
+	"github.com/unicitynetwork/aggregator-go/internal/proofstatus"
 	"github.com/unicitynetwork/aggregator-go/internal/proofview"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
@@ -137,6 +139,8 @@ type RoundManager struct {
 	proofPending          map[string]struct{}
 	latestProofReadyBlock *models.Block
 	proofMetadataCache    *proofMetadataCache
+	// statusTracker backs the unauthenticated proof status hints (pending/expired/unknown).
+	statusTracker *proofstatus.Tracker
 
 	// Streaming support
 	commitmentStream chan *models.CertificationRequest
@@ -242,11 +246,14 @@ func NewRoundManagerWithBackend(
 		eventBus:            eventBus,
 		commitmentStream:    make(chan *models.CertificationRequest, cfg.Processing.CommitmentStreamBufferSize), // Buffer for queue streamer
 		proofPending:        make(map[string]struct{}),
+		statusTracker:       newStatusTracker(),
 		proofMetadataCache:  newProofMetadataCache(cfg.SMT.ProofMetadataCacheEntries),
 		avgProcessingRate:   1.0,                    // Initial estimate: 1 commitment per ms
 		avgFinalizationTime: 200 * time.Millisecond, // Initial estimate (conservative)
 		avgSMTUpdateTime:    5 * time.Millisecond,   // Initial estimate per batch
 	}
+
+	rm.statusTracker.SetReferenceTime(rm.CurrentReferenceTime)
 
 	// Count records (SMT leaves) in Mongo; disk-backed SMT nodes live in RocksDB,
 	// so the SMT collection reads ~0.
@@ -500,6 +507,8 @@ func (rm *RoundManager) markProofsPending(commitments []*models.CertificationReq
 	for _, commitment := range commitments {
 		if commitment != nil {
 			rm.proofPending[commitment.StateID.String()] = struct{}{}
+			// also covers requests replayed from the queue after a restart (never admitted here)
+			rm.statusTracker.MarkPending(commitment.StateID, commitmentDeadline(commitment))
 		}
 	}
 }
@@ -515,12 +524,14 @@ func (rm *RoundManager) markProofsReady(block *models.Block, stateIDs []api.Stat
 	for _, stateID := range stateIDs {
 		delete(rm.proofPending, stateID.String())
 	}
+	rm.statusTracker.ClearPending(stateIDs...)
 }
 
 func (rm *RoundManager) clearProofPending() {
 	rm.proofCacheMu.Lock()
 	defer rm.proofCacheMu.Unlock()
 	rm.proofPending = make(map[string]struct{})
+	rm.statusTracker.Reset()
 }
 
 func (rm *RoundManager) clearProofsPending(commitments []*models.CertificationRequest) {
@@ -547,6 +558,7 @@ func (rm *RoundManager) clearProofStateIDsPending(stateIDs []api.StateID) {
 	for _, stateID := range stateIDs {
 		delete(rm.proofPending, stateID.String())
 	}
+	rm.statusTracker.ClearPending(stateIDs...)
 }
 
 // GetStats returns round manager statistics
@@ -1867,4 +1879,40 @@ func (rm *RoundManager) publishRecoveredBlock(ctx context.Context, blockNumber *
 		return
 	}
 	rm.proofPub.PublishFinalized(ctx, block)
+}
+
+// newStatusTracker creates the proof status tracker with the default bounds.
+func newStatusTracker() *proofstatus.Tracker {
+	return proofstatus.New(proofstatus.Config{})
+}
+
+// commitmentDeadline is the effective deadline (reference-time seconds) of a queued request;
+// requests without one never expire by deadline.
+func commitmentDeadline(c *models.CertificationRequest) uint64 {
+	if c.EffectiveTimeout != 0 {
+		return c.EffectiveTimeout
+	}
+	if c.CertificationData.ExpiresAt != nil {
+		return *c.CertificationData.ExpiresAt
+	}
+	return math.MaxUint64
+}
+
+// MarkRequestAdmitted marks an accepted request pending at admission, closing the
+// queued-but-not-in-a-round window of the status hints. Idempotent: resubmitting the same
+// request while it is pending changes nothing.
+func (rm *RoundManager) MarkRequestAdmitted(stateID api.StateID, deadline uint64) bool {
+	return rm.statusTracker.MarkPending(stateID, deadline)
+}
+
+// ClearRequestAdmitted removes the admission mark of a request which could not be queued.
+func (rm *RoundManager) ClearRequestAdmitted(stateID api.StateID) {
+	rm.statusTracker.ClearPending(stateID)
+}
+
+// ProofStatus is the unauthenticated hint for a state ID without a proof: pending,
+// expired or unknown. O(1), no I/O. The sets are per node and volatile: a node which did
+// not admit the request, or restarted, answers unknown.
+func (rm *RoundManager) ProofStatus(stateID api.StateID) api.ProofStatus {
+	return rm.statusTracker.Status(stateID)
 }
