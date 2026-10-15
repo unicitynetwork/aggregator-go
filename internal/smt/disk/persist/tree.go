@@ -302,6 +302,17 @@ func buildInclusionCerts(rootHash disk.Hash, reader storage.ReadStore, keys [][]
 // store. It materializes the union of requested proof paths once, then derives
 // each certificate from that shared materialized root.
 func BuildInclusionCerts(rootHash disk.Hash, reader storage.ReadStore, keys [][]byte) ([]*api.InclusionCert, error) {
+	return buildInclusionCertsOpt(rootHash, reader, keys, false)
+}
+
+// BuildInclusionCertsPartial is BuildInclusionCerts which reports keys absent from the
+// root per key: their entry is nil and the other proofs are still built (a client-chosen
+// batch with one absent key must not turn the union build into an error path).
+func BuildInclusionCertsPartial(rootHash disk.Hash, reader storage.ReadStore, keys [][]byte) ([]*api.InclusionCert, error) {
+	return buildInclusionCertsOpt(rootHash, reader, keys, true)
+}
+
+func buildInclusionCertsOpt(rootHash disk.Hash, reader storage.ReadStore, keys [][]byte, allowMissing bool) ([]*api.InclusionCert, error) {
 	certs := make([]*api.InclusionCert, len(keys))
 	if len(keys) == 0 {
 		return certs, nil
@@ -342,6 +353,9 @@ func BuildInclusionCerts(rootHash disk.Hash, reader storage.ReadStore, keys [][]
 	for i, diskKey := range diskKeys {
 		var cert api.InclusionCert
 		if err := buildInclusionCert(root, diskKey, &cert); err != nil {
+			if allowMissing && errors.Is(err, ErrProofLeafNotFound) {
+				continue // absent from this root: nil entry
+			}
 			return nil, fmt.Errorf("build inclusion cert %d: %w", i, err)
 		}
 		certs[i] = &cert

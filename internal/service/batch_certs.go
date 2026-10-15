@@ -1,0 +1,66 @@
+package service
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/unicitynetwork/aggregator-go/internal/smt/backend"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
+	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
+)
+
+// batchCertLease is implemented by leases which can build the proofs of many keys
+// from the pinned state at once (*proofview.Lease). For RocksDB views that is one
+// union-path materialization with bulk frontier reads, instead of one fresh
+// materialization per key.
+type batchCertLease interface {
+	GetInclusionCerts(keys [][]byte) ([]*api.InclusionCert, error)
+}
+
+// prebuiltLease serves the inclusion certificates built up front and defers anything
+// else to the underlying lease.
+type prebuiltLease struct {
+	BatchLease
+	certs map[string]*api.InclusionCert
+}
+
+func (p prebuiltLease) GetInclusionCert(key []byte) (*api.InclusionCert, error) {
+	if c, ok := p.certs[string(key)]; ok {
+		if c == nil {
+			// absent from the pinned root: reported per key, in request order, by the loop
+			return nil, backend.ErrPublishedProofLeafNotFound
+		}
+		return c, nil
+	}
+	return p.BatchLease.GetInclusionCert(key)
+}
+
+// prebuildCerts builds all proofs of the batch from the one pinned lease in a single
+// pass when the lease supports it. A key absent from the pinned root is a nil entry, not
+// an error: the per-key loop then reports state_not_included at that exact state, in
+// request order, with no further materialization (a client cannot make the batch fall
+// back to per-key builds by including an absent ID).
+func prebuildCerts(ctx context.Context, lease BatchLease, keys [][]byte) (BatchLease, *BatchError) {
+	bl, ok := lease.(batchCertLease)
+	if !ok || len(keys) < 2 {
+		return lease, nil
+	}
+	certs, err := bl.GetInclusionCerts(keys)
+	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, ctxError(cerr)
+		}
+		if cerr := lease.Context().Err(); cerr != nil {
+			return nil, ctxError(cerr)
+		}
+		return nil, &BatchError{Code: jsonrpc.InternalErrorCode, Message: "Internal error", Internal: fmt.Errorf("batch inclusion certs: %w", err)}
+	}
+	if len(certs) != len(keys) {
+		return nil, &BatchError{Code: jsonrpc.InternalErrorCode, Message: "Internal error", Internal: fmt.Errorf("batch inclusion certs: got %d for %d keys", len(certs), len(keys))}
+	}
+	m := make(map[string]*api.InclusionCert, len(keys))
+	for i, key := range keys {
+		m[string(key)] = certs[i]
+	}
+	return prebuiltLease{BatchLease: lease, certs: m}, nil
+}

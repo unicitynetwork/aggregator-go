@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 
+	"github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -84,6 +85,19 @@ func (l *Lease) GetInclusionCert(key []byte) (*api.InclusionCert, error) {
 		return nil, err
 	}
 	return l.v.reader.GetInclusionCert(l.ctx, key)
+}
+
+// GetInclusionCerts reads proofs for all keys from the leased state under the lease's
+// context, in order. Views with a batch path (RocksDB) build them from one union of the
+// proof paths; others fall back to one call per key.
+func (l *Lease) GetInclusionCerts(keys [][]byte) ([]*api.InclusionCert, error) {
+	if l.released.Load() {
+		return nil, ErrLeaseReleased
+	}
+	if err := l.ctx.Err(); err != nil {
+		return nil, err
+	}
+	return backend.InclusionCerts(l.ctx, l.v.reader, keys)
 }
 
 // Release returns the pin. When it was the last pin on an already evicted view

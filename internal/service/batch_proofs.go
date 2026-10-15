@@ -289,6 +289,12 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 		return nil, dbError(ctx, lerr)
 	}
 
+	// Proofs of the whole batch come from the one pinned lease in a single pass.
+	lease, perr := prebuildCerts(ctx, lease, keys)
+	if perr != nil {
+		return nil, perr
+	}
+
 	proofs := make([]*api.GetInclusionProofResponseV2, len(keys))
 	size := len(view)*2 + 128
 	lctx := lease.Context()

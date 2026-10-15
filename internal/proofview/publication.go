@@ -1,9 +1,6 @@
 package proofview
 
-import (
-	"bytes"
-	"crypto/sha256"
-)
+import "crypto/sha256"
 
 // MarkLatestUnavailable records that the newest finalized state could not be
 // retained. Latest then reports ErrViewNotRetained until a later publication
@@ -26,11 +23,9 @@ func (c *Catalog) MarkLatestUnavailable() {
 func (c *Catalog) ViewForDigest(digest [sha256.Size]byte) (BlockIdentity, []byte, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for i := len(c.views) - 1; i >= 0; i-- {
-		for _, a := range c.views[i].atts {
-			if a.digest == digest {
-				return c.views[i].block.clone(), append([]byte(nil), c.views[i].root...), true
-			}
+	for v := c.tail; v != nil; v = v.prev {
+		if _, ok := v.attIdx[digest]; ok {
+			return v.block.clone(), append([]byte(nil), v.root...), true
 		}
 	}
 	return BlockIdentity{}, nil, false
@@ -43,9 +38,8 @@ func (c *Catalog) ViewForDigest(digest [sha256.Size]byte) (BlockIdentity, []byte
 func (c *Catalog) ViewForRootMatching(root []byte, match func(latestUC []byte) bool) (BlockIdentity, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for i := len(c.views) - 1; i >= 0; i-- {
-		v := c.views[i]
-		if bytes.Equal(v.root, root) && len(v.atts) > 0 && match(v.atts[len(v.atts)-1].uc) {
+	for v := c.byRoot[string(root)]; v != nil; v = v.rootOlder {
+		if v.attTail != nil && match(v.attTail.uc) {
 			return v.block.clone(), true
 		}
 	}
@@ -58,11 +52,9 @@ func (c *Catalog) ViewForRootMatching(root []byte, match func(latestUC []byte) b
 func (c *Catalog) PartitionViewForDigest(digest [sha256.Size]byte) ([]byte, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for i := len(c.views) - 1; i >= 0; i-- {
-		for _, a := range c.views[i].atts {
-			if a.digest == digest {
-				return append([]byte(nil), a.view...), true
-			}
+	for v := c.tail; v != nil; v = v.prev {
+		if a, ok := v.attIdx[digest]; ok {
+			return append([]byte(nil), a.view...), true
 		}
 	}
 	return nil, false
