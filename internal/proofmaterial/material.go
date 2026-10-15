@@ -82,10 +82,11 @@ type NopSink struct{}
 
 func (NopSink) PublishProofMaterial(context.Context, *Material) error { return nil }
 
-// TopologyProvider returns the trusted topology of the partition: its complete sharding
-// scheme and the admitted configuration hash (exactly 32 bytes) of every shard. It must
-// come from the deployment's own configuration, never from a response. A partition it
-// cannot resolve completely yields (_, false) and its views are not accepted.
+// TopologyProvider optionally returns an independently pinned topology of the partition:
+// its complete sharding scheme and the admitted configuration hash (exactly 32 bytes) of
+// every shard. It must come from the deployment's own configuration, never from a
+// response. Pins only restrict: without them the topology is the one committed by the
+// authenticated seal. A partition it cannot resolve yields (_, false): no pins.
 type TopologyProvider interface {
 	Topology(partition types.PartitionID) (types.PartitionViewTopology, bool)
 }
@@ -97,39 +98,42 @@ const (
 	ResultMalformed = "malformed"
 	ResultInvalid   = "invalid"
 	ResultTooLarge  = "too_large"
-	// ResultNoTopology: no trusted topology/configuration hashes are available for the
-	// partition, so the view cannot be bound to admitted configuration.
+	// ResultNoTopology: the configured pinned topology is itself unusable.
 	ResultNoTopology = "no_trusted_topology"
 )
 
 // ConfHashSize is the required size of every admitted shard configuration hash.
 const ConfHashSize = 32
 
-// ValidateView decodes the view bytes and checks them against the already
-// authenticated enclosing UC (the caller has verified the seal) and the trusted
-// topology. A trusted complete scheme and a 32-byte admitted configuration hash for
-// every shard are REQUIRED: without them the view is not retained, however well it
-// hashes into the seal. Returns the outcome label and, on success, a private copy of
-// the bytes. Any failure only means "no proof material".
-func ValidateView(raw []byte, uc *types.UnicityCertificate, partition types.PartitionID, topos TopologyProvider) (string, []byte, error) {
+// ValidateView authenticates the partition view of a response end to end
+// (types.AuthenticatePartitionView): the view is decoded as untrusted data, must
+// hash into the seal of the enclosing UC under the caller's expected partition,
+// match the enclosing UC's own leaf exactly, and the complete seal must be
+// authenticated by "verifier" (network, exact epoch, epoch start, quorum). The
+// scheme and configuration hashes are then those committed by the seal.
+//
+// "pins" is an OPTIONAL independently admitted topology: when it resolves the
+// partition the view must also match it (stricter). Returns the outcome label and, on
+// success, a private copy of the bytes. Any failure only means "no proof material".
+func ValidateView(raw []byte, uc *types.UnicityCertificate, partition types.PartitionID, verifier types.SealVerifier, pins TopologyProvider) (string, []byte, error) {
 	if len(raw) == 0 {
 		return ResultMissing, nil, nil
 	}
 	if len(raw) > types.MaxPartitionViewBytes {
 		return ResultTooLarge, nil, fmt.Errorf("partition view is %d bytes, limit %d", len(raw), types.MaxPartitionViewBytes)
 	}
-	topo, ok := topologyFor(topos, partition)
-	if !ok {
-		return ResultNoTopology, nil, errors.New("no trusted topology for the partition")
-	}
-	if err := checkTopology(topo); err != nil {
-		return ResultNoTopology, nil, err
-	}
 	view, err := types.DecodePartitionViewV1(raw)
 	if err != nil {
 		return ResultMalformed, nil, err
 	}
-	if _, err := view.VerifyTree(uc, partition, topo, crypto.SHA256); err != nil {
+	var opts []types.AuthOption
+	if topo, ok := topologyFor(pins, partition); ok {
+		if err := checkTopology(topo); err != nil {
+			return ResultNoTopology, nil, err
+		}
+		opts = append(opts, types.WithPinnedTopology(topo))
+	}
+	if _, err := types.AuthenticateView(view, uc, partition, verifier, crypto.SHA256, opts...); err != nil {
 		return ResultInvalid, nil, err
 	}
 	return ResultOK, append([]byte(nil), raw...), nil
