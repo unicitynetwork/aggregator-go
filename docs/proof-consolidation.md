@@ -95,13 +95,15 @@ CONSOLIDATION_E2E_SHARDS=4,8 go test -tags e2e_bft ./test/integration -run TestB
 - Epoch end: the client takes `Config.EpochEnd` (the CLI derives it from the installed trust base history, which must form a
   verified chain; a successor epoch bounds its predecessor) and enforces it on every seal authentication: accepted at
   start−1, rejected at/after the successor's start.
-- Root-to-shard message count (re-deliveries): `aggregator_bft_certification_response_repeats_total{shard}` counts responses
-  whose root round does not advance; consolidation traffic must not raise it over the equal-work baseline phase, which detects
-  one duplicate per block even at a single finalized block (unit-tested at the minimum workload). The counter `aggregator_bft_certification_responses_total{shard}` counts certification response
-  messages received per shard. Every finalized block is delivered by one response, so each shard's responses are compared with its
-  finalized blocks (`get_block_height`): with consolidation traffic a shard may not receive more than its blocks plus the extra
-  responses (timeout repeats) it already received in the equal-work writes-only baseline phase, plus 2. The rule is unit-tested
-  including negative cases (doubled or one duplicate response per block fails).
+- Root-to-shard message count: `aggregator_bft_certification_responses_total{shard}` counts responses and
+  `aggregator_bft_certification_response_nonprogress_total{shard}` those that certify no new shard block (shard input record
+  round not advancing: re-deliveries, timeout repeats and any extra traffic, whatever its root round);
+  `aggregator_bft_handshakes_total{shard}` counts handshakes. Per shard the test requires: responses ≥ finalized blocks − 1;
+  progress responses (responses − non-progress) ≤ finalized blocks + 1; non-progress responses ≤ ⌊(longest gap without a
+  finalized block + 0.5 s) / T2⌋ timeout repeats + one re-delivery per handshake; handshakes ≤ baseline + 1. So a single
+  duplicate per block is detected even at one finalized block, and extra traffic cannot hide behind advancing root rounds.
+  The rule is unit-tested with negative controls (advancing-round extra traffic at the minimum workload, duplicate per block,
+  second timeout repeat without a second T2 gap, handshake-excused traffic).
 
 ### Recorded live run (colima 2 CPU / 3 GiB, shared with other jobs)
 

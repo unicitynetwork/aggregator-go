@@ -361,6 +361,38 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 	// legitimately be unavailable (explicit busy/deadline) and is simply retried as a new attempt
 	phase := func(d time.Duration, work func(), until func() bool) phaseCount {
 		s0 := take()
+		// sample every shard's finalized height to find its longest stretch without a new block
+		gaps := make([]float64, n)
+		stopSampling := make(chan struct{})
+		var samplerDone sync.WaitGroup
+		samplerDone.Add(1)
+		go func() {
+			defer samplerDone.Done()
+			last := make([]int64, n)
+			lastAt := make([]time.Time, n)
+			for i, sh := range shards {
+				last[i], lastAt[i] = int64(s0.blocks[i]), time.Now()
+				_ = sh
+			}
+			tick := time.NewTicker(500 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				select {
+				case <-stopSampling:
+					for i := range shards {
+						gaps[i] = max(gaps[i], time.Since(lastAt[i]).Seconds())
+					}
+					return
+				case <-tick.C:
+					for i, sh := range shards {
+						if h := blockHeightQuiet(sh.url); h > last[i] {
+							gaps[i] = max(gaps[i], time.Since(lastAt[i]).Seconds())
+							last[i], lastAt[i] = h, time.Now()
+						}
+					}
+				}
+			}
+		}()
 		deadline := time.Now().Add(d)
 		limit := time.Now().Add(d + 60*time.Second)
 		for time.Now().Before(deadline) || (until != nil && !until() && time.Now().Before(limit)) {
@@ -370,7 +402,11 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 				time.Sleep(500 * time.Millisecond)
 			}
 		}
-		return diff(s0, take())
+		close(stopSampling)
+		samplerDone.Wait()
+		pc := diff(s0, take())
+		pc.MaxGap = gaps
+		return pc
 	}
 	if os.Getenv("CONSOLIDATION_E2E_NEGATIVE") == "stop-writers" {
 		stopAll() // negative control: the progress checks below must fail
@@ -692,6 +728,19 @@ func startRedisCleanly(t *testing.T) (string, int) {
 	}
 	require.NoError(t, lastErr)
 	return "", 0
+}
+
+// blockHeightQuiet is blockHeight for the sampler goroutine (no test failure on transient errors).
+func blockHeightQuiet(url string) int64 {
+	raw, err := rpcCall(url, "get_block_height", nil)
+	if err != nil {
+		return 0
+	}
+	var resp api.GetBlockHeightResponse
+	if json.Unmarshal(raw, &resp) != nil || resp.BlockNumber == nil {
+		return 0
+	}
+	return resp.BlockNumber.Int64()
 }
 
 func blockHeight(t *testing.T, url string) int64 {
