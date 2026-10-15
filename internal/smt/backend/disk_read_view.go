@@ -202,6 +202,37 @@ func (v *diskReadView) GetInclusionCert(ctx context.Context, key []byte) (*api.I
 	return cert, nil
 }
 
+// GetInclusionCerts builds all proofs from this view's pinned snapshot with one
+// union-path materialization and bulk frontier reads (see persist.BuildInclusionCerts).
+// Node reads and distinct nodes are reported separately.
+func (v *diskReadView) GetInclusionCerts(ctx context.Context, keys [][]byte) ([]*api.InclusionCert, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	if v.closed {
+		return nil, ErrReadViewClosed
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	if v.root == disk.EmptyRootHash() {
+		return make([]*api.InclusionCert, len(keys)), nil // every key is absent
+	}
+	certs, stats, err := persist.BuildInclusionCertsWithStats(v.root, v.reader, keys)
+	metrics.SMTDiskBatchProofLeaves.Add(float64(len(keys)))
+	metrics.SMTDiskBatchNodeReads.Add(float64(stats.NodeReads))
+	metrics.SMTDiskBatchUniqueNodes.Add(float64(stats.UniqueNodes))
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return certs, nil
+}
+
 // RetainedBytes is the estimated storage written between this view's capture
 // and its successor's (or now), the versions the snapshot keeps alive.
 func (v *diskReadView) RetainedBytes() uint64 {
@@ -253,6 +284,7 @@ func (v *diskReadView) Close() error {
 
 var (
 	_ ReadView            = (*diskReadView)(nil)
+	_ BatchReadView       = (*diskReadView)(nil)
 	_ ReadViewRetainer    = (*DiskBackend)(nil)
 	_ RetentionAccountant = (*DiskBackend)(nil)
 	_ AccountingRetirer   = (*diskReadView)(nil)

@@ -23,7 +23,7 @@ func (c *Catalog) MarkLatestUnavailable() {
 func (c *Catalog) ViewForDigest(digest [sha256.Size]byte) (BlockIdentity, []byte, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for v := c.tail; v != nil; v = v.prev { // newest first; one index probe per view
+	for v := c.tail; v != nil; v = v.prev {
 		if _, ok := v.attIdx[digest]; ok {
 			return v.block.clone(), append([]byte(nil), v.root...), true
 		}
@@ -38,7 +38,7 @@ func (c *Catalog) ViewForDigest(digest [sha256.Size]byte) (BlockIdentity, []byte
 func (c *Catalog) ViewForRootMatching(root []byte, match func(latestUC []byte) bool) (BlockIdentity, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for v := c.byRoot[string(root)]; v != nil; v = v.rootOlder { // newest view with the root first
+	for v := c.byRoot[string(root)]; v != nil; v = v.rootOlder {
 		if v.attTail != nil && match(v.attTail.uc) {
 			return v.block.clone(), true
 		}
