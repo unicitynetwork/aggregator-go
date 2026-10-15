@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/stretchr/testify/require"
 
@@ -116,4 +120,86 @@ func TestBatchRPC_OtherMethodsUnaffectedByLimits(t *testing.T) {
 	pad := strings.Repeat(" ", 2*api.InclusionProofsMaxRequestBytes)
 	_, body := postRPC(t, rpc, `{"jsonrpc":"2.0","id":8,`+pad+`"method":"get_inclusion_proof.v2","params":{"stateId":"`+strings.Repeat("ab", 32)+`"}}`)
 	require.Equal(t, goldenV2Success[:len(goldenV2Success)-len(`,"id":7}`+"\n")]+`,"id":8}`+"\n", body)
+}
+
+func postRPCReader(t *testing.T, h http.Handler, body io.Reader) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Body.String()
+}
+
+// Regression: the 64 KiB limit counts the whole body, not the first JSON value.
+func TestBatchRPC_RequestLimitCountsCompleteBody(t *testing.T) {
+	var n int
+	rpc := batchServer(t, config.ShardingModeStandalone, echoHandler(&n))
+	valid := `{"jsonrpc":"2.0","id":1,"method":"get_inclusion_proofs.v1","params":{"stateIds":["` + strings.Repeat("ab", 32) + `"]}}`
+	limitErr := fmt.Sprintf(`{"jsonrpc":"2.0","error":{"code":-32007,"message":"Limit exceeded","data":{"reason":"limit_exceeded","detail":"request_bytes","retryable":false,"limit":%d}},"id":1}`+"\n", api.InclusionProofsMaxRequestBytes)
+
+	// trailing whitespace pushing the body over the limit
+	require.Equal(t, limitErr, postRPCReader(t, rpc, strings.NewReader(valid+strings.Repeat(" ", api.InclusionProofsMaxRequestBytes))))
+	require.Zero(t, n)
+	// the same body delivered in one-byte chunks (no Content-Length reliance)
+	require.Equal(t, limitErr, postRPCReader(t, rpc, iotest.OneByteReader(strings.NewReader(valid+strings.Repeat("\n", api.InclusionProofsMaxRequestBytes)))))
+	require.Zero(t, n)
+	// trailing whitespace within the limit is fine
+	require.Contains(t, postRPCReader(t, rpc, iotest.OneByteReader(strings.NewReader(valid+"  \n\t"))), `"result"`)
+	require.Equal(t, 1, n)
+
+	// trailing non-whitespace, including a second request, is rejected
+	invalid := `{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request","data":{"reason":"invalid_request","detail":"invalid_envelope","retryable":false}},"id":1}` + "\n"
+	require.Equal(t, invalid, postRPCReader(t, rpc, strings.NewReader(valid+valid)))
+	require.Equal(t, invalid, postRPCReader(t, rpc, strings.NewReader(valid+" x")))
+	require.Equal(t, 1, n)
+}
+
+// Regression: the raw ID is validated by its original encoding and echoed verbatim.
+func TestBatchRPC_RawIDValidationAndEcho(t *testing.T) {
+	var n int
+	rpc := batchServer(t, config.ShardingModeStandalone, echoHandler(&n))
+	call := func(id string) string {
+		idField := ""
+		if id != "<absent>" {
+			idField = `"id":` + id + `,`
+		}
+		_, body := postRPC(t, rpc, `{"jsonrpc":"2.0",`+idField+`"method":"get_inclusion_proofs.v1","params":{"stateIds":["`+strings.Repeat("ab", 32)+`"]}}`)
+		return body
+	}
+	invalidID := `{"jsonrpc":"2.0","error":{"code":-32602,"message":"Invalid params","data":{"reason":"invalid_request","detail":"invalid_id","retryable":false}},"id":null}` + "\n"
+
+	// escapes: 30 x \u0061 decodes to 30 bytes but is 182 encoded bytes
+	require.Equal(t, invalidID, call(`"`+strings.Repeat(`\u0061`, 30)+`"`))
+	for _, id := range []string{`{}`, `[]`, `true`, `false`, `null`, `<absent>`} {
+		require.Equal(t, invalidID, call(id), id)
+	}
+	require.Zero(t, n, "the handler never ran for invalid IDs")
+
+	// precision and form are preserved
+	for _, id := range []string{`9007199254740993`, `-12`, `1.50`, `1e2`, `"a\u0061b"`, `"plain"`} {
+		body := call(id)
+		require.True(t, strings.HasSuffix(body, `,"id":`+id+"}\n"), "id %s echoed in %s", id, body)
+	}
+	require.Equal(t, 6, n)
+	// exactly 128 encoded bytes passes, 129 does not
+	require.Contains(t, call(`"`+strings.Repeat("x", 126)+`"`), `"result"`)
+	require.Equal(t, invalidID, call(`"`+strings.Repeat("x", 127)+`"`))
+}
+
+// Regression: an identifiable batch method gets the structured envelope error.
+func TestBatchRPC_InvalidEnvelopeIsStructured(t *testing.T) {
+	var n int
+	rpc := batchServer(t, config.ShardingModeStandalone, echoHandler(&n))
+	_, body := postRPC(t, rpc, `{"jsonrpc":"1.0","id":5,"method":"get_inclusion_proofs.v1","params":{}}`)
+	require.Equal(t, `{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request","data":{"reason":"invalid_request","detail":"invalid_envelope","retryable":false}},"id":5}`+"\n", body)
+	_, body = postRPC(t, rpc, `{"id":5,"method":"get_inclusion_proofs.v1"}`)
+	require.Contains(t, body, `"detail":"invalid_envelope"`)
+	require.Zero(t, n)
+
+	// legacy methods keep the bare error
+	_, body = postRPC(t, rpc, `{"jsonrpc":"1.0","id":5,"method":"get_inclusion_proof.v2","params":{}}`)
+	require.Equal(t, `{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request"},"id":5}`+"\n", body)
+	// legacy IDs still decode as before (float conversion included)
+	_, body = postRPC(t, rpc, `{"jsonrpc":"2.0","id":9007199254740993,"method":"nope","params":{}}`)
+	require.Contains(t, body, `"id":9007199254740992`)
 }

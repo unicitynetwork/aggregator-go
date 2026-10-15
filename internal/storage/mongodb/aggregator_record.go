@@ -221,6 +221,48 @@ func (ars *AggregatorRecordStorage) getByStateIDFromFinalizedBlock(ctx context.C
 	return ars.decodeRecord(raw)
 }
 
+// GetStoredSizeByStateID returns the BSON size in bytes of the finalized record
+// for stateID without transferring or decoding the document (a server-side
+// $bsonSize projection). found is false when no finalized record exists.
+func (ars *AggregatorRecordStorage) GetStoredSizeByStateID(ctx context.Context, stateID api.StateID) (size int64, found bool, err error) {
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{"stateId": stateID.String()}}},
+		{{Key: "$lookup", Value: bson.M{
+			"from":         blockCollection,
+			"localField":   "blockNumber",
+			"foreignField": "index",
+			"as":           "block",
+		}}},
+		{{Key: "$unwind", Value: "$block"}},
+		{{Key: "$match", Value: bson.M{
+			"block.finalized": true,
+			"$expr":           bson.M{"$eq": bson.A{"$proposalId", "$block.proposalId"}},
+		}}},
+		{{Key: "$sort", Value: bson.M{"blockNumber": -1}}},
+		{{Key: "$limit", Value: 1}},
+		{{Key: "$project", Value: bson.M{"block": 0}}},
+		{{Key: "$project", Value: bson.M{"_id": 0, "size": bson.M{"$bsonSize": "$$ROOT"}}}},
+	}
+	cursor, err := ars.collection.Aggregate(ctx, pipeline)
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to get aggregator record size by state ID: %w", err)
+	}
+	defer cursor.Close(ctx)
+	if !cursor.Next(ctx) {
+		if err := cursor.Err(); err != nil {
+			return 0, false, fmt.Errorf("cursor error: %w", err)
+		}
+		return 0, false, nil
+	}
+	var out struct {
+		Size int64 `bson:"size"`
+	}
+	if err := cursor.Decode(&out); err != nil {
+		return 0, false, fmt.Errorf("failed to decode aggregator record size: %w", err)
+	}
+	return out.Size, true, nil
+}
+
 // GetByBlockNumber retrieves all records for a specific block
 func (ars *AggregatorRecordStorage) GetByBlockNumber(ctx context.Context, blockNumber *api.BigInt) ([]*models.AggregatorRecord, error) {
 	return ars.getByBlockNumber(ctx, blockNumber, true)
