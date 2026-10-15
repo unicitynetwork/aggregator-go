@@ -203,7 +203,7 @@ func (c *Catalog) Publish(ctx context.Context, in PublishInput) error {
 		if !owned {
 			toClose = append(toClose, in.Reader)
 		}
-		closeAll(toClose)
+		c.settle(toClose)
 	}()
 	if err := ctx.Err(); err != nil {
 		return err
@@ -268,7 +268,7 @@ func (c *Catalog) AttachCertification(ctx context.Context, block BlockIdentity, 
 		return err
 	}
 	var toClose []backend.ReadView
-	defer func() { closeAll(toClose) }()
+	defer func() { c.settle(toClose) }()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -526,8 +526,30 @@ func (c *Catalog) release(l *Lease) {
 		delete(c.retired, l.v)
 		toClose = append(toClose, l.v.reader)
 	}
+	// A release can make an over-budget view evictable.
+	if !c.closed {
+		toClose = c.enforceLocked(toClose)
+	}
 	c.mu.Unlock()
-	closeAll(toClose)
+	c.settle(toClose)
+}
+
+// settle closes readers that left the catalog, outside the lock, then re-runs
+// retention enforcement. Closing a reader can move its accounted charge onto an
+// older surviving (possibly pinned) reader; until the close the charge was not
+// visible, so pressure that appears only afterwards would otherwise go
+// unnoticed. Enforcement never closes a reader a lease still holds.
+func (c *Catalog) settle(toClose []backend.ReadView) {
+	for len(toClose) > 0 {
+		closeAll(toClose)
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return
+		}
+		toClose = c.enforceLocked(nil)
+		c.mu.Unlock()
+	}
 }
 
 // Close cancels all leases, retires every view, and closes the readers that no

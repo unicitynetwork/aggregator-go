@@ -23,7 +23,21 @@ type Batch struct {
 	committedRoot  *disk.Hash
 	committedBlock []byte
 	closed         bool
+
+	// pendingBytes estimates the storage versions the batch creates (and, for
+	// deletes, keeps alive in pinned snapshots); added to the store's write
+	// volume once the batch is durably written.
+	pendingBytes uint64
 }
+
+const (
+	// nodeKeyEstimate approximates an encoded node key.
+	nodeKeyEstimate = 40
+	// deleteRetainEstimate conservatively approximates the old node value a
+	// pinned snapshot keeps alive when the node is deleted: the batch does not
+	// know the size of the value it removes.
+	deleteRetainEstimate = 512
+)
 
 func (b *Batch) SetNode(key disk.NodeKey, value []byte) error {
 	if b == nil || b.batch == nil {
@@ -41,6 +55,7 @@ func (b *Batch) SetNode(key disk.NodeKey, value []byte) error {
 		return fmt.Errorf("closed RocksDB SMT store")
 	}
 	writeBatchPutCF(b.batch, b.store.nodesCF, b.store.nodeKey(key), value)
+	b.pendingBytes += uint64(nodeKeyEstimate + len(value))
 	b.store.counters.batchSets.Add(1)
 	b.store.counters.nodeSets.Add(1)
 	return nil
@@ -68,6 +83,9 @@ func (b *Batch) SetNodeEntries(nodes []storage.NodeWrite) error {
 		return err
 	}
 	count := int64(len(nodes))
+	for _, n := range nodes {
+		b.pendingBytes += uint64(nodeKeyEstimate + len(n.Value))
+	}
 	b.store.counters.batchSets.Add(count)
 	b.store.counters.nodeSets.Add(count)
 	return nil
@@ -89,6 +107,7 @@ func (b *Batch) DeleteNode(key disk.NodeKey) error {
 		return fmt.Errorf("closed RocksDB SMT store")
 	}
 	writeBatchDeleteCF(b.batch, b.store.nodesCF, b.store.nodeKey(key))
+	b.pendingBytes += nodeKeyEstimate + deleteRetainEstimate
 	b.store.counters.batchSets.Add(1)
 	b.store.counters.nodeDeletes.Add(1)
 	return nil
@@ -116,6 +135,7 @@ func (b *Batch) DeleteNodes(keys []disk.NodeKey) error {
 		return err
 	}
 	count := int64(len(keys))
+	b.pendingBytes += uint64(len(keys)) * (nodeKeyEstimate + deleteRetainEstimate)
 	b.store.counters.batchSets.Add(count)
 	b.store.counters.nodeDeletes.Add(count)
 	return nil
@@ -174,6 +194,7 @@ func (b *Batch) Commit() error {
 	b.batch = nil
 	b.closed = true
 	b.store.counters.batchesCommitted.Add(1)
+	b.store.writtenBytes.Add(b.pendingBytes)
 	if b.committedRoot != nil {
 		b.store.mu.Lock()
 		b.store.root = *b.committedRoot
