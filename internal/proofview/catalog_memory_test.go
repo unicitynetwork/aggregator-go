@@ -14,6 +14,7 @@ import (
 
 // memChain drives a real MemoryBackend through the catalog.
 type memChain struct {
+	wrap  func(backend.ReadView) backend.ReadView // optional: wraps each retained reader (instrumentation)
 	t     *testing.T
 	b     *backend.MemoryBackend
 	c     *Catalog
@@ -21,9 +22,19 @@ type memChain struct {
 	block uint64
 }
 
-func newMemChain(t *testing.T, l Limits) *memChain {
-	return &memChain{t: t, c: newCatalog(t, l),
-		b: backend.NewMemoryBackend(smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)))}
+func newMemChain(t *testing.T, l Limits) *memChain { return newMemChainOpts(t, l, false) }
+
+// newMemChainOpts builds a catalog over a real memory backend; withAccountant wires the backend's
+// O(1) retained-bytes total as production does (proofview.AccountantFor).
+func newMemChainOpts(t *testing.T, l Limits, withAccountant bool) *memChain {
+	b := backend.NewMemoryBackend(smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)))
+	var opts []Option
+	if withAccountant {
+		opts = append(opts, AccountantFor(b))
+	}
+	c, err := NewCatalog(l, opts...)
+	require.NoError(t, err)
+	return &memChain{t: t, c: c, b: b}
 }
 
 // publishBlock commits n new leaves and publishes the finalized state.
@@ -45,8 +56,12 @@ func (m *memChain) publishBlock(n int) []byte {
 	require.NoError(m.t, snap.Commit(ctx, backend.CommitMetadata{BlockNumber: api.NewBigIntFromUint64(m.block), RootHash: res.CandidateRoot}))
 	rv, err := m.b.RetainReadView(ctx)
 	require.NoError(m.t, err)
+	var reader backend.ReadView = rv
+	if m.wrap != nil {
+		reader = m.wrap(rv)
+	}
 	require.NoError(m.t, m.c.Publish(ctx, PublishInput{
-		Block: block(m.block), Root: rv.RootHash(), Reader: rv,
+		Block: block(m.block), Root: rv.RootHash(), Reader: reader,
 		Cert: Certification{UC: ucFor(m.t, rv.RootHash(), m.block)},
 	}))
 	return rv.RootHash()
