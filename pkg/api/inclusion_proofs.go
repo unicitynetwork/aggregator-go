@@ -2,11 +2,14 @@ package api
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 // get_inclusion_proofs.v1 admission limits (UC consolidation plan §2.3).
@@ -42,6 +45,93 @@ type GetInclusionProofsRequestV1 struct {
 type GetInclusionProofsResponseV1 struct {
 	Proofs        []*GetInclusionProofResponseV2 `json:"proofs"`
 	PartitionView HexBytes                       `json:"partitionView,omitempty"`
+}
+
+// ErrBoundedOutputExceeded is returned by AppendJSONBounded when the output would
+// exceed the limit. It satisfies the ResponseTooLarge() contract of
+// jsonrpc.BoundedJSON without importing that package.
+var ErrBoundedOutputExceeded error = boundedOutputExceeded{}
+
+type boundedOutputExceeded struct{}
+
+func (boundedOutputExceeded) Error() string          { return "bounded JSON output exceeds limit" }
+func (boundedOutputExceeded) ResponseTooLarge() bool { return true }
+
+// AppendJSONBounded implements jsonrpc.BoundedJSON: it appends the same JSON as
+// json.Marshal, element by element, and stops before encoding an element that
+// would take the output past max. Each proof is CBOR-encoded once (its size is
+// known before its hex is produced), so at most one oversized element is ever
+// held beyond max.
+func (r *GetInclusionProofsResponseV1) AppendJSONBounded(dst []byte, max int) ([]byte, error) {
+	if r == nil {
+		return append(dst, "null"...), nil
+	}
+	dst = append(dst, `{"proofs":`...)
+	if r.Proofs == nil {
+		dst = append(dst, "null"...)
+	} else {
+		dst = append(dst, '[')
+		for i, p := range r.Proofs {
+			if i > 0 {
+				dst = append(dst, ',')
+			}
+			if p == nil {
+				dst = append(dst, "null"...)
+				continue
+			}
+			enc, err := types.Cbor.Marshal(p)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal to CBOR: %w", err)
+			}
+			if len(dst)+2*len(enc)+2 > max {
+				return nil, ErrBoundedOutputExceeded
+			}
+			dst = appendHexString(dst, enc, max)
+		}
+		dst = append(dst, ']')
+	}
+	if len(r.PartitionView) > 0 {
+		if len(dst)+len(`,"partitionView":`)+2*len(r.PartitionView)+3 > max {
+			return nil, ErrBoundedOutputExceeded
+		}
+		dst = append(dst, `,"partitionView":`...)
+		dst = appendHexString(dst, r.PartitionView, max)
+	}
+	dst = append(dst, '}')
+	if len(dst) > max {
+		return nil, ErrBoundedOutputExceeded
+	}
+	return dst, nil
+}
+
+// ensureCap makes room for extra more bytes, doubling the capacity (never past
+// max when that still fits) so the cumulative allocation stays within ~2x the
+// final size instead of the append growth schedule's several times.
+func ensureCap(dst []byte, extra, max int) []byte {
+	need := len(dst) + extra
+	if cap(dst) >= need {
+		return dst
+	}
+	nc := 2 * cap(dst)
+	if nc > max {
+		nc = max
+	}
+	if nc < need {
+		nc = need
+	}
+	out := make([]byte, len(dst), nc)
+	copy(out, dst)
+	return out
+}
+
+func appendHexString(dst, b []byte, max int) []byte {
+	n := hex.EncodedLen(len(b))
+	dst = ensureCap(dst, n+2, max)
+	dst = append(dst, '"')
+	l := len(dst)
+	dst = dst[:l+n]
+	hex.Encode(dst[l:], b)
+	return append(dst, '"')
 }
 
 // Request error details of get_inclusion_proofs.v1 (data.detail).
