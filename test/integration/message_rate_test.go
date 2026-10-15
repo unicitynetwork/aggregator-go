@@ -17,7 +17,12 @@ type phaseCount struct {
 	Handshakes  []float64 // handshakes sent to the root (each may be answered by a re-delivery)
 	Submitted   []float64 // accepted submissions
 	MaxGap      []float64 // longest time (s) the shard went without a new finalized block during the phase
-	Rounds      float64   // root rounds elapsed
+	// Stalls is the number of stalls (a gap of at least T2 without a finalized block) that ended
+	// with finalization resuming inside the phase; StallBlocks the blocks finalized in the
+	// catch-up burst right after such stalls, which the root may deliver coalesced.
+	Stalls      []float64
+	StallBlocks []float64
+	Rounds      float64 // root rounds elapsed
 }
 
 func (p phaseCount) String() string {
@@ -65,10 +70,19 @@ func checkMessageRate(base, with phaseCount) error {
 		scale = with.Rounds / base.Rounds // phases may span different numbers of root rounds
 	}
 	for i := range with.Responses {
-		// the root coalesces the responses of a backlog (e.g. the catch-up after a stall of at least T2),
-		// so fewer responses than blocks is only a defect in a phase without such a stall
-		if with.MaxGap[i] < t2Seconds && with.Responses[i] < with.Blocks[i]-1 {
-			return fmt.Errorf("shard %d: %.0f responses for %.0f finalized blocks (missing deliveries)", i, with.Responses[i], with.Blocks[i])
+		// delivery lower bound: blocks outside a stall's catch-up burst are delivered one response each
+		// (-1 for a block at the phase boundary); the burst after each stall may be coalesced by the root
+		// but yields at least one response per stall. A stalled phase therefore still needs responses
+		// (0 responses for 9 blocks never passes).
+		required := math.Max(0, with.Blocks[i]-with.StallBlocks[i]-1) + with.Stalls[i]
+		if with.Responses[i] < required {
+			return fmt.Errorf("shard %d: %.0f responses for %.0f finalized blocks, at least %.0f required (%.0f blocks outside %.0f stall(s) + 1 per stall): missing deliveries",
+				i, with.Responses[i], with.Blocks[i], required, math.Max(0, with.Blocks[i]-with.StallBlocks[i]-1), with.Stalls[i])
+		}
+		// a stall only in the consolidation phase is a regression to explain, not noise: it is compared with
+		// the baseline phase's own worst gap (+1 s sampling slack)
+		if with.MaxGap[i] >= t2Seconds && with.MaxGap[i] > base.MaxGap[i]+1 {
+			return fmt.Errorf("shard %d: finalization stalled for %.1fs during consolidation (baseline worst gap %.1fs)", i, with.MaxGap[i], base.MaxGap[i])
 		}
 		if progress := with.Responses[i] - with.NonProgress[i]; progress > with.Blocks[i]+1 {
 			return fmt.Errorf("shard %d: %.0f progress responses for %.0f finalized blocks: additional root-to-shard traffic", i, progress, with.Blocks[i])
@@ -90,7 +104,9 @@ func pc(responses, blocks, nonprogress, handshakes, submitted []float64, rounds 
 	for i := range gaps {
 		gaps[i] = 1
 	}
-	return phaseCount{Responses: responses, Blocks: blocks, NonProgress: nonprogress, Handshakes: handshakes, Submitted: submitted, MaxGap: gaps, Rounds: rounds}
+	zero := make([]float64, len(responses))
+	return phaseCount{Responses: responses, Blocks: blocks, NonProgress: nonprogress, Handshakes: handshakes, Submitted: submitted, MaxGap: gaps,
+		Stalls: zero, StallBlocks: append([]float64(nil), zero...), Rounds: rounds}
 }
 
 func vec(v ...float64) []float64 { return v }
@@ -126,19 +142,14 @@ func TestMessageRateCheck(t *testing.T) {
 	require.ErrorContains(t, checkMessageRate(pc(vec(1, 1), vec(1, 1), vec(0, 0), vec(0, 0), vec(50, 50), 21), one), "shard 0")
 
 	// timeout repeats are legitimate exactly when the shard went T2 without a finalized block
-	stalled := pc(vec(4, 3), vec(3, 3), vec(1, 0), vec(0, 0), vec(40, 40), 28)
-	stalled.MaxGap = vec(6.2, 1)
-	require.NoError(t, checkMessageRate(minBase, stalled))
-	stalled.NonProgress = vec(2, 0) // a second one needs a second T2 gap
-	stalled.Responses = vec(5, 3)
-	require.ErrorContains(t, checkMessageRate(minBase, stalled), "shard 0")
-
-	// after a stall of at least T2 the root coalesces the backlog: fewer responses than blocks is legitimate
-	catchUp := pc(vec(4, 3), vec(9, 3), vec(1, 0), vec(0, 0), vec(50, 50), 21)
-	catchUp.MaxGap = vec(6.0, 1)
-	require.NoError(t, checkMessageRate(minBase, catchUp))
-	catchUp.MaxGap = vec(2.0, 1)
-	require.ErrorContains(t, checkMessageRate(minBase, catchUp), "missing deliveries")
+	repeatBase := minBase // the baseline had the same gap: the stall is not a consolidation effect
+	repeatBase.MaxGap = vec(6.2, 1)
+	repeat := pc(vec(4, 3), vec(3, 3), vec(1, 0), vec(0, 0), vec(40, 40), 28)
+	repeat.MaxGap = vec(6.2, 1)
+	require.NoError(t, checkMessageRate(repeatBase, repeat))
+	repeat.NonProgress = vec(2, 0) // a second one needs a second T2 gap
+	repeat.Responses = vec(5, 3)
+	require.ErrorContains(t, checkMessageRate(repeatBase, repeat), "shard 0")
 
 	// missing deliveries are detected too
 	missing := with
@@ -168,4 +179,55 @@ func TestWriteProgressCheck(t *testing.T) {
 	// submissions but no finalized block on one shard
 	stalled := phaseCount{Responses: []float64{5, 1}, Blocks: []float64{4, 0}, Submitted: []float64{30, 30}}
 	require.ErrorContains(t, checkWriteProgress(stalled), "shard 1 finalized no new block")
+}
+
+// stalled returns a phase in which shard 0 stalled for gap seconds and then caught up with a burst.
+func stalled(responses, blocks float64, gap, stalls, burst float64) phaseCount {
+	p := pc(vec(responses, 5), vec(blocks, 5), vec(0, 0), vec(0, 0), vec(50, 50), 21)
+	p.MaxGap = vec(gap, 1)
+	p.Stalls = vec(stalls, 0)
+	p.StallBlocks = vec(burst, 0)
+	return p
+}
+
+func TestMessageRateCheck_StalledPhases(t *testing.T) {
+	base := pc(vec(5, 5), vec(5, 5), vec(0, 0), vec(0, 0), vec(50, 50), 21)
+	baseStalled := stalled(4, 9, 6.0, 1, 5) // the baseline has the same stall: not a consolidation effect
+
+	// the review's case: 0 responses for 9 blocks in a stalled phase must fail (it used to pass)
+	require.ErrorContains(t, checkMessageRate(baseStalled, stalled(0, 9, 6.0, 1, 9)), "missing deliveries")
+	// a coalesced catch-up burst: 9 blocks, one response for the 9-block burst
+	require.NoError(t, checkMessageRate(baseStalled, stalled(1, 9, 6.0, 1, 9)))
+	// the blocks outside the burst keep the normal bound: 4 outside blocks + 1 burst response = at least 4
+	require.NoError(t, checkMessageRate(baseStalled, stalled(4, 9, 6.0, 1, 5)))
+	require.ErrorContains(t, checkMessageRate(baseStalled, stalled(3, 9, 6.0, 1, 5)), "missing deliveries")
+	// two stalls need two responses
+	baseLong := stalled(4, 9, 11.0, 2, 9)
+	require.NoError(t, checkMessageRate(baseLong, stalled(2, 9, 11.0, 2, 9)))
+	require.ErrorContains(t, checkMessageRate(baseLong, stalled(1, 9, 11.0, 2, 9)), "missing deliveries")
+	// a stall still lasting at the end of the phase (no catch-up) expects no extra response, only the normal bound
+	baseStill := stalled(3, 3, 12.0, 0, 0)
+	require.NoError(t, checkMessageRate(baseStill, stalled(3, 3, 12.0, 0, 0)))
+	require.ErrorContains(t, checkMessageRate(baseStill, stalled(0, 3, 12.0, 0, 0)), "missing deliveries")
+
+	// a stall that exists only in the consolidation phase is compared with the baseline and rejected
+	err := checkMessageRate(base, stalled(1, 9, 6.0, 1, 9))
+	require.ErrorContains(t, err, "stalled")
+	require.ErrorContains(t, err, "baseline worst gap 1.0s")
+	// a short gap below T2 is not a stall; a baseline stall of the same length excuses it
+	require.NoError(t, checkMessageRate(base, stalled(5, 5, 4.0, 0, 0)))
+	require.NoError(t, checkMessageRate(baseStalled, stalled(1, 9, 6.5, 1, 9)))
+	// but a much longer stall than the baseline's is flagged
+	require.ErrorContains(t, checkMessageRate(baseStalled, stalled(1, 9, 20.0, 1, 9)), "stalled")
+}
+
+// The recorded live 4-shard run (final gate) is accepted: no stalls, responses = blocks ±1.
+func TestMessageRateCheck_RecordedRunIsAccepted(t *testing.T) {
+	gap := vec(2, 2, 2, 2)
+	z := vec(0, 0, 0, 0)
+	p1 := phaseCount{Responses: vec(8, 8, 8, 7), Blocks: vec(8, 7, 8, 7), NonProgress: z, Handshakes: z, Submitted: vec(61, 61, 60, 61), MaxGap: gap, Stalls: z, StallBlocks: z, Rounds: 23}
+	p2 := phaseCount{Responses: vec(7, 7, 7, 8), Blocks: vec(7, 8, 7, 8), NonProgress: z, Handshakes: z, Submitted: vec(60, 60, 61, 60), MaxGap: gap, Stalls: z, StallBlocks: z, Rounds: 22}
+	require.NoError(t, checkWriteProgress(p1))
+	require.NoError(t, checkWriteProgress(p2))
+	require.NoError(t, checkMessageRate(p1, p2))
 }

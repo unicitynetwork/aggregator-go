@@ -98,7 +98,7 @@ CONSOLIDATION_E2E_SHARDS=4,8 go test -tags e2e_bft ./test/integration -run TestB
 - Root-to-shard message count: `aggregator_bft_certification_responses_total{shard}` counts responses and
   `aggregator_bft_certification_response_nonprogress_total{shard}` those that certify no new shard block (shard input record
   round not advancing: re-deliveries, timeout repeats and any extra traffic, whatever its root round);
-  `aggregator_bft_handshakes_total{shard}` counts handshakes. Per shard the test requires: responses ≥ finalized blocks − 1;
+  `aggregator_bft_handshakes_total{shard}` counts handshakes. Per shard the test requires: responses ≥ (blocks outside the catch-up bursts after stalls) − 1 + one per stall (the root may coalesce a burst, but 0 responses for 9 blocks never passes); a stall (gap ≥ T2) only in the consolidation phase is compared with the baseline's worst gap and rejected;
   progress responses (responses − non-progress) ≤ finalized blocks + 1; non-progress responses ≤ ⌊(longest gap without a
   finalized block + 0.5 s) / T2⌋ timeout repeats + one re-delivery per handshake; handshakes ≤ baseline + 1. So a single
   duplicate per block is detected even at one finalized block, and extra traffic cannot hide behind advancing root rounds.

@@ -363,6 +363,8 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 		s0 := take()
 		// sample every shard's finalized height to find its longest stretch without a new block
 		gaps := make([]float64, n)
+		stalls := make([]float64, n)
+		stallBlocks := make([]float64, n)
 		stopSampling := make(chan struct{})
 		var samplerDone sync.WaitGroup
 		samplerDone.Add(1)
@@ -386,7 +388,12 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 				case <-tick.C:
 					for i, sh := range shards {
 						if h := blockHeightQuiet(sh.url); h > last[i] {
-							gaps[i] = max(gaps[i], time.Since(lastAt[i]).Seconds())
+							gap := time.Since(lastAt[i]).Seconds()
+							gaps[i] = max(gaps[i], gap)
+							if gap >= t2Seconds { // finalization resumed after a stall: the burst may be coalesced
+								stalls[i]++
+								stallBlocks[i] += float64(h - last[i])
+							}
 							last[i], lastAt[i] = h, time.Now()
 						}
 					}
@@ -405,7 +412,7 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 		close(stopSampling)
 		samplerDone.Wait()
 		pc := diff(s0, take())
-		pc.MaxGap = gaps
+		pc.MaxGap, pc.Stalls, pc.StallBlocks = gaps, stalls, stallBlocks
 		return pc
 	}
 	if os.Getenv("CONSOLIDATION_E2E_NEGATIVE") == "stop-writers" {
