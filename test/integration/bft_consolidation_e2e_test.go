@@ -21,6 +21,7 @@ import (
 	"crypto"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -46,6 +47,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
+	"github.com/unicitynetwork/aggregator-go/internal/proofview"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/service"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
@@ -613,6 +615,27 @@ type consolidationAggOpts struct {
 	keys                                               *shardKeys
 	root                                               *bftRootInfo
 	topology                                           []config.ConsolidationShard
+
+	// measurement harness extensions (all optional)
+	dbName     string            // share the database of another aggregator (HA follower, restart)
+	smt        *config.SMTConfig // retention limits
+	noActivate bool              // start as a follower: do not activate the round manager
+	out        *aggHandle        // receives the manager and storage
+}
+
+// aggHandle exposes the parts of a started aggregator the measurements need.
+type aggHandle struct {
+	mgr     round.Manager
+	stor    interfaces.Storage
+	tracker *state.Tracker
+	log     *logger.Logger
+}
+
+func (h *aggHandle) catalog() *proofview.Catalog {
+	if pv, ok := h.mgr.(interface{ ProofViewCatalog() *proofview.Catalog }); ok {
+		return pv.ProofViewCatalog()
+	}
+	return nil
 }
 
 // startConsolidationAggregator is startBFTShardAggregator with the consolidation
@@ -627,7 +650,7 @@ func startConsolidationAggregator(ctx context.Context, t *testing.T, o consolida
 	cfg := &config.Config{
 		Server: config.ServerConfig{Host: "127.0.0.1", Port: o.port, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second,
 			IdleTimeout: 60 * time.Second, ConcurrencyLimit: 100, HTTP2MaxConcurrentStreams: 1024},
-		Database: config.DatabaseConfig{URI: o.mongoURI, Database: "aggregator_" + strings.ReplaceAll(o.name, "-", "_"),
+		Database: config.DatabaseConfig{URI: o.mongoURI, Database: dbNameFor(o),
 			ConnectTimeout: 30 * time.Second, ServerSelectionTimeout: 30 * time.Second, SocketTimeout: 90 * time.Second, MaxPoolSize: 10, MinPoolSize: 1},
 		Redis:   config.RedisConfig{Host: o.redisHost, Port: o.redisPort},
 		HA:      config.HAConfig{Enabled: false},
@@ -645,6 +668,9 @@ func startConsolidationAggregator(ctx context.Context, t *testing.T, o consolida
 		Storage: config.StorageConfig{UseRedisForCommitments: true, RedisStreamName: o.stream, RedisFlushInterval: 100 * time.Millisecond,
 			RedisMaxBatchSize: 1000, RedisCleanupInterval: time.Minute, RedisMaxStreamLength: 100000},
 		Sharding: config.ShardingConfig{Mode: config.ShardingModeBFTShard, ShardIDLength: o.shardIDLength},
+	}
+	if o.smt != nil {
+		cfg.SMT = *o.smt
 	}
 	require.NoError(t, cfg.Validate())
 
@@ -664,11 +690,19 @@ func startConsolidationAggregator(ctx context.Context, t *testing.T, o consolida
 	queue.Initialize(aggCtx)
 	eventBus := events.NewEventBus(log)
 	tree := smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits))
-	mgr, err := round.NewManager(aggCtx, cfg, log, queue, stor, state.NewSyncStateTracker(), nil, eventBus, tree, stor.TrustBaseStorage())
+	tracker := state.NewSyncStateTracker()
+	mgr, err := round.NewManager(aggCtx, cfg, log, queue, stor, tracker, nil, eventBus, tree, stor.TrustBaseStorage())
 	require.NoError(t, err)
-	require.NoError(t, stor.TrustBaseStorage().Store(aggCtx, tb))
+	if err := stor.TrustBaseStorage().Store(aggCtx, tb); err != nil && !errors.Is(err, interfaces.ErrTrustBaseAlreadyExists) { // a restart or a follower finds it stored
+		require.NoError(t, err)
+	}
 	require.NoError(t, mgr.Start(aggCtx))
-	require.NoError(t, mgr.Activate(aggCtx))
+	if !o.noActivate {
+		require.NoError(t, mgr.Activate(aggCtx))
+	}
+	if o.out != nil {
+		*o.out = aggHandle{mgr: mgr, stor: stor, tracker: tracker, log: log}
+	}
 
 	svc, err := service.NewService(aggCtx, cfg, log, mgr, queue, stor, nil)
 	require.NoError(t, err)
@@ -691,6 +725,13 @@ func startConsolidationAggregator(ctx context.Context, t *testing.T, o consolida
 
 // The shared helpers terminate their containers with the (already cancelled) test
 // context and leak them on a loaded VM; these always terminate with a fresh context.
+func dbNameFor(o consolidationAggOpts) string {
+	if o.dbName != "" {
+		return o.dbName
+	}
+	return "aggregator_" + strings.ReplaceAll(o.name, "-", "_")
+}
+
 func startMongoCleanly(t *testing.T) string {
 	t.Helper()
 	var lastErr error
