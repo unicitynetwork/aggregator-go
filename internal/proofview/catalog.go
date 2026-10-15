@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strconv"
@@ -88,7 +89,8 @@ type attachment struct {
 	uc         []byte
 	digest     [sha256.Size]byte
 	view       []byte
-	round      uint64 // UC root-chain round: the order in which certifications supersede each other
+	compat     [sha256.Size]byte // CompatDigest of the certification's accepted input record and configuration
+	round      uint64            // UC root-chain round: the order in which certifications supersede each other
 	bytes      uint64
 	refs       int
 	prev, next *attachment
@@ -120,6 +122,10 @@ type view struct {
 	rootOlder, rootNewer *view
 	idKey                string
 	live                 bool
+	// compat is the composite key of the view's latest certification under which it is in byCompat
+	// (compatIn false: not indexed, ie not live or no certification)
+	compat   compatKey
+	compatIn bool
 	// positions in the evictable / pinned heaps, -1 when not a member
 	evictIdx, pinIdx int
 }
@@ -142,6 +148,13 @@ type Catalog struct {
 	seq        uint64
 	byID       map[string]*view // block identity and root -> the live view
 	byRoot     map[string]*view // root -> newest live view with it
+	// byCompat maps (root, accepted input record + configuration) of the latest certification of each live view
+	// to the views holding it, newest first-class (see compatSet); rootCertified counts the live views per
+	// root which have a certification. Together they answer "newest compatible view of this root" without
+	// walking the same-root chain or decoding any candidate.
+	byCompat      map[compatKey]*compatSet
+	rootCertified map[string]int
+	compatProbes  uint64 // index probes of compatible-view lookups (hardware independent metric)
 	// byDigest maps the digest of a certification to the live views holding it (normally one),
 	// so a late partition view finds its view without scanning the retained ones.
 	byDigest     map[[sha256.Size]byte]map[*view]struct{}
@@ -195,13 +208,15 @@ func NewCatalog(limits Limits, opts ...Option) (*Catalog, error) {
 		return nil, err
 	}
 	c := &Catalog{
-		limits:      limits,
-		byID:        make(map[string]*view),
-		byRoot:      make(map[string]*view),
-		byDigest:    make(map[[sha256.Size]byte]map[*view]struct{}),
-		retired:     make(map[*view]struct{}),
-		retiredAtts: make(map[*attachment]struct{}),
-		leases:      make(map[*Lease]struct{}),
+		limits:        limits,
+		byID:          make(map[string]*view),
+		byRoot:        make(map[string]*view),
+		byCompat:      make(map[compatKey]*compatSet),
+		rootCertified: make(map[string]int),
+		byDigest:      make(map[[sha256.Size]byte]map[*view]struct{}),
+		retired:       make(map[*view]struct{}),
+		retiredAtts:   make(map[*attachment]struct{}),
+		leases:        make(map[*Lease]struct{}),
 	}
 	c.evictable.idx = func(v *view) *int { return &v.evictIdx }
 	c.pinned.idx = func(v *view) *int { return &v.pinIdx }
@@ -245,23 +260,103 @@ func (c *Catalog) Stats() Stats {
 }
 
 // decodeUC returns the UC's input-record state hash and root-chain round.
-func decodeUC(uc []byte) ([]byte, uint64, error) {
+func decodeUC(uc []byte) ([]byte, uint64, [sha256.Size]byte, error) {
 	var cert types.UnicityCertificate
 	if err := types.Cbor.Unmarshal(uc, &cert); err != nil {
-		return nil, 0, fmt.Errorf("decode UC: %w", err)
+		return nil, 0, [sha256.Size]byte{}, fmt.Errorf("decode UC: %w", err)
 	}
 	root := cert.GetStateHash()
-	if len(root) == 0 {
-		return nil, 0, errors.New("UC has no input record state hash")
+	if len(root) == 0 || cert.InputRecord == nil {
+		return nil, 0, [sha256.Size]byte{}, errors.New("UC has no input record state hash")
 	}
-	return root, cert.GetRootRoundNumber(), nil
+	return root, cert.GetRootRoundNumber(), CompatDigest(&cert), nil
+}
+
+// CompatDigest identifies what a repeat/timeout certification must repeat to belong to a retained state: the
+// accepted input record (round, epoch, state, previous and block hashes) and the shard configuration. Every
+// field is length-prefixed, so distinct tuples never share an encoding. It is computed once per certification
+// when it is attached, and once per lookup for the incoming one; candidates are never decoded.
+func CompatDigest(uc *types.UnicityCertificate) [sha256.Size]byte {
+	h := sha256.New()
+	var n [8]byte
+	u64 := func(x uint64) { binary.BigEndian.PutUint64(n[:], x); h.Write(n[:]) }
+	bs := func(b []byte) { u64(uint64(len(b))); h.Write(b) }
+	ir := uc.InputRecord
+	if ir == nil {
+		ir = &types.InputRecord{}
+	}
+	u64(ir.RoundNumber)
+	u64(ir.Epoch)
+	bs(ir.Hash)
+	bs(ir.PreviousHash)
+	bs(ir.BlockHash)
+	bs(uc.ShardConfHash)
+	var d [sha256.Size]byte
+	h.Sum(d[:0])
+	return d
+}
+
+// compatKey is the key of byCompat.
+type compatKey struct {
+	root   string
+	digest [sha256.Size]byte
+}
+
+// compatSet is the live views whose latest certification has one compatKey (normally exactly one). newest is
+// the one with the highest publication sequence, kept so a lookup is a single probe.
+type compatSet struct {
+	views  map[*view]struct{}
+	newest *view
+}
+
+// syncCompatLocked makes the composite index agree with v: v is indexed under its latest certification iff it is
+// live and has one. Called after every change of v.live and of v's latest attachment.
+func (c *Catalog) syncCompatLocked(v *view) {
+	var want compatKey
+	wantIn := v.live && v.attTail != nil
+	if wantIn {
+		want = compatKey{root: string(v.root), digest: v.attTail.compat}
+	}
+	if v.compatIn && (!wantIn || v.compat != want) {
+		if cs := c.byCompat[v.compat]; cs != nil {
+			delete(cs.views, v)
+			switch {
+			case len(cs.views) == 0:
+				delete(c.byCompat, v.compat)
+			case cs.newest == v:
+				cs.newest = nil
+				for o := range cs.views {
+					if cs.newest == nil || o.seq > cs.newest.seq {
+						cs.newest = o
+					}
+				}
+			}
+		}
+		if c.rootCertified[v.compat.root]--; c.rootCertified[v.compat.root] == 0 {
+			delete(c.rootCertified, v.compat.root)
+		}
+		v.compatIn = false
+	}
+	if wantIn && !v.compatIn {
+		cs := c.byCompat[want]
+		if cs == nil {
+			cs = &compatSet{views: make(map[*view]struct{}, 1)}
+			c.byCompat[want] = cs
+		}
+		cs.views[v] = struct{}{}
+		if cs.newest == nil || v.seq > cs.newest.seq {
+			cs.newest = v
+		}
+		c.rootCertified[want.root]++
+		v.compat, v.compatIn = want, true
+	}
 }
 
 func newAttachment(cert Certification, root []byte) (*attachment, error) {
 	if len(cert.UC) == 0 {
 		return nil, fmt.Errorf("%w: missing UC", ErrInvalidPublication)
 	}
-	got, round, err := decodeUC(cert.UC)
+	got, round, compat, err := decodeUC(cert.UC)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidPublication, err)
 	}
@@ -272,6 +367,7 @@ func newAttachment(cert Certification, root []byte) (*attachment, error) {
 		uc:     append([]byte(nil), cert.UC...),
 		digest: sha256.Sum256(cert.UC),
 		round:  round,
+		compat: compat,
 	}
 	if len(cert.PartitionView) > 0 {
 		a.view = append([]byte(nil), cert.PartitionView...)
@@ -460,6 +556,7 @@ func (c *Catalog) pushAttLocked(v *view, att *attachment) {
 		c.liveAttBytes += att.bytes
 		c.indexDigestLocked(v, att.digest)
 	}
+	c.syncCompatLocked(v)
 }
 
 // replaceAttLocked puts att in the position of old (same digest).
@@ -503,6 +600,7 @@ func (c *Catalog) dropAttLocked(v *view, a *attachment) {
 		c.liveAttBytes -= a.bytes
 		c.unindexDigestLocked(v, a.digest)
 	}
+	defer c.syncCompatLocked(v)
 	c.retireAttLocked(a)
 }
 
@@ -572,6 +670,7 @@ func (c *Catalog) linkViewLocked(v *view) {
 	v.live = true
 	c.liveAttBytes += v.attBytes
 	v.attIdx.each(func(d [sha256.Size]byte) { c.indexDigestLocked(v, d) })
+	c.syncCompatLocked(v)
 	prevTail := c.tail
 	v.prev = c.tail
 	if c.tail != nil {
@@ -625,6 +724,7 @@ func (c *Catalog) unlinkViewLocked(v *view) {
 	v.live = false
 	c.liveAttBytes -= v.attBytes
 	v.attIdx.each(func(d [sha256.Size]byte) { c.unindexDigestLocked(v, d) })
+	c.syncCompatLocked(v)
 	c.evictable.remove(v)
 	c.pinned.remove(v)
 	if c.tail != nil {

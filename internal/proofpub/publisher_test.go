@@ -248,7 +248,9 @@ func Test_HistoricalRetryWithSameRootNeverRegressesLatest(t *testing.T) {
 	l := latest(t, e.cat)
 	require.EqualValues(t, 18, l.Block().Number.Uint64(), "latest must not regress to block 1")
 	require.Equal(t, []byte(head.UnicityCertificate), l.UC())
-	id, found := e.cat.ViewForRootMatching(root, func([]byte) bool { return true })
+	var ucHead types.UnicityCertificate
+	require.NoError(t, types.Cbor.Unmarshal(head.UnicityCertificate, &ucHead))
+	id, found := e.cat.ViewForRootCompatible(root, proofview.CompatDigest(&ucHead))
 	require.True(t, found)
 	require.EqualValues(t, 18, id.Number.Uint64())
 
