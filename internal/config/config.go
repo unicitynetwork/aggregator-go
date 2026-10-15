@@ -201,6 +201,14 @@ type SMTConfig struct {
 	NodeKeyFormat             string     `mapstructure:"node_key_format"`
 	PrecomputeProofs          bool       `mapstructure:"precompute_proofs"`
 	ProofMetadataCacheEntries int        `mapstructure:"proof_metadata_cache_entries"`
+
+	// Retained finalized read views (consolidation batch proofs). Zero selects
+	// the default; see internal/proofview.DefaultLimits.
+	RetainedViews              int           `mapstructure:"retained_views"`
+	RetainedAttachmentsPerView int           `mapstructure:"retained_attachments_per_view"`
+	RetentionBudgetMB          int           `mapstructure:"retention_budget_mb"`
+	MaxConcurrentBatches       int           `mapstructure:"max_concurrent_batches"`
+	BatchTimeout               time.Duration `mapstructure:"batch_timeout"`
 }
 
 // ShardingMode represents the aggregator operating mode
@@ -442,6 +450,12 @@ func Load() (*Config, error) {
 			NodeKeyFormat:             getEnvOrDefault("SMT_NODE_KEY_FORMAT", "depth-major"),
 			PrecomputeProofs:          getEnvBoolOrDefault("SMT_PRECOMPUTE_PROOFS", false),
 			ProofMetadataCacheEntries: getEnvIntOrDefault("SMT_PROOF_METADATA_CACHE_ENTRIES", 250000),
+
+			RetainedViews:              getEnvIntOrDefault("SMT_RETAINED_VIEWS", 16),
+			RetainedAttachmentsPerView: getEnvIntOrDefault("SMT_RETAINED_ATTACHMENTS_PER_VIEW", 4),
+			RetentionBudgetMB:          getEnvIntOrDefault("SMT_RETENTION_BUDGET_MB", 256),
+			MaxConcurrentBatches:       getEnvIntOrDefault("SMT_MAX_CONCURRENT_BATCHES", 8),
+			BatchTimeout:               getEnvDurationOrDefault("SMT_BATCH_TIMEOUT", "5s"),
 		},
 		Sharding: ShardingConfig{
 			Mode:                       ShardingMode(getEnvOrDefault("SHARDING_MODE", "standalone")),
@@ -581,6 +595,10 @@ func (c *Config) Validate() error {
 	}
 	if c.SMT.MaterializeWorkers < 0 {
 		return fmt.Errorf("SMT_MATERIALIZE_WORKERS must be non-negative")
+	}
+	if c.SMT.RetainedViews < 0 || c.SMT.RetainedAttachmentsPerView < 0 || c.SMT.RetentionBudgetMB < 0 ||
+		c.SMT.MaxConcurrentBatches < 0 || c.SMT.BatchTimeout < 0 {
+		return fmt.Errorf("SMT retained-view settings (SMT_RETAINED_VIEWS, SMT_RETAINED_ATTACHMENTS_PER_VIEW, SMT_RETENTION_BUDGET_MB, SMT_MAX_CONCURRENT_BATCHES, SMT_BATCH_TIMEOUT) must be non-negative")
 	}
 	switch c.SMT.NodeKeyFormat {
 	case "", "depth-major", "prefix-major":
