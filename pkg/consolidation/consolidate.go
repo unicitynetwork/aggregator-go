@@ -67,13 +67,12 @@ type Output struct {
 // contacted for an unauthenticated master, and its verified material is reused
 // for the final assembly. It can only be produced by Session.AuthenticateMaster.
 type AuthenticatedMaster struct {
-	session   *Session
-	master    ShardResult
-	bound     *RootRoundBound
-	view      *types.PartitionViewV1
-	enclosing *types.UnicityCertificate
-	ucs       []*types.UnicityCertificate
-	round     uint64
+	session *Session
+	master  ShardResult
+	bound   *RootRoundBound
+	view    *types.PartitionViewV1
+	ucs     []*types.UnicityCertificate
+	round   uint64
 }
 
 // Round is the authenticated root chain round of the master seal.
@@ -91,7 +90,9 @@ func (m *AuthenticatedMaster) PeerRoot(shard types.ShardID) ([]byte, error) {
 
 // AuthenticateMaster authenticates the master's latest batch and partition view
 // before anything is requested from other shards: bound issuance and coverage of
-// the master's requests, view/UC binding, the trusted seal and R >= R_min.
+// the master's requests, view/UC binding (topology and configuration hashes come
+// from the seal-committed vector; configured pins only restrict further), the
+// trusted seal and R >= R_min.
 func (s *Session) AuthenticateMaster(bound *RootRoundBound, master ShardResult, partitionView []byte) (*AuthenticatedMaster, error) {
 	if bound == nil {
 		return nil, fail(OutcomeUnavailable, -1, nil, "authenticated minimal root round is unknown")
@@ -108,6 +109,9 @@ func (s *Session) AuthenticateMaster(bound *RootRoundBound, master ShardResult, 
 	if err := bound.covers([]ShardResult{master}); err != nil {
 		return nil, err
 	}
+	if err := bound.coversShard(0, master); err != nil {
+		return nil, err
+	}
 	view, err := types.DecodePartitionViewV1(partitionView)
 	if err != nil {
 		return nil, fail(OutcomeInvalidInput, -1, err, "partition view")
@@ -121,7 +125,11 @@ func (s *Session) AuthenticateMaster(bound *RootRoundBound, master ShardResult, 
 	}
 
 	// 1 quorum check (memoized per complete seal)
-	ucs, err := view.AssembleCertificates(enclosing, s.policy.PartitionID, s.policy.Topology, s, crypto.SHA256)
+	var opts []types.AuthOption
+	if s.policy.pinned() {
+		opts = append(opts, types.WithPinnedTopology(s.policy.Topology))
+	}
+	av, err := types.AuthenticateView(view, enclosing, s.policy.PartitionID, s, crypto.SHA256, opts...)
 	if err != nil {
 		var se *sealError
 		if errors.As(err, &se) {
@@ -132,11 +140,15 @@ func (s *Session) AuthenticateMaster(bound *RootRoundBound, master ShardResult, 
 	if enclosing.UnicitySeal.NetworkID != bound.network {
 		return nil, fail(OutcomeIncompatibleLineage, -1, nil, "master seal is of network %d, bound of network %d", enclosing.UnicitySeal.NetworkID, bound.network)
 	}
+	ucs, err := av.Certificates()
+	if err != nil {
+		return nil, fail(OutcomeInvalidInput, -1, err, "assembling certificates")
+	}
 	round := enclosing.UnicitySeal.RootChainRoundNumber
 	if round < bound.round {
 		return nil, fail(OutcomeStale, -1, nil, "master seal root round %d is below required %d", round, bound.round)
 	}
-	return &AuthenticatedMaster{session: s, master: master, bound: bound, view: view, enclosing: enclosing, ucs: ucs, round: round}, nil
+	return &AuthenticatedMaster{session: s, master: master, bound: bound, view: view, ucs: ucs, round: round}, nil
 }
 
 // Complete verifies the peers' exact-root batches against the authenticated
@@ -158,7 +170,10 @@ func (s *Session) Complete(m *AuthenticatedMaster, peers []ShardResult) (*Output
 		if idx < 0 {
 			return nil, fail(OutcomeBindingMismatch, bi, nil, "shard %q is not in the master view", b.ShardID)
 		}
-		so, err := s.consolidateShard(bi, b, m.ucs[idx])
+		if err := m.bound.coversShard(bi, b); err != nil {
+			return nil, err
+		}
+		so, err := s.consolidateShard(bi, b, m.ucs[idx], m.view.Leaves[idx].ShardConfHash)
 		if err != nil {
 			return nil, err
 		}
@@ -231,7 +246,7 @@ func decodeCommonUC(proofs []*api.GetInclusionProofResponseV2, bi int) (*types.U
 	return &uc, nil
 }
 
-func (s *Session) consolidateShard(bi int, b ShardResult, target *types.UnicityCertificate) (*ShardOutput, error) {
+func (s *Session) consolidateShard(bi int, b ShardResult, target *types.UnicityCertificate, conf []byte) (*ShardOutput, error) {
 	local, err := decodeCommonUC(b.Proofs, bi)
 	if err != nil {
 		return nil, err
@@ -248,7 +263,7 @@ func (s *Session) consolidateShard(bi int, b ShardResult, target *types.UnicityC
 	if err != nil {
 		return nil, fail(OutcomeInvalidInput, bi, err, "encoding assembled unicity certificate")
 	}
-	if err := s.checkBody(bi, b.ShardID, target, targetBytes); err != nil {
+	if err := s.checkBody(bi, b.ShardID, target, targetBytes, conf); err != nil {
 		return nil, err
 	}
 
@@ -279,7 +294,7 @@ func (s *Session) consolidateShard(bi int, b ShardResult, target *types.UnicityC
 // checkBody is the shard-body check of an assembled UC: structure, shard and
 // partition paths up to the seal hash. The seal itself is authenticated once
 // by the master check. Memoized by the complete UC bytes within the session.
-func (s *Session) checkBody(bi int, shard types.ShardID, uc *types.UnicityCertificate, ucBytes []byte) error {
+func (s *Session) checkBody(bi int, shard types.ShardID, uc *types.UnicityCertificate, ucBytes []byte, conf []byte) error {
 	key := string(appendLP(nil, ucBytes))
 	if s.seen(s.bodies, key) {
 		return nil
@@ -288,7 +303,7 @@ func (s *Session) checkBody(bi int, shard types.ShardID, uc *types.UnicityCertif
 	if err := checkPathSteps(bi, uc); err != nil {
 		return err
 	}
-	if err := uc.IsValid(s.policy.PartitionID, shard, s.policy.Topology.ShardConfHashes[shard.Key()]); err != nil {
+	if err := uc.IsValid(s.policy.PartitionID, shard, conf); err != nil {
 		return fail(OutcomeInvalidInput, bi, err, "assembled unicity certificate")
 	}
 	shardRoot, err := uc.ShardTreeCertificate.ComputeCertificateHash(uc.InputRecord, uc.TRHash, uc.ShardConfHash, crypto.SHA256)

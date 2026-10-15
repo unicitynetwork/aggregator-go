@@ -151,7 +151,11 @@ func main() {
 	eventBus := events.NewEventBus(log)
 	startFatalErrorListener(ctx, log, eventBus, stop)
 
-	// Load last committed unicity certificate (can be nil for genesis)
+	// Load last committed unicity certificate (can be nil for genesis).
+	// NOTE: this is the aggregator's own trusted storage and is NOT re-authenticated here;
+	// certificates delivered by the network (including retained redeliveries) are
+	// authenticated at the BFT client intake boundary. Do not treat restored or legacy
+	// database contents as newly authenticated material.
 	var luc *types.UnicityCertificate
 	lastBlock, err := storageInstance.BlockStorage().GetLatest(ctx)
 	if err != nil {

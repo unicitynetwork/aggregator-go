@@ -34,7 +34,15 @@ type RootRoundBound struct {
 	session *Session
 	// inputs commits to every authenticated original input: state ID -> digest
 	// of its certification data.
-	inputs map[string][sha256.Size]byte
+	inputs map[string]evidenceInput
+}
+
+// evidenceInput is what an authenticated original commits the consolidation to.
+type evidenceInput struct {
+	digest [sha256.Size]byte
+	// shard is the shard the original was certified in. Consolidation never
+	// reinterprets a state under another shard: topology migrations are unsupported.
+	shard types.ShardID
 }
 
 // Round returns the authenticated minimal root chain round.
@@ -62,9 +70,21 @@ func (b *RootRoundBound) covers(batches []ShardResult) error {
 				return fail(OutcomeIncompatibleLineage, bi, nil, "state %s is not covered by the authenticated evidence", r.StateID)
 			}
 			got, err := inputDigest(r)
-			if err != nil || got != want {
+			if err != nil || got != want.digest {
 				return fail(OutcomeIncompatibleLineage, bi, err, "state %s differs from the authenticated evidence", r.StateID)
 			}
+		}
+	}
+	return nil
+}
+
+// coversShard checks that every request of the batch was certified, in its original,
+// in the very shard it is consolidated in: consolidation never reinterprets a state under
+// another shard (topology migrations are unsupported).
+func (b *RootRoundBound) coversShard(bi int, sr ShardResult) error {
+	for _, r := range sr.Requests {
+		if want, ok := b.inputs[string(r.StateID)]; ok && !want.shard.Equal(sr.ShardID) {
+			return fail(OutcomeIncompatibleLineage, bi, nil, "state %s was certified in shard %q but is consolidated in shard %q (topology change)", r.StateID, want.shard, sr.ShardID)
 		}
 	}
 	return nil
@@ -82,7 +102,7 @@ func (s *Session) AuthenticateEvidence(ev []Evidence) (*RootRoundBound, error) {
 	var round uint64
 	var network types.NetworkID
 	var bestShard types.ShardID
-	inputs := map[string][sha256.Size]byte{}
+	inputs := map[string]evidenceInput{}
 	for i, e := range ev {
 		if e.Request == nil || e.Proof == nil {
 			return nil, fail(OutcomeInvalidInput, i, nil, "nil evidence")
@@ -98,7 +118,7 @@ func (s *Session) AuthenticateEvidence(ev []Evidence) (*RootRoundBound, error) {
 		if _, dup := inputs[string(e.Request.StateID)]; dup {
 			return nil, fail(OutcomeInvalidInput, i, nil, "duplicate evidence for state %s", e.Request.StateID)
 		}
-		inputs[string(e.Request.StateID)] = d
+		inputs[string(e.Request.StateID)] = evidenceInput{digest: d, shard: uc.ShardTreeCertificate.Shard}
 		seal := uc.UnicitySeal
 		if i == 0 {
 			network = seal.NetworkID
@@ -127,11 +147,17 @@ func (s *Session) checkEvidenceProof(i int, e Evidence) (*types.UnicityCertifica
 		return nil, err
 	}
 	shard := uc.ShardTreeCertificate.Shard
-	order, _ := types.CanonicalShardOrder(s.policy.Topology.Scheme)
-	if !slices.ContainsFunc(order, shard.Equal) {
-		return nil, fail(OutcomeIncompatibleLineage, i, nil, "evidence shard %q is not in the policy topology", shard)
+	// the configuration hash of an original may legitimately differ from the target's: it is
+	// only checked against independent pins, otherwise the shard is bound at consolidation
+	var pinnedConf []byte
+	if s.policy.pinned() {
+		order, _ := types.CanonicalShardOrder(s.policy.Topology.Scheme)
+		if !slices.ContainsFunc(order, shard.Equal) {
+			return nil, fail(OutcomeIncompatibleLineage, i, nil, "evidence shard %q is not in the policy topology", shard)
+		}
+		pinnedConf = s.policy.Topology.ShardConfHashes[shard.Key()]
 	}
-	if err := uc.IsValid(s.policy.PartitionID, shard, s.policy.Topology.ShardConfHashes[shard.Key()]); err != nil {
+	if err := uc.IsValid(s.policy.PartitionID, shard, pinnedConf); err != nil {
 		return nil, fail(OutcomeIncompatibleLineage, i, err, "evidence unicity certificate")
 	}
 	shardRoot, err := uc.ShardTreeCertificate.ComputeCertificateHash(uc.InputRecord, uc.TRHash, uc.ShardConfHash, crypto.SHA256)

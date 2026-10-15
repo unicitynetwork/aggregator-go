@@ -14,6 +14,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial"
 	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial/prooftest"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -39,6 +40,7 @@ func newProofClient(t *testing.T, rm RoundManager, f *prooftest.Fixture) (*BFTCl
 		proofStaging:  proofmaterial.NewStaging(8),
 		published:     map[proofmaterial.Digest]bool{},
 		proofTopology: f.Provider(t),
+		authn:         newUCAuthenticator(prooftest.NetworkID, stubTrustBases{f.TrustBase}),
 	}
 	sink := &recordingSink{}
 	c.SetProofMaterialSink(sink)
@@ -51,7 +53,7 @@ func proposeBlock(c *BFTClientImpl, number uint64, root []byte) {
 }
 
 func response(f *prooftest.Fixture, view []byte) *certification.CertificationResponse {
-	return &certification.CertificationResponse{Partition: prooftest.Partition, Shard: f.Shard, UC: *f.UC, PartitionView: view}
+	return &certification.CertificationResponse{Partition: prooftest.Partition, Shard: f.Shard, Technical: f.TR, UC: *f.UC, PartitionView: view}
 }
 
 func Test_ProofMaterial_FinalizedWithView(t *testing.T) {
@@ -243,7 +245,8 @@ func Test_ProofMaterial_FailedFillIsRetried(t *testing.T) {
 	require.Len(t, rm.finalizedBlocks, 1, "no re-execution")
 }
 
-func Test_ProofMaterial_NoTopologyMeansNoMaterial(t *testing.T) {
+// No independently configured topology is needed: the view is authenticated by the seal.
+func Test_ProofMaterial_NoPinsStillAuthenticatesTheView(t *testing.T) {
 	root := prooftest.Hash("root-1")
 	f := prooftest.New(t, 2, 7, root, 80)
 	rm := &stubRoundManager{}
@@ -253,27 +256,71 @@ func Test_ProofMaterial_NoTopologyMeansNoMaterial(t *testing.T) {
 	c.stagePartitionView(t.Context(), response(f, f.Raw))
 	require.NoError(t, c.handleUnicityCertificate(t.Context(), f.UC, &certification.TechnicalRecord{Round: 8, Epoch: 1}))
 	require.Len(t, rm.finalizedBlocks, 1)
-	require.Nil(t, rm.finalizedBlocks[0].PartitionView)
+	require.Equal(t, api.HexBytes(f.Raw), rm.finalizedBlocks[0].PartitionView)
+	require.Equal(t, f.Raw, sink.got[0].PartitionView)
+}
+
+// A genuinely authenticated view is still dropped when it disagrees with configured pins.
+func Test_ProofMaterial_PinsOnlyRestrict(t *testing.T) {
+	root := prooftest.Hash("root-1")
+	f := prooftest.New(t, 2, 7, root, 80)
+	rm := &stubRoundManager{}
+	c, sink := newProofClient(t, rm, f)
+	wrong := map[string][]byte{}
+	for k := range f.Topo.ShardConfHashes {
+		wrong[k] = prooftest.Hash("pinned elsewhere")
+	}
+	pins, err := proofmaterial.NewStaticTopology(prooftest.Partition, f.Topo.Scheme, wrong)
+	require.NoError(t, err)
+	c.proofTopology = pins
+	proposeBlock(c, 7, root)
+	c.stagePartitionView(t.Context(), response(f, f.Raw))
+	require.NoError(t, c.handleUnicityCertificate(t.Context(), f.UC, &certification.TechnicalRecord{Round: 8, Epoch: 1}))
 	require.Nil(t, sink.got[0].PartitionView)
+}
+
+// The sidecar is authenticated against the signed seal, not against the sidecar itself.
+func Test_ProofMaterial_ForgedSidecarIsRejected(t *testing.T) {
+	root := prooftest.Hash("root-1")
+	f := prooftest.New(t, 2, 7, root, 80)
+	forged := f.View.Clone()
+	forged.Leaves[2].ShardConfHash = prooftest.Hash("attacker configuration")
+	raw, err := types.Cbor.Marshal(forged)
+	require.NoError(t, err)
+
+	rm := &stubRoundManager{}
+	c, sink := newProofClient(t, rm, f)
+	c.proofTopology = nil
+	proposeBlock(c, 7, root)
+	c.stagePartitionView(t.Context(), response(f, raw))
+	require.NoError(t, c.handleUnicityCertificate(t.Context(), f.UC, &certification.TechnicalRecord{Round: 8, Epoch: 1}))
+	require.Nil(t, sink.got[0].PartitionView)
+
+	// a seal not signed by the trusted authority never authenticates a view either
+	other := prooftest.New(t, 2, 7, root, 80)
+	other.UC.UnicitySeal.Signatures = nil
+	c2, sink2 := newProofClient(t, &stubRoundManager{}, f)
+	c2.proofTopology = nil
+	c2.stagePartitionView(t.Context(), &certification.CertificationResponse{Partition: prooftest.Partition, Shard: f.Shard, UC: *other.UC, PartitionView: f.Raw})
+	require.Zero(t, c2.proofStaging.Len())
+	_ = sink2
 }
 
 func Test_ProofTopologyFromConfig(t *testing.T) {
 	f1 := prooftest.New(t, 0, 7, prooftest.Hash("root"), 80)
 	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 3, PartitionID: prooftest.Partition, Epoch: 1}
 
-	t.Run("unsharded uses the own configuration hash", func(t *testing.T) {
-		p, err := ProofTopologyFromConfig(&config.BFTConfig{ShardConf: pdr})
+	t.Run("unsharded without configured pins has none (the seal authenticates)", func(t *testing.T) {
+		p, err := proofTopologyFromConfig(&config.BFTConfig{ShardConf: pdr})
 		require.NoError(t, err)
-		topo, ok := p.Topology(prooftest.Partition)
-		require.True(t, ok)
-		require.Len(t, topo.ShardConfHashes[types.ShardID{}.Key()], 32)
+		require.Nil(t, p)
 		_ = f1
 	})
-	t.Run("sharded without configured topology is unavailable", func(t *testing.T) {
+	t.Run("sharded without configured pins has none", func(t *testing.T) {
 		a, _ := types.ShardID{}.Split()
 		sharded := *pdr
 		sharded.ShardID = a
-		p, err := ProofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded})
+		p, err := proofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded})
 		require.NoError(t, err)
 		require.Nil(t, p)
 	})
@@ -282,16 +329,36 @@ func Test_ProofTopologyFromConfig(t *testing.T) {
 		h := hex.EncodeToString(prooftest.Hash("c"))
 		sharded := *pdr
 		sharded.ShardID = a
-		_, err := ProofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded,
+		_, err := proofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded,
 			ConsolidationShards: []config.ConsolidationShard{{ShardID: a, ConfigHash: h}}})
 		require.Error(t, err, "incomplete scheme")
-		_, err = ProofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded,
+		_, err = proofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded,
 			ConsolidationShards: []config.ConsolidationShard{{ShardID: a, ConfigHash: h}, {ShardID: b, ConfigHash: "abcd"}}})
 		require.Error(t, err, "short hash")
-		p, err := ProofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded,
+		p, err := proofTopologyFromConfig(&config.BFTConfig{ShardConf: &sharded,
 			ConsolidationShards: []config.ConsolidationShard{{ShardID: a, ConfigHash: h}, {ShardID: b, ConfigHash: "0x" + h}}})
 		require.NoError(t, err)
 		_, ok := p.Topology(prooftest.Partition)
 		require.True(t, ok)
 	})
+}
+
+// stubTrustBases serves the given trust bases by their own epoch.
+type stubTrustBases []*types.RootTrustBaseV1
+
+func (s stubTrustBases) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
+	for _, tb := range s {
+		if tb.GetEpoch() == epoch {
+			return tb, nil
+		}
+	}
+	return nil, interfaces.ErrTrustBaseNotFound
+}
+
+// wrongEpochStore answers every request with one fixed trust base, whatever epoch was asked
+// (like a hostile or confused REST endpoint).
+type wrongEpochStore struct{ tb *types.RootTrustBaseV1 }
+
+func (s wrongEpochStore) GetByEpoch(context.Context, uint64) (*types.RootTrustBaseV1, error) {
+	return s.tb, nil
 }

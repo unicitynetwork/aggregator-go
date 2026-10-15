@@ -3,7 +3,6 @@ package bft
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -90,6 +89,8 @@ type (
 		proofStaging  *proofmaterial.Staging
 		proofSink     atomic.Pointer[proofmaterial.Sink]
 		proofTopology proofmaterial.TopologyProvider
+		// authn is the boundary which authenticates received certificates
+		authn         *ucAuthenticator
 		publishedMu   sync.Mutex
 		published     map[proofmaterial.Digest]bool // recent accepted UC digests -> partition view delivered to the sink
 		publishedFIFO []proofmaterial.Digest
@@ -153,10 +154,11 @@ func NewBFTClient(
 		trustBaseStore: trustBaseStore,
 		conf:           conf,
 		eventBus:       eventBus,
+		authn:          newUCAuthenticator(conf.ShardConf.NetworkID, trustBaseStore),
 		proofStaging:   proofmaterial.NewStaging(proofmaterial.DefaultStagingEntries),
 		published:      map[proofmaterial.Digest]bool{},
 	}
-	topo, err := ProofTopologyFromConfig(conf)
+	topo, err := proofTopologyFromConfig(conf)
 	if err != nil {
 		return nil, fmt.Errorf("invalid consolidation topology: %w", err)
 	}
@@ -331,9 +333,9 @@ func (c *BFTClientImpl) sendHandshake(ctx context.Context, bftNetwork *BftNetwor
 
 	// load trust base
 	rootEpoch := c.luc.Load().GetRootEpoch()
-	tb, err := c.trustBaseStore.GetByEpoch(ctx, rootEpoch)
+	tb, err := c.authn.trustBase(ctx, rootEpoch)
 	if err != nil {
-		return fmt.Errorf("failed to load trust base for epoch %d: %w", rootEpoch, err)
+		return err
 	}
 	// select some random root nodes
 	rootIDs, err := randomNodeSelector(tb, defaultHandshakeNodes)
@@ -408,19 +410,18 @@ func (c *BFTClientImpl) handleMessage(ctx context.Context, msg any) {
 }
 
 func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *certification.CertificationResponse) error {
-	metrics.BFTCertificationResponsesTotal.WithLabelValues(c.shardID.String()).Inc()
 	c.lastCertResponseTime.Store(time.Now().UnixMilli())
 
+	// malformed nested shapes (null path elements) are rejected before anything evaluates them
+	if err := validateUCShape(&cr.UC); err != nil {
+		return fmt.Errorf("invalid CertificationResponse: malformed unicity certificate: %w", err)
+	}
 	if err := cr.IsValid(); err != nil {
 		return fmt.Errorf("invalid CertificationResponse: %w", err)
 	}
 
-	// verify UC
-	tb, err := c.trustBaseStore.GetByEpoch(ctx, cr.UC.GetRootEpoch())
-	if err != nil {
-		return fmt.Errorf("failed to load trust base for epoch %d: %w", cr.UC.GetRootEpoch(), err)
-	}
-	if err := cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, nil); err != nil {
+	// verify UC: configured network, exact root epoch, epoch start and quorum
+	if err := c.authn.verifyUC(ctx, &cr.UC, c.partitionID, c.shardID); err != nil {
 		return fmt.Errorf("failed to verify UC: %w", err)
 	}
 
@@ -812,26 +813,13 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 	return err
 }
 
-// ProofTopologyFromConfig derives the trusted topology used to validate partition views:
-// the own shard configuration hash for an unsharded partition, otherwise the configured
-// complete topology. Returns nil (no views are retained) when neither is available.
-func ProofTopologyFromConfig(conf *config.BFTConfig) (proofmaterial.TopologyProvider, error) {
-	if conf == nil || conf.ShardConf == nil {
+// proofTopologyFromConfig derives the OPTIONAL independently pinned topology used to
+// validate partition views more strictly (BFT_CONSOLIDATION_TOPOLOGY_FILE). Without it
+// views are authenticated by the seal alone: the scheme and every configuration hash are
+// the ones the root quorum signed. Returns nil when no pins are configured.
+func proofTopologyFromConfig(conf *config.BFTConfig) (proofmaterial.TopologyProvider, error) {
+	if conf == nil || conf.ShardConf == nil || len(conf.ConsolidationShards) == 0 {
 		return nil, nil
-	}
-	if len(conf.ConsolidationShards) == 0 {
-		if conf.ShardConf.ShardID.Length() != 0 {
-			return nil, nil
-		}
-		h, err := conf.ShardConf.Hash(crypto.SHA256)
-		if err != nil {
-			return nil, fmt.Errorf("hashing shard configuration: %w", err)
-		}
-		t, err := proofmaterial.SingleShardTopology(conf.ShardConf.PartitionID, h)
-		if err != nil {
-			return nil, err
-		}
-		return t, nil
 	}
 	scheme := make(types.ShardingScheme, 0, len(conf.ConsolidationShards))
 	hashes := make(map[string][]byte, len(conf.ConsolidationShards))
@@ -878,7 +866,7 @@ func (c *BFTClientImpl) stagePartitionView(ctx context.Context, cr *certificatio
 	if cr.PartitionView == nil {
 		return // legacy v1 response, or v2 with null view
 	}
-	result, view, err := proofmaterial.ValidateView(cr.PartitionView, &cr.UC, c.partitionID, c.proofTopology)
+	result, view, err := proofmaterial.ValidateView(cr.PartitionView, &cr.UC, c.partitionID, c.authn.sealVerifier(ctx), c.proofTopology)
 	metrics.BFTPartitionViewTotal.WithLabelValues(result).Inc()
 	if err != nil {
 		c.logger.WithContext(ctx).Warn("Ignoring partition view sidecar",
@@ -1119,9 +1107,9 @@ func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 	c.logger.WithContext(ctx).Info(fmt.Sprintf("Round %d sending block certification request to root chain, IR hash %X",
 		req.InputRecord.RoundNumber, req.InputRecord.Hash))
 
-	tb, err := c.trustBaseStore.GetByEpoch(ctx, luc.GetRootEpoch())
+	tb, err := c.authn.trustBase(ctx, luc.GetRootEpoch())
 	if err != nil {
-		return fmt.Errorf("failed to load trust base for epoch %d: %w", luc.GetRootEpoch(), err)
+		return err
 	}
 	rootIDs, err := rootNodesSelector(luc, tb, defaultNofRootNodes)
 	if err != nil {

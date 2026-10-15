@@ -311,10 +311,10 @@ type BFTConfig struct {
 	KeyConf    *cmdbft.KeyConf                   `mapstructure:"key_conf"`
 	ShardConf  *types.PartitionDescriptionRecord `mapstructure:"shard_conf"`
 	TrustBases []types.RootTrustBaseV1           `mapstructure:"trust_bases"`
-	// ConsolidationShards is the trusted topology of a sharded partition for validating
-	// partition view sidecars: every shard with its admitted configuration hash. Unsharded
-	// partitions need none (the own shard configuration hash is used). Without a complete
-	// topology partition views are not retained.
+	// ConsolidationShards is an OPTIONAL independently pinned topology (every shard with its
+	// admitted configuration hash) which partition view sidecars must additionally match.
+	// It is a stricter policy, not a prerequisite: without it views are authenticated by the
+	// root seal alone, which commits to the complete scheme and every configuration hash.
 	ConsolidationShards []ConsolidationShard `mapstructure:"consolidation_shards"`
 
 	// Peer configuration
