@@ -89,7 +89,7 @@ type (
 		proofStaging  *proofmaterial.Staging
 		proofSink     atomic.Pointer[proofmaterial.Sink]
 		proofTopology proofmaterial.TopologyProvider
-		// lastResponseRound is the newest root round seen in a certification response.
+		// lastResponseRound is the newest shard input record round seen in a certification response.
 		lastResponseRound atomic.Uint64
 		// authn is the boundary which authenticates received certificates
 		authn         *ucAuthenticator
@@ -852,13 +852,15 @@ func proofTopologyFromConfig(conf *config.BFTConfig) (proofmaterial.TopologyProv
 // ProofTopology returns the optional independently pinned topology (nil: none configured).
 func (c *BFTClientImpl) ProofTopology() proofmaterial.TopologyProvider { return c.proofTopology }
 
-// noteResponseRound counts re-deliveries: a response whose seal round is not newer than the
-// newest round already received repeats a certification (no new work for the root).
+// noteResponseRound counts responses which certify no new shard block: the shard input
+// record round must advance beyond the newest one already received for the response to
+// carry new work (new finalized block). Re-deliveries, timeout repeats and extra traffic
+// with an advancing root round all count as non-progress.
 func (c *BFTClientImpl) noteResponseRound(cr *certification.CertificationResponse) {
-	if cr == nil || cr.UC.UnicitySeal == nil {
+	if cr == nil || cr.UC.InputRecord == nil {
 		return
 	}
-	round := cr.UC.UnicitySeal.RootChainRoundNumber
+	round := cr.UC.InputRecord.RoundNumber
 	for {
 		last := c.lastResponseRound.Load()
 		if round > last {
@@ -867,7 +869,7 @@ func (c *BFTClientImpl) noteResponseRound(cr *certification.CertificationRespons
 			}
 			continue
 		}
-		metrics.BFTCertificationResponseRepeatsTotal.WithLabelValues(c.shardID.String()).Inc()
+		metrics.BFTCertificationResponseNonProgressTotal.WithLabelValues(c.shardID.String()).Inc()
 		return
 	}
 }

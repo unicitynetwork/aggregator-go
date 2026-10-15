@@ -136,7 +136,7 @@ optional (the hashes can then come from the shard configurations directly).
 | per-input rules (binding, expiry, reference time, shard membership, leaf path) | O(1) per input, never memoized | `LeafChecks == L` |
 | seal quorum | one per distinct complete seal + authority + policy | `QuorumChecks`, `EvidenceQuorumChecks` |
 | shard lookups in the authenticated view | one hash probe per lookup (index built once, O(S)) | `ShardLeafProbes` |
-| derived shard certificates | only the m participating shards, lazily; the shard tree is built once per master (own derivation: the dependency's `Certificate(shard)` scans the view per call) | `UCDerivations == m`, `ViewLeafVisits == 3S` independent of m, `ShardPathSteps == Σ depth` |
+| derived shard certificates | only the m participating shards, lazily, through the authenticated view's own tree and leaf index (no rebuild, no scan; bft-go-base#10) | `UCDerivations == m`, `ViewLeafVisits == 2S` independent of m, `ShardPathSteps == Σ depth` |
 | endpoint routing | binary trie, O(shard depth) per input (log S balanced, ≤ key width) | `Stats.RoutingVisits == Σ (depth+1)` |
 
 Memoization keys commit to the complete canonical bytes (and, for seals, the resolved authority content and policy

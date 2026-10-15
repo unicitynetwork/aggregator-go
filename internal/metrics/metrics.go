@@ -226,13 +226,13 @@ var (
 		[]string{"shard"},
 	)
 
-	// BFTCertificationResponseRepeatsTotal counts responses whose certified root round does not
-	// advance beyond the newest one already received: re-deliveries of the same certification
-	// (duplicate traffic), never new certifications.
-	BFTCertificationResponseRepeatsTotal = promauto.NewCounterVec(
+	// BFTCertificationResponseNonProgressTotal counts responses which certify no new shard
+	// block: the shard input record round does not advance beyond the newest one received. It
+	// covers re-deliveries, timeout repeats and any extra traffic carrying an advancing root round.
+	BFTCertificationResponseNonProgressTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "aggregator_bft_certification_response_repeats_total",
-			Help: "Certification responses repeating an already received root round, by shard.",
+			Name: "aggregator_bft_certification_response_nonprogress_total",
+			Help: "Certification responses that certify no new shard block, by shard.",
 		},
 		[]string{"shard"},
 	)

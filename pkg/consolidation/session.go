@@ -44,8 +44,9 @@ type Counters struct {
 	// ShardLeafProbes is the number of authenticated view leaves examined by shard
 	// lookups: one hash probe per lookup with the shard index.
 	ShardLeafProbes int
-	// ViewLeafVisits is the number of authenticated view leaves visited to index the view and to
-	// build the shard tree: Θ(S) per master, independent of the number of participating shards.
+	// ViewLeafVisits is the number of authenticated view leaves visited by this package (shard index,
+	// private view copy): Θ(S) per master, independent of the number of participating shards. The
+	// view authentication itself (tree build, scheme validation) is done once inside the dependency.
 	ViewLeafVisits int
 	// ShardPathSteps is the number of shard tree path steps taken to derive certificates:
 	// the sum of the participating shards' depths.
