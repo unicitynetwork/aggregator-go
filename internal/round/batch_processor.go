@@ -773,9 +773,9 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 			return fmt.Errorf("failed to publish disk SMT proof view: %w", err)
 		}
 		proofViewPublished = true
-		// Disk seam: the committed disk state is now the published proof view and no
-		// later write can start before this returns. Needs A3's DiskBackend retainer;
-		// without it the publisher is nil and this is a no-op.
+		// Disk: the committed state is now the published proof view and no later commit
+		// can start before this returns, so the retained snapshot is exactly this block.
+		// A backend without read-view support leaves the publisher nil (no-op).
 		rm.proofPub.PublishFinalized(ctx, block)
 	}
 	if !diskFinalize {

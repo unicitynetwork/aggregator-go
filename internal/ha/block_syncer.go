@@ -241,7 +241,7 @@ func (bs *BlockSyncer) syncDiskToBlock(ctx context.Context, endBlock *big.Int) e
 		if bs.stateTracker != nil {
 			bs.stateTracker.SetLastSyncedBlock(currBlock)
 		}
-		bs.publishView(ctx, b, endBlock) // no-op until the disk backend can retain read views
+		bs.publishView(ctx, b, endBlock) // disk read views: the committed state is exactly this block
 		bs.logger.Info("Disk SMT updated for round", "roundNumber", currBlock)
 	}
 	return nil
