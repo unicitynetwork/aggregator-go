@@ -35,6 +35,7 @@ type Counters struct {
 type Session struct {
 	policy   Policy
 	resolver TrustBaseResolver
+	epochEnd EpochEndResolver
 
 	mu       sync.Mutex
 	seals    map[string]struct{}
@@ -42,15 +43,31 @@ type Session struct {
 	counters Counters
 }
 
+// EpochEndResolver returns the start round of the epoch following the seal's epoch if the
+// resolver's authenticated history already knows it (known=false otherwise). A seal at or
+// after that round is outside the interval its epoch's authority may certify in.
+type EpochEndResolver func(seal *types.UnicitySeal) (nextEpochStart uint64, known bool, err error)
+
+// SessionOption configures a Session.
+type SessionOption func(*Session)
+
+// WithEpochEnd makes the session enforce the known end boundary of the seal's epoch on
+// every authentication, also for seals it has authenticated before.
+func WithEpochEnd(r EpochEndResolver) SessionOption { return func(s *Session) { s.epochEnd = r } }
+
 // NewSession creates the operation session for the policy.
-func NewSession(policy Policy, resolver TrustBaseResolver) (*Session, error) {
+func NewSession(policy Policy, resolver TrustBaseResolver, opts ...SessionOption) (*Session, error) {
 	if resolver == nil {
 		return nil, fail(OutcomeInvalidInput, -1, nil, "trust base resolver is required")
 	}
 	if err := policy.validate(); err != nil {
 		return nil, err
 	}
-	return &Session{policy: policy, resolver: resolver, seals: map[string]struct{}{}, bodies: map[string]struct{}{}}, nil
+	s := &Session{policy: policy, resolver: resolver, seals: map[string]struct{}{}, bodies: map[string]struct{}{}}
+	for _, o := range opts {
+		o(s)
+	}
+	return s, nil
 }
 
 // Counters returns a snapshot of the instrumentation counters.
@@ -104,6 +121,16 @@ func (s *Session) verifySeal(seal *types.UnicitySeal, count func(*Counters)) err
 	authority, err := authorityIdentity(tb)
 	if err != nil {
 		return &sealError{err}
+	}
+	if s.epochEnd != nil {
+		// before the memo: history learned after a successful check still applies
+		next, known, err := s.epochEnd(seal)
+		if err != nil {
+			return &sealError{fmt.Errorf("resolving epoch end: %w", err)}
+		}
+		if known && seal.RootChainRoundNumber >= next {
+			return &sealError{fmt.Errorf("seal round %d is at or after the start of the next epoch (round %d)", seal.RootChainRoundNumber, next)}
+		}
 	}
 	key := sealKey(sealBytes, authority, s.policy.id())
 	if s.seen(s.seals, key) {
@@ -169,17 +196,28 @@ func authorityIdentity(tb types.RootTrustBase) ([]byte, error) {
 type Policy struct {
 	// PartitionID of the consolidated partition.
 	PartitionID types.PartitionID
-	// Topology is the admitted shard scheme and shard configuration hashes of
-	// every shard (required for UC assembly).
+	// Topology OPTIONALLY pins the admitted shard scheme and the configuration
+	// hash of every shard. Without it the topology comes from the partition view
+	// itself, authenticated by the seal (types.AuthenticateView): the root quorum
+	// signature commits to the complete ordered vector and every configuration
+	// hash. Pins are a stricter policy: they can only reject more.
 	Topology types.PartitionViewTopology
 	// ID identifies the policy content for memoization; derived from the
 	// partition and topology when empty.
 	ID []byte
 }
 
+// pinned reports whether the policy carries an independently admitted topology.
+func (p Policy) pinned() bool {
+	return len(p.Topology.Scheme) > 0 || len(p.Topology.ShardConfHashes) > 0
+}
+
 func (p Policy) validate() error {
 	if p.PartitionID == 0 {
 		return fail(OutcomeInvalidInput, -1, nil, "policy partition ID is zero")
+	}
+	if !p.pinned() {
+		return nil
 	}
 	order, err := types.CanonicalShardOrder(p.Topology.Scheme)
 	if err != nil {
@@ -198,6 +236,12 @@ func (p Policy) id() []byte {
 	var b []byte
 	b = appendLP(b, p.ID)
 	b = binary.BigEndian.AppendUint64(b, uint64(p.PartitionID))
+	if !p.pinned() {
+		b = append(b, 0) // authenticated topology: no pins
+		h := sha256.Sum256(b)
+		return h[:]
+	}
+	b = append(b, 1)
 	order, _ := types.CanonicalShardOrder(p.Topology.Scheme)
 	for _, id := range order {
 		b = appendLP(b, []byte(id.String()))
