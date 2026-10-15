@@ -278,7 +278,7 @@ Log-log slopes over V = 1..256: RetainedBytes reads per Publish 0.00, per Acquir
 | relative time slope: Acquire+Release / Stats | 1.25 / 1.49 | 0.57 / 0.91 | **0.06 / 0.09** |
 
 With the accountant every ordinary catalog operation reads no reader at all (reads per operation are 0 for every V), and the time per Acquire+Release and per Stats is flat in V. Without it the reads are still linear in V by construction (the catalog sums its own readers),
-which is why #205 wires the accountant in production; the fallback is kept for backends that cannot total their readers.
+which is why production wires the accountant (#205, merged); the fallback is kept for backends that cannot total their readers.
 
 ### 3.2 Oldest view pinned while captures accumulate (V = 4)
 
@@ -359,186 +359,243 @@ round trips to the store drop from `L x depth` to `depth`. Output size is unchan
 
 ## 5. Integrated measurements: real root, A4 publication and D1 batch proofs wired
 
-`test/integration/bft_integrated_measurement_test.go` (build tag `e2e_bft`, run `INTEGRATED_SHARDS=4 INTEGRATED_PHASE_SECONDS=20 go test -tags=e2e_bft ./test/integration -run TestBFTIntegratedMeasurement -v -timeout 40m`,
-Docker environment as in the commands above) runs the production path end to end: a real `ubft` root node as a host process, four in-process bft-shard aggregators (memory SMT backend) with the production wiring
-(finalization hooks and the retained-view catalog from A4, the production batch handler with D1 batch proofs), MongoDB and Redis in Docker, continuous writers, and three probes per shard that time **submission to proof** (a state is submitted, then
-`get_inclusion_proof.v2` is polled every 50 ms until the proof exists). Everything shares one host (root, four aggregators, Mongo, Redis, load generators), so CPU contention between certification and proof load is part of what is measured.
+`test/integration/bft_integrated_measurement_test.go` (build tags `e2e_bft` and, for the RocksDB variants, `rocksdb`) runs the production path end to end: a real `ubft` root node as a host process, four in-process bft-shard aggregators with the production wiring
+(finalization hooks and the retained-view catalog from A4 built with the accountant from #205, the production batch handler with D1 batch proofs), MongoDB and Redis in Docker, continuous writers, and three probes per shard that time **submission to proof**
+(a state is submitted, then `get_inclusion_proof.v2` is polled every 50 ms until the proof exists). Everything shares one host (root, four aggregators, Mongo, Redis, load generators), so CPU contention between certification and proof load is part of what is measured.
 
-**Hardware context:** the host was a roughly ten-year-old MacBook Pro running other jobs; the colima VM is 2 vCPU / 3 GiB. Latencies are shown as ratios to the no-load baseline, never as gates.
-A shard finalizes about one block every 1.7 s here (every three to four root rounds), which is why submission-to-proof is about 2.9 s at the median in every phase.
+```sh
+INTEGRATED_SHARDS=4 INTEGRATED_PHASE_SECONDS=15 INTEGRATED_CYCLES=5 \
+  go test -tags 'e2e_bft rocksdb' ./test/integration -run TestBFTIntegratedMeasurement -v -timeout 55m
+# INTEGRATED_ONLY selects a variant-name prefix (default, views2, pins1, rocksdb), "recovery" or "ha"; without -tags rocksdb only the memory variants run
+```
 
-**Method.** Each configuration runs three phases of 20 s: baseline A (writes + probes), the loaded phase (the same plus eight closed-loop batch clients, two per shard, mixing latest with 1 ID, latest with 16 IDs and exact-root requests for roots observed
-earlier, with a 25 ms back-off after any non-OK answer), and baseline B. **The difference between baseline A and B is the noise floor of the host;** the last column compares the loaded phase with their mean. Every served proof is verified with the full
-`InclusionProofV2.Verify` against the real trust base (0 failures in every run). Outcomes are the typed JSON-RPC results of the batch method, with their denominators.
+**Hardware context:** the host was a roughly ten-year-old MacBook Pro running other jobs; the colima VM is 2 vCPU / 3 GiB. Latencies are shown as ratios, never as gates. A shard finalizes about one block every 1.7 s here (three to four root rounds), so submission-to-proof is about 2.9-3.2 s at the median in every phase.
 
-### 5.1 Default limits (16 retained views, 8 concurrent batches, 5 s lease)
+**Method.** Each configuration runs **five interleaved baseline/loaded cycles** of 15 s each (the order alternates between cycles to cancel slow drift): the baseline is writes + probes, the loaded phase adds eight closed-loop batch clients (two per shard) mixing latest with 1 ID,
+latest with 16 IDs and exact-root requests for roots observed earlier, with a 25 ms back-off after any refusal. Per metric the tables show the baseline and loaded distributions (median and min-max over the five cycles), the per-cycle loaded/baseline ratio (median and range), and a verdict:
+*inside the baseline range* means the loaded median lies within the baseline min-max, in which case nothing can be concluded beyond "no effect larger than the host's own variation was seen". The certification-impact metrics are finalized blocks per root round (finalization normalized by the root's own progress),
+blocks and accepted writes per second, the **certification latency** (`aggregator_bft_certification_duration_seconds`: mean time from the BFT proposal to the unicity certificate received, over all shards), responses per finalized block, the longest gap without a block, and submission-to-proof latency.
+Every proof of every served batch is verified against its own request with the full `InclusionProofV2.Verify`, and the test fails on any refusal that is not one of the specified typed, retryable answers (`proof_unavailable/{view_not_retained,no_finalized_view,partition_view_unavailable}`, `busy/{active_requests,pinned_views,retention_budget,deadline}`).
 
-| metric | baseline A | baseline B | with batch load | with / mean(A,B) |
+### 5.1 Default limits (16 retained views, 8 concurrent batches, 5 s lease), memory SMT backend
+
+5 interleaved cycles (baseline/loaded order alternates). Values: median (min-max over cycles).
+
+| metric | baseline | with batch load | loaded / baseline per cycle: median (min-max) | verdict |
 |---|---|---|---|---|
-| finalized blocks per second (sum over shards) | 2.55 | 2.40 | 2.44 | 0.99x |
-| accepted writes per second (sum over shards) | 23.62 | 23.59 | 23.70 | 1.00x |
-| root->shard responses per finalized block | 1.00 | 1.00 | 1.00 | 1.00x |
-| non-progress responses (count) | 0 | 0 | 0 | n/a |
-| longest gap without a finalized block (s, max over shards) | 2.0 | 2.0 | 2.0 | 1.00x |
-| submission-to-proof latency p50 (probes, ms) | 2900 | 2885 | 2896 | 1.00x |
-| submission-to-proof latency p95 (probes, ms) | 2987 | 2940 | 2979 | 1.01x |
-| probes completed | 72 | 72 | 72 | 1.00x |
+| finalized blocks per root round (sum over shards) | 1.30 (1.08-1.37) | 1.29 (1.04-1.33) | 0.94x (0.90x-1.24x) | loaded median inside the baseline range |
+| finalized blocks per second (sum over shards) | 2.31 (1.84-2.46) | 2.39 (1.66-2.39) | 0.97x (0.86x-1.28x) | loaded median inside the baseline range |
+| accepted writes per second (sum over shards) | 23.38 (22.39-23.92) | 23.41 (22.71-23.48) | 1.00x (0.98x-1.01x) | loaded median inside the baseline range |
+| certification latency: mean BFT proposal -> UC received (ms) | 1443 (1404-1828) | 1369 (1358-1702) | 0.94x (0.84x-1.06x) | loaded median BELOW the baseline range |
+| responses per finalized block | 1.00 (0.86-1.03) | 1.00 (1.00-1.12) | 1.00x (0.97x-1.31x) | loaded median inside the baseline range |
+| longest gap without a finalized block (s, max over shards) | 2.0 (2.0-2.8) | 2.5 (1.8-3.0) | 1.09x (0.88x-1.25x) | loaded median inside the baseline range |
+| submission-to-proof latency p50 (probes, ms) | 2986 (2885-4508) | 3083 (2924-4150) | 0.98x (0.69x-1.12x) | loaded median inside the baseline range |
+| submission-to-proof latency p95 (probes, ms) | 3298 (2943-4630) | 3624 (3019-5017) | 1.04x (0.79x-1.38x) | loaded median inside the baseline range |
 
-batch requests issued during the loaded phase: 5028 (251 per second)
+batch requests issued over the 5 loaded phases: 16656 (221 per second)
 
 | mode | outcome | requests | share of mode | latency p50 ms (ok) | p95 ms (ok) |
 |---|---|---|---|---|---|
-| latest-1 | ok | 2544 | 100.0% | 19 | 40 |
-| latest-16 | ok | 1257 | 100.0% | 60 | 98 |
-| exact-root | ok | 1227 | 100.0% | 20 | 41 |
+| latest-1 | ok | 8463 | 100.0% | 19 | 48 |
+| latest-16 | ok | 4195 | 100.0% | 60 | 129 |
+| exact-root | ok | 1913 | 47.8% | 22 | 55 |
+| exact-root | proof_unavailable/view_not_retained | 2085 | 52.2% |  |  |
 
 | age of the requested root (blocks behind the tip) | exact-root requests | served | availability |
 |---|---|---|---|
-| 0 | 105 | 105 | 100% |
-| 1-2 | 518 | 518 | 100% |
-| 3-4 | 260 | 260 | 100% |
-| 5-8 | 275 | 275 | 100% |
-| 9-16 | 69 | 69 | 100% |
+| 0 | 136 | 136 | 100% |
+| 1-2 | 511 | 511 | 100% |
+| 3-4 | 379 | 379 | 100% |
+| 5-8 | 521 | 521 | 100% |
+| 9-16 | 372 | 366 | 98% |
+| 17+ | 2079 | 0 | 0% |
 
-verified proofs: 5028 (failures 0)
+verified proofs: 77478 (failures 0); proofs served 77478; D1 disk batch-proof leaves during the loaded phases: 0
 
-Catalog counters per shard during the run: retained views peak 16 (the cap), active pins peak 2, retained bytes peak 261 KB, 0 pressure cancellations, retired-but-pinned 0.
+### 5.2 Retention pressure: at most 2 retained views per shard (memory)
 
-### 5.2 Retention pressure: at most 2 retained views per shard
+5 interleaved cycles (baseline/loaded order alternates). Values: median (min-max over cycles).
 
-| metric | baseline A | baseline B | with batch load | with / mean(A,B) |
+| metric | baseline | with batch load | loaded / baseline per cycle: median (min-max) | verdict |
 |---|---|---|---|---|
-| finalized blocks per second (sum over shards) | 2.34 | 2.40 | 2.24 | 0.95x |
-| accepted writes per second (sum over shards) | 23.58 | 23.59 | 22.91 | 0.97x |
-| root->shard responses per finalized block | 1.02 | 1.00 | 0.98 | 0.97x |
-| non-progress responses (count) | 0 | 0 | 0 | n/a |
-| longest gap without a finalized block (s, max over shards) | 2.0 | 2.0 | 2.5 | 1.25x |
-| submission-to-proof latency p50 (probes, ms) | 3041 | 2990 | 3158 | 1.05x |
-| submission-to-proof latency p95 (probes, ms) | 3350 | 3170 | 3661 | 1.12x |
-| probes completed | 72 | 72 | 63 | 0.88x |
+| finalized blocks per root round (sum over shards) | 1.23 (1.08-1.38) | 1.29 (1.15-1.33) | 1.06x (0.86x-1.12x) | loaded median inside the baseline range |
+| finalized blocks per second (sum over shards) | 2.13 (1.78-2.40) | 2.39 (2.06-2.39) | 1.12x (0.89x-1.15x) | loaded median inside the baseline range |
+| accepted writes per second (sum over shards) | 23.18 (22.65-23.39) | 23.70 (22.81-23.75) | 1.01x (1.01x-1.02x) | loaded median ABOVE the baseline range |
+| certification latency: mean BFT proposal -> UC received (ms) | 1552 (1412-1618) | 1369 (1332-1484) | 0.92x (0.85x-1.03x) | loaded median BELOW the baseline range |
+| responses per finalized block | 1.00 (0.88-1.11) | 1.00 (1.00-1.03) | 1.00x (0.93x-1.14x) | loaded median inside the baseline range |
+| longest gap without a finalized block (s, max over shards) | 2.5 (2.0-2.8) | 2.5 (2.0-2.5) | 1.00x (0.90x-1.11x) | loaded median inside the baseline range |
+| submission-to-proof latency p50 (probes, ms) | 2994 (2988-3561) | 2986 (2922-3579) | 0.98x (0.84x-1.11x) | loaded median BELOW the baseline range |
+| submission-to-proof latency p95 (probes, ms) | 4436 (3179-4747) | 3466 (3041-3777) | 0.80x (0.75x-1.13x) | loaded median inside the baseline range |
 
-batch requests issued during the loaded phase: 3468 (173 per second)
+batch requests issued over the 5 loaded phases: 15704 (209 per second)
 
 | mode | outcome | requests | share of mode | latency p50 ms (ok) | p95 ms (ok) |
 |---|---|---|---|---|---|
-| latest-1 | ok | 1725 | 100.0% | 28 | 68 |
-| latest-16 | ok | 883 | 100.0% | 82 | 174 |
-| exact-root | ok | 353 | 41.0% | 28 | 79 |
-| exact-root | proof_unavailable/view_not_retained | 507 | 59.0% |  |  |
+| latest-1 | ok | 7864 | 100.0% | 20 | 59 |
+| latest-16 | ok | 3963 | 100.0% | 61 | 159 |
+| exact-root | ok | 664 | 17.1% | 18 | 44 |
+| exact-root | proof_unavailable/view_not_retained | 3213 | 82.9% |  |  |
 
 | age of the requested root (blocks behind the tip) | exact-root requests | served | availability |
 |---|---|---|---|
-| 0 | 126 | 125 | 99% |
-| 1-2 | 324 | 228 | 70% |
-| 3-4 | 200 | 0 | 0% |
-| 5-8 | 166 | 0 | 0% |
-| 9-16 | 44 | 0 | 0% |
+| 0 | 224 | 219 | 98% |
+| 1-2 | 632 | 444 | 70% |
+| 3-4 | 448 | 1 | 0% |
+| 5-8 | 634 | 0 | 0% |
+| 9-16 | 425 | 0 | 0% |
+| 17+ | 1514 | 0 | 0% |
 
-verified proofs: 2961 (failures 0)
+verified proofs: 71755 (failures 0); proofs served 71755; D1 disk batch-proof leaves during the loaded phases: 0
 
-Latest requests are always served; exact-root requests are served only while the root is among the 2 retained views, i.e. availability is 99% for the tip, 70% one to two blocks back and 0% beyond. Every unavailable answer is the typed
-`proof_unavailable/view_not_retained` (retryable as a new attempt); there are no transport errors and no wrong answers (2,961 proofs verified). Certification is unaffected within the noise floor.
+Latest requests are always served; exact-root availability follows the retained window (about 98% at the tip, 70% one to two blocks back, none beyond) and every refusal is the typed `proof_unavailable/view_not_retained`.
 
-### 5.3 Admission pressure: one concurrent batch per shard
+### 5.3 Admission pressure: one concurrent batch per shard (memory)
 
-| metric | baseline A | baseline B | with batch load | with / mean(A,B) |
+5 interleaved cycles (baseline/loaded order alternates). Values: median (min-max over cycles).
+
+| metric | baseline | with batch load | loaded / baseline per cycle: median (min-max) | verdict |
 |---|---|---|---|---|
-| finalized blocks per second (sum over shards) | 2.40 | 2.50 | 2.49 | 1.02x |
-| accepted writes per second (sum over shards) | 23.58 | 23.99 | 23.60 | 0.99x |
-| root->shard responses per finalized block | 1.00 | 0.96 | 1.00 | 1.02x |
-| non-progress responses (count) | 0 | 0 | 0 | n/a |
-| longest gap without a finalized block (s, max over shards) | 2.0 | 2.0 | 2.0 | 1.00x |
-| submission-to-proof latency p50 (probes, ms) | 2882 | 2884 | 2874 | 1.00x |
-| submission-to-proof latency p95 (probes, ms) | 2991 | 2958 | 2964 | 1.00x |
-| probes completed | 72 | 78 | 72 | 0.96x |
+| finalized blocks per root round (sum over shards) | 1.33 (1.27-1.38) | 1.30 (1.19-1.33) | 0.99x (0.88x-1.05x) | loaded median inside the baseline range |
+| finalized blocks per second (sum over shards) | 2.33 (2.20-2.40) | 2.33 (2.12-2.39) | 1.00x (0.89x-1.08x) | loaded median inside the baseline range |
+| accepted writes per second (sum over shards) | 23.38 (23.18-23.65) | 23.56 (23.43-23.64) | 1.01x (0.99x-1.02x) | loaded median inside the baseline range |
+| certification latency: mean BFT proposal -> UC received (ms) | 1440 (1402-1480) | 1366 (1333-1392) | 0.94x (0.92x-0.97x) | loaded median BELOW the baseline range |
+| responses per finalized block | 1.00 (0.92-1.03) | 1.00 (0.97-1.12) | 1.03x (0.94x-1.19x) | loaded median inside the baseline range |
+| longest gap without a finalized block (s, max over shards) | 2.0 (2.0-2.5) | 2.0 (2.0-2.5) | 1.00x (0.89x-1.12x) | loaded median inside the baseline range |
+| submission-to-proof latency p50 (probes, ms) | 3023 (3004-3192) | 3052 (2969-3154) | 1.00x (0.96x-1.02x) | loaded median inside the baseline range |
+| submission-to-proof latency p95 (probes, ms) | 3181 (3113-3840) | 3183 (3115-3559) | 0.98x (0.91x-1.13x) | loaded median inside the baseline range |
 
-batch requests issued during the loaded phase: 7875 (393 per second)
+batch requests issued over the 5 loaded phases: 20619 (274 per second)
 
 | mode | outcome | requests | share of mode | latency p50 ms (ok) | p95 ms (ok) |
 |---|---|---|---|---|---|
-| latest-1 | busy/active_requests | 1590 | 39.8% |  |  |
-| latest-1 | ok | 2404 | 60.2% | 11 | 20 |
-| latest-16 | busy/active_requests | 778 | 39.7% |  |  |
-| latest-16 | ok | 1182 | 60.3% | 31 | 52 |
-| exact-root | busy/active_requests | 771 | 40.1% |  |  |
-| exact-root | ok | 1150 | 59.9% | 11 | 19 |
+| latest-1 | busy/active_requests | 5521 | 53.4% |  |  |
+| latest-1 | ok | 4818 | 46.6% | 17 | 47 |
+| latest-16 | busy/active_requests | 2773 | 53.3% |  |  |
+| latest-16 | ok | 2425 | 46.7% | 49 | 127 |
+| exact-root | busy/active_requests | 2681 | 52.8% |  |  |
+| exact-root | ok | 1165 | 22.9% | 19 | 50 |
+| exact-root | proof_unavailable/view_not_retained | 1236 | 24.3% |  |  |
 
 | age of the requested root (blocks behind the tip) | exact-root requests | served | availability |
 |---|---|---|---|
-| 0 | 170 | 108 | 64% |
-| 1-2 | 635 | 372 | 59% |
-| 3-4 | 430 | 260 | 60% |
-| 5-8 | 514 | 303 | 59% |
-| 9-16 | 172 | 107 | 62% |
+| 0 | 308 | 139 | 45% |
+| 1-2 | 735 | 340 | 46% |
+| 3-4 | 463 | 208 | 45% |
+| 5-8 | 634 | 255 | 40% |
+| 9-16 | 523 | 223 | 43% |
+| 17+ | 2419 | 0 | 0% |
 
-verified proofs: 4736 (failures 0)
+verified proofs: 44726 (failures 0); proofs served 44726; D1 disk batch-proof leaves during the loaded phases: 0
 
-Requests beyond the single slot are rejected immediately with the typed retryable `busy/active_requests` (about 40% of 7,875 requests, with 8 clients on 4 shards); the rest are served faster (smaller queue). Certification is unaffected within the noise floor.
-The byte budget and the pin-count (`busy/pinned_views`) paths were not reached: the retained state per shard is tens to hundreds of KB here (section 2), far below the 256 MiB budget.
+Requests beyond the single slot are rejected immediately with the typed retryable `busy/active_requests` (about 53% of requests with eight clients on four shards); the rest are served. The byte-budget and pin-count (`busy/pinned_views`) paths were not reached: the retained state per shard is tens to hundreds of KB here, far below the 256 MiB budget.
 
-### 5.4 Recovery: cold restart of one shard
+### 5.4 RocksDB backend: D1 union-path batch proofs exercised
 
-Shard 0's aggregator is stopped and started again on the same database (the catalog is rebuilt only for the current validated state, A4's startup publication):
+The same configurations on the RocksDB backend (`SMT_BACKEND=rocksdb`, a separate `DiskPath` per shard). The test asserts that `aggregator_smt_disk_batch_proof_leaves_total` (leaves proven by the union-path builder on retained disk views) is **0 in every baseline phase and in every memory variant**
+and, on RocksDB, **at least the number of proofs served in multi-ID batches: it equals it exactly (31,301 = 31,301 and 75,558 = 75,558)**. Single-ID batches take the single-proof path and are not counted.
 
-- The restarted aggregator served block height at about 0.3-0.5 s after the stop began, and the **first latest batch request succeeded about 10 ms after it started serving** (the persisted sidecar of the latest block is revalidated, so latest is available immediately).
-- The next block was finalized at 0.5-2.3 s after the restart across runs (the root round cadence dominates).
-- **History is not rebuilt, by design:** of the roots observed before the restart, 0 of 19 were served afterwards; every one answered `proof_unavailable/view_not_retained` (typed, retryable as a new attempt).
+**rocksdb-default**
 
-### 5.5 HA failover: follower with the block syncer
+5 interleaved cycles (baseline/loaded order alternates). Values: median (min-max over cycles).
+
+| metric | baseline | with batch load | loaded / baseline per cycle: median (min-max) | verdict |
+|---|---|---|---|---|
+| finalized blocks per root round (sum over shards) | 1.35 (1.27-1.40) | 1.28 (1.12-1.29) | 0.92x (0.80x-1.01x) | loaded median inside the baseline range |
+| finalized blocks per second (sum over shards) | 2.33 (2.19-2.60) | 2.12 (1.90-2.39) | 0.92x (0.81x-0.96x) | loaded median BELOW the baseline range |
+| accepted writes per second (sum over shards) | 23.55 (22.98-23.77) | 23.30 (22.25-23.85) | 1.00x (0.94x-1.01x) | loaded median inside the baseline range |
+| certification latency: mean BFT proposal -> UC received (ms) | 1495 (1387-1529) | 1490 (1345-1663) | 1.02x (0.96x-1.09x) | loaded median inside the baseline range |
+| responses per finalized block | 1.00 (1.00-1.03) | 1.00 (1.00-1.00) | 1.00x (0.97x-1.00x) | loaded median inside the baseline range |
+| longest gap without a finalized block (s, max over shards) | 2.0 (1.8-2.0) | 2.5 (2.0-2.8) | 1.29x (1.00x-1.37x) | loaded median ABOVE the baseline range |
+| submission-to-proof latency p50 (probes, ms) | 3175 (2866-3191) | 3323 (2891-4154) | 1.04x (0.99x-1.31x) | loaded median ABOVE the baseline range |
+| submission-to-proof latency p95 (probes, ms) | 3303 (2996-3702) | 3906 (3030-4433) | 1.06x (1.01x-1.34x) | loaded median ABOVE the baseline range |
+
+batch requests issued over the 5 loaded phases: 7731 (102 per second)
+
+| mode | outcome | requests | share of mode | latency p50 ms (ok) | p95 ms (ok) |
+|---|---|---|---|---|---|
+| latest-1 | ok | 3839 | 100.0% | 43 | 120 |
+| latest-16 | ok | 1958 | 100.0% | 129 | 345 |
+| exact-root | ok | 997 | 51.6% | 50 | 112 |
+| exact-root | proof_unavailable/view_not_retained | 937 | 48.4% |  |  |
+
+| age of the requested root (blocks behind the tip) | exact-root requests | served | availability |
+|---|---|---|---|
+| 0 | 162 | 162 | 100% |
+| 1-2 | 288 | 288 | 100% |
+| 3-4 | 195 | 195 | 100% |
+| 5-8 | 216 | 216 | 100% |
+| 9-16 | 138 | 136 | 99% |
+| 17+ | 935 | 0 | 0% |
+
+verified proofs: 36137 (failures 0); proofs served 36137 (in multi-ID batches: 31301); D1 disk batch-proof leaves during the loaded phases: 31301
+
+**rocksdb-views2**
+
+5 interleaved cycles (baseline/loaded order alternates). Values: median (min-max over cycles).
+
+| metric | baseline | with batch load | loaded / baseline per cycle: median (min-max) | verdict |
+|---|---|---|---|---|
+| finalized blocks per root round (sum over shards) | 1.32 (1.29-1.36) | 1.32 (1.32-1.36) | 1.03x (0.97x-1.03x) | loaded median inside the baseline range |
+| finalized blocks per second (sum over shards) | 2.46 (2.39-2.53) | 2.46 (2.46-2.53) | 1.03x (0.97x-1.03x) | loaded median inside the baseline range |
+| accepted writes per second (sum over shards) | 23.64 (23.38-23.97) | 23.58 (23.32-24.08) | 0.99x (0.98x-1.03x) | loaded median inside the baseline range |
+| certification latency: mean BFT proposal -> UC received (ms) | 1407 (1401-1416) | 1377 (1361-1381) | 0.98x (0.97x-0.98x) | loaded median BELOW the baseline range |
+| responses per finalized block | 1.00 (1.00-1.03) | 1.00 (1.00-1.00) | 1.00x (0.97x-1.00x) | loaded median inside the baseline range |
+| longest gap without a finalized block (s, max over shards) | 2.0 (1.8-2.0) | 2.0 (1.8-2.0) | 1.00x (0.87x-1.14x) | loaded median inside the baseline range |
+| submission-to-proof latency p50 (probes, ms) | 2889 (2847-2894) | 2875 (2871-2883) | 1.00x (0.99x-1.01x) | loaded median inside the baseline range |
+| submission-to-proof latency p95 (probes, ms) | 2961 (2934-2999) | 2977 (2957-3042) | 1.01x (0.99x-1.04x) | loaded median inside the baseline range |
+
+batch requests issued over the 5 loaded phases: 19326 (257 per second)
+
+| mode | outcome | requests | share of mode | latency p50 ms (ok) | p95 ms (ok) |
+|---|---|---|---|---|---|
+| latest-1 | ok | 9804 | 100.0% | 17 | 36 |
+| latest-16 | ok | 4724 | 100.0% | 54 | 93 |
+| exact-root | ok | 658 | 13.7% | 17 | 37 |
+| exact-root | proof_unavailable/view_not_retained | 4140 | 86.3% |  |  |
+
+| age of the requested root (blocks behind the tip) | exact-root requests | served | availability |
+|---|---|---|---|
+| 0 | 266 | 265 | 100% |
+| 1-2 | 642 | 392 | 61% |
+| 3-4 | 458 | 1 | 0% |
+| 5-8 | 642 | 0 | 0% |
+| 9-16 | 578 | 0 | 0% |
+| 17+ | 2212 | 0 | 0% |
+
+verified proofs: 86020 (failures 0); proofs served 86020 (in multi-ID batches: 75558); D1 disk batch-proof leaves during the loaded phases: 75558
+
+### 5.5 Recovery: cold restart of one shard
+
+Shard 0's aggregator is stopped and started again on the same database (A4's startup publication rebuilds the catalog only for the current validated state):
+
+- memory backend: stop 61ms, process started 372ms, serving block height 24 at 380ms, first latest batch ok at 391ms (outcomes while waiting: map[ok:1]), first new finalized block after the restart at 2.469s; roots observed before the restart that are served after it: 1 of 14 (map[ok:1 proof_unavailable/view_not_retained:13]); history is intentionally not rebuilt
+- RocksDB backend: stop 81ms, process started 569ms, serving block height 25 at 573ms, first latest batch ok at 580ms (outcomes while waiting: map[ok:1]), first new finalized block after the restart at 2.04s; roots observed before the restart that are served after it: 1 of 14 (map[ok:1 proof_unavailable/view_not_retained:13]); history is intentionally not rebuilt
+
+The latest batch request succeeds within about 10 ms of the aggregator serving (the persisted sidecar of the latest block is revalidated). The one old root that is still served after the restart is the current state, which is the current latest. A first attempt can answer the typed `proof_unavailable/partition_view_unavailable`
+until the sidecar is attached (seen once in the longer RocksDB run: a retryable new attempt succeeded). **History is not rebuilt, by design.**
+
+### 5.6 HA failover: follower with the block syncer (memory)
 
 Shard 0 gets a second aggregator on the same database that is not activated; the production block syncer (with the catalog's publisher, as `cmd/aggregator` wires it) replays finalized blocks and publishes the replayed states into its own catalog.
 Promotion mirrors the production leader-change listener (stop the syncer, `SyncToLatestBlock`, `Activate`); leader election itself is not used (the leader is stopped by the test), so lease and election delay are not measured.
 
-- Before the failover the follower's catalog held 15 retained views (149 KB) and **served 13 of 13 roots the leader had observed**, and latest was available on the follower.
-- At the failover: the leader stopped in about 0.1 s, the follower's final sync took 10 ms and activation 9 ms (about 10-30 ms each across runs); the **first latest batch succeeded 148 ms after the stop began and the new leader finalized its first block 255 ms after it**; 13 of 13 pre-failover roots were still served.
-- The follower publishes the replayed state once per sync tick (500 ms here), so it retains every block only when blocks arrive slower than the tick; with faster blocks it would retain one view per tick.
+- HA before failover: leader observed 10 roots; follower catalog views=12 retained=107434B; follower serves 10 of 10 of the leader's observed roots; follower latest: ok
+- HA FAILOVER shard 0: leader stopped after 125ms, follower sync 18ms, activate 8ms; first latest batch ok at 170ms, first block finalized by the new leader at 1.631s after the stop (height 14 at the stop, 14 when promoted); leader-observed roots served by the new leader: 10 of 10 (follower retains replayed states, not every block)
+- An earlier run measured the first block by the new leader at 255 ms after the stop; here 1.6 s: it depends on where in the root round the promotion lands.
 
-### 5.6 With the accountant wired (#205)
+### 5.7 What the noise floor allows to conclude
 
-The default-limits run repeated on `uc/P5-wire-accountant` merged with the same test (production `initProofViews` with `AccountantFor`):
-
-| metric | baseline A | baseline B | with batch load | with / mean(A,B) |
-|---|---|---|---|---|
-| finalized blocks per second (sum over shards) | 2.40 | 2.50 | 2.35 | 0.96x |
-| accepted writes per second (sum over shards) | 23.63 | 23.59 | 23.56 | 1.00x |
-| root->shard responses per finalized block | 1.00 | 1.00 | 1.00 | 1.00x |
-| non-progress responses (count) | 0 | 0 | 0 | n/a |
-| longest gap without a finalized block (s, max over shards) | 2.0 | 2.0 | 2.5 | 1.25x |
-| submission-to-proof latency p50 (probes, ms) | 2887 | 2878 | 2987 | 1.04x |
-| submission-to-proof latency p95 (probes, ms) | 3008 | 2974 | 3496 | 1.17x |
-| probes completed | 72 | 72 | 72 | 1.00x |
-
-batch requests issued during the loaded phase: 4088 (204 per second)
-
-| mode | outcome | requests | share of mode | latency p50 ms (ok) | p95 ms (ok) |
-|---|---|---|---|---|---|
-| latest-1 | ok | 2036 | 100.0% | 24 | 51 |
-| latest-16 | ok | 1019 | 100.0% | 72 | 127 |
-| exact-root | ok | 1033 | 100.0% | 23 | 51 |
-
-| age of the requested root (blocks behind the tip) | exact-root requests | served | availability |
-|---|---|---|---|
-| 0 | 164 | 164 | 100% |
-| 1-2 | 357 | 357 | 100% |
-| 3-4 | 206 | 206 | 100% |
-| 5-8 | 229 | 229 | 100% |
-| 9-16 | 77 | 77 | 100% |
-
-verified proofs: 4088 (failures 0)
-
-Within the noise floor the integrated results are the same with and without the accountant at these sizes; the catalog curves in section 3 are where it matters.
-
-### 5.7 What these runs establish
-
-- **Certification impact:** with eight closed-loop batch clients issuing 170-390 requests per second (and proof building, CBOR and verification on the same CPUs), finalized blocks per second and accepted writes per second stay within about 5% of the baseline mean (the two baselines themselves differ by up to 4%), responses per finalized block stay at 1.00,
-  non-progress responses at 0 and the longest gap without a block at 2.0-2.5 s; submission-to-proof latency p50 moves by 0-5%. At these sizes consolidation load does not measurably slow certification; it does not prove the same for larger shards or a saturated host.
-- **Availability with denominators:** under default limits every one of 5,028 requests was served and verified; under retention pressure the exact-root availability follows the retained-view window exactly and every refusal is typed; under admission pressure
-  refusals are typed busy answers. No request failed silently or with a transport error.
-- **Recovery and HA:** latest is available within tens of milliseconds of serving after a cold restart and about 150 ms after a failover; history is lost on a cold restart and kept by a follower in proportion to its sync ticks.
+- **The baseline itself varies a lot:** over five baseline cycles of one configuration, blocks per second ranged 1.84-2.46 (memory default) and the per-cycle loaded/baseline ratio of blocks per second ranged 0.86-1.28; a single baseline pair (as in an earlier revision of this document) is not an estimate of that variation, and its "within about 5%" claim is withdrawn.
+- **Memory backend (default, views2, pins1):** apart from the certification latency, which was *lower* under load in every variant (0.92x-0.94x, which cannot be a real benefit and shows how much that mean moves with drift and order), every certification metric's loaded median lies inside the baseline range or is better; the one metric flagged "above" is accepted writes per second at 1.01x.
+  With these runs one cannot show any measurable certification slowdown at about 210-270 batch requests per second, nor exclude one smaller than the 10-30% cycle-to-cycle variation.
+- **RocksDB backend, default limits:** at a lower request rate (102 per second; each request is slower, p50 43 ms against about 20 ms in memory) the loaded phases show blocks per second **0.92x (0.81x-0.96x), below the baseline range**, a longest gap 1.29x above, and submission-to-proof p50/p95 1.04x/1.06x above the baseline range.
+  The certification latency itself (proposal to UC received) is unchanged (1.02x). The second RocksDB configuration (views2) does not reproduce it (1.03x, every metric inside the range). So this is a possible cost of at most about 10% of finalization throughput on a shared host when proofs are served from RocksDB, seen in one of two configurations; five cycles per configuration cannot settle it.
+- **Availability with denominators:** default limits served every exact-root request up to 16 blocks old (98-100%; the 17+ rows are beyond the 16-view window by design), latest requests 100%; views2 and pins1 refuse exactly as configured (above), always typed and retryable. No request failed with an untyped or transport error (the test fails if one does), and no served proof failed verification (77,478, 71,755, 44,726, 36,137 and 86,020 proofs verified in the five configurations).
+- **Not shown:** that the load cannot affect certification on a quiet dedicated host or at larger shard sizes, that the retention budget behaves under pressure (not reached), or any absolute latency.
 
 ## 6. Not covered
 
-- **Integrated runs on other configurations:** section 5 uses the in-memory SMT backend, four shards and one run per configuration; the RocksDB backend, eight shards, longer runs and a deployment with real network latency between the aggregators, root and Mongo were not run.
+- **Integrated runs on other configurations:** section 5 uses four shards and five 15 s cycles per configuration; eight shards, longer runs, the HA follower on RocksDB, a deployment with real network latency between the aggregators, root and Mongo, and a quiet dedicated host were not run.
 - **Peak RSS** is not measured; only heap (memory) and physical on-disk bytes after compaction (RocksDB). Cold versus warm RocksDB block cache, adversarial shared-prefix keys and disk batch proofs through the service were not run.
 - **Absolute latency** is deliberately not reported (hardware context above); the Mongo curves report command counts and relative time only.
 - The V sweep only goes to 256 on the memory backend (the RocksDB catalog accounting was not swept). The retention sweeps in section 2 and the proof reads in section 4 call the backends directly; they were not re-run end to end through the D1 batch API.

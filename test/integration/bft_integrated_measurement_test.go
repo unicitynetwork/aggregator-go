@@ -8,8 +8,8 @@
 // MongoDB and Redis in Docker, continuous writers and probes that time submission-to-proof.
 // Phases compare the certification path with and without get_inclusion_proofs.v1 load:
 //
-//	INTEGRATED_SHARDS=4 INTEGRATED_PHASE_SECONDS=20 \
-//	go test -tags=e2e_bft ./test/integration -run TestBFTIntegratedMeasurement -v -timeout 40m
+//	INTEGRATED_SHARDS=4 INTEGRATED_PHASE_SECONDS=15 INTEGRATED_CYCLES=5 \
+//	go test -tags "e2e_bft rocksdb" ./test/integration -run TestBFTIntegratedMeasurement -v -timeout 55m
 //
 // Everything is reported as counters (requests by typed outcome, finalized blocks, responses,
 // catalog evictions and pins) and as latency relative to the no-load phase; absolute times are
@@ -36,6 +36,7 @@ import (
 	"time"
 
 	promtest "github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	bfttypes "github.com/unicitynetwork/bft-go-base/types"
 
@@ -92,6 +93,21 @@ func outcome(rerr *rpcError, err error) string {
 	}
 }
 
+// typedRefusal reports whether a refusal is one of the specified typed answers of the batch method
+// (plan section 2.4) with retryable set as specified. Anything else (an internal error, an untyped
+// error, state_not_included for a root the test knows is part of the view) fails the test.
+func typedRefusal(rerr *rpcError) bool {
+	if rerr == nil || !rerr.Data.Retryable {
+		return false
+	}
+	switch rerr.Data.Reason + "/" + rerr.Data.Detail {
+	case "proof_unavailable/view_not_retained", "proof_unavailable/no_finalized_view", "proof_unavailable/partition_view_unavailable",
+		"busy/active_requests", "busy/pinned_views", "busy/retention_budget", "busy/deadline":
+		return true
+	}
+	return false
+}
+
 // ---- statistics ----
 
 func percentile(d []time.Duration, q float64) time.Duration {
@@ -119,18 +135,22 @@ type certified struct {
 }
 
 type recorder struct {
-	mu        sync.Mutex
-	probeLat  []time.Duration
-	batchLat  map[string][]time.Duration // by mode, successful requests
-	outcomes  map[string]map[string]int  // mode -> outcome -> count
-	verified  int
-	verifyBad int
-	ageTotal  map[string]int // exact-root attempts by age bucket
-	ageOK     map[string]int
+	mu          sync.Mutex
+	probeLat    []time.Duration
+	batchLat    map[string][]time.Duration // by mode, successful requests
+	outcomes    map[string]map[string]int  // mode -> outcome -> count
+	verified    int                        // proofs verified with the full verifier (every proof of every batch)
+	verifyBad   int
+	untyped     []string // refusals that are not one of the specified typed, retryable answers
+	served      int      // proofs served in OK batches
+	servedBy    map[string]int
+	servedMulti int            // proofs served in batches of more than one ID (the union-path builder serves these)
+	ageTotal    map[string]int // exact-root attempts by age bucket
+	ageOK       map[string]int
 }
 
 func newRecorder() *recorder {
-	return &recorder{batchLat: map[string][]time.Duration{}, outcomes: map[string]map[string]int{}, ageTotal: map[string]int{}, ageOK: map[string]int{}}
+	return &recorder{servedBy: map[string]int{}, batchLat: map[string][]time.Duration{}, outcomes: map[string]map[string]int{}, ageTotal: map[string]int{}, ageOK: map[string]int{}}
 }
 
 func (r *recorder) outcome(mode, o string, lat time.Duration) {
@@ -226,10 +246,16 @@ func newCluster(t *testing.T, ubft, mongoURI, redisHost string, redisPort, n, po
 		h, err := sh.conf.Hash(crypto.SHA256)
 		require.NoError(t, err)
 		c.hashes = append(c.hashes, h)
+		shardSMT := smt
+		if smt != nil && smt.Backend == config.SMTBackendRocksDB {
+			cp := *smt
+			cp.DiskPath = t.TempDir() // survives restarts of this shard (same opts)
+			shardSMT = &cp
+		}
 		sh.opts = consolidationAggOpts{
 			name: fmt.Sprintf("m%s-%d", tag, i), port: strconv.Itoa(portBase + 10 + i), bftListen: fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", portBase+40+i),
 			mongoURI: mongoURI, redisHost: redisHost, redisPort: redisPort, stream: fmt.Sprintf("commitments:meas:%s:%d", tag, i),
-			conf: sh.conf, keys: keys, root: root, shardIDLength: bits, smt: smt, out: &sh.agg,
+			conf: sh.conf, keys: keys, root: root, shardIDLength: bits, smt: shardSMT, out: &sh.agg,
 		}
 		c.shards = append(c.shards, sh)
 	}
@@ -408,6 +434,11 @@ func (c *cluster) batchOnce(sh *clusterShard, mode string, rng *rand.Rand, rec *
 	lat := time.Since(t0)
 	o := outcome(rerr, err)
 	rec.outcome(mode, o, lat)
+	if o != "ok" && !typedRefusal(rerr) {
+		rec.mu.Lock()
+		rec.untyped = append(rec.untyped, fmt.Sprintf("%s: %s (err=%v)", mode, o, err))
+		rec.mu.Unlock()
+	}
 	if mode == "exact-root" {
 		rec.mu.Lock()
 		rec.ageTotal[ageKey]++
@@ -428,21 +459,23 @@ func (c *cluster) batchOnce(sh *clusterShard, mode string, rng *rand.Rand, rec *
 		rec.mu.Unlock()
 		return false
 	}
-	var first api.GetInclusionProofResponseV2
-	if json.Unmarshal(res.Proofs[0], &first) != nil {
-		rec.mu.Lock()
-		rec.verifyBad++
-		rec.mu.Unlock()
-		return false
+	proofs := make([]api.GetInclusionProofResponseV2, len(res.Proofs))
+	bad := 0
+	for i, raw := range res.Proofs { // every proof of the batch is verified against its own request
+		if json.Unmarshal(raw, &proofs[i]) != nil || proofs[i].InclusionProof == nil || c.verifyProof(sh, items[i].req, &proofs[i]) != nil {
+			bad++
+		}
 	}
-	// every success is checked with the full verifier
-	bad := c.verifyProof(sh, items[0].req, &first) != nil
 	rec.mu.Lock()
-	rec.verified++
-	if bad {
-		rec.verifyBad++
+	rec.verified += len(proofs)
+	rec.served += len(proofs)
+	rec.servedBy[mode] += len(proofs)
+	if len(proofs) > 1 {
+		rec.servedMulti += len(proofs)
 	}
+	rec.verifyBad += bad
 	rec.mu.Unlock()
+	first := proofs[0]
 	if mode != "exact-root" && first.InclusionProof != nil {
 		var uc bfttypes.UnicityCertificate
 		if bfttypes.Cbor.Unmarshal(first.InclusionProof.UnicityCertificate, &uc) == nil {
@@ -483,10 +516,22 @@ type snapshot struct {
 	responses, nonprogress, handshakes, blocks, subs []float64
 	round                                            uint64
 	t                                                time.Time
+	certSum                                          float64 // seconds, BFT proposal -> UC received (all shards)
+	certCount                                        uint64
+	diskLeaves                                       float64 // leaves proven by D1 union-path builds on retained disk views
+}
+
+func certDuration() (sum float64, count uint64) {
+	var m dto.Metric
+	if err := metrics.BFTCertificationDuration.Write(&m); err != nil || m.Histogram == nil {
+		return 0, 0
+	}
+	return m.Histogram.GetSampleSum(), m.Histogram.GetSampleCount()
 }
 
 func (c *cluster) take() snapshot {
-	sn := snapshot{round: rootRound(c.t, c.root), t: time.Now()}
+	sn := snapshot{round: rootRound(c.t, c.root), t: time.Now(), diskLeaves: promtest.ToFloat64(metrics.SMTDiskBatchProofLeaves)}
+	sn.certSum, sn.certCount = certDuration()
 	for _, sh := range c.shards {
 		sn.responses = append(sn.responses, promtest.ToFloat64(metrics.BFTCertificationResponsesTotal.WithLabelValues(sh.id.String())))
 		sn.nonprogress = append(sn.nonprogress, promtest.ToFloat64(metrics.BFTCertificationResponseNonProgressTotal.WithLabelValues(sh.id.String())))
@@ -513,6 +558,8 @@ type phaseResult struct {
 	probeMax time.Duration
 	probeN   int
 	peak     catalogPeak
+	certMean float64 // mean BFT proposal -> UC received (ms): the certification latency of the shards
+	diskLeaf float64 // leaves proven by D1 union-path builds during the phase
 }
 
 func (c *cluster) phase(name string, d time.Duration, workers int) phaseResult {
@@ -581,7 +628,11 @@ func (c *cluster) phase(name string, d time.Duration, workers int) phaseResult {
 	}
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	return phaseResult{name: name, dur: s1.t.Sub(s0.t), counts: pc, rec: rec, probeP50: percentile(rec.probeLat, 0.5), probeP95: percentile(rec.probeLat, 0.95),
+	certMean := 0.0
+	if dc := s1.certCount - s0.certCount; dc > 0 {
+		certMean = 1000 * (s1.certSum - s0.certSum) / float64(dc)
+	}
+	return phaseResult{certMean: certMean, diskLeaf: s1.diskLeaves - s0.diskLeaves, name: name, dur: s1.t.Sub(s0.t), counts: pc, rec: rec, probeP50: percentile(rec.probeLat, 0.5), probeP95: percentile(rec.probeLat, 0.95),
 		probeMax: percentile(rec.probeLat, 1), probeN: len(rec.probeLat), peak: peak}
 }
 
@@ -629,39 +680,120 @@ func (p phaseResult) ageTable() string {
 	return sb.String()
 }
 
-// compare shows a loaded phase against the baselines that bracket it (A, B): the spread between
-// the two baselines is the noise floor of this host, the last column relates the loaded phase to
-// their mean.
-func compare(baseA, baseB, with phaseResult) string {
+// metricOf extracts one comparison metric from a phase.
+type cycleMetric struct {
+	name string
+	f    func(p phaseResult) float64
+	fmt  string
+}
+
+func blocksPerRound(p phaseResult) float64 { return sum(p.counts.Blocks) / max(p.counts.Rounds, 1) }
+
+var cycleMetrics = []cycleMetric{
+	{"finalized blocks per root round (sum over shards)", blocksPerRound, "%.2f"},
+	{"finalized blocks per second (sum over shards)", func(p phaseResult) float64 { return sum(p.counts.Blocks) / p.dur.Seconds() }, "%.2f"},
+	{"accepted writes per second (sum over shards)", func(p phaseResult) float64 { return sum(p.counts.Submitted) / p.dur.Seconds() }, "%.2f"},
+	{"certification latency: mean BFT proposal -> UC received (ms)", func(p phaseResult) float64 { return p.certMean }, "%.0f"},
+	{"responses per finalized block", func(p phaseResult) float64 { return sum(p.counts.Responses) / max(sum(p.counts.Blocks), 1) }, "%.2f"},
+	{"longest gap without a finalized block (s, max over shards)", func(p phaseResult) float64 { return slices.Max(p.counts.MaxGap) }, "%.1f"},
+	{"submission-to-proof latency p50 (probes, ms)", func(p phaseResult) float64 { return float64(p.probeP50.Milliseconds()) }, "%.0f"},
+	{"submission-to-proof latency p95 (probes, ms)", func(p phaseResult) float64 { return float64(p.probeP95.Milliseconds()) }, "%.0f"},
+}
+
+func median(v []float64) float64 {
+	s := slices.Clone(v)
+	slices.Sort(s)
+	return s[len(s)/2]
+}
+
+func spread(v []float64, f string) string {
+	return fmt.Sprintf(f+" ("+f+"-"+f+")", median(v), slices.Min(v), slices.Max(v))
+}
+
+// compareCycles reports interleaved baseline/loaded cycles: per metric the baseline and loaded
+// distributions (median and range over the cycles), the per-cycle loaded/baseline ratios (median and
+// range), and a verdict. The verdict is "inside the baseline range" when the loaded median lies within
+// the baseline min-max, in which case nothing can be concluded beyond "no effect larger than the host
+// variation was observed"; otherwise the difference is outside the baseline variation and is reported as such.
+func compareCycles(bases, loads []phaseResult) string {
 	var sb strings.Builder
-	rel := func(a, b, w float64) string {
-		m := (a + b) / 2
-		if m == 0 {
-			return "n/a"
+	fmt.Fprintf(&sb, "%d interleaved cycles (baseline/loaded order alternates). Values: median (min-max over cycles).\n\n", len(bases))
+	sb.WriteString("| metric | baseline | with batch load | loaded / baseline per cycle: median (min-max) | verdict |\n|---|---|---|---|---|\n")
+	for _, m := range cycleMetrics {
+		var bv, lv, ratios []float64
+		for i := range bases {
+			b, l := m.f(bases[i]), m.f(loads[i])
+			bv, lv = append(bv, b), append(lv, l)
+			if b > 0 {
+				ratios = append(ratios, l/b)
+			}
 		}
-		return fmt.Sprintf("%.2fx", w/m)
+		verdict := "n/a"
+		if len(ratios) > 0 {
+			lm := median(lv)
+			if lm >= slices.Min(bv) && lm <= slices.Max(bv) {
+				verdict = "loaded median inside the baseline range"
+			} else if lm < slices.Min(bv) {
+				verdict = "loaded median BELOW the baseline range"
+			} else {
+				verdict = "loaded median ABOVE the baseline range"
+			}
+		}
+		r := "n/a"
+		if len(ratios) > 0 {
+			r = spread(ratios, "%.2fx")
+		}
+		fmt.Fprintf(&sb, "| %s | %s | %s | %s | %s |\n", m.name, spread(bv, m.fmt), spread(lv, m.fmt), r, verdict)
 	}
-	sb.WriteString("| metric | baseline A | baseline B | with batch load | with / mean(A,B) |\n|---|---|---|---|---|\n")
-	row := func(name string, a, b, w float64, f string) {
-		fmt.Fprintf(&sb, "| %s | "+f+" | "+f+" | "+f+" | %s |\n", name, a, b, w, rel(a, b, w))
-	}
-	rate := func(v []float64, p phaseResult) float64 { return sum(v) / p.dur.Seconds() }
-	row("finalized blocks per second (sum over shards)", rate(baseA.counts.Blocks, baseA), rate(baseB.counts.Blocks, baseB), rate(with.counts.Blocks, with), "%.2f")
-	row("accepted writes per second (sum over shards)", rate(baseA.counts.Submitted, baseA), rate(baseB.counts.Submitted, baseB), rate(with.counts.Submitted, with), "%.2f")
-	row("root->shard responses per finalized block", sum(baseA.counts.Responses)/max(sum(baseA.counts.Blocks), 1), sum(baseB.counts.Responses)/max(sum(baseB.counts.Blocks), 1), sum(with.counts.Responses)/max(sum(with.counts.Blocks), 1), "%.2f")
-	row("non-progress responses (count)", sum(baseA.counts.NonProgress), sum(baseB.counts.NonProgress), sum(with.counts.NonProgress), "%.0f")
-	row("longest gap without a finalized block (s, max over shards)", slices.Max(baseA.counts.MaxGap), slices.Max(baseB.counts.MaxGap), slices.Max(with.counts.MaxGap), "%.1f")
-	row("submission-to-proof latency p50 (probes, ms)", float64(baseA.probeP50.Milliseconds()), float64(baseB.probeP50.Milliseconds()), float64(with.probeP50.Milliseconds()), "%.0f")
-	row("submission-to-proof latency p95 (probes, ms)", float64(baseA.probeP95.Milliseconds()), float64(baseB.probeP95.Milliseconds()), float64(with.probeP95.Milliseconds()), "%.0f")
-	row("probes completed", float64(baseA.probeN), float64(baseB.probeN), float64(with.probeN), "%.0f")
 	reqs := 0
-	for _, outs := range with.rec.outcomes {
-		for _, n := range outs {
-			reqs += n
+	for _, l := range loads {
+		for _, outs := range l.rec.outcomes {
+			for _, n := range outs {
+				reqs += n
+			}
 		}
 	}
-	fmt.Fprintf(&sb, "\nbatch requests issued during the loaded phase: %d (%.0f per second)\n", reqs, float64(reqs)/with.dur.Seconds())
+	var secs float64
+	for _, l := range loads {
+		secs += l.dur.Seconds()
+	}
+	fmt.Fprintf(&sb, "\nbatch requests issued over the %d loaded phases: %d (%.0f per second)\n", len(loads), reqs, float64(reqs)/secs)
 	return sb.String()
+}
+
+// mergeLoaded combines the recorders of several loaded phases for the outcome and age tables.
+func mergeLoaded(loads []phaseResult) phaseResult {
+	out := loads[0]
+	rec := newRecorder()
+	for _, l := range loads {
+		for mode, outs := range l.rec.outcomes {
+			if rec.outcomes[mode] == nil {
+				rec.outcomes[mode] = map[string]int{}
+			}
+			for o, n := range outs {
+				rec.outcomes[mode][o] += n
+			}
+		}
+		for mode, v := range l.rec.batchLat {
+			rec.batchLat[mode] = append(rec.batchLat[mode], v...)
+		}
+		for k, v := range l.rec.ageTotal {
+			rec.ageTotal[k] += v
+		}
+		for k, v := range l.rec.ageOK {
+			rec.ageOK[k] += v
+		}
+		rec.verified += l.rec.verified
+		rec.verifyBad += l.rec.verifyBad
+		rec.served += l.rec.served
+		rec.servedMulti += l.rec.servedMulti
+		for k, v := range l.rec.servedBy {
+			rec.servedBy[k] += v
+		}
+		rec.untyped = append(rec.untyped, l.rec.untyped...)
+	}
+	out.rec = rec
+	return out
 }
 
 func (p phaseResult) String() string {
@@ -678,27 +810,40 @@ func TestBFTIntegratedMeasurement(t *testing.T) {
 		require.NoError(t, err)
 		n = v
 	}
-	dur := 30 * time.Second
+	dur := 15 * time.Second
 	if s := os.Getenv("INTEGRATED_PHASE_SECONDS"); s != "" {
 		v, err := strconv.Atoi(s)
 		require.NoError(t, err)
 		dur = time.Duration(v) * time.Second
 	}
-	only := os.Getenv("INTEGRATED_ONLY") // "", "default", "tight", "recovery", "ha"
+	cycles := 5
+	if s := os.Getenv("INTEGRATED_CYCLES"); s != "" {
+		v, err := strconv.Atoi(s)
+		require.NoError(t, err)
+		cycles = v
+	}
+	only := os.Getenv("INTEGRATED_ONLY") // "", a variant name prefix ("default", "rocksdb"), "recovery" or "ha"
 	ubft := buildBinary(t, os.Getenv("UBFT_BIN"), "github.com/unicitynetwork/bft-core/cli/ubft", "ubft")
 	mongoURI := startMongoCleanly(t)
 	redisHost, redisPort := startRedisCleanly(t)
 
-	variants := []struct {
+	type variant struct {
 		name string
 		smt  *config.SMTConfig
-	}{
-		{"default", nil}, // 16 retained views, 8 concurrent batches, 5 s lease
-		{"views2", &config.SMTConfig{RetainedViews: 2}},       // retention pressure: at most 2 retained views per shard
-		{"pins1", &config.SMTConfig{MaxConcurrentBatches: 1}}, // admission pressure: one batch at a time per shard
+		disk bool
+	}
+	variants := []variant{
+		{"default", nil, false},                                      // 16 retained views, 8 concurrent batches, 5 s lease
+		{"views2", &config.SMTConfig{RetainedViews: 2}, false},       // retention pressure: at most 2 retained views per shard
+		{"pins1", &config.SMTConfig{MaxConcurrentBatches: 1}, false}, // admission pressure: one batch at a time per shard
+	}
+	if haveRocksDB { // the same configurations on the RocksDB backend, where D1's union-path builder serves the batches
+		variants = append(variants,
+			variant{"rocksdb-default", &config.SMTConfig{Backend: config.SMTBackendRocksDB}, true},
+			variant{"rocksdb-views2", &config.SMTConfig{Backend: config.SMTBackendRocksDB, RetainedViews: 2}, true})
 	}
 	for vi, v := range variants {
-		if only != "" && only != v.name && !(only == "recovery" && v.name == "default") {
+		if only != "" && !strings.HasPrefix(v.name, only) && !(only == "recovery" && (v.name == "default" || v.name == "rocksdb-default")) {
 			continue
 		}
 		t.Run("limits-"+v.name, func(t *testing.T) {
@@ -718,31 +863,56 @@ func TestBFTIntegratedMeasurement(t *testing.T) {
 				return true
 			}, 90*time.Second, time.Second)
 
-			baseA := c.phase("baseline A (writes + probes)", dur, 0)
-			t.Logf("%s", baseA)
 			workers := 2 * n
-			with := c.phase(fmt.Sprintf("with %d batch clients", workers), dur, workers)
-			t.Logf("%s", with)
-			baseB := c.phase("baseline B (writes + probes)", dur, 0)
-			t.Logf("%s", baseB)
-			for _, p := range []phaseResult{baseA, with, baseB} {
-				require.NoError(t, checkWriteProgress(p.counts), p.name)
+			var bases, loads []phaseResult
+			for cycle := 0; cycle < cycles; cycle++ {
+				runBase := func() { bases = append(bases, c.phase(fmt.Sprintf("cycle %d baseline", cycle+1), dur, 0)) }
+				runLoad := func() {
+					loads = append(loads, c.phase(fmt.Sprintf("cycle %d with %d batch clients", cycle+1, workers), dur, workers))
+				}
+				if cycle%2 == 0 { // alternate the order to cancel slow drift of the host
+					runBase()
+					runLoad()
+				} else {
+					runLoad()
+					runBase()
+				}
+				t.Logf("%s", bases[cycle])
+				t.Logf("%s", loads[cycle])
+				require.NoError(t, checkWriteProgress(bases[cycle].counts), "baseline cycle %d", cycle+1)
+				require.NoError(t, checkWriteProgress(loads[cycle].counts), "loaded cycle %d", cycle+1)
 			}
-			base := baseA
-			_ = base
-
+			with := mergeLoaded(loads)
 			rec := with.rec
 			require.Zero(t, rec.verifyBad, "every served proof verifies with the full verifier")
-			t.Logf("RESULT limits=%s shards=%d\n\n%s\n%s\n%s\nverified proofs: %d (failures %d)\n",
-				v.name, n, compare(baseA, baseB, with), with.outcomeTable(), with.ageTable(), rec.verified, rec.verifyBad)
-			for mode, outs := range rec.outcomes { // unavailability is always typed, never a transport failure
+			require.Empty(t, rec.untyped, "every refusal is one of the specified typed, retryable answers")
+			var diskLeaves float64
+			for _, l := range loads {
+				diskLeaves += l.diskLeaf
+			}
+			var baseDisk float64
+			for _, b := range bases {
+				baseDisk += b.diskLeaf
+			}
+			if v.disk {
+				// D1: the union-path batch builder ran on retained RocksDB views, once per served proof
+				require.Greater(t, diskLeaves, 0.0, "D1 batch proofs must be exercised on the disk backend")
+				// batches of one ID take the single-proof path; every proof of a multi-ID batch is built by the union-path builder
+				require.GreaterOrEqual(t, diskLeaves, float64(rec.servedMulti), "multi-ID batches use the union-path builder (served by mode: %v)", rec.servedBy)
+			} else {
+				require.Zero(t, diskLeaves, "the memory backend does not use the disk union-path builder")
+			}
+			require.Zero(t, baseDisk, "no batch proofs are built without load")
+			t.Logf("RESULT limits=%s backend=%s shards=%d\n\n%s\n%s\n%s\nverified proofs: %d (failures %d); proofs served %d (in multi-ID batches: %d); D1 disk batch-proof leaves during the loaded phases: %.0f\n",
+				v.name, map[bool]string{true: "rocksdb", false: "memory"}[v.disk], n, compareCycles(bases, loads), with.outcomeTable(), with.ageTable(), rec.verified, rec.verifyBad, rec.served, rec.servedMulti, diskLeaves)
+			for mode, outs := range rec.outcomes {
 				for o := range outs {
 					require.NotEqual(t, "transport-error", o, "mode %s", mode)
 				}
 			}
 
-			if only == "" || only == "recovery" || only == "default" {
-				if vi == 0 {
+			if only == "" || only == "recovery" || strings.HasPrefix(v.name, only) {
+				if v.name == "default" || v.name == "rocksdb-default" {
 					recoveryPhase(t, c, dur)
 				}
 			}
@@ -834,6 +1004,11 @@ func haFailover(t *testing.T, ubft, mongoURI, redisHost string, redisPort int, d
 	fopts.port = strconv.Itoa(fport)
 	fopts.bftListen = fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", 9900+80)
 	fopts.noActivate = true
+	if fopts.smt != nil && fopts.smt.Backend == config.SMTBackendRocksDB {
+		cp := *fopts.smt
+		cp.DiskPath = t.TempDir()
+		fopts.smt = &cp
+	}
 	var fh aggHandle
 	fopts.out = &fh
 	fstop := startConsolidationAggregator(t.Context(), t, fopts)
