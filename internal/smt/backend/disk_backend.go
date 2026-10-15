@@ -31,8 +31,7 @@ type DiskBackend struct {
 
 	// retained read views, see RetainReadView
 	retainMu     sync.Mutex
-	retained     map[*diskReadView]struct{}
-	lastRetained *diskReadView
+	retained     []*diskReadView // surviving snapshot-holding views in capture order
 	retainClosed bool
 }
 

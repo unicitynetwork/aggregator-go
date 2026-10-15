@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -25,10 +26,12 @@ import (
 // views (ErrReadViewUnsupported): without accounting the retention budget could
 // not be honored.
 //
-// Consecutive calls form a lineage: a view is charged the (conservatively
-// estimated) bytes written between its capture and its successor's, or until
-// now for the newest view. A view therefore accounts for the versions its
-// snapshot pins, shared history counted once across the retained views.
+// The surviving snapshot-holding views form a lineage ordered by capture: a
+// view is charged the (conservatively estimated) bytes written between its
+// capture and the capture of the next surviving view, or until now for the
+// newest survivor. When a view closes, the interval it covered is inherited by
+// its predecessor (which still pins that history), so the total charge of the
+// survivors is always everything written since the oldest one, counted once.
 func (b *DiskBackend) RetainReadView(ctx context.Context) (ReadView, error) {
 	if b == nil || b.tree == nil || b.store == nil {
 		return nil, fmt.Errorf("disk SMT backend not initialized")
@@ -71,15 +74,9 @@ func (b *DiskBackend) RetainReadView(ctx context.Context) (ReadView, error) {
 	}
 	if reader != nil {
 		metrics.SMTDiskProofSnapshotsActive.Inc()
+		// a view without a snapshot pins nothing and takes no part in the lineage
+		b.retained = append(b.retained, v)
 	}
-	if prev := b.lastRetained; prev != nil {
-		prev.endLineage(startVolume)
-	}
-	b.lastRetained = v
-	if b.retained == nil {
-		b.retained = make(map[*diskReadView]struct{})
-	}
-	b.retained[v] = struct{}{}
 	return v, nil
 }
 
@@ -88,11 +85,7 @@ func (b *DiskBackend) RetainReadView(ctx context.Context) (ReadView, error) {
 func (b *DiskBackend) closeRetainedViews() {
 	b.retainMu.Lock()
 	b.retainClosed = true
-	views := make([]*diskReadView, 0, len(b.retained))
-	for v := range b.retained {
-		views = append(views, v)
-	}
-	b.lastRetained = nil
+	views := slices.Clone(b.retained)
 	b.retainMu.Unlock()
 	for _, v := range views {
 		_ = v.Close()
@@ -101,11 +94,20 @@ func (b *DiskBackend) closeRetainedViews() {
 
 func (b *DiskBackend) forgetRetainedView(v *diskReadView) {
 	b.retainMu.Lock()
-	delete(b.retained, v)
-	if b.lastRetained == v {
-		b.lastRetained = nil
-	}
+	b.retained = slices.DeleteFunc(b.retained, func(o *diskReadView) bool { return o == v })
 	b.retainMu.Unlock()
+}
+
+// lineageEnd is the write volume where the charge of v ends: the capture of
+// the next surviving view, or the current volume for the newest survivor.
+func (b *DiskBackend) lineageEnd(v *diskReadView, current uint64) uint64 {
+	b.retainMu.Lock()
+	defer b.retainMu.Unlock()
+	i := slices.Index(b.retained, v)
+	if i < 0 || i+1 >= len(b.retained) {
+		return current
+	}
+	return b.retained[i+1].lineageStart
 }
 
 type diskReadView struct {
@@ -121,21 +123,7 @@ type diskReadView struct {
 	mu     sync.RWMutex
 	closed bool
 
-	// lineageEnd is the write volume when the successor view was retained
-	// (zero while this is the newest view).
-	lineageMu    sync.Mutex
 	lineageStart uint64
-	lineageEnd   uint64
-	ended        bool
-}
-
-func (v *diskReadView) endLineage(volume uint64) {
-	v.lineageMu.Lock()
-	if !v.ended {
-		v.ended = true
-		v.lineageEnd = volume
-	}
-	v.lineageMu.Unlock()
 }
 
 func (v *diskReadView) RootHash() []byte {
@@ -173,12 +161,7 @@ func (v *diskReadView) RetainedBytes() uint64 {
 	if closed || !v.hasSnapshot {
 		return 0
 	}
-	v.lineageMu.Lock()
-	end, ended := v.lineageEnd, v.ended
-	v.lineageMu.Unlock()
-	if !ended {
-		end = v.volume.WrittenBytes()
-	}
+	end := v.owner.lineageEnd(v, v.volume.WrittenBytes())
 	if end < v.lineageStart {
 		return 0
 	}

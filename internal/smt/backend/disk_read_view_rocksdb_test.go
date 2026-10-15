@@ -387,3 +387,94 @@ func TestDiskReadViewConcurrentReadersWritersAndClose(t *testing.T) {
 	wg.Wait()
 	require.Zero(t, f.store.NumSnapshots())
 }
+
+func totalRetained(views ...ReadView) uint64 {
+	var sum uint64
+	for _, v := range views {
+		sum += v.RetainedBytes()
+	}
+	return sum
+}
+
+// A redundant same-root reader (discarded by the catalog) must not end the
+// charging of the view which survives.
+func TestDiskReadViewDiscardedDuplicateKeepsPredecessorCharged(t *testing.T) {
+	f := newRVFixture(t)
+	f.commit(0, 20)
+	a, err := f.backend.RetainReadView(f.ctx)
+	require.NoError(t, err)
+	defer a.Close()
+	start := a.(*diskReadView).lineageStart
+	b, err := f.backend.RetainReadView(f.ctx) // same root
+	require.NoError(t, err)
+	require.NoError(t, b.Close())
+
+	f.commit(20, 100)
+	require.Equal(t, f.store.WrittenBytes()-start, a.RetainedBytes(), "A pins everything written since it was retained")
+	require.Positive(t, a.RetainedBytes())
+	// a new capture after the close continues the lineage from A
+	c, err := f.backend.RetainReadView(f.ctx)
+	require.NoError(t, err)
+	defer c.Close()
+	f.commit(100, 120)
+	require.Equal(t, f.store.WrittenBytes()-start, totalRetained(a, c))
+}
+
+// An intermediate view closing while an older one is pinned transfers its interval.
+func TestDiskReadViewIntermediateCloseTransfersAccounting(t *testing.T) {
+	f := newRVFixture(t)
+	f.commit(0, 20)
+	a, err := f.backend.RetainReadView(f.ctx)
+	require.NoError(t, err)
+	defer a.Close()
+	start := a.(*diskReadView).lineageStart
+	f.commit(20, 50)
+	b, err := f.backend.RetainReadView(f.ctx)
+	require.NoError(t, err)
+	f.commit(50, 80)
+	c, err := f.backend.RetainReadView(f.ctx)
+	require.NoError(t, err)
+	defer c.Close()
+	f.commit(80, 110)
+
+	before := totalRetained(a, b, c)
+	require.Equal(t, f.store.WrittenBytes()-start, before)
+	aBefore, cBefore := a.RetainedBytes(), c.RetainedBytes()
+
+	require.NoError(t, b.Close())
+	require.Zero(t, b.RetainedBytes())
+	require.Equal(t, before, totalRetained(a, c), "closing B must not lower the total charge of the survivors")
+	require.Greater(t, a.RetainedBytes(), aBefore, "A inherits B's interval")
+	require.Equal(t, cBefore, c.RetainedBytes())
+
+	// ongoing writes are charged to the newest survivor
+	f.commit(110, 140)
+	require.Equal(t, f.store.WrittenBytes()-start, totalRetained(a, c))
+	require.Greater(t, c.RetainedBytes(), cBefore)
+}
+
+// When the newest view closes the newest survivor resumes charging the ongoing churn.
+func TestDiskReadViewNewestCloseResumesPredecessor(t *testing.T) {
+	f := newRVFixture(t)
+	f.commit(0, 20)
+	a, err := f.backend.RetainReadView(f.ctx)
+	require.NoError(t, err)
+	defer a.Close()
+	start := a.(*diskReadView).lineageStart
+	f.commit(20, 40)
+	b, err := f.backend.RetainReadView(f.ctx)
+	require.NoError(t, err)
+	f.commit(40, 60)
+	require.NoError(t, b.Close())
+	f.commit(60, 120)
+	require.Equal(t, f.store.WrittenBytes()-start, a.RetainedBytes())
+
+	// all closed: nothing charged, a later capture starts a fresh lineage
+	require.NoError(t, a.Close())
+	d, err := f.backend.RetainReadView(f.ctx)
+	require.NoError(t, err)
+	defer d.Close()
+	require.Zero(t, d.RetainedBytes())
+	f.commit(120, 130)
+	require.Equal(t, f.store.WrittenBytes()-d.(*diskReadView).lineageStart, d.RetainedBytes())
+}
