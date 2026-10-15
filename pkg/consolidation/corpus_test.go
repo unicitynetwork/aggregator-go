@@ -546,7 +546,7 @@ func TestCorpusNegativeCasesAreRefusedWithoutPinnedTopology(t *testing.T) {
 		res, err := consolidationcorpus.EvaluateWith(files, consolidationcorpus.Options{Unpinned: true})
 		require.NoError(t, err, c.Name)
 		switch c.Name {
-		case "context-wrong-config-participant", "context-incomplete-scheme", "context-overlapping-scheme":
+		case "negative/context-wrong-config-participant", "negative/context-incomplete-scheme", "negative/context-overlapping-scheme":
 			// these tamper with the pins themselves
 			continue
 		}
