@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync/atomic"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -261,7 +262,8 @@ type LeafBranch struct {
 	Value   []byte
 	rawHash [smtCachedHashBytes]byte // inline hash cache; valid when hashSet == true
 	hashSet bool
-	isChild bool // true if this is the root hash from a child aggregator
+	isChild bool   // true if this is the root hash from a child aggregator
+	seq     uint64 // creation sequence; see nextNodeSeq
 }
 
 // NodeBranch represents an internal node
@@ -278,8 +280,18 @@ type NodeBranch struct {
 	Right   branch
 	rawHash [smtCachedHashBytes]byte // inline hash cache; valid when hashSet == true
 	hashSet bool
-	isRoot  bool // true if this is the root node
+	isRoot  bool   // true if this is the root node
+	seq     uint64 // creation sequence; see nextNodeSeq
 }
+
+// nodeSeqCounter stamps every node at construction. Nodes are immutable once
+// reachable from a published root and a parent is always constructed after its
+// children, so seq(parent) > seq(child). Retained read views use this to count
+// the nodes a root introduced relative to an earlier root by descending only
+// into nodes newer than that root, without walking the whole tree.
+var nodeSeqCounter atomic.Uint64
+
+func nextNodeSeq() uint64 { return nodeSeqCounter.Add(1) }
 
 // NewLeafBranch creates a regular leaf branch
 func newLeafBranch(path *big.Int, value []byte) *LeafBranch {
@@ -296,6 +308,7 @@ func newLeafBranchWithKey(path *big.Int, key, value []byte) *LeafBranch {
 		Key:     append([]byte(nil), key...),
 		Value:   append([]byte(nil), value...),
 		isChild: false,
+		seq:     nextNodeSeq(),
 		// Hash will be computed on demand
 	}
 }
@@ -317,6 +330,7 @@ func newChildLeafBranchWithKey(path *big.Int, key, value []byte) *LeafBranch {
 		Key:     key,
 		Value:   value,
 		isChild: true,
+		seq:     nextNodeSeq(),
 		// Hash will be set on demand
 	}
 }
@@ -369,6 +383,7 @@ func newNodeBranchWithDepth(path *big.Int, left, right branch, depth int, region
 		Left:   left,
 		Right:  right,
 		isRoot: false,
+		seq:    nextNodeSeq(),
 	}
 }
 
@@ -384,6 +399,7 @@ func newRootBranch(path *big.Int, left, right branch, depth int) *NodeBranch {
 		Left:   left,
 		Right:  right,
 		isRoot: true,
+		seq:    nextNodeSeq(),
 	}
 }
 
