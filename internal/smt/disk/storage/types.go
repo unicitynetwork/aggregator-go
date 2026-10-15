@@ -23,6 +23,13 @@ type ReadSnapshotter interface {
 	NewReadSnapshot() (ReadStore, func(), error)
 }
 
+// WriteVolumeReporter is implemented by stores that can report a monotonic,
+// conservative estimate of the bytes written by committed batches. It lets
+// retained read snapshots account for the old versions they keep alive.
+type WriteVolumeReporter interface {
+	WrittenBytes() uint64
+}
+
 type ProofResponseWrite struct {
 	StateID  api.StateID
 	Response []byte

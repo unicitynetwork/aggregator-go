@@ -262,6 +262,31 @@ func (t *Tree) GetInclusionCertsWithReadSnapshot(keys [][]byte, openReadSnapshot
 	return buildInclusionCerts(rootHash, reader, keys)
 }
 
+// RetainReadSnapshot atomically captures the committed root and opens a read
+// snapshot of the store at it: commits take the tree lock around their engine
+// write, so the snapshot contains exactly the nodes of the returned root. The
+// caller owns the returned close function. For the empty root no snapshot is
+// opened and reader and close are nil.
+func (t *Tree) RetainReadSnapshot(openReadSnapshot func() (storage.ReadStore, func(), error)) (disk.Hash, storage.ReadStore, func(), error) {
+	if t == nil {
+		return disk.Hash{}, nil, nil, fmt.Errorf("disk SMT persist: nil tree")
+	}
+	if openReadSnapshot == nil {
+		return disk.Hash{}, nil, nil, fmt.Errorf("disk SMT persist: no read snapshot opener")
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	root := t.rootHash
+	if root == disk.EmptyRootHash() {
+		return root, nil, nil, nil
+	}
+	reader, closeSnapshot, err := openReadSnapshot()
+	if err != nil {
+		return disk.Hash{}, nil, nil, err
+	}
+	return root, reader, closeSnapshot, nil
+}
+
 func buildInclusionCerts(rootHash disk.Hash, reader storage.ReadStore, keys [][]byte) ([]*api.InclusionCert, error) {
 	return BuildInclusionCerts(rootHash, reader, keys)
 }
