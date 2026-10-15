@@ -19,14 +19,15 @@ type BatchStats struct {
 	Frontiers uint64
 }
 
-// BuildInclusionCertsWithStats is BuildInclusionCerts plus node I/O statistics.
+// BuildInclusionCertsWithStats is BuildInclusionCertsPartial (nil entry = key absent from
+// the root) plus node I/O statistics.
 func BuildInclusionCertsWithStats(rootHash disk.Hash, reader storage.ReadStore, keys [][]byte) ([]*api.InclusionCert, BatchStats, error) {
 	if reader == nil {
-		certs, err := BuildInclusionCerts(rootHash, reader, keys)
+		certs, err := BuildInclusionCertsPartial(rootHash, reader, keys)
 		return certs, BatchStats{}, err
 	}
 	cr := &countingReader{inner: reader, seen: make(map[disk.NodeKey]struct{})}
-	certs, err := BuildInclusionCerts(rootHash, cr, keys)
+	certs, err := BuildInclusionCertsPartial(rootHash, cr, keys)
 	return certs, BatchStats{NodeReads: cr.reads, UniqueNodes: uint64(len(cr.seen)), Frontiers: cr.calls}, err
 }
 

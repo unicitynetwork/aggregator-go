@@ -11,6 +11,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/proofview"
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
@@ -39,6 +40,9 @@ func (b *batchView) GetInclusionCerts(ctx context.Context, keys [][]byte) ([]*ap
 	for i, k := range keys {
 		c, err := b.readerView.GetInclusionCert(ctx, k)
 		if err != nil {
+			if errors.Is(err, smt.ErrLeafNotFound) {
+				continue // absent: nil entry, like the disk view
+			}
 			return nil, err
 		}
 		out[i] = c
@@ -99,9 +103,10 @@ func TestBatch_SingleStateKeepsPerKeyPath(t *testing.T) {
 	require.EqualValues(t, 1, bv.singles.Load())
 }
 
-// An absent leaf makes the batch build fail as a whole; the per-key path then reports the
-// exact outcome (state_not_included), not an internal error.
-func TestBatch_AbsentLeafFallsBackToPerKeyOutcome(t *testing.T) {
+// An absent leaf is a per-key outcome of the one union build: state_not_included at that
+// state, in request order, with zero per-key materializations (no fallback path a client
+// could force).
+func TestBatch_AbsentLeafIsPerKeyOutcomeWithoutFallback(t *testing.T) {
 	var bv *batchView
 	e := newBatchEnv(t, proofview.DefaultLimits())
 	ids := e.addRecords(4, 1000)
@@ -111,6 +116,41 @@ func TestBatch_AbsentLeafFallsBackToPerKeyOutcome(t *testing.T) {
 	_, berr := e.svc.GetInclusionProofsV1(context.Background(), e.request(append(append([]api.StateID{}, ids[:3]...), extra), nil))
 	requireBatchErr(t, berr, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_not_included")
 	require.EqualValues(t, 1, bv.batches.Load())
+	require.Zero(t, bv.singles.Load(), "no per-key fallback materialization")
+}
+
+// The older-root scenario: many IDs included in R_old followed by one finalized after
+// R_old. The worst case stays one union build, not one build per key.
+func TestBatch_OlderRootWithIDFinalizedAfterIt(t *testing.T) {
+	var oldView, newView *batchView
+	e := newBatchEnv(t, proofview.DefaultLimits())
+	oldIDs := e.addRecords(40, 1000)
+	oldRoot := e.publishWith(func(r readerView) backend.ReadView { oldView = &batchView{readerView: r}; return oldView })
+	later := e.addRecords(1, 1000) // finalized after oldRoot: record in block 2, leaf only in the newer root
+	e.records[string(later[0])].BlockNumber = api.NewBigIntFromUint64(2)
+	e.publishWith(func(r readerView) backend.ReadView { newView = &batchView{readerView: r}; return newView })
+
+	req := append(append([]api.StateID{}, oldIDs...), later[0])
+	_, berr := e.svc.GetInclusionProofsV1(context.Background(), e.request(req, oldRoot))
+	requireBatchErr(t, berr, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_not_included")
+	require.EqualValues(t, 1, oldView.batches.Load())
+	require.Zero(t, oldView.singles.Load(), "one union build, no per-key builds")
+	require.Zero(t, newView.batches.Load()+newView.singles.Load())
+
+	// the same batch against the newer root succeeds, still one batch build
+	root2 := e.catalogLatestRoot()
+	resp, berr := e.svc.GetInclusionProofsV1(context.Background(), e.request(req, root2))
+	require.Nil(t, berr)
+	require.Len(t, resp.Proofs, len(req))
+	require.EqualValues(t, 1, newView.batches.Load())
+	require.Zero(t, newView.singles.Load())
+}
+
+func (e *batchEnv) catalogLatestRoot() []byte {
+	l, err := e.catalog.AcquireLatest(context.Background())
+	require.NoError(e.t, err)
+	defer l.Release()
+	return append([]byte(nil), l.Root()...)
 }
 
 func TestBatch_BatchBuildFailureIsInternalAndLeaksNothing(t *testing.T) {

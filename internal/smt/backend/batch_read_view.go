@@ -2,6 +2,9 @@ package backend
 
 import (
 	"context"
+	"errors"
+
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -11,9 +14,8 @@ import (
 // view materializes the union of the proof paths with bulk frontier reads).
 type BatchReadView interface {
 	// GetInclusionCerts returns one certificate per key, in order, from the
-	// retained root. It fails as a whole (like a single call would for the
-	// first offending key); a key absent from the retained state is reported
-	// as ErrPublishedProofLeafNotFound.
+	// retained root. A key absent from the retained state yields a nil entry
+	// (the other proofs are still built); any other failure fails the whole call.
 	GetInclusionCerts(ctx context.Context, keys [][]byte) ([]*api.InclusionCert, error)
 }
 
@@ -27,6 +29,9 @@ func InclusionCerts(ctx context.Context, v ReadView, keys [][]byte) ([]*api.Incl
 	for i, key := range keys {
 		cert, err := v.GetInclusionCert(ctx, key)
 		if err != nil {
+			if errors.Is(err, ErrPublishedProofLeafNotFound) || errors.Is(err, smt.ErrLeafNotFound) {
+				continue // absent: nil entry
+			}
 			return nil, err
 		}
 		certs[i] = cert

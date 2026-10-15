@@ -32,6 +32,10 @@ func TestInclusionCertsFallsBackPerKeyForMemoryViews(t *testing.T) {
 		require.NoError(t, certs[i].Verify(l.Key, l.Value, root, api.SHA256))
 	}
 
-	_, err = InclusionCerts(ctx, v, [][]byte{keys[0], spreadInput(9999).Key})
-	require.Error(t, err)
+	// an absent key is a nil entry here too, the others are still built
+	certs, err = InclusionCerts(ctx, v, [][]byte{keys[0], spreadInput(9999).Key, keys[1]})
+	require.NoError(t, err)
+	require.NotNil(t, certs[0])
+	require.Nil(t, certs[1])
+	require.NotNil(t, certs[2])
 }

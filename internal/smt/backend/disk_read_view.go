@@ -168,16 +168,13 @@ func (v *diskReadView) GetInclusionCerts(ctx context.Context, keys [][]byte) ([]
 		return nil, nil
 	}
 	if v.root == disk.EmptyRootHash() {
-		return nil, ErrPublishedProofLeafNotFound
+		return make([]*api.InclusionCert, len(keys)), nil // every key is absent
 	}
 	certs, stats, err := persist.BuildInclusionCertsWithStats(v.root, v.reader, keys)
 	metrics.SMTDiskBatchProofLeaves.Add(float64(len(keys)))
 	metrics.SMTDiskBatchNodeReads.Add(float64(stats.NodeReads))
 	metrics.SMTDiskBatchUniqueNodes.Add(float64(stats.UniqueNodes))
 	if err != nil {
-		if errors.Is(err, persist.ErrProofLeafNotFound) {
-			return nil, ErrPublishedProofLeafNotFound
-		}
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {

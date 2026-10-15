@@ -105,7 +105,8 @@ func TestBatchProofNodeReadsAreSublinearInLeaves(t *testing.T) {
 	require.Less(t, stShared.NodeReads, stSpread.NodeReads, "keys sharing prefixes read fewer nodes")
 }
 
-func TestBatchProofMissingLeafIsNotFound(t *testing.T) {
+// An absent key is a nil entry; the other proofs of the same union build are intact.
+func TestBatchProofAbsentKeyIsNilEntry(t *testing.T) {
 	store := openTestStore(t, t.TempDir())
 	defer store.Close()
 	tree := openPersistTree(t, store)
@@ -113,13 +114,25 @@ func TestBatchProofMissingLeafIsNotFound(t *testing.T) {
 	require.NoError(t, err)
 	var present, absent disk.Key
 	present[0], absent[0] = 0x10, 0xf0
-	res, err := snap.AddLeaves([]disk.LeafInput{leafInput(present, []byte("v")), leafInput(keyWithFirstByte(0x20), []byte("w"))})
+	other := keyWithFirstByte(0x20)
+	res, err := snap.AddLeaves([]disk.LeafInput{leafInput(present, []byte("v")), leafInput(other, []byte("w"))})
 	require.NoError(t, err)
 	require.NoError(t, snap.Commit(api.NewBigIntFromUint64(1)))
 	root, _ := disk.HashFromBytes(res.CandidateRoot[:])
 	reader, closeSnap, err := store.NewReadSnapshot()
 	require.NoError(t, err)
 	defer closeSnap()
-	_, _, err = BuildInclusionCertsWithStats(root, reader, [][]byte{present[:], absent[:]})
+
+	certs, st, err := BuildInclusionCertsWithStats(root, reader, [][]byte{present[:], absent[:], other[:]})
+	require.NoError(t, err)
+	require.Len(t, certs, 3)
+	require.NotNil(t, certs[0])
+	require.Nil(t, certs[1], "absent key")
+	require.NotNil(t, certs[2])
+	require.NoError(t, certs[0].Verify(present[:], []byte("v"), res.CandidateRoot[:], api.SHA256))
+	require.Equal(t, st.NodeReads, st.UniqueNodes)
+
+	// the strict variant still fails as a whole
+	_, err = BuildInclusionCerts(root, reader, [][]byte{present[:], absent[:]})
 	require.ErrorIs(t, err, ErrProofLeafNotFound)
 }

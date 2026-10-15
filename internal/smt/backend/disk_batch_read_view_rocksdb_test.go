@@ -65,8 +65,10 @@ func TestDiskReadViewBatchCertsErrors(t *testing.T) {
 
 	t.Run("a key not in the retained state", func(t *testing.T) {
 		f.commit(30, 40)
-		_, err := bv.GetInclusionCerts(f.ctx, [][]byte{f.leaves[0].Key, f.leaves[35].Key})
-		require.ErrorIs(t, err, ErrPublishedProofLeafNotFound)
+		certs, err := bv.GetInclusionCerts(f.ctx, [][]byte{f.leaves[0].Key, f.leaves[35].Key})
+		require.NoError(t, err)
+		require.NotNil(t, certs[0])
+		require.Nil(t, certs[1], "committed after the retained state: absent, others intact")
 	})
 	t.Run("empty key list", func(t *testing.T) {
 		certs, err := bv.GetInclusionCerts(f.ctx, nil)
@@ -89,8 +91,9 @@ func TestDiskReadViewBatchCertsErrors(t *testing.T) {
 		ev, err := g.backend.RetainReadView(g.ctx)
 		require.NoError(t, err)
 		defer ev.Close()
-		_, err = ev.(BatchReadView).GetInclusionCerts(g.ctx, [][]byte{rvLeaf(1).Key})
-		require.ErrorIs(t, err, ErrPublishedProofLeafNotFound)
+		certs, err := ev.(BatchReadView).GetInclusionCerts(g.ctx, [][]byte{rvLeaf(1).Key, rvLeaf(2).Key})
+		require.NoError(t, err)
+		require.Equal(t, []*api.InclusionCert{nil, nil}, certs, "every key is absent from the empty root")
 	})
 }
 
