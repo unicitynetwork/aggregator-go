@@ -15,39 +15,91 @@ type topo struct{ t types.PartitionViewTopology }
 
 func (p topo) Topology(types.PartitionID) (types.PartitionViewTopology, bool) { return p.t, true }
 
+type noTopo struct{}
+
+func (noTopo) Topology(types.PartitionID) (types.PartitionViewTopology, bool) {
+	return types.PartitionViewTopology{}, false
+}
+
 func Test_ValidateView(t *testing.T) {
 	for _, bits := range []int{0, 2, 3} {
 		f := prooftest.New(t, bits, 5, prooftest.Hash("root"), 80)
-		res, got, err := proofmaterial.ValidateView(f.Raw, f.UC, prooftest.Partition, nil)
+		res, got, err := proofmaterial.ValidateView(f.Raw, f.UC, prooftest.Partition, f.Provider(t))
 		require.NoError(t, err, bits)
-		require.Equal(t, proofmaterial.ResultDerivedTopology, res)
+		require.Equal(t, proofmaterial.ResultOK, res)
 		require.Equal(t, f.Raw, got)
 		orig := f.Raw[0]
 		got[0] ^= 0xff
 		require.Equal(t, orig, f.Raw[0], "result must be a private copy")
-
-		res, _, err = proofmaterial.ValidateView(f.Raw, f.UC, prooftest.Partition, topo{f.Topo})
-		require.NoError(t, err)
-		require.Equal(t, proofmaterial.ResultOK, res)
 	}
+}
+
+// Without a trusted scheme and an admitted 32-byte hash for every shard the view is
+// not retained, however well it hashes into the seal.
+func Test_ValidateView_RequiresTrustedTopology(t *testing.T) {
+	f := prooftest.New(t, 2, 5, prooftest.Hash("root"), 80)
+
+	incomplete := map[string][]byte{}
+	for k, v := range f.Topo.ShardConfHashes {
+		incomplete[k] = v
+	}
+	delete(incomplete, f.Shard.Key())
+	short := map[string][]byte{}
+	for k, v := range f.Topo.ShardConfHashes {
+		short[k] = v
+	}
+	short[f.Shard.Key()] = []byte{1, 2, 3}
+
+	cases := map[string]proofmaterial.TopologyProvider{
+		"no provider":                   nil,
+		"partition not resolved":        noTopo{},
+		"scheme only, no hashes":        topo{types.PartitionViewTopology{Scheme: f.Topo.Scheme}},
+		"hash map missing a shard":      topo{types.PartitionViewTopology{Scheme: f.Topo.Scheme, ShardConfHashes: incomplete}},
+		"hash of the wrong size":        topo{types.PartitionViewTopology{Scheme: f.Topo.Scheme, ShardConfHashes: short}},
+		"incomplete scheme with hashes": topo{types.PartitionViewTopology{Scheme: f.Topo.Scheme[:3], ShardConfHashes: f.Topo.ShardConfHashes}},
+	}
+	for name, p := range cases {
+		res, view, err := proofmaterial.ValidateView(f.Raw, f.UC, prooftest.Partition, p)
+		require.Error(t, err, name)
+		require.Equal(t, proofmaterial.ResultNoTopology, res, name)
+		require.Nil(t, view, name)
+	}
+
+	_, err := proofmaterial.NewStaticTopology(prooftest.Partition, f.Topo.Scheme, incomplete)
+	require.Error(t, err)
+	_, err = proofmaterial.NewStaticTopology(prooftest.Partition, f.Topo.Scheme[:3], f.Topo.ShardConfHashes)
+	require.Error(t, err)
+	_, err = proofmaterial.SingleShardTopology(prooftest.Partition, []byte{1})
+	require.Error(t, err)
+	st, err := proofmaterial.SingleShardTopology(prooftest.Partition, prooftest.Hash("c"))
+	require.NoError(t, err)
+	_, ok := st.Topology(prooftest.Partition + 1)
+	require.False(t, ok)
 }
 
 func Test_ValidateView_Failures(t *testing.T) {
 	f := prooftest.New(t, 2, 5, prooftest.Hash("root"), 80)
 	other := prooftest.New(t, 2, 6, prooftest.Hash("other root"), 81)
+	good := f.Provider(t)
+
+	wrongConf := map[string][]byte{}
+	for k, v := range f.Topo.ShardConfHashes {
+		wrongConf[k] = v
+	}
+	wrongConf[f.Shard.Key()] = prooftest.Hash("bad")
 
 	cases := map[string]struct {
 		raw    []byte
 		topos  proofmaterial.TopologyProvider
 		result string
 	}{
-		"missing":           {nil, nil, proofmaterial.ResultMissing},
-		"too large":         {bytes.Repeat([]byte{1}, types.MaxPartitionViewBytes+1), nil, proofmaterial.ResultTooLarge},
-		"malformed":         {[]byte{0x83, 0x01}, nil, proofmaterial.ResultMalformed},
-		"trailing bytes":    {append(bytes.Clone(f.Raw), 0), nil, proofmaterial.ResultMalformed},
-		"view of other UC":  {other.Raw, nil, proofmaterial.ResultInvalid},
-		"wrong topology":    {f.Raw, topo{types.PartitionViewTopology{Scheme: prooftest.Scheme(1)}}, proofmaterial.ResultInvalid},
-		"wrong config hash": {f.Raw, topo{types.PartitionViewTopology{Scheme: f.Topo.Scheme, ShardConfHashes: map[string][]byte{f.Shard.Key(): prooftest.Hash("bad")}}}, proofmaterial.ResultInvalid},
+		"missing":           {nil, good, proofmaterial.ResultMissing},
+		"too large":         {bytes.Repeat([]byte{1}, types.MaxPartitionViewBytes+1), good, proofmaterial.ResultTooLarge},
+		"malformed":         {[]byte{0x83, 0x01}, good, proofmaterial.ResultMalformed},
+		"trailing bytes":    {append(bytes.Clone(f.Raw), 0), good, proofmaterial.ResultMalformed},
+		"view of other UC":  {other.Raw, good, proofmaterial.ResultInvalid},
+		"wrong scheme":      {f.Raw, topo{oneBitTopology()}, proofmaterial.ResultInvalid},
+		"wrong config hash": {f.Raw, topo{types.PartitionViewTopology{Scheme: f.Topo.Scheme, ShardConfHashes: wrongConf}}, proofmaterial.ResultInvalid},
 	}
 	for name, c := range cases {
 		res, view, err := proofmaterial.ValidateView(c.raw, f.UC, prooftest.Partition, c.topos)
@@ -62,14 +114,14 @@ func Test_ValidateView_Failures(t *testing.T) {
 		seal := *f.UC.UnicitySeal
 		seal.Hash = prooftest.Hash("tampered")
 		uc.UnicitySeal = &seal
-		res, _, err := proofmaterial.ValidateView(f.Raw, &uc, prooftest.Partition, nil)
+		res, _, err := proofmaterial.ValidateView(f.Raw, &uc, prooftest.Partition, good)
 		require.Error(t, err)
 		require.Equal(t, proofmaterial.ResultInvalid, res)
 	})
 	t.Run("wrong partition", func(t *testing.T) {
-		res, _, err := proofmaterial.ValidateView(f.Raw, f.UC, prooftest.Partition+1, nil)
+		res, _, err := proofmaterial.ValidateView(f.Raw, f.UC, prooftest.Partition+1, good)
 		require.Error(t, err)
-		require.Equal(t, proofmaterial.ResultInvalid, res)
+		require.Equal(t, proofmaterial.ResultNoTopology, res)
 	})
 }
 
@@ -113,4 +165,13 @@ func Test_DigestOfUC_DistinguishesSeals(t *testing.T) {
 	require.NotEqual(t, d1, d2)
 	_, _, err = proofmaterial.DigestOfUC(nil)
 	require.Error(t, err)
+}
+
+func oneBitTopology() types.PartitionViewTopology {
+	scheme := prooftest.Scheme(1)
+	hashes := map[string][]byte{}
+	for _, id := range scheme {
+		hashes[id.Key()] = prooftest.Hash("a" + id.String())
+	}
+	return types.PartitionViewTopology{Scheme: scheme, ShardConfHashes: hashes}
 }

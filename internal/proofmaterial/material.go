@@ -82,27 +82,35 @@ type NopSink struct{}
 
 func (NopSink) PublishProofMaterial(context.Context, *Material) error { return nil }
 
-// TopologyProvider returns the trusted topology for the partition if the deployment
-// has one configured. Without it the scheme is derived from the (seal-authenticated)
-// view itself and the view is NOT bound to admitted shard configurations.
+// TopologyProvider returns the trusted topology of the partition: its complete sharding
+// scheme and the admitted configuration hash (exactly 32 bytes) of every shard. It must
+// come from the deployment's own configuration, never from a response. A partition it
+// cannot resolve completely yields (_, false) and its views are not accepted.
 type TopologyProvider interface {
 	Topology(partition types.PartitionID) (types.PartitionViewTopology, bool)
 }
 
 // Validation outcomes used as metric labels.
 const (
-	ResultOK              = "ok"
-	ResultMissing         = "missing"
-	ResultMalformed       = "malformed"
-	ResultInvalid         = "invalid"
-	ResultTooLarge        = "too_large"
-	ResultDerivedTopology = "ok_derived_topology"
+	ResultOK        = "ok"
+	ResultMissing   = "missing"
+	ResultMalformed = "malformed"
+	ResultInvalid   = "invalid"
+	ResultTooLarge  = "too_large"
+	// ResultNoTopology: no trusted topology/configuration hashes are available for the
+	// partition, so the view cannot be bound to admitted configuration.
+	ResultNoTopology = "no_trusted_topology"
 )
 
+// ConfHashSize is the required size of every admitted shard configuration hash.
+const ConfHashSize = 32
+
 // ValidateView decodes the view bytes and checks them against the already
-// authenticated enclosing UC (the caller has verified the seal). Returns the label
-// of the outcome and, on success, the bytes to retain (a private copy).
-// Any failure only means "no proof material".
+// authenticated enclosing UC (the caller has verified the seal) and the trusted
+// topology. A trusted complete scheme and a 32-byte admitted configuration hash for
+// every shard are REQUIRED: without them the view is not retained, however well it
+// hashes into the seal. Returns the outcome label and, on success, a private copy of
+// the bytes. Any failure only means "no proof material".
 func ValidateView(raw []byte, uc *types.UnicityCertificate, partition types.PartitionID, topos TopologyProvider) (string, []byte, error) {
 	if len(raw) == 0 {
 		return ResultMissing, nil, nil
@@ -110,29 +118,67 @@ func ValidateView(raw []byte, uc *types.UnicityCertificate, partition types.Part
 	if len(raw) > types.MaxPartitionViewBytes {
 		return ResultTooLarge, nil, fmt.Errorf("partition view is %d bytes, limit %d", len(raw), types.MaxPartitionViewBytes)
 	}
+	topo, ok := topologyFor(topos, partition)
+	if !ok {
+		return ResultNoTopology, nil, errors.New("no trusted topology for the partition")
+	}
+	if err := checkTopology(topo); err != nil {
+		return ResultNoTopology, nil, err
+	}
 	view, err := types.DecodePartitionViewV1(raw)
 	if err != nil {
 		return ResultMalformed, nil, err
 	}
-	var topo types.PartitionViewTopology
-	result := ResultOK
-	if t, ok := topologyFor(topos, partition); ok {
-		topo = t
-	} else {
-		scheme := make(types.ShardingScheme, 0, len(view.Leaves))
-		for _, l := range view.Leaves {
-			scheme = append(scheme, l.ShardID)
-		}
-		if len(scheme) == 1 && scheme[0].Length() == 0 {
-			scheme = types.ShardingScheme{}
-		}
-		topo = types.PartitionViewTopology{Scheme: scheme}
-		result = ResultDerivedTopology
-	}
 	if _, err := view.VerifyTree(uc, partition, topo, crypto.SHA256); err != nil {
 		return ResultInvalid, nil, err
 	}
-	return result, append([]byte(nil), raw...), nil
+	return ResultOK, append([]byte(nil), raw...), nil
+}
+
+// checkTopology requires a valid complete scheme and a 32-byte hash for every shard.
+func checkTopology(topo types.PartitionViewTopology) error {
+	order, err := types.CanonicalShardOrder(topo.Scheme)
+	if err != nil {
+		return fmt.Errorf("trusted topology: %w", err)
+	}
+	for _, id := range order {
+		if h := topo.ShardConfHashes[id.Key()]; len(h) != ConfHashSize {
+			return fmt.Errorf("trusted topology: shard %q has no %d-byte configuration hash", id, ConfHashSize)
+		}
+	}
+	return nil
+}
+
+// StaticTopology is a fixed trusted topology for one partition.
+type StaticTopology struct {
+	partition types.PartitionID
+	topo      types.PartitionViewTopology
+}
+
+// NewStaticTopology builds and checks a trusted topology: scheme must be complete and
+// every shard needs a 32-byte configuration hash (keyed by ShardID.Key()).
+func NewStaticTopology(partition types.PartitionID, scheme types.ShardingScheme, confHashes map[string][]byte) (*StaticTopology, error) {
+	topo := types.PartitionViewTopology{Scheme: scheme, ShardConfHashes: map[string][]byte{}}
+	for k, v := range confHashes {
+		topo.ShardConfHashes[k] = append([]byte(nil), v...)
+	}
+	if err := checkTopology(topo); err != nil {
+		return nil, err
+	}
+	return &StaticTopology{partition: partition, topo: topo}, nil
+}
+
+// SingleShardTopology is the trusted topology of an unsharded partition: the empty
+// scheme with the deployment's own shard configuration hash.
+func SingleShardTopology(partition types.PartitionID, shardConfHash []byte) (*StaticTopology, error) {
+	return NewStaticTopology(partition, types.ShardingScheme{}, map[string][]byte{types.ShardID{}.Key(): shardConfHash})
+}
+
+func (s *StaticTopology) Topology(partition types.PartitionID) (types.PartitionViewTopology, bool) {
+	if s == nil || partition != s.partition {
+		return types.PartitionViewTopology{}, false
+	}
+	return s.topo, true
 }
 
 func topologyFor(p TopologyProvider, partition types.PartitionID) (types.PartitionViewTopology, bool) {

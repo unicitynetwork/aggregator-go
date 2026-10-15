@@ -300,6 +300,11 @@ type BFTConfig struct {
 	KeyConf    *cmdbft.KeyConf                   `mapstructure:"key_conf"`
 	ShardConf  *types.PartitionDescriptionRecord `mapstructure:"shard_conf"`
 	TrustBases []types.RootTrustBaseV1           `mapstructure:"trust_bases"`
+	// ConsolidationShards is the trusted topology of a sharded partition for validating
+	// partition view sidecars: every shard with its admitted configuration hash. Unsharded
+	// partitions need none (the own shard configuration hash is used). Without a complete
+	// topology partition views are not retained.
+	ConsolidationShards []ConsolidationShard `mapstructure:"consolidation_shards"`
 
 	// Peer configuration
 	Address                    string        `mapstructure:"address"`
@@ -316,6 +321,12 @@ type BFTConfig struct {
 
 	// BFT node REST api address
 	RPCAddress string `mapstructure:"rpc_address"`
+}
+
+// ConsolidationShard is one shard of the trusted consolidation topology.
+type ConsolidationShard struct {
+	ShardID    types.ShardID `json:"shardId"`
+	ConfigHash string        `json:"configHash"` // hex SHA-256 of the shard's PartitionDescriptionRecord
 }
 
 func (c *BFTConfig) Validate() error {
@@ -480,6 +491,11 @@ func Load() (*Config, error) {
 		config.BFT.KeyConf = config.Signing.KeyConf
 		if err := loadConf(getEnvOrDefault("BFT_SHARD_CONF_FILE", "bft-config/shard-conf-7_0.json"), &config.BFT.ShardConf); err != nil {
 			return nil, fmt.Errorf("failed to load shard configuration: %w", err)
+		}
+		if f := getEnvOrDefault("BFT_CONSOLIDATION_TOPOLOGY_FILE", ""); f != "" {
+			if err := loadConf(f, &config.BFT.ConsolidationShards); err != nil {
+				return nil, fmt.Errorf("failed to load consolidation topology: %w", err)
+			}
 		}
 		trustBaseFiles := strings.Split(getEnvOrDefault("BFT_TRUST_BASE_FILES", "bft-config/trust-base.json"), ",")
 		config.BFT.TrustBases = make([]types.RootTrustBaseV1, 0, len(trustBaseFiles))
