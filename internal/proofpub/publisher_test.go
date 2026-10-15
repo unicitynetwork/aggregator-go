@@ -51,7 +51,7 @@ func newEnv(t *testing.T, f *prooftest.Fixture) *env {
 	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cat.Close() })
-	pub := proofpub.New(cat, b, prooftest.Partition, f.Provider(t), log)
+	pub := proofpub.New(cat, b, prooftest.Partition, nil, f.Verifier(), log)
 	require.NotNil(t, pub)
 	return &env{b: b, cat: cat, pub: pub}
 }
@@ -214,7 +214,7 @@ func Test_UnsupportedBackend(t *testing.T) {
 	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
 	require.NoError(t, err)
 	defer cat.Close()
-	require.Nil(t, proofpub.New(cat, nil, 1, nil, nil))
+	require.Nil(t, proofpub.New(cat, nil, 1, nil, nil, nil))
 }
 
 func commitEmpty(t testing.TB, b *smtbackend.MemoryBackend, block uint64) {

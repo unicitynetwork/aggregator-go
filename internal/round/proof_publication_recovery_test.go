@@ -50,13 +50,13 @@ func newRecoveryEnv(t *testing.T) *recoveryEnv {
 	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cat.Close() })
-	topo := prooftest.New(t, 2, 1, prooftest.Hash("x"), 80).Provider(t)
+	topo := prooftest.New(t, 2, 1, prooftest.Hash("x"), 80)
 	bs := &fixedBlockStorage{blocks: map[uint64]*models.Block{}}
 	rm := &RoundManager{
 		logger:     log,
 		smtBackend: b,
 		storage:    &fixedStorage{bs: bs},
-		proofPub:   proofpub.New(cat, b, prooftest.Partition, topo, log),
+		proofPub:   proofpub.New(cat, b, prooftest.Partition, nil, topo.Verifier(), log),
 	}
 	return &recoveryEnv{rm: rm, cat: cat, bs: bs, b: b}
 }

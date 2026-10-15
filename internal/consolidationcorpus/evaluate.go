@@ -130,10 +130,23 @@ func classifyRPC(role, shard string, e *RPCError) (string, *RPCFailure) {
 // codec check, the trusted context, authentication of the original evidence
 // (R_min), classification of failed batch calls, and consolidation. A returned
 // error means the files are malformed as a corpus (not a typed refusal).
-func Evaluate(files Files) (*Result, error) {
+func Evaluate(files Files) (*Result, error) { return EvaluateWith(files, Options{}) }
+
+// Options of EvaluateWith.
+type Options struct {
+	// Unpinned drops the admitted topology of the context: the scheme and the
+	// configuration hashes are then those committed by the authenticated seal.
+	Unpinned bool
+}
+
+// EvaluateWith is Evaluate with options.
+func EvaluateWith(files Files, opts Options) (*Result, error) {
 	l, err := Load(files)
 	if err != nil {
 		return nil, err
+	}
+	if opts.Unpinned {
+		l.Policy.Topology = types.PartitionViewTopology{}
 	}
 	var reqs Requests
 	var resps Responses
