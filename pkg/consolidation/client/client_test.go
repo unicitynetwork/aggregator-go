@@ -261,7 +261,7 @@ func TestConsolidate_UnavailableSemantics(t *testing.T) {
 			return true
 		}
 		_, err := newClient(t, sim, nil).Consolidate(context.Background(), items)
-		requireClientErr(t, err, client.KindUnavailable, "http_502")
+		requireClientErr(t, err, client.KindTransport, "http_502")
 		require.EqualValues(t, 1, hits.Load())
 		for i, sh := range sim.Shards[:len(sim.Shards)-1] {
 			require.Empty(t, sh.Calls(), "peer %d is not contacted when the master fails", i)
@@ -286,14 +286,14 @@ func TestConsolidate_DeadlineAndCancellation(t *testing.T) {
 	}
 	start := time.Now()
 	_, err := newClient(t, sim, func(c *client.Config) { c.Timeout = 100 * time.Millisecond }).Consolidate(context.Background(), items)
-	requireClientErr(t, err, client.KindUnavailable, "deadline")
+	requireClientErr(t, err, client.KindTimeout, "deadline")
 	require.Less(t, time.Since(start), time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
 	start = time.Now()
 	_, err = newClient(t, sim, nil).Consolidate(ctx, items)
-	requireClientErr(t, err, client.KindUnavailable, "cancelled")
+	requireClientErr(t, err, client.KindCancelled, "cancelled")
 	require.Less(t, time.Since(start), time.Second)
 }
 

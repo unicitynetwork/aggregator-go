@@ -379,7 +379,9 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 			require.NoError(t, pr.InclusionProof.Verify(items[i].Req, vctx), "bundle %d proof %d", bi, i)
 			// original data and reference time are preserved
 			require.Equal(t, *items[i].Proof.InclusionProof.ReferenceTime, *pr.InclusionProof.ReferenceTime)
-			require.Equal(t, items[i].Proof.InclusionProof.CertificateBytes, pr.InclusionProof.CertificateBytes)
+			// the SMT path legitimately differs (original root vs the master view's root); the
+			// certified data is the same
+			require.Equal(t, items[i].Req.CertificationData.TransactionHash, pr.InclusionProof.CertificationData.TransactionHash)
 
 			var uc bfttypes.UnicityCertificate
 			require.NoError(t, bfttypes.Cbor.Unmarshal(pr.InclusionProof.UnicityCertificate, &uc))
@@ -486,15 +488,20 @@ func rootRound(t *testing.T, root *bftRootInfo) uint64 {
 	resp, err := http.Get(root.restURL + "/api/v1/roundInfo")
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	var body struct {
-		RoundNumber uint64 `json:"roundNumber"`
-		Round       uint64 `json:"round"`
-	}
+	var body map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
-	if body.RoundNumber != 0 {
-		return body.RoundNumber
+	for _, k := range []string{"roundNumber", "round"} {
+		switch v := body[k].(type) {
+		case string:
+			n, err := strconv.ParseUint(v, 10, 64)
+			require.NoError(t, err)
+			return n
+		case float64:
+			return uint64(v)
+		}
 	}
-	return body.Round
+	t.Fatalf("no round number in %v", body)
+	return 0
 }
 
 type consolidationAggOpts struct {
@@ -531,7 +538,8 @@ func startConsolidationAggregator(ctx context.Context, t *testing.T, o consolida
 			HeartbeatInterval: time.Second, InactivityTimeout: 10 * time.Second,
 		},
 		Signing:    config.SigningConfig{KeyConf: keyConf},
-		Processing: config.ProcessingConfig{BatchLimit: 1000, MaxCommitmentsPerRound: 1000},
+		Processing: config.ProcessingConfig{BatchLimit: 1000, MaxCommitmentsPerRound: 1000, CommitmentStreamBufferSize: 50000,
+			CollectPhaseDuration: 200 * time.Millisecond, CollectMiniBatchSize: 500, SkipDuplicateCheck: true},
 		Storage: config.StorageConfig{UseRedisForCommitments: true, RedisStreamName: o.stream, RedisFlushInterval: 100 * time.Millisecond,
 			RedisMaxBatchSize: 1000, RedisCleanupInterval: time.Minute, RedisMaxStreamLength: 100000},
 		Sharding: config.ShardingConfig{Mode: config.ShardingModeBFTShard, ShardIDLength: o.shardIDLength},

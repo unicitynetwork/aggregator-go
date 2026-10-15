@@ -150,8 +150,10 @@ func TestConsolidate_ContextHonoredDuringVerification(t *testing.T) {
 			}
 		}).Consolidate(ctx, items)
 		require.Nil(t, res, "no success for a cancelled attempt")
-		requireClientErr(t, err, client.KindUnavailable, "cancelled")
-		require.True(t, client.IsUnavailable(err))
+		ce := requireClientErr(t, err, client.KindCancelled, "cancelled")
+		require.False(t, ce.Retryable, "caller cancellation is never retryable")
+		require.True(t, client.IsCancelled(err))
+		require.False(t, client.IsUnavailable(err))
 	})
 	t.Run("deadline expiring inside the resolver", func(t *testing.T) {
 		sim, items := scenario(t, 2, 1)
@@ -164,14 +166,14 @@ func TestConsolidate_ContextHonoredDuringVerification(t *testing.T) {
 			}
 		}).Consolidate(context.Background(), items)
 		require.Nil(t, res)
-		requireClientErr(t, err, client.KindUnavailable, "deadline")
+		requireClientErr(t, err, client.KindTimeout, "deadline")
 	})
 	t.Run("already cancelled", func(t *testing.T) {
 		sim, items := scenario(t, 2, 1)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		_, err := newClient(t, sim, nil).Consolidate(ctx, items)
-		require.True(t, client.IsUnavailable(err), "%v", err)
+		require.True(t, client.IsCancelled(err), "%v", err)
 	})
 }
 
@@ -182,8 +184,8 @@ func TestConsolidate_DeadlineWithQueuedPeers(t *testing.T) {
 		sh.Delay = 2 * time.Second
 	}
 	_, err := newClient(t, sim, func(c *client.Config) { c.MaxParallel = 1; c.Timeout = 300 * time.Millisecond }).Consolidate(context.Background(), items)
-	requireClientErr(t, err, client.KindUnavailable, "deadline")
-	require.True(t, client.IsUnavailable(err))
+	requireClientErr(t, err, client.KindTimeout, "deadline")
+	require.False(t, client.IsUnavailable(err), "an expired deadline is not proof unavailability")
 }
 
 func TestConsolidate_QueuedCancellationKeepsOriginatingFailure(t *testing.T) {
@@ -249,7 +251,7 @@ func TestConsolidate_BlockedResolverIsBoundedByDeadline(t *testing.T) {
 	res, err := c.Consolidate(context.Background(), items)
 	elapsed := time.Since(start)
 	require.Nil(t, res)
-	requireClientErr(t, err, client.KindUnavailable, "deadline")
+	requireClientErr(t, err, client.KindTimeout, "deadline")
 	require.Less(t, elapsed, 150*time.Millisecond, "the attempt must not wait for the blocked resolver")
 
 	// outstanding work completes once released and nothing is left blocked
@@ -269,7 +271,7 @@ func TestConsolidate_BlockedResolverCancellation(t *testing.T) {
 	go func() { time.Sleep(30 * time.Millisecond); cancel() }()
 	start := time.Now()
 	_, err := c.Consolidate(ctx, items)
-	requireClientErr(t, err, client.KindUnavailable, "cancelled")
+	requireClientErr(t, err, client.KindCancelled, "cancelled")
 	require.Less(t, time.Since(start), 200*time.Millisecond)
 }
 
@@ -294,7 +296,7 @@ func TestConsolidate_ContextResolverReceivesAttemptContext(t *testing.T) {
 	})
 	start := time.Now()
 	_, err := c.Consolidate(context.Background(), items)
-	requireClientErr(t, err, client.KindUnavailable, "deadline")
+	requireClientErr(t, err, client.KindTimeout, "deadline")
 	require.True(t, sawDeadline.Load())
 	require.Less(t, time.Since(start), time.Second)
 
@@ -306,4 +308,83 @@ func TestConsolidate_ContextResolverReceivesAttemptContext(t *testing.T) {
 	})
 	_, err = good.Consolidate(context.Background(), items)
 	require.NoError(t, err)
+}
+
+// Operational errors keep their own typed kinds; unavailable is reserved for the
+// specified material/pressure outcomes.
+func TestConsolidate_ErrorTyping(t *testing.T) {
+	rpcErrHook := func(code int, data map[string]any) func(http.ResponseWriter, []byte) bool {
+		return func(w http.ResponseWriter, _ []byte) bool {
+			e := map[string]any{"code": code, "message": "x"}
+			if data != nil {
+				e["data"] = data
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "error": e})
+			return true
+		}
+	}
+	for name, tc := range map[string]struct {
+		hook      func(http.ResponseWriter, []byte) bool
+		kind      client.Kind
+		detail    string
+		retryable bool
+	}{
+		"method not found":           {rpcErrHook(-32601, nil), client.KindUnsupported, "method_not_found", false},
+		"unsupported configuration":  {rpcErrHook(-32008, map[string]any{"reason": "proof_unavailable", "detail": "unsupported_configuration", "retryable": false}), client.KindUnsupported, "unsupported_configuration", false},
+		"state not included":         {rpcErrHook(-32008, map[string]any{"reason": "proof_unavailable", "detail": "state_not_included", "retryable": true}), client.KindUnavailable, "state_not_included", true},
+		"partition view unavailable": {rpcErrHook(-32008, map[string]any{"reason": "proof_unavailable", "detail": "partition_view_unavailable", "retryable": true}), client.KindUnavailable, "partition_view_unavailable", true},
+		"busy":                       {rpcErrHook(-32006, map[string]any{"reason": "busy", "detail": "pinned_views", "retryable": true}), client.KindUnavailable, "pinned_views", true},
+		"database error":             {rpcErrHook(-32004, nil), client.KindServer, "", false},
+		"internal error":             {rpcErrHook(-32603, nil), client.KindServer, "", false},
+		"unknown code":               {rpcErrHook(-32099, nil), client.KindServer, "", false},
+		"invalid params":             {rpcErrHook(-32602, map[string]any{"reason": "invalid_request", "detail": "wrong_shard"}), client.KindRejected, "wrong_shard", false},
+		"limit exceeded":             {rpcErrHook(-32007, map[string]any{"reason": "limit_exceeded", "detail": "state_count", "retryable": true}), client.KindRejected, "state_count", false},
+		"http 500 without body":      {func(w http.ResponseWriter, _ []byte) bool { http.Error(w, "x", 500); return true }, client.KindTransport, "http_500", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sim, items := scenario(t, 2, 1)
+			sim.Shards[len(sim.Shards)-1].Hook = tc.hook // the master
+			_, err := newClient(t, sim, nil).Consolidate(context.Background(), items)
+			ce := requireClientErr(t, err, tc.kind, tc.detail)
+			require.Equal(t, tc.retryable, ce.Retryable)
+			require.Equal(t, tc.kind == client.KindUnavailable, client.IsUnavailable(err))
+		})
+	}
+
+	t.Run("connection failure is transport", func(t *testing.T) {
+		sim, items := scenario(t, 2, 1)
+		sim.Shards[len(sim.Shards)-1].Server.Close()
+		_, err := newClient(t, sim, nil).Consolidate(context.Background(), items)
+		ce := requireClientErr(t, err, client.KindTransport, "transport")
+		require.True(t, ce.Retryable)
+		require.False(t, client.IsUnavailable(err))
+	})
+}
+
+// A signature failure is never ordinary unavailability, also when the context ended meanwhile
+// or a peer is down.
+func TestConsolidate_SignatureFailureIsNeverUnavailable(t *testing.T) {
+	sim, items := scenario(t, 4, 1)
+	for _, sh := range sim.Shards[:3] {
+		sh.Hook = func(w http.ResponseWriter, _ []byte) bool {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return true
+		}
+	}
+	tamperMaster(sim, func(res map[string]any) { corruptSeal(t, res) })
+	_, err := newClient(t, sim, nil).Consolidate(context.Background(), items)
+	ce := requireClientErr(t, err, client.KindVerification, "")
+	require.Equal(t, consolidation.OutcomeUnauthenticated, ce.Outcome)
+	require.False(t, client.IsUnavailable(err))
+
+	// an authority that rejects the seal (not a context error) stays verification even under a done context
+	sim2, items2 := scenario(t, 2, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err = newClient(t, sim2, func(c *client.Config) {
+		other, _ := consolidationsim.NewWithSeed(2, "bad authority")
+		inner := other.Resolver()
+		c.Resolver = func(s *types.UnicitySeal) (types.RootTrustBase, error) { cancel(); return inner(s) }
+	}).Consolidate(ctx, items2)
+	require.Error(t, err)
+	require.False(t, client.IsUnavailable(err))
 }

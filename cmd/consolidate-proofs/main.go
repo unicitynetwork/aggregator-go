@@ -32,10 +32,12 @@ import (
 // Exit codes.
 const (
 	exitOK          = 0
-	exitInput       = 2 // bad flags, configuration or input files
-	exitUnavailable = 3 // explicit unavailable outcome; inputs intact, nothing resubmitted
-	exitRejected    = 4 // refused: server rejection, malformed response or verification failure
-	exitOutput      = 5 // the bundle could not be delivered (stdout or output file)
+	exitInput       = 2   // bad flags, configuration or input files
+	exitUnavailable = 3   // explicit unavailable outcome; inputs intact, nothing resubmitted
+	exitRejected    = 4   // refused: server rejection, malformed response or verification failure
+	exitOutput      = 5   // the bundle could not be delivered (stdout or output file)
+	exitOperational = 6   // transport failure, attempt deadline or server-side operational error
+	exitCancelled   = 130 // cancelled by the caller
 )
 
 // Config is the trusted deployment configuration.
@@ -128,6 +130,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 			switch ce.Kind {
 			case client.KindUnavailable:
 				code = exitUnavailable
+			case client.KindTransport, client.KindTimeout, client.KindServer:
+				code = exitOperational
+			case client.KindCancelled:
+				code = exitCancelled
 			case client.KindInput:
 				code = exitInput
 			}

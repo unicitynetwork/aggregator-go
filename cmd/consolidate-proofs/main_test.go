@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -129,7 +130,7 @@ func TestCLI_FailureLeavesOutputAndInputsUntouched(t *testing.T) {
 	require.NoError(t, os.WriteFile(e.out, []byte("previous"), 0o600))
 	inBefore, _ := os.ReadFile(e.in)
 	e.sim.Shards[3].Hook = func(w http.ResponseWriter, _ []byte) bool {
-		http.Error(w, "down", http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32008,"message":"Proof unavailable","data":{"reason":"proof_unavailable","detail":"view_not_retained","retryable":true}}}`))
 		return true
 	}
 	e.sim.Shards[0].Hook = e.sim.Shards[3].Hook
@@ -196,4 +197,36 @@ func TestCLI_UnwritableOutputFile(t *testing.T) {
 	var out, errb bytes.Buffer
 	code := run([]string{"-config", e.cfg, "-in", e.in, "-out", filepath.Join(e.dir, "no-such-dir", "b.json")}, &out, &errb)
 	require.Equal(t, exitOutput, code)
+}
+
+func TestCLI_OperationalExitCodes(t *testing.T) {
+	e := setup(t, 2)
+	// connection failure: operational, not unavailable
+	for _, sh := range e.sim.Shards {
+		sh.Server.Close()
+	}
+	var out, errb bytes.Buffer
+	require.Equal(t, exitOperational, run([]string{"-config", e.cfg, "-in", e.in}, &out, &errb), errb.String())
+	require.Contains(t, errb.String(), `"kind":"transport"`)
+
+	// unsupported endpoint is classified explicitly (refusal exit, kind unsupported)
+	e = setup(t, 2)
+	for _, sh := range e.sim.Shards {
+		sh.Hook = func(w http.ResponseWriter, _ []byte) bool {
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}`))
+			return true
+		}
+	}
+	errb.Reset()
+	require.Equal(t, exitRejected, run([]string{"-config", e.cfg, "-in", e.in}, &out, &errb), errb.String())
+	require.Contains(t, errb.String(), `"kind":"unsupported"`)
+
+	// deadline: timeout is operational
+	e = setup(t, 2)
+	for _, sh := range e.sim.Shards {
+		sh.Delay = 3 * time.Second
+	}
+	errb.Reset()
+	require.Equal(t, exitOperational, run([]string{"-config", e.cfg, "-in", e.in, "-timeout", "200ms"}, &out, &errb), errb.String())
+	require.Contains(t, errb.String(), `"kind":"timeout"`)
 }

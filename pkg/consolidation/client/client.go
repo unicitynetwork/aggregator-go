@@ -212,11 +212,13 @@ func (c *Client) Consolidate(ctx context.Context, items []Item) (*Result, error)
 		if ctx.Err() == nil {
 			return nil
 		}
-		return transportError(ctx, types.ShardID{}, ctx.Err())
+		return ctxError(types.ShardID{}, ctx.Err())
 	}
+	// only a failure that *is* the context error (the resolver abandoned by the attempt)
+	// becomes cancellation/timeout; a genuine authentication failure stays a verification error
 	libFail := func(err error) error {
-		if cerr := ctxFail(); cerr != nil {
-			return cerr
+		if isContextErr(err) {
+			return ctxError(types.ShardID{}, ctx.Err())
 		}
 		return libError(err)
 	}
@@ -396,7 +398,7 @@ func (c *Client) fetchAll(ctx context.Context, groups []*shardGroup, roots [][]b
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			case <-ctx.Done():
-				errs[i] = transportError(ctx, groups[i].ep.ShardID, ctx.Err())
+				errs[i] = ctxError(groups[i].ep.ShardID, ctx.Err())
 				return
 			}
 			var local Stats
@@ -436,7 +438,7 @@ func (c *Client) fetchAll(ctx context.Context, groups []*shardGroup, roots [][]b
 // isContextError reports a typed error that only reflects cancellation or an expired deadline.
 func isContextError(err error) bool {
 	var ce *Error
-	return errors.As(err, &ce) && ce.Kind == KindUnavailable && (ce.Detail == "cancelled" || ce.Detail == "deadline")
+	return errors.As(err, &ce) && (ce.Kind == KindCancelled || ce.Kind == KindTimeout)
 }
 
 type rpcRequest struct {
@@ -509,7 +511,7 @@ func (c *Client) fetch(ctx context.Context, g *shardGroup, items []Item, root []
 	var rr rpcResponse
 	if err := json.Unmarshal(raw, &rr); err != nil {
 		if resp.StatusCode != http.StatusOK {
-			return nil, &Error{Kind: KindUnavailable, Shard: g.ep.ShardID, Detail: fmt.Sprintf("http_%d", resp.StatusCode), Err: errors.New(resp.Status)}
+			return nil, &Error{Kind: KindTransport, Shard: g.ep.ShardID, Retryable: true, Detail: fmt.Sprintf("http_%d", resp.StatusCode), Err: errors.New(resp.Status)}
 		}
 		return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: err}
 	}
