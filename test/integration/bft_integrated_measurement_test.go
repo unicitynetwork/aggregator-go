@@ -516,22 +516,39 @@ type snapshot struct {
 	responses, nonprogress, handshakes, blocks, subs []float64
 	round                                            uint64
 	t                                                time.Time
-	certSum                                          float64 // seconds, BFT proposal -> UC received (all shards)
-	certCount                                        uint64
-	diskLeaves                                       float64 // leaves proven by D1 union-path builds on retained disk views
+	hists                                            [3]histSnap // see histNames
+	diskLeaves                                       float64     // leaves proven by D1 union-path builds on retained disk views
 }
 
-func certDuration() (sum float64, count uint64) {
+// histSnap is the cumulative sum (seconds) and count of a histogram.
+type histSnap struct {
+	sum   float64
+	count uint64
+}
+
+// The shard-side latency histograms read for the certification impact (all shards share the process
+// registry, so each is the sum over the shards):
+//   - block creation: shard round start -> block finalized (proposal construction, root wait, finalization);
+//   - finalization: UC received -> block stored and SMT snapshot committed (pure shard-side work);
+//   - root wait: BFT request sent -> UC received. This is NOT a cost measure: if shard-side work delays the
+//     request, it reaches the root later in the root round and the wait shrinks.
+var histNames = [3]string{"block creation (round start -> finalized)", "finalization (UC received -> stored and committed)", "root wait (request sent -> UC received)"}
+
+func readHist(h interface{ Write(*dto.Metric) error }) histSnap {
 	var m dto.Metric
-	if err := metrics.BFTCertificationDuration.Write(&m); err != nil || m.Histogram == nil {
-		return 0, 0
+	if err := h.Write(&m); err != nil || m.Histogram == nil {
+		return histSnap{}
 	}
-	return m.Histogram.GetSampleSum(), m.Histogram.GetSampleCount()
+	return histSnap{m.Histogram.GetSampleSum(), m.Histogram.GetSampleCount()}
+}
+
+func histsNow() [3]histSnap {
+	return [3]histSnap{readHist(metrics.BlockCreationDuration), readHist(metrics.RoundFinalizationDuration), readHist(metrics.BFTCertificationDuration)}
 }
 
 func (c *cluster) take() snapshot {
 	sn := snapshot{round: rootRound(c.t, c.root), t: time.Now(), diskLeaves: promtest.ToFloat64(metrics.SMTDiskBatchProofLeaves)}
-	sn.certSum, sn.certCount = certDuration()
+	sn.hists = histsNow()
 	for _, sh := range c.shards {
 		sn.responses = append(sn.responses, promtest.ToFloat64(metrics.BFTCertificationResponsesTotal.WithLabelValues(sh.id.String())))
 		sn.nonprogress = append(sn.nonprogress, promtest.ToFloat64(metrics.BFTCertificationResponseNonProgressTotal.WithLabelValues(sh.id.String())))
@@ -558,8 +575,8 @@ type phaseResult struct {
 	probeMax time.Duration
 	probeN   int
 	peak     catalogPeak
-	certMean float64 // mean BFT proposal -> UC received (ms): the certification latency of the shards
-	diskLeaf float64 // leaves proven by D1 union-path builds during the phase
+	histMean [3]float64 // mean (ms) of block creation, finalization and root wait during the phase
+	diskLeaf float64    // leaves proven by D1 union-path builds during the phase
 }
 
 func (c *cluster) phase(name string, d time.Duration, workers int) phaseResult {
@@ -628,11 +645,13 @@ func (c *cluster) phase(name string, d time.Duration, workers int) phaseResult {
 	}
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	certMean := 0.0
-	if dc := s1.certCount - s0.certCount; dc > 0 {
-		certMean = 1000 * (s1.certSum - s0.certSum) / float64(dc)
+	var hm [3]float64
+	for i := range hm {
+		if dc := s1.hists[i].count - s0.hists[i].count; dc > 0 {
+			hm[i] = 1000 * (s1.hists[i].sum - s0.hists[i].sum) / float64(dc)
+		}
 	}
-	return phaseResult{certMean: certMean, diskLeaf: s1.diskLeaves - s0.diskLeaves, name: name, dur: s1.t.Sub(s0.t), counts: pc, rec: rec, probeP50: percentile(rec.probeLat, 0.5), probeP95: percentile(rec.probeLat, 0.95),
+	return phaseResult{histMean: hm, diskLeaf: s1.diskLeaves - s0.diskLeaves, name: name, dur: s1.t.Sub(s0.t), counts: pc, rec: rec, probeP50: percentile(rec.probeLat, 0.5), probeP95: percentile(rec.probeLat, 0.95),
 		probeMax: percentile(rec.probeLat, 1), probeN: len(rec.probeLat), peak: peak}
 }
 
@@ -693,7 +712,9 @@ var cycleMetrics = []cycleMetric{
 	{"finalized blocks per root round (sum over shards)", blocksPerRound, "%.2f"},
 	{"finalized blocks per second (sum over shards)", func(p phaseResult) float64 { return sum(p.counts.Blocks) / p.dur.Seconds() }, "%.2f"},
 	{"accepted writes per second (sum over shards)", func(p phaseResult) float64 { return sum(p.counts.Submitted) / p.dur.Seconds() }, "%.2f"},
-	{"certification latency: mean BFT proposal -> UC received (ms)", func(p phaseResult) float64 { return p.certMean }, "%.0f"},
+	{"certification latency: mean shard round start -> block finalized (ms)", func(p phaseResult) float64 { return p.histMean[0] }, "%.0f"},
+	{"shard-side finalization: mean UC received -> block stored and committed (ms)", func(p phaseResult) float64 { return p.histMean[1] }, "%.0f"},
+	{"root wait (not a cost measure): mean request sent -> UC received (ms)", func(p phaseResult) float64 { return p.histMean[2] }, "%.0f"},
 	{"responses per finalized block", func(p phaseResult) float64 { return sum(p.counts.Responses) / max(sum(p.counts.Blocks), 1) }, "%.2f"},
 	{"longest gap without a finalized block (s, max over shards)", func(p phaseResult) float64 { return slices.Max(p.counts.MaxGap) }, "%.1f"},
 	{"submission-to-proof latency p50 (probes, ms)", func(p phaseResult) float64 { return float64(p.probeP50.Milliseconds()) }, "%.0f"},
@@ -712,9 +733,10 @@ func spread(v []float64, f string) string {
 
 // compareCycles reports interleaved baseline/loaded cycles: per metric the baseline and loaded
 // distributions (median and range over the cycles), the per-cycle loaded/baseline ratios (median and
-// range), and a verdict. The verdict is "inside the baseline range" when the loaded median lies within
-// the baseline min-max, in which case nothing can be concluded beyond "no effect larger than the host
-// variation was observed"; otherwise the difference is outside the baseline variation and is reported as such.
+// range), and a verdict. "Inside the baseline range": the loaded median lies within the baseline min-max,
+// so nothing can be concluded beyond "no effect larger than the host variation was observed". When the
+// baseline range is very narrow a difference of at most 3% in the medians is reported as such rather than
+// as a flag; anything else is outside the baseline variation and reported as ABOVE or BELOW.
 func compareCycles(bases, loads []phaseResult) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%d interleaved cycles (baseline/loaded order alternates). Values: median (min-max over cycles).\n\n", len(bases))
@@ -730,13 +752,16 @@ func compareCycles(bases, loads []phaseResult) string {
 		}
 		verdict := "n/a"
 		if len(ratios) > 0 {
-			lm := median(lv)
-			if lm >= slices.Min(bv) && lm <= slices.Max(bv) {
-				verdict = "loaded median inside the baseline range"
-			} else if lm < slices.Min(bv) {
-				verdict = "loaded median BELOW the baseline range"
-			} else {
-				verdict = "loaded median ABOVE the baseline range"
+			lm, bm := median(lv), median(bv)
+			switch {
+			case lm >= slices.Min(bv) && lm <= slices.Max(bv):
+				verdict = "inside the baseline range"
+			case bm > 0 && lm/bm >= 0.97 && lm/bm <= 1.03:
+				verdict = "outside the (narrow) baseline range but within 3% of its median"
+			case lm < slices.Min(bv):
+				verdict = "BELOW the baseline range"
+			default:
+				verdict = "ABOVE the baseline range"
 			}
 		}
 		r := "n/a"
