@@ -22,12 +22,16 @@ type negative struct {
 	outcome string
 	// pipeline is the outcome of the full pipeline for codec stage cases.
 	pipeline string
-	mutate   func(b *builtCase, f consolidationcorpus.Files) error
+	// rpc is the expected classification of a failed batch call (stage rpc).
+	rpc    *consolidationcorpus.RPCFailure
+	mutate func(b *builtCase, f consolidationcorpus.Files) error
 }
 
 const (
 	stView = consolidationcorpus.StageViewCodec
 	stEv   = consolidationcorpus.StageEvidence
+	stPol  = consolidationcorpus.StagePolicy
+	stRPC  = consolidationcorpus.StageRPC
 	stCons = consolidationcorpus.StageConsolidate
 	rej    = consolidationcorpus.OutcomeRejected
 
@@ -245,8 +249,35 @@ func negatives(b *builtCase) []negative {
 		mutate: mutateView(func(v *rawView) { v.Leaves = v.Leaves[:len(v.Leaves)-1] })})
 	add(negative{name: "view-duplicate-shard", desc: "a shard appears twice, another is missing", stage: stCons, outcome: invalid,
 		mutate: mutateView(func(v *rawView) { v.Leaves[1] = v.Leaves[0] })})
-	add(negative{name: "view-extra-shard", desc: "a shard outside the admitted topology is added", stage: stCons, outcome: invalid,
-		mutate: mutateView(func(v *rawView) { v.Leaves = append(v.Leaves, v.Leaves[0]) })})
+	add(negative{name: "view-extra-shard", desc: "a shard outside the admitted topology is added to the view", stage: stCons, outcome: invalid,
+		mutate: mutateView(func(v *rawView) {
+			foreign := v.Leaves[0]
+			foreign.ShardID, _ = consolidationcorpus.ParseShard("000")
+			v.Leaves = append(v.Leaves, foreign)
+		})})
+	add(negative{name: "view-overlapping-prefix", desc: "a leaf for a shard which is a prefix of another admitted shard", stage: stCons, outcome: invalid,
+		mutate: mutateView(func(v *rawView) { v.Leaves[1].ShardID, _ = consolidationcorpus.ParseShard("0") })})
+	add(negative{name: "view-incomplete-prefix-coverage", desc: "leaves cover only part of the shard tree (a shard replaced by a deeper one)", stage: stCons, outcome: invalid,
+		mutate: mutateView(func(v *rawView) { v.Leaves[1].ShardID, _ = consolidationcorpus.ParseShard("010") })})
+	add(negative{name: "context-incomplete-scheme", desc: "trusted topology does not cover the whole shard tree", stage: stPol, outcome: invalid,
+		mutate: func(_ *builtCase, f consolidationcorpus.Files) error {
+			return mutContext(f, func(c *consolidationcorpus.Context) { dropShard(c, "01") })
+		}})
+	add(negative{name: "context-overlapping-scheme", desc: "trusted topology with overlapping shard prefixes", stage: stPol, outcome: invalid,
+		mutate: func(_ *builtCase, f consolidationcorpus.Files) error {
+			return mutContext(f, func(c *consolidationcorpus.Context) {
+				c.Shards = append(c.Shards, "0")
+				c.ShardConfigs = append(c.ShardConfigs, consolidationcorpus.ShardConfig{Shard: "0", File: c.ShardConfigs[0].File, Hash: c.ShardConfigs[0].Hash})
+			})
+		}})
+	add(negative{name: "context-network-mismatch", desc: "declared network of the trusted context differs from the installed authority", stage: stPol, outcome: lineage,
+		mutate: func(_ *builtCase, f consolidationcorpus.Files) error {
+			return mutContext(f, func(c *consolidationcorpus.Context) { c.NetworkID++ })
+		}})
+	add(negative{name: "view-input-record-version", desc: "unsupported input record version in a leaf", stage: stView, outcome: rej, pipeline: invalid,
+		mutate: leafFlip(peerLeaf, func(l *types.PartitionViewLeafV1) { l.InputRecord.Version = 2 })})
+	add(negative{name: "seal-version", desc: "unsupported unicity seal version in the enclosing UC", stage: stCons, outcome: invalid,
+		mutate: editMasterUC(func(uc *types.UnicityCertificate) { uc.UnicitySeal.Version = 2 })})
 	add(negative{name: "view-reordered", desc: "leaves are not in canonical order", stage: stCons, outcome: invalid,
 		mutate: mutateView(func(v *rawView) { v.Leaves[0], v.Leaves[1] = v.Leaves[1], v.Leaves[0] })})
 	add(negative{name: "view-wrong-partition", desc: "view of another partition", stage: stCons, outcome: invalid,
@@ -372,7 +403,11 @@ func negatives(b *builtCase) []negative {
 			tb.NetworkID++
 			bs, err := tb.MarshalCBOR()
 			f[consolidationcorpus.FileTrustBase] = bs
-			return err
+			if err != nil {
+				return err
+			}
+			// the context declares the same other network, so only the seals disagree
+			return mutContext(f, func(c *consolidationcorpus.Context) { c.NetworkID++ })
 		}})
 	add(negative{name: "trust-base-other-epoch", desc: "same keys in another epoch", stage: stEv, outcome: unauth,
 		mutate: func(_ *builtCase, f consolidationcorpus.Files) error {
@@ -591,6 +626,68 @@ func negatives(b *builtCase) []negative {
 				r.Peers[0].Response.Result.Proofs = slices.Clone(m[:n])
 			})
 		}})
+
+	// failed batch calls: availability and capacity are not integrity failures
+	u := func(n uint64) *uint64 { return &n }
+	type rpcCase struct {
+		name, role string
+		code       int
+		msg        string
+		data       *consolidationcorpus.RPCErrorData
+	}
+	cases := []rpcCase{
+		{"view-not-retained", "master", -32008, "Proof unavailable", &consolidationcorpus.RPCErrorData{Reason: "proof_unavailable", Detail: "view_not_retained", Retryable: true}},
+		{"no-finalized-view", "master", -32008, "Proof unavailable", &consolidationcorpus.RPCErrorData{Reason: "proof_unavailable", Detail: "no_finalized_view", Retryable: true}},
+		{"partition-view-unavailable", "master", -32008, "Proof unavailable", &consolidationcorpus.RPCErrorData{Reason: "proof_unavailable", Detail: "partition_view_unavailable", Retryable: true}},
+		{"state-not-included", "master", -32008, "Proof unavailable", &consolidationcorpus.RPCErrorData{Reason: "proof_unavailable", Detail: "state_not_included", Retryable: true}},
+		{"unsupported-configuration", "master", -32008, "Proof unavailable", &consolidationcorpus.RPCErrorData{Reason: "proof_unavailable", Detail: "unsupported_configuration", Retryable: false}},
+		{"busy-active-requests", "master", -32006, "Concurrency limit exceeded", &consolidationcorpus.RPCErrorData{Reason: "busy", Detail: "active_requests", Retryable: true}},
+		{"busy-pinned-views", "master", -32006, "Concurrency limit exceeded", &consolidationcorpus.RPCErrorData{Reason: "busy", Detail: "pinned_views", Retryable: true}},
+		{"busy-retention-budget", "master", -32006, "Concurrency limit exceeded", &consolidationcorpus.RPCErrorData{Reason: "busy", Detail: "retention_budget", Retryable: true}},
+		{"busy-deadline", "master", -32006, "Concurrency limit exceeded", &consolidationcorpus.RPCErrorData{Reason: "busy", Detail: "deadline", Retryable: true}},
+		{"busy-bare", "master", -32006, "Concurrency limit exceeded", nil},
+		{"limit-state-count", "master", -32007, "Limit exceeded", &consolidationcorpus.RPCErrorData{Reason: "limit_exceeded", Detail: "state_count", Retryable: false, Limit: u(256)}},
+		{"limit-request-bytes", "master", -32007, "Limit exceeded", &consolidationcorpus.RPCErrorData{Reason: "limit_exceeded", Detail: "request_bytes", Retryable: false, Limit: u(65536)}},
+		{"limit-response-bytes", "master", -32007, "Limit exceeded", &consolidationcorpus.RPCErrorData{Reason: "limit_exceeded", Detail: "response_bytes", Retryable: false, Limit: u(8 << 20)}},
+		{"invalid-duplicate-state-id", "master", -32602, "Invalid params", &consolidationcorpus.RPCErrorData{Reason: "invalid_request", Detail: "duplicate_state_id", Retryable: false}},
+		{"invalid-wrong-shard", "master", -32602, "Invalid params", &consolidationcorpus.RPCErrorData{Reason: "invalid_request", Detail: "wrong_shard", Retryable: false}},
+		{"method-not-found", "master", -32601, "Method not found", nil},
+		{"database-error", "master", -32004, "Database error", nil},
+		{"view-not-retained", "peer", -32008, "Proof unavailable", &consolidationcorpus.RPCErrorData{Reason: "proof_unavailable", Detail: "view_not_retained", Retryable: true}},
+		{"state-not-included", "peer", -32008, "Proof unavailable", &consolidationcorpus.RPCErrorData{Reason: "proof_unavailable", Detail: "state_not_included", Retryable: true}},
+		{"busy-pinned-views", "peer", -32006, "Concurrency limit exceeded", &consolidationcorpus.RPCErrorData{Reason: "busy", Detail: "pinned_views", Retryable: true}},
+		{"limit-response-bytes", "peer", -32007, "Limit exceeded", &consolidationcorpus.RPCErrorData{Reason: "limit_exceeded", Detail: "response_bytes", Retryable: false, Limit: u(8 << 20)}},
+		{"unsupported-configuration", "peer", -32008, "Proof unavailable", &consolidationcorpus.RPCErrorData{Reason: "proof_unavailable", Detail: "unsupported_configuration", Retryable: false}},
+	}
+	for _, c := range cases {
+		c := c
+		class := map[int]string{-32008: consolidationcorpus.RPCUnavailable, -32006: consolidationcorpus.RPCBusy, -32007: consolidationcorpus.RPCLimitExceeded,
+			-32602: consolidationcorpus.RPCInvalid, -32601: consolidationcorpus.RPCNoMethod, -32004: consolidationcorpus.RPCInfra}[c.code]
+		if c.data != nil && c.data.Detail == "unsupported_configuration" {
+			class = consolidationcorpus.RPCUnsupported
+		}
+		shard := b.files.MustContext().Master
+		if c.role == "peer" {
+			shard = b.files.MustRequests().Peers[0].Shard
+		}
+		want := &consolidationcorpus.RPCFailure{Role: c.role, Shard: shard, Code: c.code}
+		if c.data != nil {
+			want.Reason, want.Detail, want.Retryable, want.Limit = c.data.Reason, c.data.Detail, c.data.Retryable, c.data.Limit
+		} else {
+			want.Retryable = class == consolidationcorpus.RPCBusy || class == consolidationcorpus.RPCUnavailable || class == consolidationcorpus.RPCInfra
+		}
+		add(negative{name: "rpc-" + c.role + "-" + c.name, desc: c.role + " batch call failed with a JSON-RPC error: " + c.msg, stage: stRPC, outcome: class, rpc: want,
+			mutate: func(_ *builtCase, f consolidationcorpus.Files) error {
+				return mutResponses(f, func(r *consolidationcorpus.Responses) {
+					e := &consolidationcorpus.RPCError{Code: c.code, Message: c.msg, Data: c.data}
+					if c.role == "master" {
+						r.Master = consolidationcorpus.RPCResponse{JSONRPC: "2.0", ID: r.Master.ID, Error: e}
+					} else {
+						r.Peers[0].Response = consolidationcorpus.RPCResponse{JSONRPC: "2.0", ID: r.Peers[0].Response.ID, Error: e}
+					}
+				})
+			}})
+	}
 	return out
 }
 
@@ -625,4 +722,9 @@ func replaceTrustBaseKeys(f consolidationcorpus.Files) error {
 	bs, err := tb.MarshalCBOR()
 	f[consolidationcorpus.FileTrustBase] = bs
 	return err
+}
+
+func dropShard(c *consolidationcorpus.Context, shard string) {
+	c.Shards = slices.DeleteFunc(c.Shards, func(s string) bool { return s == shard })
+	c.ShardConfigs = slices.DeleteFunc(c.ShardConfigs, func(s consolidationcorpus.ShardConfig) bool { return s.Shard == shard })
 }

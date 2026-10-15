@@ -22,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"reflect"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -116,11 +117,14 @@ func generate(aggregatorCommit string) (consolidationcorpus.Files, error) {
 		if err != nil {
 			return nil, fmt.Errorf("negative %s: %w", n.name, err)
 		}
+		if !reflect.DeepEqual(res.RPC, n.rpc) {
+			return nil, fmt.Errorf("negative %s: rpc failure %+v, intended %+v", n.name, res.RPC, n.rpc)
+		}
 		if res.Stage != n.stage || res.Outcome != n.outcome || res.PipelineOutcome != n.pipeline {
 			return nil, fmt.Errorf("negative %s: observed %s/%s (pipeline %q), intended %s/%s (pipeline %q)",
 				n.name, res.Stage, res.Outcome, res.PipelineOutcome, n.stage, n.outcome, n.pipeline)
 		}
-		exp := negativeExpected{Base: "shards-4", Description: n.desc, Stage: res.Stage, Outcome: res.Outcome, PipelineOutcome: res.PipelineOutcome}
+		exp := negativeExpected{Base: "shards-4", Description: n.desc, Stage: res.Stage, Outcome: res.Outcome, PipelineOutcome: res.PipelineOutcome, RPC: res.RPC}
 		prefix := "negative/" + n.name + "/"
 		for name, b := range f {
 			if name == consolidationcorpus.FileExpected {
@@ -158,13 +162,14 @@ func generate(aggregatorCommit string) (consolidationcorpus.Files, error) {
 }
 
 type negativeExpected struct {
-	Base            string   `json:"base"`
-	Description     string   `json:"description"`
-	Stage           string   `json:"stage"`
-	Outcome         string   `json:"outcome"`
-	PipelineOutcome string   `json:"pipelineOutcome,omitempty"`
-	ChangedFiles    []string `json:"changedFiles"`
-	RemovedFiles    []string `json:"removedFiles,omitempty"`
+	Base            string                          `json:"base"`
+	Description     string                          `json:"description"`
+	Stage           string                          `json:"stage"`
+	Outcome         string                          `json:"outcome"`
+	PipelineOutcome string                          `json:"pipelineOutcome,omitempty"`
+	RPC             *consolidationcorpus.RPCFailure `json:"rpc,omitempty"`
+	ChangedFiles    []string                        `json:"changedFiles"`
+	RemovedFiles    []string                        `json:"removedFiles,omitempty"`
 }
 
 type manifestCase struct {
@@ -221,7 +226,7 @@ func buildManifest(files consolidationcorpus.Files, cases []manifestCase, aggreg
 		Notes: []string{
 			"uint64 values in JSON are decimal strings; CBOR and proofs are lowercase hex or .cbor files",
 			"a case directory holds the files of testdata layout; a negative directory holds only the complete mutated files plus expected.json naming its base case",
-			"evaluation order: view_codec (partition view alone), evidence (authenticate originals, R_min), consolidate",
+			"evaluation order: view_codec (partition view alone, extra check), policy (trusted context), evidence (authenticate originals, R_min), rpc (classify failed batch calls: availability is not an integrity failure), consolidate",
 			"producer.json replays the root chain blocks byte for byte (bft-core rootchain/testutils/ucfixture)",
 			"seal signatures are deterministic secp256k1 with public test keys; no production credentials",
 		},

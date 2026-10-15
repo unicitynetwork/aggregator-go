@@ -137,11 +137,29 @@ type RPCResult struct {
 	PartitionView string   `json:"partitionView,omitempty"`
 }
 
-// RPCResponse is an exact JSON-RPC success response.
+// RPCErrorData is the structured data of a consolidation JSON-RPC error.
+type RPCErrorData struct {
+	Reason    string  `json:"reason"`
+	Detail    string  `json:"detail"`
+	Retryable bool    `json:"retryable"`
+	Limit     *uint64 `json:"limit,omitempty"`
+}
+
+// RPCError is the error object of a JSON-RPC failure. Data is absent on bare
+// errors (for example the global concurrency rejection).
+type RPCError struct {
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    *RPCErrorData `json:"data,omitempty"`
+}
+
+// RPCResponse is an exact JSON-RPC response: a success carries Result, a
+// failure carries Error.
 type RPCResponse struct {
-	JSONRPC string    `json:"jsonrpc"`
-	ID      int       `json:"id"`
-	Result  RPCResult `json:"result"`
+	JSONRPC string     `json:"jsonrpc"`
+	ID      int        `json:"id"`
+	Result  *RPCResult `json:"result,omitempty"`
+	Error   *RPCError  `json:"error,omitempty"`
 }
 
 // PeerResponse is the exact-root response of a peer shard.
@@ -203,3 +221,20 @@ func ShardName(id types.ShardID) string { return id.String() }
 func Hex(b []byte) string { return hex.EncodeToString(b) }
 
 func UnHex(s string) ([]byte, error) { return hex.DecodeString(strings.TrimPrefix(s, "0x")) }
+
+// MustContext and MustRequests decode the files for generators, panicking on a malformed case.
+func (f Files) MustContext() Context {
+	var c Context
+	if err := f.Decode(FileContext, &c); err != nil {
+		panic(err)
+	}
+	return c
+}
+
+func (f Files) MustRequests() Requests {
+	var r Requests
+	if err := f.Decode(FileRequests, &r); err != nil {
+		panic(err)
+	}
+	return r
+}

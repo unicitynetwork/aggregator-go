@@ -427,13 +427,13 @@ func buildCase(spec caseSpec) (*builtCase, error) {
 	var resps consolidationcorpus.Responses
 	m := targets[spec.master]
 	reqs.Master = consolidationcorpus.Batch{Shard: consolidationcorpus.ShardName(shards[spec.master].ID), Requests: m.reqs}
-	resps.Master = consolidationcorpus.RPCResponse{JSONRPC: "2.0", ID: 1, Result: consolidationcorpus.RPCResult{Proofs: m.proofs, PartitionView: consolidationcorpus.Hex(blkF.View)}}
+	resps.Master = consolidationcorpus.RPCResponse{JSONRPC: "2.0", ID: 1, Result: &consolidationcorpus.RPCResult{Proofs: m.proofs, PartitionView: consolidationcorpus.Hex(blkF.View)}}
 	for k, i := range spec.peers {
 		sp := targets[i]
 		name := consolidationcorpus.ShardName(shards[i].ID)
 		reqs.Peers = append(reqs.Peers, consolidationcorpus.Batch{Shard: name, Requests: sp.reqs})
 		resps.Peers = append(resps.Peers, consolidationcorpus.PeerResponse{Shard: name,
-			Response: consolidationcorpus.RPCResponse{JSONRPC: "2.0", ID: 2 + k, Result: consolidationcorpus.RPCResult{Proofs: sp.proofs}}})
+			Response: consolidationcorpus.RPCResponse{JSONRPC: "2.0", ID: 2 + k, Result: &consolidationcorpus.RPCResult{Proofs: sp.proofs}}})
 	}
 	var oldPeer []string
 	for _, ec := range evidenceCerts {

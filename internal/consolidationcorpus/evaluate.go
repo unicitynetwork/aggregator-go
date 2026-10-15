@@ -11,10 +11,14 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/consolidation"
 )
 
-// Stages of the consumer pipeline, in order.
+// Stages of the consumer pipeline, in the order they run (view_codec is an
+// additional check of the partition view bytes alone, run first).
 const (
-	StageViewCodec   = "view_codec"
+	StageViewCodec = "view_codec"
+	// StagePolicy: the trusted context itself is unusable or inconsistent.
+	StagePolicy      = "policy"
 	StageEvidence    = "evidence"
+	StageRPC         = "rpc"
 	StageConsolidate = "consolidate"
 	StageOK          = "ok"
 
@@ -40,6 +44,23 @@ type ShardBundle struct {
 	Proofs []string `json:"proofs"`
 }
 
+// RPCFailure is a JSON-RPC error of one of the batch calls, classified without
+// losing what the wire said. Availability and capacity failures are not
+// integrity failures: a client may retry them as a new consolidation attempt
+// when Retryable.
+type RPCFailure struct {
+	// Role is "master" or "peer", Shard the shard whose call failed.
+	Role  string `json:"role"`
+	Shard string `json:"shard"`
+	Code  int    `json:"code"`
+	// Reason, Detail, Retryable and Limit are the error data (absent on bare errors;
+	// Retryable then follows the code class).
+	Reason    string  `json:"reason,omitempty"`
+	Detail    string  `json:"detail,omitempty"`
+	Retryable bool    `json:"retryable"`
+	Limit     *uint64 `json:"limit,omitempty"`
+}
+
 // Result of evaluating a case.
 type Result struct {
 	Stage   string `json:"stage"`
@@ -47,6 +68,8 @@ type Result struct {
 	// PipelineOutcome is, for the codec stage, the outcome the full pipeline
 	// reports for the same input (always a refusal).
 	PipelineOutcome string `json:"pipelineOutcome,omitempty"`
+	// RPC is set for the rpc stage.
+	RPC *RPCFailure `json:"rpc,omitempty"`
 
 	RMin      string        `json:"rMin,omitempty"`
 	RootRound string        `json:"rootRound,omitempty"`
@@ -55,20 +78,85 @@ type Result struct {
 	Bundle    []ShardBundle `json:"bundle,omitempty"`
 }
 
+// Classes of rpc stage outcomes.
+const (
+	RPCUnavailable   = "unavailable"        // -32008 availability: retry as a new attempt
+	RPCUnsupported   = "unsupported"        // -32008 unsupported_configuration: never retry
+	RPCBusy          = "busy"               // -32006
+	RPCLimitExceeded = "limit_exceeded"     // -32007: nonretryable with unchanged input
+	RPCInvalid       = "invalid_request"    // -32600, -32602
+	RPCNoMethod      = "unsupported_method" // -32601: the aggregator has no batch capability
+	RPCInfra         = "infrastructure"     // -32004
+	RPCOther         = "rpc_error"
+)
+
+// Wire codes of the consolidation errors (arch-plan 2.4).
+const (
+	CodeLimitExceeded    = -32007
+	CodeProofUnavailable = -32008
+)
+
+func classifyRPC(role, shard string, e *RPCError) (string, *RPCFailure) {
+	f := &RPCFailure{Role: role, Shard: shard, Code: e.Code}
+	if e.Data != nil {
+		f.Reason, f.Detail, f.Retryable, f.Limit = e.Data.Reason, e.Data.Detail, e.Data.Retryable, e.Data.Limit
+	}
+	class := RPCOther
+	switch e.Code {
+	case CodeProofUnavailable:
+		class = RPCUnavailable
+		if f.Detail == "unsupported_configuration" {
+			class = RPCUnsupported
+		}
+	case -32006:
+		class = RPCBusy
+	case CodeLimitExceeded:
+		class = RPCLimitExceeded
+	case -32600, -32602:
+		class = RPCInvalid
+	case -32601:
+		class = RPCNoMethod
+	case -32004:
+		class = RPCInfra
+	}
+	if e.Data == nil {
+		// bare error: the class decides
+		f.Retryable = class == RPCBusy || class == RPCUnavailable || class == RPCInfra
+	}
+	return class, f
+}
+
 // Evaluate runs the consumer pipeline over the case files: partition view
-// codec check, authentication of the original evidence (R_min) and
-// consolidation. A returned error means the files are malformed as a corpus
-// (not a typed refusal of the reference library).
+// codec check, the trusted context, authentication of the original evidence
+// (R_min), classification of failed batch calls, and consolidation. A returned
+// error means the files are malformed as a corpus (not a typed refusal).
 func Evaluate(files Files) (*Result, error) {
 	l, err := Load(files)
 	if err != nil {
 		return nil, err
 	}
+	var reqs Requests
+	var resps Responses
+	if err := files.Decode(FileRequests, &reqs); err != nil {
+		return nil, err
+	}
+	if err := files.Decode(FileResponses, &resps); err != nil {
+		return nil, err
+	}
 	res := &Result{Master: l.Context.Master}
+
 	runPipeline := func() (stage, outcome string, err error) {
+		// the trusted context must be consistent with the installed authority
+		if l.Context.NetworkID != uint32(l.TrustBase.GetNetworkID()) {
+			return StagePolicy, string(consolidation.OutcomeIncompatibleLineage), nil
+		}
 		sess, err := l.NewSession()
 		if err != nil {
-			return "", "", fmt.Errorf("policy: %w", err)
+			o, ok := consolidation.OutcomeOf(err)
+			if !ok {
+				return "", "", err
+			}
+			return StagePolicy, string(o), nil
 		}
 		bound, err := sess.AuthenticateEvidence(l.Evidence)
 		if err != nil {
@@ -79,6 +167,21 @@ func Evaluate(files Files) (*Result, error) {
 			return StageEvidence, string(o), nil
 		}
 		res.RMin = strconv.FormatUint(bound.Round(), 10)
+
+		// failed batch calls: availability is not an integrity failure
+		if resps.Master.Error != nil {
+			class, f := classifyRPC("master", reqs.Master.Shard, resps.Master.Error)
+			res.RPC = f
+			return StageRPC, class, nil
+		}
+		for _, p := range resps.Peers {
+			if p.Response.Error != nil {
+				class, f := classifyRPC("peer", p.Shard, p.Response.Error)
+				res.RPC = f
+				return StageRPC, class, nil
+			}
+		}
+
 		in := *l.Input
 		in.Bound = bound
 		out, err := sess.Consolidate(&in)
@@ -119,7 +222,7 @@ func Evaluate(files Files) (*Result, error) {
 				return nil, err
 			}
 			res.PipelineOutcome = o
-			res.Counters, res.RMin, res.RootRound, res.Bundle = nil, "", "", nil
+			res.Counters, res.RMin, res.RootRound, res.Bundle, res.RPC = nil, "", "", nil, nil
 			return res, nil
 		}
 	}
@@ -209,6 +312,9 @@ func inputOf(ctx *Context, reqs *Requests, resps *Responses) (*consolidation.Inp
 			}
 			sr.Requests = append(sr.Requests, req)
 		}
+		if r.Result == nil {
+			return sr, nil // a failed call: classified by the rpc stage
+		}
 		for _, h := range r.Result.Proofs {
 			p, err := decodeProof(h)
 			if err != nil {
@@ -223,7 +329,7 @@ func inputOf(ctx *Context, reqs *Requests, resps *Responses) (*consolidation.Inp
 	if in.Master, err = shardResult(reqs.Master, resps.Master); err != nil {
 		return nil, nil, nil, err
 	}
-	if resps.Master.Result.PartitionView != "" {
+	if resps.Master.Result != nil && resps.Master.Result.PartitionView != "" {
 		if in.PartitionView, err = UnHex(resps.Master.Result.PartitionView); err != nil {
 			return nil, nil, nil, err
 		}
