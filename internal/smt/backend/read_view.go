@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -79,75 +78,110 @@ func (b *MemoryBackend) RetainReadView(ctx context.Context) (ReadView, error) {
 // head if it is the last survivor, so shared nodes are counted once, the
 // charge stays with surviving views when intermediate handles close, and
 // closing a handle never loses nodes an older pinned view still holds.
+//
+// Every operation is O(1): entries keep the cumulative delta through
+// themselves and are linked to their alive neighbors, so the charge of a view
+// is a difference of two cumulative counters, closing unlinks the entry (its
+// interval is thereby inherited by the alive predecessor) and the total over
+// all alive views telescopes to alive*overhead + head - first.cum.
 type lineage struct {
-	mu      sync.Mutex
-	entries []*lineageEntry // oldest first
-
-	// visited counts the lineage entries examined by retained-byte queries (observability
-	// for the scaling measurements: each query scans from the oldest entry).
-	visited atomic.Int64
-}
-
-// LineageStats reports the number of lineage entries currently kept (including dead
-// interior entries awaiting trimming) and the cumulative number of entries examined by
-// RetainedBytes queries. It is observability for the scaling measurements.
-func (b *MemoryBackend) LineageStats() (entries int, visited int64) {
-	b.lineage.mu.Lock()
-	defer b.lineage.mu.Unlock()
-	return len(b.lineage.entries), b.lineage.visited.Load()
+	mu    sync.Mutex
+	total uint64 // cumulative delta of every entry ever added
+	first *lineageEntry
+	last  *lineageEntry
+	alive int
+	// visits counts the entries touched by accounting operations: the entry itself and the
+	// neighbors read or relinked. Tests assert it is a constant per operation, independent of
+	// the number of alive entries.
+	visits uint64
 }
 
 type lineageEntry struct {
-	delta uint64
-	alive bool
+	cum        uint64 // lineage.total after this entry's delta was added
+	alive      bool
+	prev, next *lineageEntry // alive neighbors, oldest first
 }
 
 func (l *lineage) add(view *smt.ReadView) *memoryReadView {
+	e := l.addDelta(view.Introduced())
+	return &memoryReadView{view: view, lin: l, entry: e}
+}
+
+// addDelta appends an entry which introduced "delta" bytes.
+func (l *lineage) addDelta(delta uint64) *lineageEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	e := &lineageEntry{delta: view.Introduced(), alive: true}
-	l.entries = append(l.entries, e)
-	return &memoryReadView{view: view, lin: l, entry: e}
+	l.visits++
+	l.total += delta
+	e := &lineageEntry{cum: l.total, alive: true, prev: l.last}
+	if l.last != nil {
+		l.visits++
+		l.last.next = e
+	} else {
+		l.first = e
+	}
+	l.last = e
+	l.alive++
+	return e
 }
 
 // retained returns the incremental bytes charged to e.
 func (l *lineage) retained(e *lineageEntry) uint64 {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.visits++
 	if !e.alive {
 		return 0
 	}
-	total := uint64(smt.ReadViewOverheadBytes)
-	after := false
-	for _, x := range l.entries {
-		l.visited.Add(1)
-		if x == e {
-			after = true
-			continue
-		}
-		if !after {
-			continue
-		}
-		total += x.delta
-		if x.alive {
-			break
-		}
+	end := l.total
+	if e.next != nil {
+		l.visits++
+		end = e.next.cum
 	}
-	return total
+	return smt.ReadViewOverheadBytes + end - e.cum
 }
 
-// close marks e dead and drops the dead prefix, whose deltas nothing is
-// charged for (no surviving view is older).
+// totalRetained is the sum of retained over all alive entries.
+func (l *lineage) totalRetained() uint64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.visits++
+	if l.alive == 0 {
+		return 0
+	}
+	return uint64(l.alive)*smt.ReadViewOverheadBytes + l.total - l.first.cum
+}
+
+// close marks e dead and unlinks it; its interval is inherited by the alive
+// predecessor (nothing is charged if there is none). Idempotent.
 func (l *lineage) close(e *lineageEntry) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	e.alive = false
-	i := 0
-	for i < len(l.entries) && !l.entries[i].alive {
-		i++
+	l.visits++
+	if !e.alive {
+		return
 	}
-	l.entries = append([]*lineageEntry(nil), l.entries[i:]...)
+	e.alive = false
+	if e.prev != nil {
+		l.visits++
+		e.prev.next = e.next
+	} else {
+		l.first = e.next
+	}
+	if e.next != nil {
+		l.visits++
+		e.next.prev = e.prev
+	} else {
+		l.last = e.prev
+	}
+	e.prev, e.next = nil, nil
+	l.alive--
 }
+
+// RetainedBytesTotal is the sum of RetainedBytes over all open views of the
+// backend, in O(1). Views which have left the accounting (closed, or retired
+// through AccountingRetirer) are not included.
+func (b *MemoryBackend) RetainedBytesTotal() uint64 { return b.lineage.totalRetained() }
 
 type memoryReadView struct {
 	// mu makes Close wait for in-flight reads. Reads share it; the tree itself
@@ -189,6 +223,11 @@ func (v *memoryReadView) RetainedBytes() uint64 {
 	return v.lin.retained(v.entry)
 }
 
+// RetireAccounting removes the view from the retention accounting ahead of Close
+// (the interval it covered is inherited by its predecessor). The view stays
+// readable until Close. O(1), idempotent, safe to call under a catalog lock.
+func (v *memoryReadView) RetireAccounting() { v.lin.close(v.entry) }
+
 func (v *memoryReadView) Close() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -202,7 +241,22 @@ func (v *memoryReadView) Close() error {
 	return nil
 }
 
+// RetentionAccountant is implemented by backends which can total the retained
+// bytes of all their open views in O(1) (the sum of the views' RetainedBytes).
+type RetentionAccountant interface {
+	RetainedBytesTotal() uint64
+}
+
+// AccountingRetirer is implemented by views which can leave the retention
+// accounting before they are closed: closing may have to wait for reads in
+// flight and so cannot run under a lock, whereas retiring is O(1).
+type AccountingRetirer interface {
+	RetireAccounting()
+}
+
 var (
-	_ ReadView         = (*memoryReadView)(nil)
-	_ ReadViewRetainer = (*MemoryBackend)(nil)
+	_ ReadView            = (*memoryReadView)(nil)
+	_ ReadViewRetainer    = (*MemoryBackend)(nil)
+	_ RetentionAccountant = (*MemoryBackend)(nil)
+	_ AccountingRetirer   = (*memoryReadView)(nil)
 )

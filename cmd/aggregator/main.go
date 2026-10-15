@@ -19,6 +19,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/proofpub"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/service"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
@@ -219,7 +220,12 @@ func main() {
 			log.WithComponent("main").Info("Block syncing disabled for parent aggregator mode - SMT will be reconstructed on leadership transition")
 		} else {
 			log.WithComponent("main").Info("Starting block syncer")
-			bs = ha.NewBlockSyncer(log, ls, storageInstance, roundManager.GetSMTBackend(), cfg.Sharding.Child.ShardID, cfg.HA.BlockSyncInterval, stateTracker)
+			syncer := ha.NewBlockSyncer(log, ls, storageInstance, roundManager.GetSMTBackend(), cfg.Sharding.Child.ShardID, cfg.HA.BlockSyncInterval, stateTracker)
+			if pv, ok := roundManager.(interface{ ProofViewPublisher() *proofpub.Publisher }); ok && pv.ProofViewPublisher() != nil {
+				// followers retain the state they replay so they can serve it after promotion
+				syncer.SetViewPublisher(pv.ProofViewPublisher())
+			}
+			bs = syncer
 			bs.Start(ctx)
 		}
 
@@ -246,6 +252,14 @@ func main() {
 
 	// Initialize gateway server
 	server := gateway.NewServer(cfg, log, aggregatorService)
+
+	// get_inclusion_proofs.v1: served from the retained-view catalog, or explicitly
+	// unsupported (unsupported_configuration) when this deployment cannot serve it.
+	batchHandler, unsupportedReason := service.NewBatchProofHandler(cfg, roundManager, storageInstance, aggregatorService)
+	server.SetBatchProofHandler(batchHandler)
+	if unsupportedReason != "" {
+		log.WithComponent("main").Info("get_inclusion_proofs.v1 unsupported in this deployment", "reason", unsupportedReason)
+	}
 
 	// Start server in a goroutine
 	go func() {

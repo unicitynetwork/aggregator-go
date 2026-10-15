@@ -224,6 +224,14 @@ var (
 		[]string{"result"},
 	)
 
+	ProofViewPublicationTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_proofview_publication_total",
+			Help: "Retained finalized proof view publications by outcome.",
+		},
+		[]string{"result"},
+	)
+
 	BFTErrorsTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "aggregator_bft_errors_total",
@@ -367,6 +375,27 @@ var (
 			Help: "SMT startup recovery actions by outcome.",
 		},
 		[]string{"action"},
+	)
+
+	SMTDiskBatchProofLeaves = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_smt_disk_batch_proof_leaves_total",
+			Help: "Leaves proven by union-path batch builds on retained disk views.",
+		},
+	)
+
+	SMTDiskBatchNodeReads = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_smt_disk_batch_node_reads_total",
+			Help: "Node reads requested by union-path batch proof builds (compare with unique nodes and leaves).",
+		},
+	)
+
+	SMTDiskBatchUniqueNodes = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_smt_disk_batch_unique_nodes_total",
+			Help: "Distinct nodes read by union-path batch proof builds.",
+		},
 	)
 
 	SMTDiskProofSnapshotsActive = promauto.NewGauge(

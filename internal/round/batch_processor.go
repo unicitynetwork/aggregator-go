@@ -570,6 +570,7 @@ func (rm *RoundManager) reconcileRecoveredFinalization(ctx context.Context, reco
 	}
 	rm.roundMutex.Unlock()
 
+	rm.publishRecoveredBlock(ctx, blockNumber)
 	rm.clearProofStateIDsPending(recoveryResult.StateIDs)
 	return nil
 }
@@ -677,6 +678,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 			}
 			block.Finalized = true
 			rm.markProofsReady(block, stateIDs, records)
+			rm.proofPub.EnsurePublished(ctx, block)
 			if snapshot != nil {
 				snapshot.Discard(ctx)
 			}
@@ -745,6 +747,10 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		if err != nil {
 			return err
 		}
+	} else {
+		// The state is committed and the block is finalized in storage; finalizationMu
+		// keeps the backend at exactly this state. Failures never fail finalization.
+		rm.proofPub.PublishFinalizedAdmitted(ctx, block)
 	}
 	metrics.SMTCommitDuration.Observe(smtCommitDuration.Seconds())
 
@@ -768,6 +774,10 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 			return fmt.Errorf("failed to publish disk SMT proof view: %w", err)
 		}
 		proofViewPublished = true
+		// Disk: the committed state is now the published proof view and no later commit
+		// can start before this returns, so the retained snapshot is exactly this block.
+		// A backend without read-view support leaves the publisher nil (no-op).
+		rm.proofPub.PublishFinalizedAdmitted(ctx, block)
 	}
 	if !diskFinalize {
 		rm.finalizationMu.Unlock()

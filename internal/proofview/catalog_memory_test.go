@@ -22,9 +22,19 @@ type memChain struct {
 	block uint64
 }
 
-func newMemChain(t *testing.T, l Limits) *memChain {
-	return &memChain{t: t, c: newCatalog(t, l),
-		b: backend.NewMemoryBackend(smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)))}
+func newMemChain(t *testing.T, l Limits) *memChain { return newMemChainOpts(t, l, false) }
+
+// newMemChainOpts builds a catalog over a real memory backend; withAccountant wires the backend's
+// O(1) retained-bytes total as production does (proofview.AccountantFor).
+func newMemChainOpts(t *testing.T, l Limits, withAccountant bool) *memChain {
+	b := backend.NewMemoryBackend(smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)))
+	var opts []Option
+	if withAccountant {
+		opts = append(opts, AccountantFor(b))
+	}
+	c, err := NewCatalog(l, opts...)
+	require.NoError(t, err)
+	return &memChain{t: t, c: c, b: b}
 }
 
 // publishBlock commits n new leaves and publishes the finalized state.

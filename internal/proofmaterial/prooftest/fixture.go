@@ -4,6 +4,7 @@
 package prooftest
 
 import (
+	"context"
 	"crypto"
 	"crypto/sha256"
 	"testing"
@@ -123,4 +124,10 @@ func (f *Fixture) Provider(t testing.TB) *proofmaterial.StaticTopology {
 	p, err := proofmaterial.NewStaticTopology(Partition, f.Topo.Scheme, f.Topo.ShardConfHashes)
 	require.NoError(t, err)
 	return p
+}
+
+// Verifier returns a seal verifier trusting the fixture authority (all fixtures share one).
+func (f *Fixture) Verifier() func(context.Context) types.SealVerifier {
+	v := types.TrustBaseSealVerifier(f.TrustBase)
+	return func(context.Context) types.SealVerifier { return v }
 }
