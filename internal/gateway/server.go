@@ -71,6 +71,7 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 
 	// Create JSON-RPC server
 	rpcServer := jsonrpc.NewServer(logger, cfg.Server.ConcurrencyLimit)
+	rpcServer.SetMaxRequestBodyBytes(cfg.Server.MaxRequestBodyBytes)
 
 	server := &Server{
 		config:    cfg,

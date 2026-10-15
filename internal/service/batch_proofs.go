@@ -11,6 +11,8 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/proofview"
+	"github.com/unicitynetwork/aggregator-go/internal/smt"
+	"github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
@@ -230,6 +232,15 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 	}
 	defer lease.Release()
 
+	// All database and proof work runs under a context cancelled by the request
+	// (and its execution deadline) and by the lease, so pressure cancellation or
+	// the lease deadline interrupts an in-flight database call too.
+	work, cancelWork := context.WithCancel(ctx)
+	defer cancelWork()
+	stopWatch := context.AfterFunc(lease.Context(), cancelWork)
+	defer stopWatch()
+	ctx = work
+
 	var view []byte
 	if latest {
 		if view = lease.PartitionView(); len(view) == 0 {
@@ -306,6 +317,10 @@ func (s *BatchProofService) buildProof(ctx context.Context, lease BatchLease, id
 		}
 		if cerr := lease.Context().Err(); cerr != nil {
 			return nil, ctxError(cerr)
+		}
+		if errors.Is(err, backend.ErrPublishedProofLeafNotFound) || errors.Is(err, smt.ErrLeafNotFound) {
+			// the record is finalized but its leaf is not in the pinned root
+			return nil, unavailable("state_not_included")
 		}
 		return nil, &BatchError{Code: jsonrpc.InternalErrorCode, Message: "Internal error", Internal: fmt.Errorf("inclusion cert: %w", err)}
 	}

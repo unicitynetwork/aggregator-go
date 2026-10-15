@@ -62,6 +62,9 @@ type ServerConfig struct {
 	EnableTLS                 bool          `mapstructure:"enable_tls"`
 	EnableH2C                 bool          `mapstructure:"enable_h2c"`
 	HTTP2MaxConcurrentStreams int           `mapstructure:"http2_max_concurrent_streams"`
+	// MaxRequestBodyBytes is the outer JSON-RPC request body ceiling applied
+	// before decoding (0 = jsonrpc.DefaultMaxRequestBodyBytes, 16 MiB).
+	MaxRequestBodyBytes int64 `mapstructure:"max_request_body_bytes"`
 }
 
 // DatabaseConfig holds MongoDB configuration
@@ -355,6 +358,7 @@ func Load() (*Config, error) {
 			WriteTimeout:              getEnvDurationOrDefault("WRITE_TIMEOUT", "30s"),
 			IdleTimeout:               getEnvDurationOrDefault("IDLE_TIMEOUT", "120s"),
 			ConcurrencyLimit:          getEnvIntOrDefault("CONCURRENCY_LIMIT", 1000),
+			MaxRequestBodyBytes:       int64(getEnvIntOrDefault("MAX_REQUEST_BODY_BYTES", 16<<20)),
 			EnableDocs:                getEnvBoolOrDefault("ENABLE_DOCS", true),
 			EnableCORS:                getEnvBoolOrDefault("ENABLE_CORS", true),
 			TLSCertFile:               getEnvOrDefault("TLS_CERT_FILE", ""),
@@ -595,6 +599,9 @@ func (c *Config) Validate() error {
 	}
 	if c.SMT.MaterializeWorkers < 0 {
 		return fmt.Errorf("SMT_MATERIALIZE_WORKERS must be non-negative")
+	}
+	if c.Server.MaxRequestBodyBytes < 0 {
+		return fmt.Errorf("MAX_REQUEST_BODY_BYTES must be non-negative")
 	}
 	if c.SMT.RetainedViews < 0 || c.SMT.RetainedAttachmentsPerView < 0 || c.SMT.RetentionBudgetMB < 0 ||
 		c.SMT.MaxConcurrentBatches < 0 || c.SMT.BatchTimeout < 0 {

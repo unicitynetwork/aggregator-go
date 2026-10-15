@@ -17,6 +17,8 @@ var (
 	ErrKeyLength              = errors.New("smt: invalid key length")
 	ErrWrongShard             = errors.New("smt: key does not belong in this shard")
 	ErrInvalidChildHashLength = errors.New("smt: child hash value length does not match hash algorithm")
+	// ErrLeafNotFound: no leaf exists at the requested key (inclusion cert).
+	ErrLeafNotFound = errors.New("smt: leaf not found")
 )
 
 // smtCachedHashBytes is the fixed size of the inline hash cache arrays in
@@ -633,7 +635,7 @@ func (smt *SparseMerkleTree) GetInclusionCert(key []byte) (*api.InclusionCert, e
 		return nil, err
 	}
 	if len(leafValue) == 0 {
-		return nil, fmt.Errorf("smt: leaf not found for key %x", key)
+		return nil, fmt.Errorf("%w for key %x", ErrLeafNotFound, key)
 	}
 	return &cert, nil
 }
@@ -690,7 +692,7 @@ func (smt *SparseMerkleTree) generateInclusionCertWithLeafValue(hasher *api.Data
 		// Value. For those placeholders, key equality is validated only after the
 		// first real AddLeaf replaces them with a keyed leaf.
 		if leaf.Key != nil && !bytes.Equal(leaf.Key, key) {
-			return nil, fmt.Errorf("smt: leaf not found for key %x", key)
+			return nil, fmt.Errorf("%w for key %x", ErrLeafNotFound, key)
 		}
 		if leaf.Value == nil {
 			return nil, nil
@@ -747,7 +749,7 @@ func (smt *SparseMerkleTree) generateInclusionCertWithLeafValue(hasher *api.Data
 	if node.Right != nil {
 		return smt.generateInclusionCertWithLeafValue(hasher, key, node.Right, cert)
 	}
-	return nil, fmt.Errorf("smt: reached empty subtree in inclusion cert traversal")
+	return nil, fmt.Errorf("%w: reached empty subtree in inclusion cert traversal", ErrLeafNotFound)
 }
 
 // keyBit returns bit d of the raw key under the yellowpaper big-endian bit

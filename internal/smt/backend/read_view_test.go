@@ -251,7 +251,7 @@ func TestMemoryReadViewOfEmptyTree(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, emptyRoot(t), v.RootHash())
 	_, err = v.GetInclusionCert(context.Background(), spreadInput(1).Key)
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrPublishedProofLeafNotFound, "an absent leaf has the backend-neutral error")
 }
 
 // Regression: closing a duplicate handle must not strand the charge for nodes
