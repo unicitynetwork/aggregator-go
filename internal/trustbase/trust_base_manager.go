@@ -43,7 +43,12 @@ func NewTrustBaseManager(log *logger.Logger, trustBaseStore TrustBaseStore, bftR
 
 // GetByEpoch returns trust base from (in order of precedence):
 // cache -> storage -> BFT node -> error if not found.
-// If new trust base is found from BFT node then the trust base is persisted to TrustBaseStore before returning.
+//
+// The BFT REST endpoint is NOT a trust anchor. The installed epoch-1 trust base (from configuration)
+// is the only anchor: a trust base fetched from the BFT node is admitted only if it has exactly the
+// requested epoch, the anchor's network, is epoch > 1, and extends the already installed predecessor
+// (hash link + predecessor quorum signatures). Replacement genesis (epoch 1) entries are never accepted
+// from the network. The value returned is always the one held in storage, never the received object.
 func (s *TrustBaseManager) GetByEpoch(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
 	// attempt to load from local store (cache + disk via decorator chain)
 	tbFromCache, err := s.trustBaseStore.GetByEpoch(ctx, epoch)
@@ -54,6 +59,25 @@ func (s *TrustBaseManager) GetByEpoch(ctx context.Context, epoch uint64) (*types
 		return tbFromCache, nil
 	}
 
+	// epoch 1 is the configured anchor and cannot be obtained from the network
+	if epoch <= 1 {
+		return nil, fmt.Errorf("trust base anchor (epoch 1) is not installed and cannot be fetched from BFT node, requested epoch %d", epoch)
+	}
+
+	// the installed anchor fixes the expected network
+	anchor, err := s.trustBaseStore.GetByEpoch(ctx, 1)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load installed trust base anchor (epoch 1): %w", err)
+	}
+	if anchor == nil {
+		return nil, errors.New("installed trust base anchor (epoch 1) not found")
+	}
+
+	// the predecessor must be installed (extending the chain one epoch at a time)
+	if _, err = s.GetByEpoch(ctx, epoch-1); err != nil {
+		return nil, fmt.Errorf("cannot extend trust base chain to epoch %d: %w", epoch, err)
+	}
+
 	// not found locally: query BFT node
 	trustBases, err := s.bftRestClient.GetTrustBases(ctx, epoch, epoch)
 	if err != nil {
@@ -61,25 +85,36 @@ func (s *TrustBaseManager) GetByEpoch(ctx context.Context, epoch uint64) (*types
 	}
 
 	// validate trust base received from BFT node
-	if len(trustBases) != 1 {
+	if len(trustBases) != 1 || trustBases[0] == nil {
 		return nil, fmt.Errorf("trust base for epoch %d not found for BFT node, len(trustBases)=%d", epoch, len(trustBases))
 	}
 	tb := trustBases[0]
+	if tb.GetEpoch() != epoch {
+		return nil, fmt.Errorf("BFT node returned trust base for epoch %d, requested epoch %d", tb.GetEpoch(), epoch)
+	}
+	if tb.GetNetworkID() != anchor.GetNetworkID() {
+		return nil, fmt.Errorf("BFT node returned trust base for network %d, expected network %d", tb.GetNetworkID(), anchor.GetNetworkID())
+	}
 	if err = s.trustBaseValidator.Verify(ctx, tb); err != nil {
 		return nil, fmt.Errorf("failed to verify trust base received from BFT node for epoch %d: %w", epoch, err)
 	}
 
 	// store the received trust base
 	if err = s.trustBaseStore.Store(ctx, tb); err != nil {
-		if errors.Is(err, interfaces.ErrTrustBaseAlreadyExists) {
-			s.log.WithContext(ctx).Warn("Trust base already stored, not overwriting it", "epoch", tb.GetEpoch())
-		} else {
+		if !errors.Is(err, interfaces.ErrTrustBaseAlreadyExists) {
 			return nil, fmt.Errorf("failed to store trust base for epoch %d: %w", epoch, err)
 		}
-	} else {
-		s.log.WithContext(ctx).Info("Updated trust base storage with new trust base from BFT node", "epoch", tb.GetEpoch())
+		s.log.WithContext(ctx).Warn("Trust base already stored, not overwriting it", "epoch", epoch)
+		// return the admitted stored entry, not the received object
+		stored, getErr := s.trustBaseStore.GetByEpoch(ctx, epoch)
+		if getErr != nil {
+			return nil, fmt.Errorf("failed to load stored trust base for epoch %d: %w", epoch, getErr)
+		}
+		if stored == nil {
+			return nil, fmt.Errorf("stored trust base for epoch %d not found after conflict", epoch)
+		}
+		return stored, nil
 	}
-
-	// return the received trust base
+	s.log.WithContext(ctx).Info("Updated trust base storage with new trust base from BFT node", "epoch", epoch)
 	return tb, nil
 }

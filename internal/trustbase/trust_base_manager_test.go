@@ -2,59 +2,189 @@ package trustbase
 
 import (
 	"context"
+	"crypto"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	cryptobft "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
+// memStore is a map-backed TrustBaseStore with already-exists semantics.
+type memStore struct {
+	tbs map[uint64]*types.RootTrustBaseV1
+}
+
+func (m *memStore) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
+	if tb, ok := m.tbs[epoch]; ok {
+		return tb, nil
+	}
+	return nil, interfaces.ErrTrustBaseNotFound
+}
+
+func (m *memStore) Store(_ context.Context, tb types.RootTrustBase) error {
+	if _, ok := m.tbs[tb.GetEpoch()]; ok {
+		return interfaces.ErrTrustBaseAlreadyExists
+	}
+	m.tbs[tb.GetEpoch()] = tb.(*types.RootTrustBaseV1)
+	return nil
+}
+
+func genesis(t *testing.T, network types.NetworkID, n int) (*types.RootTrustBaseV1, map[string]cryptobft.Signer) {
+	nodes, signers := newRootNodes(t, n)
+	tb, err := types.NewTrustBase(network, nodes, types.WithEpoch(1))
+	require.NoError(t, err)
+	for id, s := range signers {
+		require.NoError(t, tb.Sign(id, s))
+	}
+	return tb, signers
+}
+
+// next builds epoch prev+1 linked to prev and signed by prevSigners.
+func next(t *testing.T, prev *types.RootTrustBaseV1, network types.NetworkID, prevSigners map[string]cryptobft.Signer) (*types.RootTrustBaseV1, map[string]cryptobft.Signer) {
+	h, err := prev.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	nodes, signers := newRootNodes(t, 3)
+	tb, err := types.NewTrustBase(network, nodes,
+		types.WithEpoch(prev.GetEpoch()+1),
+		types.WithEpochStart(prev.GetEpochStart()+1000),
+		types.WithPreviousTrustBaseHash(h),
+	)
+	require.NoError(t, err)
+	for id, s := range prevSigners {
+		require.NoError(t, tb.Sign(id, s))
+	}
+	return tb, signers
+}
+
+func restReturning(tbs ...*types.RootTrustBaseV1) *mockBFTRestClient {
+	return &mockBFTRestClient{GetTrustBasesFunc: func(context.Context, uint64, uint64) ([]*types.RootTrustBaseV1, error) {
+		return tbs, nil
+	}}
+}
+
 func TestTrustBaseManager(t *testing.T) {
 	log, err := logger.New("info", "text", "stdout", false)
 	require.NoError(t, err)
 
-	// create trust base for epoch 1
-	rootNodes, signers := newRootNodes(t, 3)
-	trustBaseEpoch1, err := types.NewTrustBase(
-		types.NetworkLocal,
-		rootNodes,
-		types.WithEpoch(1),
-	)
-	require.NoError(t, err)
-	for nodeID, signer := range signers {
-		require.NoError(t, trustBaseEpoch1.Sign(nodeID, signer))
+	anchor, anchorSigners := genesis(t, types.NetworkLocal, 3)
+	newManager := func(store *memStore, rest BFTRestClient) *TrustBaseManager {
+		return NewTrustBaseManager(log, store, rest, NewTrustBaseValidator(store))
+	}
+	installed := func() *memStore {
+		return &memStore{tbs: map[uint64]*types.RootTrustBaseV1{1: anchor}}
 	}
 
-	t.Run("test ok", func(t *testing.T) {
-		// no trust base in store
-		trustBaseStore := &mockStorage{
-			GetByEpochFunc: func(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
-				return nil, interfaces.ErrTrustBaseNotFound
-			},
-		}
-		// default validator
-		trustBaseValidator := NewTrustBaseValidator(trustBaseStore)
-
-		// BFT REST client returns the trust base for epoch 1
-		bftClient := &mockBFTRestClient{
-			GetTrustBasesFunc: func(ctx context.Context, epoch1, epoch2 uint64) ([]*types.RootTrustBaseV1, error) {
-				return []*types.RootTrustBaseV1{trustBaseEpoch1}, nil
-			},
-		}
-		trustBaseManager := NewTrustBaseManager(log, trustBaseStore, bftClient, trustBaseValidator)
-		tb, err := trustBaseManager.GetByEpoch(t.Context(), 1)
+	t.Run("extends installed chain with predecessor-signed epoch", func(t *testing.T) {
+		e2, _ := next(t, anchor, types.NetworkLocal, anchorSigners)
+		store := installed()
+		got, err := newManager(store, restReturning(e2)).GetByEpoch(t.Context(), 2)
 		require.NoError(t, err)
-
-		// verify returned trust base
-		require.Equal(t, uint64(1), tb.GetEpoch())
-
-		// verify trust base was stored
-		storedTB, ok := trustBaseStore.stored[1]
-		require.True(t, ok, "trust base was not stored")
-		require.Equal(t, tb.GetEpoch(), storedTB.GetEpoch())
+		require.Same(t, store.tbs[2], got)
+		require.Equal(t, uint64(2), got.GetEpoch())
 	})
+
+	t.Run("serves installed anchor from store", func(t *testing.T) {
+		got, err := newManager(installed(), restReturning()).GetByEpoch(t.Context(), 1)
+		require.NoError(t, err)
+		require.Same(t, anchor, got)
+	})
+
+	t.Run("hostile REST: self-signed replacement epoch 1 is never installed", func(t *testing.T) {
+		evil, _ := genesis(t, types.NetworkLocal, 3)
+		store := &memStore{tbs: map[uint64]*types.RootTrustBaseV1{}}
+		_, err := newManager(store, restReturning(evil)).GetByEpoch(t.Context(), 1)
+		require.ErrorContains(t, err, "anchor")
+		require.Empty(t, store.tbs)
+	})
+
+	t.Run("hostile REST: self-signed epoch 1 served for requested epoch 2", func(t *testing.T) {
+		evil, _ := genesis(t, types.NetworkLocal, 3)
+		store := installed()
+		_, err := newManager(store, restReturning(evil)).GetByEpoch(t.Context(), 2)
+		require.ErrorContains(t, err, "requested epoch 2")
+		require.Len(t, store.tbs, 1)
+		require.Same(t, anchor, store.tbs[1])
+	})
+
+	t.Run("hostile REST: valid-looking wrong epoch", func(t *testing.T) {
+		e2, _ := next(t, anchor, types.NetworkLocal, anchorSigners)
+		store := installed()
+		_, err := newManager(store, restReturning(e2)).GetByEpoch(t.Context(), 3)
+		// epoch 2 is the predecessor of 3: fetched via REST, but REST then returns e2 for epoch 3 too
+		require.ErrorContains(t, err, "requested epoch 3")
+		require.NotContains(t, store.tbs, uint64(3))
+	})
+
+	t.Run("hostile REST: wrong network", func(t *testing.T) {
+		e2, _ := next(t, anchor, types.NetworkLocal+1, anchorSigners)
+		store := installed()
+		_, err := newManager(store, restReturning(e2)).GetByEpoch(t.Context(), 2)
+		require.ErrorContains(t, err, "network")
+		require.NotContains(t, store.tbs, uint64(2))
+	})
+
+	t.Run("hostile REST: epoch 2 signed by attacker keys, not predecessor", func(t *testing.T) {
+		_, evilSigners := genesis(t, types.NetworkLocal, 3)
+		e2, _ := next(t, anchor, types.NetworkLocal, evilSigners)
+		store := installed()
+		_, err := newManager(store, restReturning(e2)).GetByEpoch(t.Context(), 2)
+		require.Error(t, err)
+		require.NotContains(t, store.tbs, uint64(2))
+	})
+
+	t.Run("hostile REST: epoch 2 not hash-linked to installed anchor", func(t *testing.T) {
+		otherAnchor, otherSigners := genesis(t, types.NetworkLocal, 3)
+		e2, _ := next(t, otherAnchor, types.NetworkLocal, otherSigners)
+		store := installed()
+		_, err := newManager(store, restReturning(e2)).GetByEpoch(t.Context(), 2)
+		require.Error(t, err)
+		require.NotContains(t, store.tbs, uint64(2))
+	})
+
+	t.Run("no installed anchor: nothing is bootstrapped from REST", func(t *testing.T) {
+		evil, evilSigners := genesis(t, types.NetworkLocal, 3)
+		e2, _ := next(t, evil, types.NetworkLocal, evilSigners)
+		store := &memStore{tbs: map[uint64]*types.RootTrustBaseV1{}}
+		_, err := newManager(store, restReturning(e2)).GetByEpoch(t.Context(), 2)
+		require.Error(t, err)
+		require.Empty(t, store.tbs)
+	})
+
+	t.Run("nil and empty REST results are rejected", func(t *testing.T) {
+		store := installed()
+		_, err := newManager(store, restReturning(nil)).GetByEpoch(t.Context(), 2)
+		require.Error(t, err)
+		_, err = newManager(store, restReturning()).GetByEpoch(t.Context(), 2)
+		require.Error(t, err)
+	})
+
+	t.Run("already-exists conflict returns stored admitted entry, not received object", func(t *testing.T) {
+		e2, _ := next(t, anchor, types.NetworkLocal, anchorSigners)
+		admitted, _ := next(t, anchor, types.NetworkLocal, anchorSigners) // different validator set, same epoch
+		store := installed()
+		// the cache-miss read sees nothing, then a racing writer admits another entry before Store
+		wrapped := &racingStore{memStore: store, onStore: func() { store.tbs[2] = admitted }}
+		m := NewTrustBaseManager(log, wrapped, restReturning(e2), NewTrustBaseValidator(wrapped))
+		got, err := m.GetByEpoch(t.Context(), 2)
+		require.NoError(t, err)
+		require.Same(t, admitted, got)
+		require.NotSame(t, e2, got)
+	})
+}
+
+// racingStore simulates a concurrent writer that wins between the cache miss and Store.
+type racingStore struct {
+	*memStore
+	onStore func()
+}
+
+func (r *racingStore) Store(ctx context.Context, tb types.RootTrustBase) error {
+	r.onStore()
+	return r.memStore.Store(ctx, tb)
 }
 
 type mockBFTRestClient struct {
