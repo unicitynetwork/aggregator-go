@@ -37,14 +37,14 @@ func checkInvariants(t testing.TB, c *Catalog) {
 		var pa *attachment
 		for a := v.attHead; a != nil; a = a.next {
 			require.Same(t, pa, a.prev)
-			require.Same(t, a, v.attIdx[a.digest])
+			require.Same(t, a, v.attIdx.m[a.digest])
 			attBytes += a.bytes
 			cnt++
 			pa = a
 		}
 		require.Same(t, pa, v.attTail)
 		require.Equal(t, cnt, v.attN)
-		require.Len(t, v.attIdx, cnt)
+		require.Len(t, v.attIdx.m, cnt)
 		require.Equal(t, attBytes, v.attBytes)
 		live += int(attBytes)
 		require.Equal(t, v.refs, len(v.leases))
@@ -80,13 +80,13 @@ func checkInvariants(t testing.TB, c *Catalog) {
 		require.NotEmpty(t, vs)
 		for v := range vs {
 			require.True(t, v.live, "a retired view is not indexed")
-			require.Contains(t, v.attIdx, d)
+			require.Contains(t, v.attIdx.m, d)
 			indexed++
 		}
 	}
 	var held int
 	for v := c.head; v != nil; v = v.next {
-		held += len(v.attIdx)
+		held += v.attIdx.size()
 	}
 	require.Equal(t, held, indexed)
 	var retiredViews, retiredAtts uint64
@@ -686,11 +686,12 @@ func TestAccountantForWiresBackendsWhichCanTotal(t *testing.T) {
 	require.NotNil(t, c.acc)
 }
 
-// The digest lookup of the publication path is an index probe: the candidate views examined per lookup do not
-// depend on the number of retained views (a scan examined V/2 on average). The answer equals the scan's.
+// The digest lookup of the publication path is an index probe: every lookup in a view's attachment index is
+// counted wherever the loop lives, so a lookup which scanned the retained views would show V probes. Per
+// successful lookup exactly one view is probed, flat across V; the reference scan (kept here as the model of the
+// previous implementation, going through the same counted index) probes ~V/2 and grows with V.
 func TestDigestLookupDoesNotScanTheRetainedViews(t *testing.T) {
-	ctx := context.Background()
-	var perLookup []float64
+	var indexed, scan []float64
 	for _, v := range []int{16, 32, 64, 128, 256} {
 		w := &countingWorld{}
 		c, err := NewCatalog(scalingLimits(v), WithAccountant(w))
@@ -698,13 +699,20 @@ func TestDigestLookupDoesNotScanTheRetainedViews(t *testing.T) {
 		digests := map[int][32]byte{}
 		for i := 1; i <= v; i++ {
 			pub(t, c, w, i, uint64(i), 100)
-			uc := ucFor(t, rootN(i), uint64(i))
-			digests[i] = sha256.Sum256(uc)
+			digests[i] = sha256.Sum256(ucFor(t, rootN(i), uint64(i)))
 		}
-		// an attachment which no view has yet, and a second view holding an equal certification digest is impossible
-		// to confuse: the lookup returns the newest holder
-		before := c.digestVisits
+		scanOnce := func(d [32]byte) bool { // the previous implementation: newest view first
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			for vw := c.tail; vw != nil; vw = vw.prev {
+				if vw.attIdx.get(d) != nil {
+					return true
+				}
+			}
+			return false
+		}
 		const lookups = 50
+		probesBefore := c.attProbes
 		for k := 0; k < lookups; k++ {
 			i := 1 + (k*7)%v
 			block, root, ok := c.ViewForDigest(digests[i])
@@ -714,17 +722,28 @@ func TestDigestLookupDoesNotScanTheRetainedViews(t *testing.T) {
 			_, ok = c.PartitionViewForDigest(digests[i])
 			require.True(t, ok)
 		}
+		indexed = append(indexed, float64(c.attProbes-probesBefore)/(2*lookups))
+		require.InDelta(t, 1.0, indexed[len(indexed)-1], 1e-9, "exactly one view probed per successful lookup: %v", indexed)
+
+		probesBefore = c.attProbes
+		for k := 0; k < lookups; k++ {
+			require.True(t, scanOnce(digests[1+(k*7)%v]))
+		}
+		scan = append(scan, float64(c.attProbes-probesBefore)/lookups)
+
+		// a digest nobody holds probes no view at all
+		probesBefore = c.attProbes
 		_, _, ok := c.ViewForDigest([32]byte{9})
 		require.False(t, ok)
-		perLookup = append(perLookup, float64(c.digestVisits-before)/(2*lookups))
+		require.Equal(t, probesBefore, c.attProbes)
 		checkInvariants(t, c)
 		// evicted views are not found
 		pub(t, c, w, v+1, uint64(v+1), 100)
 		_, _, ok = c.ViewForDigest(digests[1])
 		require.False(t, ok, "the oldest view was evicted")
-		_ = ctx
 	}
-	for _, p := range perLookup {
-		require.LessOrEqual(t, p, 1.0, "views examined per lookup: %v", perLookup)
+	for i := 1; i < len(scan); i++ {
+		require.Greater(t, scan[i], 1.7*scan[i-1], "the reference scan grows with V (otherwise the counter proves nothing): %v", scan)
 	}
+	require.Greater(t, scan[len(scan)-1], 50*indexed[len(indexed)-1], "scan %v indexed %v", scan, indexed)
 }

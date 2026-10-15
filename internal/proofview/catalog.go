@@ -61,6 +61,26 @@ type PublishInput struct {
 	Cert   Certification
 }
 
+// attIndex is the digest index of the attachments of one view. Every lookup is counted in the catalog
+// (probes): a lookup path which examined many views would show it, wherever its loop lives.
+type attIndex struct {
+	m      map[[sha256.Size]byte]*attachment
+	probes *uint64
+}
+
+func (x attIndex) get(d [sha256.Size]byte) *attachment {
+	*x.probes++
+	return x.m[d]
+}
+func (x attIndex) put(a *attachment)       { x.m[a.digest] = a }
+func (x attIndex) del(d [sha256.Size]byte) { delete(x.m, d) }
+func (x attIndex) size() int               { return len(x.m) }
+func (x attIndex) each(f func(d [sha256.Size]byte)) {
+	for d := range x.m {
+		f(d)
+	}
+}
+
 // attachment is one certification (UC plus optional partition view) of a view. The
 // attachments of a view form a list, oldest first, whose tail is the latest
 // certification; it is indexed by digest.
@@ -87,7 +107,7 @@ type view struct {
 
 	attHead, attTail *attachment // oldest ... latest
 	attN             int
-	attIdx           map[[sha256.Size]byte]*attachment
+	attIdx           attIndex
 	attBytes         uint64 // sum of the bytes of the attachments in the list
 
 	leases map[*Lease]struct{}
@@ -126,6 +146,7 @@ type Catalog struct {
 	// so a late partition view finds its view without scanning the retained ones.
 	byDigest     map[[sha256.Size]byte]map[*view]struct{}
 	digestVisits uint64   // candidate views examined by digest lookups (hardware independent metric)
+	attProbes    uint64   // every lookup of a digest in a view\'s attachment index, wherever it is done
 	evictable    viewHeap // live, unpinned views except the newest, oldest first
 	pinned       viewHeap // live, pinned views, oldest first
 	// retiredLive are the retired views with leases pressure has not cancelled yet: a pressure
@@ -315,7 +336,7 @@ func (c *Catalog) Publish(ctx context.Context, in PublishInput) error {
 		block:    in.Block.clone(),
 		root:     append([]byte(nil), in.Root...),
 		reader:   in.Reader,
-		attIdx:   make(map[[sha256.Size]byte]*attachment, 1),
+		attIdx:   attIndex{m: make(map[[sha256.Size]byte]*attachment, 1), probes: &c.attProbes},
 		evictIdx: -1,
 		pinIdx:   -1,
 	}
@@ -384,7 +405,7 @@ func (c *Catalog) AttachCertification(ctx context.Context, block BlockIdentity, 
 // an older or equal UC that is no longer (or never was) attached is historical
 // and is dropped, so redelivery can never promote it over a newer certification.
 func (c *Catalog) attachLocked(v *view, att *attachment, toClose []backend.ReadView) ([]backend.ReadView, error) {
-	if old := v.attIdx[att.digest]; old != nil {
+	if old := v.attIdx.get(att.digest); old != nil {
 		if old.view != nil || att.view == nil {
 			return toClose, nil // nothing new
 		}
@@ -407,7 +428,7 @@ func (c *Catalog) enforceAttachLocked(v *view, att *attachment, toClose []backen
 	if viewCost(v, 0) > c.limits.RetentionBudgetBytes {
 		// The certification does not fit; drop it. If it is (or supersedes)
 		// the current one, latest would otherwise be older material.
-		if v.attIdx[att.digest] == att {
+		if v.attIdx.get(att.digest) == att {
 			c.dropAttLocked(v, att)
 		}
 		if isCur && att.round >= c.curRound {
@@ -433,7 +454,7 @@ func (c *Catalog) pushAttLocked(v *view, att *attachment) {
 	}
 	v.attTail = att
 	v.attN++
-	v.attIdx[att.digest] = att
+	v.attIdx.put(att)
 	v.attBytes += att.bytes
 	if v.live {
 		c.liveAttBytes += att.bytes
@@ -454,7 +475,7 @@ func (c *Catalog) replaceAttLocked(v *view, old, att *attachment) {
 	} else {
 		v.attTail = att
 	}
-	v.attIdx[att.digest] = att
+	v.attIdx.put(att)
 	v.attBytes = v.attBytes - old.bytes + att.bytes
 	if v.live {
 		c.liveAttBytes = c.liveAttBytes - old.bytes + att.bytes
@@ -476,7 +497,7 @@ func (c *Catalog) dropAttLocked(v *view, a *attachment) {
 	}
 	a.prev, a.next = nil, nil
 	v.attN--
-	delete(v.attIdx, a.digest)
+	v.attIdx.del(a.digest)
 	v.attBytes -= a.bytes
 	if v.live {
 		c.liveAttBytes -= a.bytes
@@ -515,15 +536,20 @@ func (c *Catalog) unindexDigestLocked(v *view, d [sha256.Size]byte) {
 }
 
 // newestWithDigestLocked is the newest live view holding the certification.
-func (c *Catalog) newestWithDigestLocked(d [sha256.Size]byte) *view {
+func (c *Catalog) newestWithDigestLocked(d [sha256.Size]byte) (*view, *attachment) {
 	var best *view
+	var bestAtt *attachment
 	for v := range c.byDigest[d] {
 		c.digestVisits++
+		a := v.attIdx.get(d) // the index is exact: a holder always has it
+		if a == nil {
+			continue
+		}
 		if best == nil || v.seq > best.seq {
-			best = v
+			best, bestAtt = v, a
 		}
 	}
-	return best
+	return best, bestAtt
 }
 
 func identityKey(b BlockIdentity, root []byte) string {
@@ -545,9 +571,7 @@ func (c *Catalog) linkViewLocked(v *view) {
 	v.seq = c.seq
 	v.live = true
 	c.liveAttBytes += v.attBytes
-	for d := range v.attIdx {
-		c.indexDigestLocked(v, d)
-	}
+	v.attIdx.each(func(d [sha256.Size]byte) { c.indexDigestLocked(v, d) })
 	prevTail := c.tail
 	v.prev = c.tail
 	if c.tail != nil {
@@ -600,9 +624,7 @@ func (c *Catalog) unlinkViewLocked(v *view) {
 	v.rootOlder, v.rootNewer = nil, nil
 	v.live = false
 	c.liveAttBytes -= v.attBytes
-	for d := range v.attIdx {
-		c.unindexDigestLocked(v, d)
-	}
+	v.attIdx.each(func(d [sha256.Size]byte) { c.unindexDigestLocked(v, d) })
 	c.evictable.remove(v)
 	c.pinned.remove(v)
 	if c.tail != nil {
@@ -966,4 +988,29 @@ func AccountantFor(b any) Option {
 		return WithAccountant(acc)
 	}
 	return func(*Catalog) {}
+}
+
+// RetainedBytesBySummation recomputes the budgeted total the slow way: the sum of the held readers'
+// charges and of every attachment (live, of retired pinned views, and still leased after removal). It is the
+// O(V) reference the maintained total must equal, for tests and diagnostics; it takes the catalog lock.
+func (c *Catalog) RetainedBytesBySummation() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var total uint64
+	for v := c.head; v != nil; v = v.next {
+		total += v.reader.RetainedBytes()
+		for a := v.attHead; a != nil; a = a.next {
+			total += a.bytes
+		}
+	}
+	for v := range c.retired {
+		total += v.reader.RetainedBytes()
+		for a := v.attHead; a != nil; a = a.next {
+			total += a.bytes
+		}
+	}
+	for a := range c.retiredAtts {
+		total += a.bytes
+	}
+	return total
 }
