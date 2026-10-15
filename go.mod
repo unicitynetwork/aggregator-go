@@ -15,7 +15,7 @@ require (
 	github.com/testcontainers/testcontainers-go v0.40.0
 	github.com/testcontainers/testcontainers-go/modules/mongodb v0.39.0
 	github.com/testcontainers/testcontainers-go/modules/redis v0.40.0
-	github.com/unicitynetwork/bft-core v1.1.1-0.20261015083847-77b8f7e90331
+	github.com/unicitynetwork/bft-core v1.1.1-0.20261015090148-39340692da3a
 	github.com/unicitynetwork/bft-go-base v1.1.1-0.20261015080553-6251c1d73eee
 	go.mongodb.org/mongo-driver v1.17.4
 	go.opentelemetry.io/otel/metric v1.38.0
