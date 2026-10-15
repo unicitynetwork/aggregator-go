@@ -19,8 +19,6 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-var lineage = []byte("config-hash")
-
 func commit(t testing.TB, b *smtbackend.MemoryBackend, block uint64, from, to uint32) []byte {
 	ctx := context.Background()
 	var inputs []smtbackend.LeafInput
@@ -53,7 +51,7 @@ func newEnv(t *testing.T, f *prooftest.Fixture) *env {
 	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cat.Close() })
-	pub := proofpub.New(cat, b, prooftest.Partition, f.Provider(t), lineage, log)
+	pub := proofpub.New(cat, b, prooftest.Partition, f.Provider(t), log)
 	require.NotNil(t, pub)
 	return &env{b: b, cat: cat, pub: pub}
 }
@@ -92,7 +90,7 @@ func Test_PublishFinalized(t *testing.T) {
 	require.Equal(t, []byte(block.UnicityCertificate), l.UC())
 	require.Equal(t, f.Raw, l.PartitionView())
 	require.EqualValues(t, 1, l.Block().Number.Uint64())
-	require.Equal(t, lineage, l.Block().ConfigLineage)
+	require.Equal(t, []byte(f.UC.ShardConfHash), l.Block().ConfigLineage, "identity comes from the accepted UC, not process startup")
 }
 
 func Test_PublishFinalized_WithoutSidecar(t *testing.T) {
@@ -216,7 +214,7 @@ func Test_UnsupportedBackend(t *testing.T) {
 	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
 	require.NoError(t, err)
 	defer cat.Close()
-	require.Nil(t, proofpub.New(cat, nil, 1, nil, nil, nil))
+	require.Nil(t, proofpub.New(cat, nil, 1, nil, nil))
 }
 
 func commitEmpty(t testing.TB, b *smtbackend.MemoryBackend, block uint64) {
@@ -297,4 +295,64 @@ func Test_Sink_ReturnsAttachmentFailures(t *testing.T) {
 	cancel()
 	require.Error(t, e.pub.PublishProofMaterial(cancelled, material(t, proofmaterial.KindFinalized, bf, bf.Raw, 1, true)))
 	require.NoError(t, e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindFinalized, bf, bf.Raw, 1, true)))
+}
+
+// Metadata is bound to the accepted identity: equal state hashes across config epochs or
+// differing input records must not attach (architect audit, aggregator-go#196).
+func Test_Sink_RejectsIncompatibleAttachments(t *testing.T) {
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80))
+	root := commit(t, e.b, 1, 0, 20)
+	block, f := finalizedBlock(t, 1, root, 80, false)
+	e.pub.PublishFinalized(t.Context(), block)
+	before := latest(t, e.cat).UC()
+
+	t.Run("different shard configuration", func(t *testing.T) {
+		g := prooftest.New(t, 2, 1, root, 90)
+		g.UC.ShardConfHash = prooftest.Hash("another epoch's config")
+		err := e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, g, nil, 0, false))
+		require.ErrorIs(t, err, proofpub.ErrIncompatibleCertification)
+	})
+	t.Run("different input record on the same state hash", func(t *testing.T) {
+		g := prooftest.New(t, 2, 1, root, 91)
+		g.UC.InputRecord.Epoch++
+		err := e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, g, nil, 0, false))
+		require.ErrorIs(t, err, proofpub.ErrIncompatibleCertification)
+		g2 := prooftest.New(t, 2, 2, root, 92) // other shard round, same root
+		err = e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, g2, nil, 0, false))
+		require.ErrorIs(t, err, proofpub.ErrIncompatibleCertification)
+	})
+	t.Run("finalized material for a block identity with another configuration", func(t *testing.T) {
+		g := prooftest.New(t, 2, 1, root, 93)
+		g.UC.ShardConfHash = prooftest.Hash("elsewhere")
+		err := e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindFinalized, g, g.Raw, 1, true))
+		require.ErrorIs(t, err, proofview.ErrViewNotRetained)
+	})
+	t.Run("no configuration identity", func(t *testing.T) {
+		g := prooftest.New(t, 2, 1, root, 94)
+		g.UC.ShardConfHash = nil
+		require.Error(t, e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, g, nil, 0, false)))
+	})
+	require.Equal(t, before, latest(t, e.cat).UC(), "nothing was attached")
+
+	t.Run("a compatible repeat attaches", func(t *testing.T) {
+		g := prooftest.New(t, 2, 1, root, 95)
+		require.NoError(t, e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, g, g.Raw, 0, false)))
+		ucBytes, _ := types.Cbor.Marshal(g.UC)
+		require.Equal(t, ucBytes, latest(t, e.cat).UC())
+	})
+	_ = f
+}
+
+func Test_PublishRequiresConfigIdentityInUC(t *testing.T) {
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80))
+	root := commit(t, e.b, 1, 0, 20)
+	f := prooftest.New(t, 2, 1, root, 80)
+	f.UC.ShardConfHash = nil
+	uc, err := types.Cbor.Marshal(f.UC)
+	require.NoError(t, err)
+	block, _ := finalizedBlock(t, 1, root, 80, false)
+	block.UnicityCertificate = api.NewHexBytes(uc)
+	e.pub.PublishFinalized(t.Context(), block)
+	_, err = e.cat.AcquireLatest(t.Context())
+	require.ErrorIs(t, err, proofview.ErrViewNotRetained, "an unsupported boundary is rejected, not labelled with a startup value")
 }

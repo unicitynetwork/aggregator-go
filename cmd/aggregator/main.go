@@ -249,6 +249,14 @@ func main() {
 	// Initialize gateway server
 	server := gateway.NewServer(cfg, log, aggregatorService)
 
+	// get_inclusion_proofs.v1: served from the retained-view catalog, or explicitly
+	// unsupported (unsupported_configuration) when this deployment cannot serve it.
+	batchHandler, unsupportedReason := service.NewBatchProofHandler(cfg, roundManager, storageInstance, aggregatorService)
+	server.SetBatchProofHandler(batchHandler)
+	if unsupportedReason != "" {
+		log.WithComponent("main").Info("get_inclusion_proofs.v1 unsupported in this deployment", "reason", unsupportedReason)
+	}
+
 	// Start server in a goroutine
 	go func() {
 		if err := server.Start(); err != nil {

@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -34,6 +35,8 @@ const (
 	ResultRetainFailed = "retain_failed"
 	ResultRootMismatch = "root_mismatch"
 	ResultStaleBlock   = "stale_block"
+	ResultNoConfig     = "no_config_identity"
+	ResultIncompatible = "attach_incompatible"
 	ResultRejected     = "rejected"
 	ResultUnsupported  = "unsupported_backend"
 	ResultAttached     = "attached"
@@ -46,7 +49,6 @@ type Publisher struct {
 	catalog  *proofview.Catalog
 	retainer smtbackend.ReadViewRetainer
 	backend  smtbackend.Backend
-	lineage  []byte
 	// partition is used to re-validate stored partition views against their UC
 	// before publication (restored material is never trusted blindly).
 	partition types.PartitionID
@@ -57,12 +59,12 @@ type Publisher struct {
 // New returns a publisher, or nil when the backend cannot retain read views
 // (the batch API is then unavailable for this deployment). A nil *Publisher is
 // valid and does nothing.
-func New(catalog *proofview.Catalog, backend smtbackend.Backend, partition types.PartitionID, topology proofmaterial.TopologyProvider, configLineage []byte, log *logger.Logger) *Publisher {
+func New(catalog *proofview.Catalog, backend smtbackend.Backend, partition types.PartitionID, topology proofmaterial.TopologyProvider, log *logger.Logger) *Publisher {
 	retainer, ok := backend.(smtbackend.ReadViewRetainer)
 	if !ok || catalog == nil {
 		return nil
 	}
-	return &Publisher{catalog: catalog, retainer: retainer, backend: backend, partition: partition, topology: topology, lineage: append([]byte(nil), configLineage...), log: log}
+	return &Publisher{catalog: catalog, retainer: retainer, backend: backend, partition: partition, topology: topology, log: log}
 }
 
 // Catalog returns the catalog (nil for a nil publisher).
@@ -126,6 +128,13 @@ func (p *Publisher) publish(ctx context.Context, block *models.Block, strict, un
 		fail(ResultNoCert, nil)
 		return
 	}
+	// The configuration identity of a state is the one its accepted UC carries, never a
+	// process-wide startup value.
+	lineage, err := ucLineage(block.UnicityCertificate)
+	if err != nil {
+		fail(ResultNoConfig, err)
+		return
+	}
 	// The block must be the one the backend is committed at: a historical block whose
 	// root merely equals the current one (eg consecutive empty rounds) must never be
 	// recreated as a view, nor replace latest. Callers hold the commit ordering lock.
@@ -154,7 +163,7 @@ func (p *Publisher) publish(ctx context.Context, block *models.Block, strict, un
 	}
 	// Publish takes ownership of rv (closes it on failure).
 	err = p.catalog.Publish(ctx, proofview.PublishInput{
-		Block:  proofview.BlockIdentity{Number: block.Index, ConfigLineage: p.lineage},
+		Block:  proofview.BlockIdentity{Number: block.Index, ConfigLineage: lineage},
 		Root:   append([]byte(nil), block.RootHash...),
 		Reader: rv,
 		Cert:   proofview.Certification{UC: block.UnicityCertificate, PartitionView: p.revalidatedView(ctx, block)},
@@ -196,15 +205,27 @@ func (p *Publisher) PublishProofMaterial(ctx context.Context, m *proofmaterial.M
 		return nil
 	}
 	root := m.UC.InputRecord.Hash
+	lineage := m.UC.ShardConfHash
+	if len(lineage) != proofmaterial.ConfHashSize {
+		metrics.ProofViewPublicationTotal.WithLabelValues(ResultNoConfig).Inc()
+		return errors.New("certification carries no shard configuration identity")
+	}
 	var id proofview.BlockIdentity
 	if m.Kind == proofmaterial.KindFinalized && m.HasBlock {
-		id = proofview.BlockIdentity{Number: api.NewBigIntFromUint64(m.BlockNumber), ConfigLineage: p.lineage}
+		id = proofview.BlockIdentity{Number: api.NewBigIntFromUint64(m.BlockNumber), ConfigLineage: lineage}
 	} else {
-		var ok bool
-		if id, ok = p.catalog.BlockForRoot(root); !ok {
+		// repeat / duplicate: only onto the retained state with a compatible accepted
+		// identity, never selected by the state hash alone
+		found, refUC, ok := p.catalog.ViewForRoot(root)
+		if !ok {
 			metrics.ProofViewPublicationTotal.WithLabelValues(ResultAttachMiss).Inc()
 			return proofview.ErrViewNotRetained
 		}
+		if err := compatible(refUC, m.UC); err != nil {
+			metrics.ProofViewPublicationTotal.WithLabelValues(ResultIncompatible).Inc()
+			return err
+		}
+		id = found
 	}
 	err := p.catalog.AttachCertification(ctx, id, root, proofview.Certification{UC: m.UCBytes, PartitionView: m.PartitionView})
 	switch {
@@ -218,6 +239,40 @@ func (p *Publisher) PublishProofMaterial(ctx context.Context, m *proofmaterial.M
 	// The error goes back to the BFT client, which only logs it (certification is never
 	// failed) but keeps the sidecar fill retryable for later duplicate deliveries.
 	return err
+}
+
+// ErrIncompatibleCertification: the certification is not for the retained state's accepted
+// input record / shard configuration (an unsupported boundary, eg an epoch change).
+var ErrIncompatibleCertification = errors.New("certification is incompatible with the retained state")
+
+// ucLineage extracts the shard configuration identity of an accepted UC.
+func ucLineage(ucBytes []byte) ([]byte, error) {
+	var uc types.UnicityCertificate
+	if err := types.Cbor.Unmarshal(ucBytes, &uc); err != nil {
+		return nil, fmt.Errorf("decoding UC: %w", err)
+	}
+	if len(uc.ShardConfHash) != proofmaterial.ConfHashSize {
+		return nil, errors.New("UC carries no shard configuration identity")
+	}
+	return append([]byte(nil), uc.ShardConfHash...), nil
+}
+
+// compatible requires the new certification to repeat the retained state's accepted
+// input record (round, epoch, state, previous and block hashes) and shard configuration.
+func compatible(refUCBytes []byte, uc *types.UnicityCertificate) error {
+	var ref types.UnicityCertificate
+	if err := types.Cbor.Unmarshal(refUCBytes, &ref); err != nil || ref.InputRecord == nil || uc.InputRecord == nil {
+		return fmt.Errorf("%w: unreadable reference", ErrIncompatibleCertification)
+	}
+	a, b := ref.InputRecord, uc.InputRecord
+	if a.RoundNumber != b.RoundNumber || a.Epoch != b.Epoch ||
+		!bytes.Equal(a.Hash, b.Hash) || !bytes.Equal(a.PreviousHash, b.PreviousHash) || !bytes.Equal(a.BlockHash, b.BlockHash) {
+		return fmt.Errorf("%w: input record differs", ErrIncompatibleCertification)
+	}
+	if !bytes.Equal(ref.ShardConfHash, uc.ShardConfHash) {
+		return fmt.Errorf("%w: shard configuration differs", ErrIncompatibleCertification)
+	}
+	return nil
 }
 
 var _ proofmaterial.Sink = (*Publisher)(nil)

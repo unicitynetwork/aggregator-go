@@ -321,7 +321,7 @@ func Test_ProofMaterial_FillRetriedUntilViewRetained(t *testing.T) {
 	defer catalog.Close()
 	log, err := logger.New("error", "json", "", false)
 	require.NoError(t, err)
-	pub := proofpub.New(catalog, backend, prooftest.Partition, f.Provider(t), nil, log)
+	pub := proofpub.New(catalog, backend, prooftest.Partition, f.Provider(t), log)
 	require.NotNil(t, pub)
 
 	rm := &stubRoundManager{}

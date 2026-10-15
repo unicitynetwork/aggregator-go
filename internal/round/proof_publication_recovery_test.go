@@ -56,7 +56,7 @@ func newRecoveryEnv(t *testing.T) *recoveryEnv {
 		logger:     log,
 		smtBackend: b,
 		storage:    &fixedStorage{bs: bs},
-		proofPub:   proofpub.New(cat, b, prooftest.Partition, topo, []byte("lineage"), log),
+		proofPub:   proofpub.New(cat, b, prooftest.Partition, topo, log),
 	}
 	return &recoveryEnv{rm: rm, cat: cat, bs: bs, b: b}
 }

@@ -29,3 +29,18 @@ func (c *Catalog) BlockForRoot(root []byte) (BlockIdentity, bool) {
 	}
 	return BlockIdentity{}, false
 }
+
+// ViewForRoot returns the identity and the latest certification's UC bytes of the newest
+// retained view with the given root, without pinning it. Callers use it to check that
+// further certifications are compatible with that state before attaching them.
+func (c *Catalog) ViewForRoot(root []byte) (BlockIdentity, []byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := len(c.views) - 1; i >= 0; i-- {
+		v := c.views[i]
+		if bytes.Equal(v.root, root) && len(v.atts) > 0 {
+			return v.block.clone(), append([]byte(nil), v.atts[len(v.atts)-1].uc...), true
+		}
+	}
+	return BlockIdentity{}, nil, false
+}

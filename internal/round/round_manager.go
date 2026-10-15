@@ -3,7 +3,6 @@ package round
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"errors"
 	"fmt"
 	"math/big"
@@ -1812,15 +1811,11 @@ func (rm *RoundManager) initProofViews(cfg *config.Config, client *bft.BFTClient
 	if err != nil {
 		return fmt.Errorf("failed to create proof view catalog: %w", err)
 	}
-	lineage, err := cfg.BFT.ShardConf.Hash(crypto.SHA256)
-	if err != nil {
-		return fmt.Errorf("failed to hash shard configuration: %w", err)
-	}
 	topology, err := bft.ProofTopologyFromConfig(&cfg.BFT)
 	if err != nil {
 		return fmt.Errorf("invalid consolidation topology: %w", err)
 	}
-	rm.proofPub = proofpub.New(catalog, rm.smtBackend, cfg.BFT.ShardConf.PartitionID, topology, lineage, rm.logger)
+	rm.proofPub = proofpub.New(catalog, rm.smtBackend, cfg.BFT.ShardConf.PartitionID, topology, rm.logger)
 	if rm.proofPub == nil {
 		_ = catalog.Close()
 		return nil

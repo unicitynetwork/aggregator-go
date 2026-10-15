@@ -23,7 +23,7 @@ func attachDiskProofPub(t *testing.T, rm *RoundManager) *proofview.Catalog {
 	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cat.Close() })
-	rm.proofPub = proofpub.New(cat, rm.smtBackend, 0, nil, []byte("lineage"), newTestLogger(t))
+	rm.proofPub = proofpub.New(cat, rm.smtBackend, 0, nil, newTestLogger(t))
 	require.NotNil(t, rm.proofPub, "the RocksDB backend must support retained read views")
 	return cat
 }
