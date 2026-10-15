@@ -28,6 +28,10 @@ func BatchHandlerFor(cfg *config.Config, svc Service, rm round.Manager, st inter
 	if !ok || !vok || pp.ProofViewPublisher() == nil || pp.ProofViewPublisher().Catalog() == nil {
 		return UnsupportedRPC
 	}
-	batch := NewBatchProofService(CatalogViewSource(pp.ProofViewPublisher().Catalog()), st.AggregatorRecordStorage(), validator, BatchProofConfig{})
+	records, rok := st.AggregatorRecordStorage().(BatchRecordSource)
+	if !rok { // storage without the bounded size projection cannot serve the batch API
+		return UnsupportedRPC
+	}
+	batch := NewBatchProofService(CatalogViewSource(pp.ProofViewPublisher().Catalog()), records, validator, BatchProofConfig{})
 	return batch.HandleRPC
 }

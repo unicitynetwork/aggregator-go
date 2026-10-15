@@ -388,3 +388,66 @@ func TestConsolidate_SignatureFailureIsNeverUnavailable(t *testing.T) {
 	require.Error(t, err)
 	require.False(t, client.IsUnavailable(err))
 }
+
+// A resolver's own timeout (attempt context still live) is not caller cancellation.
+func TestConsolidate_ResolverOwnTimeoutIsPreserved(t *testing.T) {
+	sim, items := scenario(t, 2, 1)
+	c := newClient(t, sim, func(cfg *client.Config) {
+		cfg.Timeout = 30 * time.Second
+		cfg.Resolver = nil
+		cfg.ResolverContext = func(ctx context.Context, _ *types.UnicitySeal) (types.RootTrustBase, error) {
+			return nil, context.DeadlineExceeded // the resolver's own shorter timeout
+		}
+	})
+	_, err := c.Consolidate(context.Background(), items)
+	ce := requireClientErr(t, err, client.KindTimeout, "resolver_timeout")
+	require.True(t, ce.Retryable)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "the cause is preserved")
+	require.False(t, client.IsCancelled(err))
+
+	c = newClient(t, sim, func(cfg *client.Config) {
+		cfg.Resolver = nil
+		cfg.ResolverContext = func(context.Context, *types.UnicitySeal) (types.RootTrustBase, error) {
+			return nil, context.Canceled // cancelled inside the resolver, not by the caller
+		}
+	})
+	_, err = c.Consolidate(context.Background(), items)
+	ce = requireClientErr(t, err, client.KindServer, "resolver_cancelled")
+	require.False(t, ce.Retryable)
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, client.IsCancelled(err), "the caller never cancelled")
+}
+
+// HTTP failures are operational whatever their body looks like.
+func TestConsolidate_HTTPStatusIndependentOfBody(t *testing.T) {
+	for name, tc := range map[string]struct {
+		status    int
+		body      string
+		kind      client.Kind
+		detail    string
+		retryable bool
+		rpcCode   int
+	}{
+		"503 plain text":              {503, "Service Unavailable", client.KindTransport, "http_503", true, 0},
+		"503 json without envelope":   {503, `{"message":"Service Unavailable"}`, client.KindTransport, "http_503", true, 0},
+		"503 empty":                   {503, ``, client.KindTransport, "http_503", true, 0},
+		"502 html":                    {502, `<html>Bad gateway</html>`, client.KindTransport, "http_502", true, 0},
+		"429 json":                    {429, `{"error":"slow down"}`, client.KindTransport, "http_429", true, 0},
+		"404 json":                    {404, `{"error":"no such path"}`, client.KindTransport, "http_404", false, 0},
+		"503 with rpc error keeps it": {503, `{"jsonrpc":"2.0","id":1,"error":{"code":-32006,"message":"busy","data":{"reason":"busy","detail":"pinned_views","retryable":true}}}`, client.KindUnavailable, "pinned_views", true, -32006},
+		"200 malformed body":          {200, `{"message":"hello"}`, client.KindInvalidResponse, "", false, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sim, items := scenario(t, 2, 1)
+			sim.Shards[len(sim.Shards)-1].Hook = func(w http.ResponseWriter, _ []byte) bool {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+				return true
+			}
+			_, err := newClient(t, sim, nil).Consolidate(context.Background(), items)
+			ce := requireClientErr(t, err, tc.kind, tc.detail)
+			require.Equal(t, tc.retryable, ce.Retryable)
+			require.Equal(t, tc.rpcCode, ce.Code)
+		})
+	}
+}

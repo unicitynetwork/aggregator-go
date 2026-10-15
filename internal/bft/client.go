@@ -408,7 +408,7 @@ func (c *BFTClientImpl) handleMessage(ctx context.Context, msg any) {
 }
 
 func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *certification.CertificationResponse) error {
-	metrics.BFTCertificationResponsesTotal.Inc()
+	metrics.BFTCertificationResponsesTotal.WithLabelValues(c.shardID.String()).Inc()
 	c.lastCertResponseTime.Store(time.Now().UnixMilli())
 
 	if err := cr.IsValid(); err != nil {

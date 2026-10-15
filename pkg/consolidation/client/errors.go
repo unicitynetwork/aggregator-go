@@ -112,6 +112,15 @@ func ctxError(shard types.ShardID, err error) *Error {
 	return &Error{Kind: KindCancelled, Shard: shard, Detail: "cancelled", Err: err}
 }
 
+// resolverError types a context error that did not come from the attempt context:
+// the resolver's own timeout or cancellation. The cause is preserved.
+func resolverError(err error) *Error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return &Error{Kind: KindTimeout, Detail: "resolver_timeout", Retryable: true, Err: err}
+	}
+	return &Error{Kind: KindServer, Detail: "resolver_cancelled", Err: err}
+}
+
 func isContextErr(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

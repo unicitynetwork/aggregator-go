@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -218,7 +219,10 @@ func (c *Client) Consolidate(ctx context.Context, items []Item) (*Result, error)
 	// becomes cancellation/timeout; a genuine authentication failure stays a verification error
 	libFail := func(err error) error {
 		if isContextErr(err) {
-			return ctxError(types.ShardID{}, ctx.Err())
+			if ctx.Err() != nil { // the attempt itself ended
+				return ctxError(types.ShardID{}, ctx.Err())
+			}
+			return resolverError(err) // the resolver's own timeout/cancellation, cause preserved
 		}
 		return libError(err)
 	}
@@ -509,11 +513,21 @@ func (c *Client) fetch(ctx context.Context, g *shardGroup, items []Item, root []
 		return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: errors.New("response exceeds the 8 MiB limit")}
 	}
 	var rr rpcResponse
-	if err := json.Unmarshal(raw, &rr); err != nil {
-		if resp.StatusCode != http.StatusOK {
-			return nil, &Error{Kind: KindTransport, Shard: g.ep.ShardID, Retryable: true, Detail: fmt.Sprintf("http_%d", resp.StatusCode), Err: errors.New(resp.Status)}
+	parseErr := json.Unmarshal(raw, &rr)
+	if resp.StatusCode != http.StatusOK {
+		// an HTTP failure is operational whatever its body looks like; a well-formed
+		// JSON-RPC error envelope still carries its structured information
+		if parseErr == nil && rr.JSONRPC == jsonrpc.Version && present(rr.Error) {
+			var eb rpcErrorBody
+			if json.Unmarshal(rr.Error, &eb) == nil {
+				return nil, rpcError(g.ep.ShardID, eb.Code, eb.Message, eb.Data)
+			}
 		}
-		return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: err}
+		return nil, &Error{Kind: KindTransport, Shard: g.ep.ShardID, Detail: fmt.Sprintf("http_%d", resp.StatusCode),
+			Retryable: retryableStatus(resp.StatusCode), Err: fmt.Errorf("%s: %s", resp.Status, snippet(raw))}
+	}
+	if parseErr != nil {
+		return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: parseErr}
 	}
 	invalid := func(format string, a ...any) error {
 		return &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: fmt.Errorf(format, a...)}
@@ -548,4 +562,18 @@ func (c *Client) fetch(ctx context.Context, g *shardGroup, items []Item, root []
 		}
 	}
 	return &batchResponse{proofs: res.Proofs, view: res.PartitionView}, nil
+}
+
+// retryableStatus: transient HTTP statuses (as a new attempt).
+func retryableStatus(code int) bool {
+	return code == http.StatusRequestTimeout || code == http.StatusTooEarly || code == http.StatusTooManyRequests || code >= 500
+}
+
+// snippet is a bounded, single-line excerpt of an error body.
+func snippet(b []byte) string {
+	const max = 200
+	if len(b) > max {
+		b = b[:max]
+	}
+	return strings.Join(strings.Fields(string(b)), " ")
 }

@@ -230,3 +230,20 @@ func TestCLI_OperationalExitCodes(t *testing.T) {
 	require.Equal(t, exitOperational, run([]string{"-config", e.cfg, "-in", e.in, "-timeout", "200ms"}, &out, &errb), errb.String())
 	require.Contains(t, errb.String(), `"kind":"timeout"`)
 }
+
+func TestCLI_HTTPFailureBodiesAreOperational(t *testing.T) {
+	for name, body := range map[string]string{"plain": "Service Unavailable", "json": `{"message":"Service Unavailable"}`} {
+		e := setup(t, 2)
+		for _, sh := range e.sim.Shards {
+			sh.Hook = func(w http.ResponseWriter, _ []byte) bool {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(body))
+				return true
+			}
+		}
+		var out, errb bytes.Buffer
+		require.Equal(t, exitOperational, run([]string{"-config", e.cfg, "-in", e.in}, &out, &errb), name+": "+errb.String())
+		require.Contains(t, errb.String(), `"kind":"transport"`, name)
+		require.Contains(t, errb.String(), `"detail":"http_503"`, name)
+	}
+}

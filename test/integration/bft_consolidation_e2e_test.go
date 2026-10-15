@@ -50,6 +50,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/service"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	"github.com/unicitynetwork/aggregator-go/internal/storage"
+	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/internal/testutil"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/consolidation"
@@ -216,7 +217,10 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 	var mu sync.Mutex
 	var early []certified
 	var stopWriters atomic.Bool
-	var submitted atomic.Int64
+	subs := make([]atomic.Int64, n) // accepted submissions per shard
+	var recording atomic.Bool       // collect states submitted while consolidations run
+	var duringMu sync.Mutex
+	during := make([][]*api.CertificationRequest, n)
 	var wg sync.WaitGroup
 	submit := func(i int, tag string) *api.CertificationRequest {
 		for k := 0; k < 5000; k++ {
@@ -225,7 +229,12 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 			key, _ := req.StateID.GetTreeKey()
 			if shards[i].id.Comparator()(key) {
 				if st := submitCertificationRequestStatus(t, shards[i].url, req); st == "SUCCESS" {
-					submitted.Add(1)
+					subs[i].Add(1)
+					if recording.Load() {
+						duringMu.Lock()
+						during[i] = append(during[i], req)
+						duringMu.Unlock()
+					}
 					return req
 				}
 				return nil
@@ -315,24 +324,50 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 	require.NoError(t, os.WriteFile(inFile, b, 0o600))
 
 	// ---- phase 1: writes only; phase 2: writes + repeated consolidations ----
-	measure := func(d time.Duration, during func()) (responses, rounds float64) {
-		r0, rd0 := promtest.ToFloat64(metrics.BFTCertificationResponsesTotal), rootRound(t, root)
+	type snapshot struct {
+		responses, blocks, subs []float64
+		round                   uint64
+	}
+	take := func() snapshot {
+		sn := snapshot{round: rootRound(t, root)}
+		for i, sh := range shards {
+			sn.responses = append(sn.responses, promtest.ToFloat64(metrics.BFTCertificationResponsesTotal.WithLabelValues(sh.id.String())))
+			sn.blocks = append(sn.blocks, float64(blockHeight(t, sh.url)))
+			sn.subs = append(sn.subs, float64(subs[i].Load()))
+		}
+		return sn
+	}
+	diff := func(a, b snapshot) phaseCount {
+		pc := phaseCount{Rounds: float64(b.round - a.round)}
+		for i := range shards {
+			pc.Responses = append(pc.Responses, b.responses[i]-a.responses[i])
+			pc.Blocks = append(pc.Blocks, b.blocks[i]-a.blocks[i])
+			pc.Submitted = append(pc.Submitted, b.subs[i]-a.subs[i])
+		}
+		return pc
+	}
+	phase := func(d time.Duration, work func()) phaseCount {
+		s0 := take()
 		deadline := time.Now().Add(d)
 		for time.Now().Before(deadline) {
-			if during != nil {
-				during()
+			if work != nil {
+				work()
 			} else {
 				time.Sleep(500 * time.Millisecond)
 			}
 		}
-		return promtest.ToFloat64(metrics.BFTCertificationResponsesTotal) - r0, float64(rootRound(t, root) - rd0)
+		return diff(s0, take())
 	}
-	resp1, rounds1 := measure(12*time.Second, nil)
-	t.Logf("phase 1 (writes only): %.0f responses over %.0f root rounds (%d shards)", resp1, rounds1, n)
+	if os.Getenv("CONSOLIDATION_E2E_NEGATIVE") == "stop-writers" {
+		stopAll() // negative control: the progress checks below must fail
+	}
+	p1 := phase(12*time.Second, nil)
+	t.Logf("phase 1 (writes only): %s", p1)
 
 	var bundles []consolidationBundle
 	var attempts, unavailable int
-	resp2, rounds2 := measure(12*time.Second, func() {
+	recording.Store(true)
+	p2 := phase(12*time.Second, func() {
 		attempts++
 		out := filepath.Join(dir, fmt.Sprintf("bundle-%d.json", attempts))
 		code, stderr := runCLI(t, cli, cfgFile, inFile, out)
@@ -346,17 +381,25 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 			t.Fatalf("consolidate-proofs exit %d: %s", code, stderr)
 		}
 	})
-	t.Logf("phase 2 (writes + %d consolidations): %.0f responses over %.0f root rounds", attempts, resp2, rounds2)
+	recording.Store(false)
+	t.Logf("phase 2 (writes + %d consolidations): %s", attempts, p2)
 	require.NotEmpty(t, bundles, "at least one consolidation must succeed under continuous writes (unavailable=%d)", unavailable)
 	stopAll()
 
-	// root-to-shard message count: at most one response per shard per root round, and the
-	// per-round rate with consolidation traffic equals the writes-only rate
-	ratio1, ratio2 := resp1/(rounds1*float64(n)), resp2/(rounds2*float64(n))
-	t.Logf("responses per shard per root round: writes only %.3f, with consolidation %.3f", ratio1, ratio2)
-	require.LessOrEqual(t, ratio1, 1.05)
-	require.LessOrEqual(t, ratio2, 1.05)
-	require.InDelta(t, ratio1, ratio2, 0.25, "consolidation must not change the root-to-shard message rate")
+	// writes and finalization really continued on every shard during both phases
+	require.NoError(t, checkWriteProgress(p1), "phase 1")
+	require.NoError(t, checkWriteProgress(p2), "phase 2 (during consolidation)")
+	// and the states submitted while consolidations ran get finalized with proofs
+	for i, sh := range shards {
+		duringMu.Lock()
+		reqs := append([]*api.CertificationRequest(nil), during[i]...)
+		duringMu.Unlock()
+		require.NotEmpty(t, reqs, "shard %d accepted no write during consolidation", i)
+		fetchInclusionProofV2(t, sh.url, reqs[len(reqs)-1].StateID, 90*time.Second)
+	}
+
+	// root-to-shard messages follow the finalization workload: consolidation adds none
+	require.NoError(t, checkMessageRate(p1, p2), "root-to-shard message rate with consolidation traffic")
 
 	// ---- verify every bundle with the reference verifier ----
 	for bi, bundle := range bundles {
@@ -527,7 +570,7 @@ func startConsolidationAggregator(ctx context.Context, t *testing.T, o consolida
 		Server: config.ServerConfig{Host: "127.0.0.1", Port: o.port, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second,
 			IdleTimeout: 60 * time.Second, ConcurrencyLimit: 100, HTTP2MaxConcurrentStreams: 1024},
 		Database: config.DatabaseConfig{URI: o.mongoURI, Database: "aggregator_" + strings.ReplaceAll(o.name, "-", "_"),
-			ConnectTimeout: 10 * time.Second, ServerSelectionTimeout: 10 * time.Second, SocketTimeout: 30 * time.Second, MaxPoolSize: 10, MinPoolSize: 1},
+			ConnectTimeout: 30 * time.Second, ServerSelectionTimeout: 30 * time.Second, SocketTimeout: 90 * time.Second, MaxPoolSize: 10, MinPoolSize: 1},
 		Redis:   config.RedisConfig{Host: o.redisHost, Port: o.redisPort},
 		HA:      config.HAConfig{Enabled: false},
 		Logging: config.LoggingConfig{Level: "warn", Format: "json"},
@@ -549,7 +592,16 @@ func startConsolidationAggregator(ctx context.Context, t *testing.T, o consolida
 
 	aggCtx, aggCancel := context.WithCancel(ctx)
 	log, _ := logger.New(cfg.Logging.Level, cfg.Logging.Format, "", false)
-	queue, stor, err := storage.NewStorage(aggCtx, cfg, log)
+	var queue interfaces.CommitmentQueue
+	var stor interfaces.Storage
+	var err error
+	for attempt := 0; attempt < 4; attempt++ { // index creation can time out on the shared, loaded VM
+		if queue, stor, err = storage.NewStorage(aggCtx, cfg, log); err == nil {
+			break
+		}
+		t.Logf("storage for %s: attempt %d failed: %v", o.name, attempt+1, err)
+		time.Sleep(2 * time.Second)
+	}
 	require.NoError(t, err)
 	queue.Initialize(aggCtx)
 	eventBus := events.NewEventBus(log)
@@ -624,4 +676,13 @@ func startRedisCleanly(t *testing.T) (string, int) {
 	}
 	require.NoError(t, lastErr)
 	return "", 0
+}
+
+func blockHeight(t *testing.T, url string) int64 {
+	t.Helper()
+	raw, err := rpcCall(url, "get_block_height", nil)
+	require.NoError(t, err)
+	var resp api.GetBlockHeightResponse
+	require.NoError(t, json.Unmarshal(raw, &resp))
+	return resp.BlockNumber.Int64()
 }
