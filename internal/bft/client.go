@@ -847,6 +847,15 @@ func proofTopologyFromConfig(conf *config.BFTConfig) (proofmaterial.TopologyProv
 	return t, nil
 }
 
+// ProofTopology returns the optional independently pinned topology (nil: none configured).
+func (c *BFTClientImpl) ProofTopology() proofmaterial.TopologyProvider { return c.proofTopology }
+
+// SealVerifier returns the client's trusted seal verifier (authority resolved from the
+// admitted trust history) for re-authenticating stored material.
+func (c *BFTClientImpl) SealVerifier(ctx context.Context) types.SealVerifier {
+	return c.authn.sealVerifier(ctx)
+}
+
 // SetProofMaterialSink sets the consumer of published proof material (A4 wires the
 // retained-view catalog here). Safe to call before or after Start; nil resets to discard.
 func (c *BFTClientImpl) SetProofMaterialSink(sink proofmaterial.Sink) {
