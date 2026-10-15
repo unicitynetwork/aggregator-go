@@ -70,12 +70,15 @@ func (s catalogSource) AcquireRoot(ctx context.Context, root []byte) (BatchLease
 // BatchRecordSource loads finalized, immutable records by state ID. The
 // storage's AggregatorRecordStorage satisfies it.
 type BatchRecordSource interface {
-	// GetStoredSizeByStateID returns the stored size of the finalized record
-	// without loading it (a bounded server-side projection); found is false if
-	// there is none. It is consulted before GetByStateID so a record that cannot
-	// fit the response budget is never materialized.
-	GetStoredSizeByStateID(ctx context.Context, stateID api.StateID) (size int64, found bool, err error)
-	GetByStateID(ctx context.Context, stateID api.StateID) (*models.AggregatorRecord, error)
+	// GetStoredSizesByStateIDs returns the stored size of the finalized record of
+	// each state ID (keyed by StateID.String(); absent when there is none)
+	// without loading the records: one bounded server-side projection for the
+	// whole batch. It is consulted before GetFinalizedByStateIDs so records that
+	// cannot fit the response budget are never materialized.
+	GetStoredSizesByStateIDs(ctx context.Context, stateIDs []api.StateID) (map[string]int64, error)
+	// GetFinalizedByStateIDs loads the finalized records of the state IDs (keyed by
+	// StateID.String(); absent when there is none): one query for the whole batch.
+	GetFinalizedByStateIDs(ctx context.Context, stateIDs []api.StateID) (map[string]*models.AggregatorRecord, error)
 }
 
 // encodedSizeFactor converts a record's stored size to a conservative upper
@@ -254,6 +257,38 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 	}
 
 	ucBytes := lease.UC()
+
+	// Database access is constant per batch, independent of the number of IDs:
+	// one size projection, then (only if the batch fits the response budget) one
+	// record load. Both run under the request/lease context.
+	if err := ctx.Err(); err != nil {
+		return nil, ctxError(err)
+	}
+	sizes, serr := s.records.GetStoredSizesByStateIDs(ctx, req.StateIDs)
+	if serr != nil {
+		return nil, dbError(ctx, serr)
+	}
+	// Preflight in request order: a missing record or an over-budget estimate is
+	// reported before any record is loaded.
+	budget := int64(len(view)*2 + 128)
+	for _, id := range req.StateIDs {
+		stored, ok := sizes[id.String()]
+		if !ok {
+			return nil, unavailable("state_not_included")
+		}
+		budget += stored*encodedSizeFactor + responseElementOverhead
+		if stored < 0 || budget > int64(s.maxBytes) {
+			return nil, limitExceeded(api.DetailResponseBytes, s.maxBytes)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, ctxError(err)
+	}
+	records, lerr := s.records.GetFinalizedByStateIDs(ctx, req.StateIDs)
+	if lerr != nil {
+		return nil, dbError(ctx, lerr)
+	}
+
 	proofs := make([]*api.GetInclusionProofResponseV2, len(keys))
 	size := len(view)*2 + 128
 	lctx := lease.Context()
@@ -264,22 +299,7 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 		if err := lctx.Err(); err != nil {
 			return nil, ctxError(err)
 		}
-		// Preflight: reject before loading or encoding a record that cannot fit
-		// the remaining response budget.
-		stored, found, serr := s.records.GetStoredSizeByStateID(ctx, req.StateIDs[i])
-		if serr != nil {
-			if cerr := ctx.Err(); cerr != nil {
-				return nil, ctxError(cerr)
-			}
-			return nil, &BatchError{Code: jsonrpc.DatabaseErrorCode, Message: "Database error", Internal: serr}
-		}
-		if !found {
-			return nil, unavailable("state_not_included")
-		}
-		if stored < 0 || int64(size)+stored*encodedSizeFactor+responseElementOverhead > int64(s.maxBytes) {
-			return nil, limitExceeded(api.DetailResponseBytes, s.maxBytes)
-		}
-		p, berr := s.buildProof(ctx, lease, req.StateIDs[i], key, blk, ucBytes)
+		p, berr := s.buildProof(ctx, lease, records[req.StateIDs[i].String()], key, blk, ucBytes)
 		if berr != nil {
 			return nil, berr
 		}
@@ -295,14 +315,14 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 	return &api.GetInclusionProofsResponseV1{Proofs: proofs, PartitionView: view}, nil
 }
 
-func (s *BatchProofService) buildProof(ctx context.Context, lease BatchLease, id api.StateID, key []byte, blk proofview.BlockIdentity, ucBytes []byte) (*api.GetInclusionProofResponseV2, *BatchError) {
-	rec, err := s.records.GetByStateID(ctx, id)
-	if err != nil {
-		if cerr := ctx.Err(); cerr != nil {
-			return nil, ctxError(cerr)
-		}
-		return nil, &BatchError{Code: jsonrpc.DatabaseErrorCode, Message: "Database error", Internal: err}
+func dbError(ctx context.Context, err error) *BatchError {
+	if cerr := ctx.Err(); cerr != nil {
+		return ctxError(cerr)
 	}
+	return &BatchError{Code: jsonrpc.DatabaseErrorCode, Message: "Database error", Internal: err}
+}
+
+func (s *BatchProofService) buildProof(ctx context.Context, lease BatchLease, rec *models.AggregatorRecord, key []byte, blk proofview.BlockIdentity, ucBytes []byte) (*api.GetInclusionProofResponseV2, *BatchError) {
 	// the record must be a finalized state of the pinned view
 	if rec == nil || rec.BlockNumber == nil || blk.Number == nil || rec.BlockNumber.Cmp(blk.Number.Int) > 0 {
 		return nil, unavailable("state_not_included")
