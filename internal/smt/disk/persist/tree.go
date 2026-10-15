@@ -202,6 +202,8 @@ func (t *Tree) CreateSnapshot() (*Snapshot, error) {
 		baseRoot:   t.rootHash,
 		rootHash:   t.rootHash,
 		ownOverlay: make(nodeOverlay),
+		writeIdx:   make(map[disk.NodeKey]int),
+		collected:  make(map[*disk.Branch]disk.NodeKey),
 		loadedKeys: make(map[disk.NodeKey]struct{}),
 	}, nil
 }
@@ -439,9 +441,7 @@ func loadProofFrontier(reader storage.ReadStore, loads []frontierLoadReq) error 
 	if len(loads) == 0 {
 		return nil
 	}
-	sort.Slice(loads, func(i, j int) bool {
-		return nodeKeyLess(loads[i].req.nodeKey, loads[j].req.nodeKey)
-	})
+	loads = orderFrontierLoads(loads, nil)
 	keys := make([]disk.NodeKey, len(loads))
 	for i, load := range loads {
 		keys[i] = load.req.nodeKey
@@ -559,9 +559,11 @@ type Snapshot struct {
 	// writeIdx is the position of each key in overlayWrites (a rewritten node replaces its
 	// earlier version in place).
 	writeIdx map[disk.NodeKey]int
-	// collected records, for every branch already encoded into the overlay, the node key it
-	// was encoded at: a subtree whose root is unchanged and at the same key is not visited again.
+	// collected records, for every branch already persisted (encoded into the overlay, or loaded
+	// unchanged from the overlay chain or the store) the node key it is persisted at: a subtree whose
+	// root is unchanged and at the same key is not visited, and so not written, again.
 	collected      map[*disk.Branch]disk.NodeKey
+	collectedMu    sync.Mutex
 	overlayDeletes []disk.NodeKey
 	loadedKeys     map[disk.NodeKey]struct{}
 	cacheWrites    map[disk.NodeKey]cachedNode
@@ -677,6 +679,8 @@ func (s *Snapshot) Fork() (*Snapshot, error) {
 		baseRoot:      s.rootHash,
 		rootHash:      s.rootHash,
 		ownOverlay:    make(nodeOverlay),
+		writeIdx:      make(map[disk.NodeKey]int),
+		collected:     make(map[*disk.Branch]disk.NodeKey),
 		parentOverlay: chain,
 		loadedKeys:    make(map[disk.NodeKey]struct{}),
 	}, nil
@@ -736,13 +740,22 @@ func (s *Snapshot) AddLeaves(inputs []disk.LeafInput) (disk.ApplyResult, error) 
 	materializedDepthLE24Before := s.stats.MaterializedDepthLE24
 	materializedDepthGT24Before := s.stats.MaterializedDepthGT24
 	materializeParallelForksBefore := s.stats.MaterializeParallelForks
+	sortCallsBefore, sortedBefore, wavesBefore := s.stats.SortCalls, s.stats.SortedElements, s.stats.WaveOrderings
+	// the one comparison sort of the update: materialization and the tree update share it
+	sortStart := time.Now()
+	order, sortedN := disk.SortedInputOrder(inputs)
+	sortDuration := time.Since(sortStart)
+	if sortedN > 1 {
+		s.stats.SortCalls++
+		s.stats.SortedElements += sortedN
+	}
 	materializeStart := time.Now()
-	if err := s.materializeInputs(inputs); err != nil {
+	if err := s.materializeInputs(inputs, order, sortDuration); err != nil {
 		return disk.ApplyResult{}, err
 	}
 	materializeDuration := time.Since(materializeStart)
 	applyStart := time.Now()
-	result, err := s.tree.ApplyLeaves(inputs)
+	result, err := s.tree.ApplyLeavesOrdered(inputs, order)
 	applyDuration := time.Since(applyStart)
 	if err != nil {
 		return result, err
@@ -770,6 +783,9 @@ func (s *Snapshot) AddLeaves(inputs []disk.LeafInput) (disk.ApplyResult, error) 
 	result.Stats.MaterializedDepthGT24 += s.stats.MaterializedDepthGT24 - materializedDepthGT24Before
 	result.Stats.MaterializeParallelForks += s.stats.MaterializeParallelForks - materializeParallelForksBefore
 	result.Stats.ApplyDuration += applyDuration
+	result.Stats.SortCalls += s.stats.SortCalls - sortCallsBefore
+	result.Stats.SortedElements += s.stats.SortedElements - sortedBefore
+	result.Stats.WaveOrderings += s.stats.WaveOrderings - wavesBefore
 	s.rootHash = result.CandidateRoot
 	if len(result.AcceptedIndexes) > 0 || len(s.ownOverlay) > 0 {
 		if err := s.collectOverlay(); err != nil {
@@ -1131,35 +1147,26 @@ func (t *Tree) applyNodeCacheUpdate(deletes []disk.NodeKey, updates map[disk.Nod
 	}
 }
 
-func (s *Snapshot) materializeInputs(inputs []disk.LeafInput) error {
+func (s *Snapshot) materializeInputs(inputs []disk.LeafInput, order []int, sortDuration time.Duration) error {
 	if len(s.loadedKeys) == 0 && len(inputs) > 0 {
 		// A 10k-leaf batch at tens of millions of leaves usually materializes
 		// more than 100k nodes. Pre-sizing avoids repeated large map growth.
 		s.loadedKeys = make(map[disk.NodeKey]struct{}, len(inputs)*16)
 	}
-	seen := make(map[disk.Key]struct{}, len(inputs))
-	keys := make([]disk.Key, 0, len(inputs))
-	for _, input := range inputs {
-		key, err := disk.KeyFromBytes(input.Key)
+	// the keys in tree order, without duplicates, derived from the shared order (no sort here)
+	keys := make([]disk.Key, 0, len(order))
+	for _, idx := range order {
+		key, err := disk.KeyFromBytes(inputs[idx].Key)
 		if err != nil {
 			continue
 		}
-		if _, ok := seen[key]; ok {
+		if n := len(keys); n > 0 && keys[n-1] == key {
 			continue
 		}
-		seen[key] = struct{}{}
 		keys = append(keys, key)
 	}
-	trackStats := s.trackApplyStats()
-	var sortStart time.Time
-	if trackStats {
-		sortStart = time.Now()
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		return keyPathLess(keys[i], keys[j])
-	})
-	if trackStats {
-		s.stats.MaterializeSortDuration += time.Since(sortStart)
+	if s.trackApplyStats() {
+		s.stats.MaterializeSortDuration += sortDuration
 	}
 	if s.parent != nil && (s.parent.materializeMode == MaterializeFrontier || s.parent.materializeMode == MaterializeParallel) {
 		if s.parent.materializeMode == MaterializeParallel {
@@ -1325,7 +1332,30 @@ func (s *Snapshot) materializeBranchParallel(branch *disk.Branch, nodeKey disk.N
 	return branch, nil
 }
 
+// noteLoaded records that "branch" was just loaded, unchanged, from what is already persisted
+// (the overlay chain or the store) at key: it needs no write unless it later moves to another key
+// or is replaced by an updated copy. Safe for the parallel materialization.
+func (s *Snapshot) noteLoaded(branch *disk.Branch, key disk.NodeKey) {
+	if branch == nil || branch.Kind == disk.BranchKindStub {
+		return
+	}
+	s.collectedMu.Lock()
+	if s.collected == nil {
+		s.collected = make(map[*disk.Branch]disk.NodeKey)
+	}
+	s.collected[branch] = key
+	s.collectedMu.Unlock()
+}
+
 func (s *Snapshot) loadBranchParallel(key disk.NodeKey, expectedHash disk.Hash) (*disk.Branch, error) {
+	branch, err := s.loadBranchParallelRaw(key, expectedHash)
+	if err == nil {
+		s.noteLoaded(branch, key)
+	}
+	return branch, err
+}
+
+func (s *Snapshot) loadBranchParallelRaw(key disk.NodeKey, expectedHash disk.Hash) (*disk.Branch, error) {
 	if branch, ok, err := s.loadBranchFromOverlay(key, expectedHash, true); ok || err != nil {
 		return branch, err
 	}
@@ -1602,9 +1632,7 @@ func (s *Snapshot) loadFrontier(loads []frontierLoadReq) error {
 	}
 
 	sortStart := time.Now()
-	sort.Slice(misses, func(i, j int) bool {
-		return nodeKeyLess(misses[i].req.nodeKey, misses[j].req.nodeKey)
-	})
+	misses = orderFrontierLoads(misses, &s.stats)
 	s.stats.MaterializeSortDuration += time.Since(sortStart)
 
 	keys := make([]disk.NodeKey, len(misses))
@@ -1744,6 +1772,7 @@ func (s *Snapshot) loadFrontierParallel(loads []frontierLoadReq) error {
 }
 
 func (s *Snapshot) attachLoadedBranch(req frontierReq, branch *disk.Branch) {
+	s.noteLoaded(branch, req.nodeKey)
 	*req.slot = branch
 	if req.root {
 		s.tree = disk.NewTreeWithRoot(branch)
@@ -1858,6 +1887,74 @@ func nodeKeyLess(left, right disk.NodeKey) bool {
 	return left.Less(right)
 }
 
+// nodeKeyDepthRank is the primary sort key of NodeKey.Less (the encoded depth bytes, low byte first;
+// the root sorts last).
+func nodeKeyDepthRank(k disk.NodeKey) int {
+	if k.IsRoot() {
+		return 0xffff
+	}
+	d := k.DepthBits()
+	return (d&0xff)<<8 | d>>8
+}
+
+// orderFrontierLoads puts the loads of a frontier wave in NodeKey order without a comparison sort.
+//
+// A wave is generated from the previous one in tree (left to right) order, so within one depth the
+// loads are already in prefix order; ordering by NodeKey is then a stable grouping by depth, linear
+// in the wave (plus the few distinct depths). The result is verified in one pass and only if the
+// assumption were ever violated is a comparison sort used (counted in st: it stays zero).
+func orderFrontierLoads(loads []frontierLoadReq, st *disk.ApplyStats) []frontierLoadReq {
+	if st != nil {
+		st.WaveOrderings++
+	}
+	sorted := func(l []frontierLoadReq) bool {
+		for i := 1; i < len(l); i++ {
+			if nodeKeyLess(l[i].req.nodeKey, l[i-1].req.nodeKey) {
+				return false
+			}
+		}
+		return true
+	}
+	if sorted(loads) {
+		return loads
+	}
+	// stable grouping by depth rank
+	rankIdx := map[int]int{}
+	var ranks []int
+	for _, l := range loads {
+		r := nodeKeyDepthRank(l.req.nodeKey)
+		if _, ok := rankIdx[r]; !ok {
+			rankIdx[r] = len(ranks)
+			ranks = append(ranks, r)
+		}
+	}
+	sort.Ints(ranks) // the distinct depths only (at most 258)
+	for i, r := range ranks {
+		rankIdx[r] = i
+	}
+	counts := make([]int, len(ranks)+1)
+	for _, l := range loads {
+		counts[rankIdx[nodeKeyDepthRank(l.req.nodeKey)]+1]++
+	}
+	for i := 1; i < len(counts); i++ {
+		counts[i] += counts[i-1]
+	}
+	out := make([]frontierLoadReq, len(loads))
+	for _, l := range loads {
+		b := rankIdx[nodeKeyDepthRank(l.req.nodeKey)]
+		out[counts[b]] = l
+		counts[b]++
+	}
+	if !sorted(out) {
+		sort.Slice(out, func(i, j int) bool { return nodeKeyLess(out[i].req.nodeKey, out[j].req.nodeKey) })
+		if st != nil {
+			st.SortCalls++
+			st.SortedElements += len(out)
+		}
+	}
+	return out
+}
+
 // keyPathLess orders keys by big-endian tree-traversal order, which equals
 // unsigned lexicographic byte order (rsmt_sort_key(k) = k).
 func keyPathLess(left, right disk.Key) bool {
@@ -1927,6 +2024,14 @@ func (s *Snapshot) materializeSlot(slot **disk.Branch, nodeKey disk.NodeKey, pre
 }
 
 func (s *Snapshot) loadBranch(key disk.NodeKey, expectedHash disk.Hash) (*disk.Branch, error) {
+	branch, err := s.loadBranchRaw(key, expectedHash)
+	if err == nil {
+		s.noteLoaded(branch, key)
+	}
+	return branch, err
+}
+
+func (s *Snapshot) loadBranchRaw(key disk.NodeKey, expectedHash disk.Hash) (*disk.Branch, error) {
 	if branch, ok, err := s.loadBranchFromOverlay(key, expectedHash, false); ok || err != nil {
 		return branch, err
 	}
