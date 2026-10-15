@@ -25,9 +25,9 @@ func requireOutcome(t *testing.T, err error, want Outcome) {
 func TestConsolidate_HappyPath(t *testing.T) {
 	f := newFixture(t, ts())
 	s := f.session()
-	out, err := s.Consolidate(f.in)
+	out, err := f.consolidate(s)
 	require.NoError(t, err)
-	require.Equal(t, Counters{QuorumChecks: 1, BodyChecks: 2, LeafChecks: 2}, s.Counters())
+	require.Equal(t, Counters{QuorumChecks: 1, BodyChecks: 2, LeafChecks: 2, EvidenceQuorumChecks: 2}, s.Counters())
 	require.Equal(t, f.round, out.RootRound)
 	require.Len(t, out.Shards, 2)
 
@@ -55,7 +55,7 @@ func TestConsolidate_SessionReuseKeepsOneQuorumCheck(t *testing.T) {
 	f := newFixture(t, ts())
 	s := f.session()
 	for range 3 {
-		_, err := s.Consolidate(f.in)
+		_, err := f.consolidate(s)
 		require.NoError(t, err)
 	}
 	c := s.Counters()
@@ -76,7 +76,7 @@ func TestConsolidate_ReferenceTimeAfterTarget(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, tc.o)
-			_, err := f.session().Consolidate(f.in)
+			_, err := f.consolidate(f.session())
 			if tc.want == "" {
 				require.NoError(t, err)
 				return
@@ -87,44 +87,154 @@ func TestConsolidate_ReferenceTimeAfterTarget(t *testing.T) {
 }
 
 func TestConsolidate_RMin(t *testing.T) {
+	// unknown bound is unavailable
 	f := newFixture(t, ts())
-	f.in.MinRootRound = nil
 	_, err := f.session().Consolidate(f.in)
 	requireOutcome(t, err, OutcomeUnavailable)
 
+	// a master seal older than the authenticated evidence is stale
 	f = newFixture(t, ts())
-	above := f.round + 1
-	f.in.MinRootRound = &above
-	_, err = f.session().Consolidate(f.in)
+	s := f.session()
+	f.in.Bound, err = s.AuthenticateEvidence([]Evidence{f.evidenceAt(0, f.round+1)})
+	require.NoError(t, err)
+	_, err = s.Consolidate(f.in)
 	requireOutcome(t, err, OutcomeStale)
+
+	// the bound is the maximum evidence round, and equal rounds pass
+	f = newFixture(t, ts())
+	s = f.session()
+	f.in.Bound, err = s.AuthenticateEvidence([]Evidence{f.evidenceAt(0, f.round-5), f.evidenceAt(1, f.round)})
+	require.NoError(t, err)
+	require.Equal(t, f.round, f.in.Bound.Round())
+	_, err = s.Consolidate(f.in)
+	require.NoError(t, err)
 
 	f = newFixture(t, ts())
 	f.in.PartitionView = nil
-	_, err = f.session().Consolidate(f.in)
+	_, err = f.consolidate(f.session())
 	requireOutcome(t, err, OutcomeUnavailable)
+}
+
+func TestConsolidate_BoundCannotBeForgedOrLowered(t *testing.T) {
+	f := newFixture(t, ts())
+	// a zero-value (guessed) bound carries no lineage and is refused
+	f.in.Bound = &RootRoundBound{}
+	_, err := f.session().Consolidate(f.in)
+	requireOutcome(t, err, OutcomeIncompatibleLineage)
+
+	// a genuine bound of another policy/history is refused
+	other := newFixture(t, ts())
+	other.policy.ID = []byte("another history")
+	os, err := NewSession(other.policy, other.resolver())
+	require.NoError(t, err)
+	f.in.Bound, err = os.AuthenticateEvidence(other.defaultEvidence())
+	require.NoError(t, err)
+	_, err = f.session().Consolidate(f.in)
+	requireOutcome(t, err, OutcomeIncompatibleLineage)
+
+	// the bound cannot be taken from unauthenticated evidence
+	f = newFixture(t, ts())
+	s, err := NewSession(f.policy, newFixture(t, ts()).resolver()) // other authority
+	require.NoError(t, err)
+	_, err = s.AuthenticateEvidence(f.defaultEvidence())
+	requireOutcome(t, err, OutcomeUnauthenticated)
+
+	// forged evidence: tampered proof, no evidence
+	f = newFixture(t, ts())
+	ev := f.defaultEvidence()
+	ev[1].Proof.CertificationData.Witness = []byte{1}
+	_, err = f.session().AuthenticateEvidence(ev)
+	requireOutcome(t, err, OutcomeBindingMismatch)
+	_, err = f.session().AuthenticateEvidence(nil)
+	requireOutcome(t, err, OutcomeUnavailable)
+
+	// evidence with a rewritten seal round no longer reaches its seal signature
+	ev = f.defaultEvidence()
+	uc := mustUC(t, ev[0].Proof.UnicityCertificate)
+	uc.UnicitySeal.RootChainRoundNumber++
+	ev[0].Proof.UnicityCertificate, err = uc.MarshalCBOR()
+	require.NoError(t, err)
+	_, err = f.session().AuthenticateEvidence(ev)
+	requireOutcome(t, err, OutcomeUnauthenticated)
+}
+
+func TestAuthenticateEvidence_CrossNetwork(t *testing.T) {
+	f := newFixture(t, ts())
+	e0 := f.evidenceAt(0, f.round-1)
+	e1 := f.evidenceAt(1, f.round-1)
+	uc := mustUC(t, e1.Proof.UnicityCertificate)
+	uc.UnicitySeal.NetworkID++
+	require.NoError(t, uc.UnicitySeal.Sign("test", f.signer))
+	var err error
+	e1.Proof.UnicityCertificate, err = uc.MarshalCBOR()
+	require.NoError(t, err)
+	_, err = f.session().AuthenticateEvidence([]Evidence{e0, e1})
+	requireOutcome(t, err, OutcomeIncompatibleLineage)
+}
+
+func TestConsolidate_InputsAndOutputsAreIndependent(t *testing.T) {
+	exp := uint64(5000)
+	f := newFixture(t, fixtureOpts{refTime: 1000, timestamp: 2000, expiresAt: &exp})
+	out, err := f.consolidate(f.session())
+	require.NoError(t, err)
+
+	before, err := types.Cbor.Marshal(f.in.Peers[0].Proofs[0].InclusionProof.CertificationData)
+	require.NoError(t, err)
+	for _, so := range out.Shards {
+		cd := so.Proofs[0].InclusionProof.CertificationData
+		cd.Witness[0] ^= 0xff
+		cd.TransactionHash[0] ^= 0xff
+		cd.SourceStateHash[0] ^= 0xff
+		cd.OwnerPredicate.Params[0] ^= 0xff
+		cd.OwnerPredicate.Code[0] ^= 0xff
+		*cd.ExpiresAt = 1
+		*so.Proofs[0].InclusionProof.ReferenceTime = 1
+		so.Proofs[0].InclusionProof.CertificateBytes = append(so.Proofs[0].InclusionProof.CertificateBytes, 1)
+	}
+	after, err := types.Cbor.Marshal(f.in.Peers[0].Proofs[0].InclusionProof.CertificationData)
+	require.NoError(t, err)
+	require.Equal(t, before, after, "mutating the output must not alter the original data")
+	require.Equal(t, uint64(5000), *f.reqs[1].CertificationData.ExpiresAt)
+
+	// and vice versa: reusing input buffers does not change an output bundle
+	f2 := newFixture(t, fixtureOpts{refTime: 1000, timestamp: 2000, expiresAt: &exp})
+	out2, err := f2.consolidate(f2.session())
+	require.NoError(t, err)
+	want, err := types.Cbor.Marshal(out2.Shards[1].Proofs[0].InclusionProof.CertificationData)
+	require.NoError(t, err)
+	cd := f2.in.Peers[0].Proofs[0].InclusionProof.CertificationData
+	cd.Witness[0] ^= 0xff
+	cd.OwnerPredicate.Params[0] ^= 0xff
+	*cd.ExpiresAt = 1
+	got, err := types.Cbor.Marshal(out2.Shards[1].Proofs[0].InclusionProof.CertificationData)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 }
 
 func TestConsolidate_UnauthenticatedMaster(t *testing.T) {
 	f := newFixture(t, ts())
 	// a different authority never accepts the master seal
 	other := newFixture(t, ts())
+	var err error
+	f.in.Bound, err = f.session().AuthenticateEvidence(f.defaultEvidence())
+	require.NoError(t, err)
 	s, err := NewSession(f.policy, other.resolver())
 	require.NoError(t, err)
-	_, err = s.Consolidate(f.in)
+	_, err = f.consolidate(s)
 	requireOutcome(t, err, OutcomeUnauthenticated)
 	require.Equal(t, 1, s.Counters().QuorumChecks)
 
 	// a resolver failure is not authentication either
 	s, err = NewSession(f.policy, func(*types.UnicitySeal) (types.RootTrustBase, error) { return nil, errors.New("unknown epoch") })
 	require.NoError(t, err)
-	_, err = s.Consolidate(f.in)
+	_, err = f.consolidate(s)
 	requireOutcome(t, err, OutcomeUnauthenticated)
 }
 
 func TestConsolidate_AlteredSealWitnessMisses(t *testing.T) {
 	f := newFixture(t, ts())
 	s := f.session()
-	_, err := s.Consolidate(f.in)
+	_, err := f.consolidate(s)
 	require.NoError(t, err)
 
 	// same authority, same policy, same seal fields but a different witness
@@ -203,7 +313,7 @@ func TestConsolidate_BindingFailures(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, ts())
 			tc.mutate(f)
-			_, err := f.session().Consolidate(f.in)
+			_, err := f.consolidate(f.session())
 			requireOutcome(t, err, tc.want)
 		})
 	}
@@ -235,7 +345,7 @@ func TestConsolidate_InvalidInputs(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, ts())
 			mutate(f)
-			_, err := f.session().Consolidate(f.in)
+			_, err := f.consolidate(f.session())
 			requireOutcome(t, err, OutcomeInvalidInput)
 		})
 	}
@@ -248,7 +358,7 @@ func TestConsolidate_NoncanonicalMasterUCRejected(t *testing.T) {
 	for _, p := range f.in.Master.Proofs {
 		p.InclusionProof.UnicityCertificate = append(bytes.Clone(raw), 0x00)
 	}
-	_, err := f.session().Consolidate(f.in)
+	_, err := f.consolidate(f.session())
 	require.Error(t, err)
 	o, _ := OutcomeOf(err)
 	require.Contains(t, []Outcome{OutcomeInvalidInput, OutcomeUnsupported}, o)
@@ -289,7 +399,7 @@ func u64p(v uint64) *uint64 { return &v }
 
 func TestCheckLeaf_StateOfAnotherShard(t *testing.T) {
 	f := newFixture(t, ts())
-	out, err := f.session().Consolidate(f.in)
+	out, err := f.consolidate(f.session())
 	require.NoError(t, err)
 	// shard 1's certificate does not cover the state of shard 0
 	err = f.session().checkLeaf(0, f.reqs[0], out.Shards[0].Proofs[0].InclusionProof, out.Shards[1].UC)

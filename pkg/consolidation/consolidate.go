@@ -33,9 +33,10 @@ type Input struct {
 	PartitionView []byte
 	// Peers are the other participating shards, fetched at the exact roots of the view.
 	Peers []ShardResult
-	// MinRootRound is the authenticated minimal root chain round (R_min) the
-	// master seal must reach. Nil means unknown: the result is unavailable.
-	MinRootRound *uint64
+	// Bound is the authenticated minimal root chain round (R_min) the master
+	// seal must reach, produced by Session.AuthenticateEvidence. It cannot be
+	// constructed by callers. Nil means unknown: the result is unavailable.
+	Bound *RootRoundBound
 }
 
 // ShardOutput is the consolidated result of one shard.
@@ -66,8 +67,11 @@ func (s *Session) Consolidate(in *Input) (*Output, error) {
 	if in == nil {
 		return nil, fail(OutcomeInvalidInput, -1, nil, "nil input")
 	}
-	if in.MinRootRound == nil {
+	if in.Bound == nil {
 		return nil, fail(OutcomeUnavailable, -1, nil, "authenticated minimal root round is unknown")
+	}
+	if !bytes.Equal(in.Bound.lineage, s.policy.id()) {
+		return nil, fail(OutcomeIncompatibleLineage, -1, nil, "root round bound was derived under another policy")
 	}
 	if len(in.PartitionView) == 0 {
 		return nil, fail(OutcomeUnavailable, -1, nil, "master response carries no partition view")
@@ -98,9 +102,12 @@ func (s *Session) Consolidate(in *Input) (*Output, error) {
 		}
 		return nil, fail(OutcomeInvalidInput, -1, err, "master partition view")
 	}
+	if enclosing.UnicitySeal.NetworkID != in.Bound.network {
+		return nil, fail(OutcomeIncompatibleLineage, -1, nil, "master seal is of network %d, bound of network %d", enclosing.UnicitySeal.NetworkID, in.Bound.network)
+	}
 	round := enclosing.UnicitySeal.RootChainRoundNumber
-	if round < *in.MinRootRound {
-		return nil, fail(OutcomeStale, -1, nil, "master seal root round %d is below required %d", round, *in.MinRootRound)
+	if round < in.Bound.round {
+		return nil, fail(OutcomeStale, -1, nil, "master seal root round %d is below required %d", round, in.Bound.round)
 	}
 
 	out := &Output{MasterShard: in.Master.ShardID, RootRound: round}
@@ -196,10 +203,7 @@ func (s *Session) consolidateShard(bi int, b ShardResult, target *types.UnicityC
 			return nil, err
 		}
 		np := *p.InclusionProof
-		if np.CertificationData != nil {
-			cd := *np.CertificationData
-			np.CertificationData = &cd
-		}
+		np.CertificationData = np.CertificationData.Clone()
 		if np.ReferenceTime != nil {
 			rt := *np.ReferenceTime
 			np.ReferenceTime = &rt

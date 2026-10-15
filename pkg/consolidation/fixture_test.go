@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	testsig "github.com/unicitynetwork/bft-go-base/testutils/sig"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -35,6 +36,12 @@ type fixture struct {
 	certs    [2][]byte
 	round    uint64
 	in       *Input
+
+	signer abcrypto.Signer
+	ut     *types.UnicityTree
+	utc    *types.UnicityTreeCertificate
+	tree   types.ShardTree
+	inputs []types.ShardTreeInput
 }
 
 type fixtureOpts struct {
@@ -50,6 +57,7 @@ func newFixture(t *testing.T, o fixtureOpts) *fixture {
 	sids := [2]types.ShardID{sid0, sid1}
 
 	signer, verifier := testsig.CreateSignerAndVerifier(t)
+	f.signer = signer
 	sigKey, err := verifier.MarshalPublicKey()
 	require.NoError(t, err)
 	f.tb, err = types.NewTrustBase(types.NetworkMainNet, []*types.NodeInfo{{NodeID: "test", SigKey: sigKey, Stake: 1}})
@@ -111,6 +119,7 @@ func newFixture(t *testing.T, o fixtureOpts) *fixture {
 	require.NoError(t, err)
 	utc, err := ut.Certificate(testPartition)
 	require.NoError(t, err)
+	f.tree, f.ut, f.utc, f.inputs = tree, ut, utc, inputs
 	f.round = f.tb.GetEpochStart() + 50
 	seal := &types.UnicitySeal{Version: 1, NetworkID: f.tb.GetNetworkID(), Epoch: f.tb.GetEpoch(), RootChainRoundNumber: f.round,
 		Timestamp: types.NewTimestamp(), PreviousHash: h32("prev root"), Hash: ut.RootHash()}
@@ -128,7 +137,6 @@ func newFixture(t *testing.T, o fixtureOpts) *fixture {
 		Master:        f.shardResult(sid0, 0, masterUC),
 		PartitionView: f.viewRaw,
 		Peers:         []ShardResult{f.shardResult(sid1, 1, peerUC)},
-		MinRootRound:  &f.round,
 	}
 	return f
 }
@@ -163,4 +171,33 @@ func (f *fixture) session() *Session {
 	s, err := NewSession(f.policy, f.resolver())
 	require.NoError(f.t, err)
 	return s
+}
+
+// evidenceAt is the original proof of shard i, certified under its own seal of
+// the given root round (signed by the trusted authority).
+func (f *fixture) evidenceAt(i int, round uint64) Evidence {
+	seal := &types.UnicitySeal{Version: 1, NetworkID: f.tb.GetNetworkID(), Epoch: f.tb.GetEpoch(), RootChainRoundNumber: round,
+		Timestamp: types.NewTimestamp(), PreviousHash: h32("prev root"), Hash: f.ut.RootHash()}
+	require.NoError(f.t, seal.Sign("test", f.signer))
+	uc := f.localUC(f.tree, f.inputs, i, f.utc, seal)
+	sid := f.view.Leaves[i].ShardID
+	r := f.shardResult(sid, i, uc)
+	return Evidence{Request: r.Requests[0], Proof: r.Proofs[0].InclusionProof}
+}
+
+// defaultEvidence yields R_min = round-2 over two original proofs.
+func (f *fixture) defaultEvidence() []Evidence {
+	return []Evidence{f.evidenceAt(0, f.round-10), f.evidenceAt(1, f.round-2)}
+}
+
+// consolidate authenticates the default evidence (unless a bound is set) and consolidates.
+func (f *fixture) consolidate(s *Session) (*Output, error) {
+	if f.in.Bound == nil {
+		b, err := s.AuthenticateEvidence(f.defaultEvidence())
+		if err != nil {
+			return nil, err
+		}
+		f.in.Bound = b
+	}
+	return s.Consolidate(f.in)
 }

@@ -23,6 +23,10 @@ type Counters struct {
 	BodyChecks int
 	// LeafChecks is the number of leaf (per input) verifications.
 	LeafChecks int
+	// EvidenceQuorumChecks is the number of native seal verifications done to
+	// authenticate the original evidence for R_min. They are reported
+	// separately from the output-bundle QuorumChecks.
+	EvidenceQuorumChecks int
 }
 
 // Session is the operation scope of one consolidation. It memoizes successful
@@ -79,6 +83,10 @@ func (s *Session) remember(cache map[string]struct{}, key string) {
 // reused only for the identical complete seal bytes, authority and policy.
 // Failures are never cached.
 func (s *Session) VerifySeal(seal *types.UnicitySeal) error {
+	return s.verifySeal(seal, func(c *Counters) { c.QuorumChecks++ })
+}
+
+func (s *Session) verifySeal(seal *types.UnicitySeal, count func(*Counters)) error {
 	if seal == nil {
 		return types.ErrUnicitySealIsNil
 	}
@@ -102,7 +110,7 @@ func (s *Session) VerifySeal(seal *types.UnicitySeal) error {
 		return nil
 	}
 	// the native check, never replaced by a permissive trust base
-	s.count(func(c *Counters) { c.QuorumChecks++ })
+	s.count(count)
 	if err := types.TrustBaseSealVerifier(tb).VerifySeal(seal); err != nil {
 		return &sealError{err}
 	}

@@ -27,6 +27,9 @@ const (
 	// OutcomeReferenceTime: the original reference time is later than the
 	// timestamp of the target input record.
 	OutcomeReferenceTime Outcome = "reference_time_after_target"
+	// OutcomeIncompatibleLineage: the evidence or bound belongs to another
+	// network, policy or history than the master seal.
+	OutcomeIncompatibleLineage Outcome = "incompatible_lineage"
 	// OutcomeUnsupported: unsupported encoding or configuration.
 	OutcomeUnsupported Outcome = "unsupported"
 )
