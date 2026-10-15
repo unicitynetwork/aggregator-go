@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -171,6 +172,27 @@ func (s *Server) setupJSONRPCHandlers() {
 	s.rpcServer.RegisterMethod("get_block_height", s.handleGetBlockHeight)
 	s.rpcServer.RegisterMethod("get_block", s.handleGetBlock)
 	s.rpcServer.RegisterMethod("get_block_records", s.handleGetBlockRecords)
+}
+
+// BatchProofsMethod is the JSON-RPC method of the batch inclusion proof API.
+const BatchProofsMethod = "get_inclusion_proofs.v1"
+
+// SetBatchProofHandler registers get_inclusion_proofs.v1 with its request and
+// response bounds. Until it is called (publication wiring) the method is not
+// served. Deployments that cannot serve it (parent/child aggregation) get the
+// unsupported_configuration error instead.
+func (s *Server) SetBatchProofHandler(h jsonrpc.HandlerFunc) {
+	if m := s.config.Sharding.Mode; m.IsParent() || m.IsChild() {
+		h = func(context.Context, json.RawMessage) (interface{}, *jsonrpc.Error) {
+			return nil, jsonrpc.NewDetailedError(jsonrpc.ProofUnavailableCode, "Proof unavailable", "proof_unavailable", "unsupported_configuration", false, nil)
+		}
+	}
+	s.rpcServer.RegisterMethodWithLimits(BatchProofsMethod, h, jsonrpc.MethodLimits{
+		MaxRequestBytes:  api.InclusionProofsMaxRequestBytes,
+		MaxParamsBytes:   api.InclusionProofsMaxParamsBytes,
+		MaxIDBytes:       api.InclusionProofsMaxIDBytes,
+		MaxResponseBytes: api.InclusionProofsMaxResponseBytes,
+	})
 }
 
 // Start starts the HTTP server

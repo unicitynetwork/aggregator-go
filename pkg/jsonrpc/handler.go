@@ -3,6 +3,7 @@ package jsonrpc
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ type HandlerFunc func(ctx context.Context, params json.RawMessage) (interface{},
 // Server represents a JSON-RPC server
 type Server struct {
 	handlers         map[string]HandlerFunc
+	limits           map[string]MethodLimits
 	middleware       []MiddlewareFunc
 	logger           *logger.Logger
 	concurrencyLimit int
@@ -33,6 +35,7 @@ type MiddlewareFunc func(ctx context.Context, req *Request, next func(context.Co
 func NewServer(logger *logger.Logger, concurrencyLimit int) *Server {
 	return &Server{
 		handlers:         make(map[string]HandlerFunc),
+		limits:           make(map[string]MethodLimits),
 		middleware:       make([]MiddlewareFunc, 0),
 		logger:           logger,
 		concurrencyLimit: concurrencyLimit,
@@ -45,6 +48,22 @@ func (s *Server) RegisterMethod(method string, handler HandlerFunc) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	s.handlers[method] = handler
+}
+
+// RegisterMethodWithLimits registers a handler with method-specific request and
+// response bounds.
+func (s *Server) RegisterMethodWithLimits(method string, handler HandlerFunc, limits MethodLimits) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.handlers[method] = handler
+	s.limits[method] = limits
+}
+
+func (s *Server) methodLimits(method string) (MethodLimits, bool) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	l, ok := s.limits[method]
+	return l, ok
 }
 
 // AddMiddleware adds middleware to the server
@@ -89,25 +108,70 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Add request ID to context
 	ctx := context.WithValue(r.Context(), logger.StateIDKey, uuid.New().String())
 
-	// Parse request
-	var req Request
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Parse request. The ID is kept raw so that method-limited requests can
+	// validate its original encoding and echo it without number conversion.
+	var env rawRequest
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&env); err != nil {
 		s.logger.WithContext(ctx).Error("Failed to parse JSON-RPC request", "error", err.Error())
 		recordMetrics("unknown", "error")
 		s.writeErrorResponse(w, ErrParseError, nil)
 		return
 	}
-
-	// Validate request
-	if err := req.IsValidRequest(); err != nil {
-		s.logger.WithContext(ctx).Error("Invalid JSON-RPC request", "error", err.Error())
-		recordMetrics("unknown", "error")
-		s.writeErrorResponse(w, ErrInvalidRequest, req.ID)
-		return
+	req := Request{JSONRPC: env.JSONRPC, Method: env.Method, Params: env.Params}
+	limits, limited := s.methodLimits(req.Method)
+	if !limited {
+		// Legacy methods: the ID decodes exactly as before.
+		if len(env.ID) > 0 {
+			if err := json.Unmarshal(env.ID, &req.ID); err != nil {
+				s.logger.WithContext(ctx).Error("Failed to parse JSON-RPC request", "error", err.Error())
+				recordMetrics("unknown", "error")
+				s.writeErrorResponse(w, ErrParseError, nil)
+				return
+			}
+		}
+		if err := req.IsValidRequest(); err != nil {
+			s.logger.WithContext(ctx).Error("Invalid JSON-RPC request", "error", err.Error())
+			recordMetrics("unknown", "error")
+			s.writeErrorResponse(w, ErrInvalidRequest, req.ID)
+			return
+		}
+	} else {
+		idOK := validRawID(env.ID, limits.MaxIDBytes)
+		var id interface{} // an invalid or oversized ID is never echoed
+		if idOK {
+			id = json.RawMessage(env.ID)
+		}
+		if err := req.IsValidRequest(); err != nil {
+			s.logger.WithContext(ctx).Error("Invalid JSON-RPC request", "error", err.Error())
+			recordMetrics(metrics.NormalizeMethod(req.Method), "error")
+			s.writeErrorResponse(w, NewDetailedError(InvalidRequestCode, "Invalid Request", "invalid_request", "invalid_envelope", false, nil), id)
+			return
+		}
+		if rpcErr := checkRequestBody(limits, dec, r.Body); rpcErr != nil {
+			recordMetrics(metrics.NormalizeMethod(req.Method), "error")
+			s.writeErrorResponse(w, rpcErr, id)
+			return
+		}
+		if !idOK {
+			recordMetrics(metrics.NormalizeMethod(req.Method), "error")
+			s.writeErrorResponse(w, NewDetailedError(InvalidParamsCode, "Invalid params", "invalid_request", "invalid_id", false, nil), nil)
+			return
+		}
+		if rpcErr := checkParamsLimit(limits, &req); rpcErr != nil {
+			recordMetrics(metrics.NormalizeMethod(req.Method), "error")
+			s.writeErrorResponse(w, rpcErr, id)
+			return
+		}
+		req.ID = id
 	}
 
 	// Add client's JSON-RPC ID to context for end-to-end tracing
-	ctx = context.WithValue(ctx, logger.JSONRPCIDKey, req.ID)
+	var ctxID interface{} = req.ID
+	if raw, ok := req.ID.(json.RawMessage); ok {
+		ctxID = string(raw)
+	}
+	ctx = context.WithValue(ctx, logger.JSONRPCIDKey, ctxID)
 
 	// Process request
 	response := s.processRequest(ctx, &req)
@@ -119,7 +183,122 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	recordMetrics(method, result)
 
 	// Write response
+	if limited && limits.MaxResponseBytes > 0 {
+		s.writeLimitedResponse(w, response, limits.MaxResponseBytes)
+		return
+	}
 	s.writeJSONResponse(w, response)
+}
+
+// rawRequest is the request envelope with the ID left undecoded.
+type rawRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	ID      json.RawMessage `json:"id,omitempty"`
+}
+
+// validRawID reports whether the original ID encoding is a JSON string or
+// number within maxBytes (0 = unbounded). Absent, null, boolean, object and
+// array IDs are invalid for method-limited requests.
+func validRawID(raw json.RawMessage, maxBytes int) bool {
+	if len(raw) == 0 || (maxBytes > 0 && len(raw) > maxBytes) {
+		return false
+	}
+	switch c := raw[0]; {
+	case c == '"':
+		return true
+	case c == '-' || (c >= '0' && c <= '9'):
+		return true
+	}
+	return false
+}
+
+// checkRequestBody counts the bytes of the complete request body (not just the
+// first JSON value): the rest is read through a bounded reader, and anything
+// but whitespace after the request object is rejected.
+func checkRequestBody(l MethodLimits, dec *json.Decoder, body io.Reader) *Error {
+	consumed := dec.InputOffset()
+	rest := io.MultiReader(dec.Buffered(), body)
+	var buf [4096]byte
+	total := consumed
+	for {
+		n, err := rest.Read(buf[:])
+		for _, c := range buf[:n] {
+			if c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+				return NewDetailedError(InvalidRequestCode, "Invalid Request", "invalid_request", "invalid_envelope", false, nil)
+			}
+		}
+		total += int64(n)
+		if l.MaxRequestBytes > 0 && total > int64(l.MaxRequestBytes) {
+			lim := l.MaxRequestBytes
+			return NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "request_bytes", false, &lim)
+		}
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return NewDetailedError(InvalidRequestCode, "Invalid Request", "invalid_request", "invalid_envelope", false, nil)
+		}
+	}
+}
+
+func checkParamsLimit(l MethodLimits, req *Request) *Error {
+	if l.MaxParamsBytes > 0 && len(req.Params) > l.MaxParamsBytes {
+		n := l.MaxParamsBytes
+		return NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "request_bytes", false, &n)
+	}
+	return nil
+}
+
+// writeLimitedResponse assembles the complete response and writes it only when
+// it fits the limit. A success whose result is BoundedJSON is built with the
+// output capped, counting the envelope and the ID, so an oversized result is
+// rejected before it is fully encoded; any other result is encoded with
+// json.Marshal (the existing path) and measured.
+func (s *Server) writeLimitedResponse(w http.ResponseWriter, response *Response, max int) {
+	data, err := encodeLimited(response, max)
+	if tooLarge(err) {
+		n := max
+		data, err = json.Marshal(NewErrorResponse(
+			NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "response_bytes", false, &n), response.ID))
+	}
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to encode JSON response")
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(append(data, '\n'))
+}
+
+// encodeLimited returns the response JSON without the trailing newline, or
+// ErrResponseTooLarge if the response plus the newline exceeds max.
+func encodeLimited(response *Response, max int) ([]byte, error) {
+	if bj, ok := response.Result.(BoundedJSON); ok && response.Error == nil {
+		id, err := json.Marshal(response.ID)
+		if err != nil {
+			return nil, err
+		}
+		const prefix = `{"jsonrpc":"2.0","result":`
+		suffix := append(append([]byte(`,"id":`), id...), '}')
+		// budget for the result: everything but the envelope and the newline
+		budget := max - len(prefix) - len(suffix) - 1
+		if budget < 0 {
+			return nil, ErrResponseTooLarge
+		}
+		buf := append(make([]byte, 0, 4096), prefix...)
+		buf, err = bj.AppendJSONBounded(buf, len(prefix)+budget)
+		if err != nil {
+			return nil, err
+		}
+		return append(buf, suffix...), nil
+	}
+	data, err := json.Marshal(response)
+	if err == nil && len(data)+1 > max {
+		return nil, ErrResponseTooLarge
+	}
+	return data, err
 }
 
 // processRequest processes a JSON-RPC request
