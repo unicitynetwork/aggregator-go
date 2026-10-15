@@ -100,7 +100,7 @@ func TestBatchStatus_MixedOutcomePrecedence(t *testing.T) {
 }
 
 // A finalized record the pinned view does not contain yet is pending (retry), not unknown;
-// the status memory still wins when it knows better.
+// the status memory cannot make it expired.
 func TestBatchStatus_RecordNewerThanThePinnedViewIsPending(t *testing.T) {
 	e, ids, st := statusEnv(t)
 	later := e.addRecordNoLeaf(1000) // stored record, leaf not in the pinned root
@@ -110,9 +110,13 @@ func TestBatchStatus_RecordNewerThanThePinnedViewIsPending(t *testing.T) {
 	require.True(t, err.Retryable)
 	requireIndexes(t, err, map[string][]int{"pending": {1}})
 
-	st.m[later.String()] = api.ProofStatusExpired
-	_, err = e.svc.GetInclusionProofsV1(context.Background(), e.request([]api.StateID{later}, nil))
-	requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_expired")
+	// the (volatile, advisory) status memory never overrules a stored finalized record
+	for _, wrong := range []api.ProofStatus{api.ProofStatusExpired, api.ProofStatusUnknown} {
+		st.m[later.String()] = wrong
+		_, err = e.svc.GetInclusionProofsV1(context.Background(), e.request([]api.StateID{later}, nil))
+		requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_pending")
+		require.True(t, err.Retryable)
+	}
 }
 
 func TestBatchStatus_ExactRootAbsentLeafIsNotInRoot(t *testing.T) {

@@ -386,8 +386,8 @@ func allIndexes(n int) []int {
 // Exact-root requests: every such state is absent from that retained root (state_not_in_root,
 // not retryable). Latest requests: noRecord are states without a stored finalized record, and
 // absentInView have a record which the pinned view does not contain yet; each is classified from
-// the in-memory status hint. A state with a record, which the status memory does not know, is
-// pending (finalized after the pinned view). With mixed outcomes unknown takes precedence over
+// the in-memory status hint. A state with a stored finalized record is always pending (finalized
+// after the pinned view), whatever the hint says. With mixed outcomes unknown takes precedence over
 // expired, which takes precedence over pending; only pending is retryable. The error data lists
 // the offending request indexes per class.
 func (s *BatchProofService) absentError(req *api.GetInclusionProofsRequestV1, latest bool, noRecord, absentInView []int) *BatchError {
@@ -401,12 +401,14 @@ func (s *BatchProofService) absentError(req *api.GetInclusionProofsRequestV1, la
 	}
 	classes := map[string][]int{}
 	classify := func(i int, hasRecord bool) {
-		st := api.ProofStatusUnknown
-		if s.status != nil {
-			st = s.status.ProofStatus(req.StateIDs[i])
-		}
-		if st == api.ProofStatusUnknown && hasRecord {
-			st = api.ProofStatusPending
+		// A stored finalized record means the state was certified, whatever the (volatile,
+		// advisory) status memory says: it is only missing from the pinned view, so retry.
+		st := api.ProofStatusPending
+		if !hasRecord {
+			st = api.ProofStatusUnknown
+			if s.status != nil {
+				st = s.status.ProofStatus(req.StateIDs[i])
+			}
 		}
 		classes[string(st)] = append(classes[string(st)], i)
 	}

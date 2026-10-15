@@ -508,7 +508,7 @@ func (rm *RoundManager) markProofsPending(commitments []*models.CertificationReq
 		if commitment != nil {
 			rm.proofPending[commitment.StateID.String()] = struct{}{}
 			// also covers requests replayed from the queue after a restart (never admitted here)
-			rm.statusTracker.MarkPending(commitment.StateID, commitmentDeadline(commitment))
+			rm.statusTracker.MarkInRound(commitment.StateID, commitmentDeadline(commitment))
 		}
 	}
 }
@@ -524,7 +524,7 @@ func (rm *RoundManager) markProofsReady(block *models.Block, stateIDs []api.Stat
 	for _, stateID := range stateIDs {
 		delete(rm.proofPending, stateID.String())
 	}
-	rm.statusTracker.ClearPending(stateIDs...)
+	rm.statusTracker.ClearFinalized(stateIDs...)
 }
 
 func (rm *RoundManager) clearProofPending() {
@@ -544,6 +544,7 @@ func (rm *RoundManager) clearProofsPending(commitments []*models.CertificationRe
 	for _, commitment := range commitments {
 		if commitment != nil {
 			delete(rm.proofPending, commitment.StateID.String())
+			rm.statusTracker.ReturnToQueue(commitment.StateID) // back in the queue, swept by deadline again
 		}
 	}
 }
@@ -558,7 +559,7 @@ func (rm *RoundManager) clearProofStateIDsPending(stateIDs []api.StateID) {
 	for _, stateID := range stateIDs {
 		delete(rm.proofPending, stateID.String())
 	}
-	rm.statusTracker.ClearPending(stateIDs...)
+	rm.statusTracker.ClearFinalized(stateIDs...)
 }
 
 // GetStats returns round manager statistics
@@ -1915,4 +1916,21 @@ func (rm *RoundManager) ClearRequestAdmitted(stateID api.StateID) {
 // not admit the request, or restarted, answers unknown.
 func (rm *RoundManager) ProofStatus(stateID api.StateID) api.ProofStatus {
 	return rm.statusTracker.Status(stateID)
+}
+
+// clearStaleAdmissionMarks removes the admission marks of requests a round dropped as
+// duplicates or rejected leaves, unless the original is in a round (then its mark stays: it is
+// the same state, still being certified). A copy of an already certified leaf must not leave a
+// mark behind which nothing would clear.
+func (rm *RoundManager) clearStaleAdmissionMarks(dropped []interfaces.CertificationRequestAck) {
+	if len(dropped) == 0 {
+		return
+	}
+	rm.proofCacheMu.RLock()
+	defer rm.proofCacheMu.RUnlock()
+	for _, d := range dropped {
+		if _, inRound := rm.proofPending[d.StateID.String()]; !inRound {
+			rm.statusTracker.ClearPending(d.StateID)
+		}
+	}
 }

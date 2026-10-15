@@ -2,6 +2,7 @@ package proofstatus
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -156,4 +157,104 @@ func TestLookupDoesNotScale(t *testing.T) {
 		require.Equal(t, api.ProofStatusPending, tr.Status(sid(i)))
 	}
 	require.Less(t, time.Since(start), 2*time.Second, fmt.Sprintf("50k lookups took %s", time.Since(start)))
+}
+
+// The deadline heap indexes only live pending entries: finalization/expiry of a request
+// removes its node, so memory is O(pending), not O(admission rate x deadline) (review major 1).
+func TestHeapStaysBoundedByPendingUnderChurn(t *testing.T) {
+	c := &clock{now: time.Unix(1000, 0), ref: 100}
+	tr := newTracker(c, 10, time.Minute)
+	for i := 0; i < 200000; i++ {
+		id := sid(i)
+		tr.MarkPending(id, 1<<62) // far-future client-chosen deadline
+		tr.ClearFinalized(id)     // certified right away
+		if i%3 == 0 {
+			tr.MarkPending(id, 1<<61)
+			tr.MarkExpired(id)
+		}
+		require.LessOrEqual(t, tr.HeapLen(), 2, "heap must not accumulate finalized/expired requests")
+	}
+	p, _ := tr.Counts()
+	require.Zero(t, p)
+	require.Zero(t, tr.HeapLen())
+
+	// steady state: heap == pending (+ none)
+	for i := 0; i < 1000; i++ {
+		tr.MarkPending(sid(i), uint64(1<<40+i))
+	}
+	require.Equal(t, 1000, tr.HeapLen())
+	for i := 0; i < 1000; i += 2 {
+		tr.ClearPending(sid(i))
+	}
+	require.Equal(t, 500, tr.HeapLen())
+}
+
+func TestNoDeadlineRequestsNeverCostAHeapNode(t *testing.T) {
+	c := &clock{now: time.Unix(1000, 0), ref: 100}
+	tr := newTracker(c, 10, time.Minute)
+	for i := 0; i < 1000; i++ {
+		tr.MarkPending(sid(i), math.MaxUint64)
+	}
+	require.Zero(t, tr.HeapLen())
+	p, _ := tr.Counts()
+	require.Equal(t, 1000, p)
+}
+
+// A request a round pulled is decided by the round: the deadline sweep must not call it
+// expired while it is being certified (review major 2).
+func TestInRoundRequestIsNotSweptByDeadline(t *testing.T) {
+	c := &clock{now: time.Unix(1000, 0), ref: 100}
+	tr := newTracker(c, 10, time.Minute)
+	tr.MarkPending(sid(1), 150)
+	tr.MarkPending(sid(2), 150)
+	tr.MarkInRound(sid(1), 150) // pulled into a round pinned at 100 < 150, leaf accepted
+
+	c.advance(time.Second, 200) // the certified round's UC moves the reference time past the deadline
+	require.Equal(t, api.ProofStatusPending, tr.Status(sid(1)), "being certified: pending, never expired")
+	require.Equal(t, api.ProofStatusExpired, tr.Status(sid(2)), "still queued: its drop is guaranteed")
+
+	tr.ClearFinalized(sid(1))
+	require.Equal(t, api.ProofStatusUnknown, tr.Status(sid(1)))
+	p, e := tr.Counts()
+	require.Zero(t, p)
+	require.Equal(t, 1, e)
+
+	// requests replayed from the queue after a restart enter as in-round
+	tr.MarkInRound(sid(3), 150)
+	c.advance(time.Second, 300)
+	require.Equal(t, api.ProofStatusPending, tr.Status(sid(3)))
+	// a round which gives requests back makes them sweepable again
+	tr.ReturnToQueue(sid(3))
+	require.Equal(t, api.ProofStatusExpired, tr.Status(sid(3)))
+}
+
+// Finalization also forgets an expired record: a certified state was not dropped.
+func TestFinalizationClearsExpiredRecord(t *testing.T) {
+	c := &clock{now: time.Unix(1000, 0), ref: 100}
+	tr := newTracker(c, 10, time.Minute)
+	tr.MarkExpired(sid(1))
+	require.Equal(t, api.ProofStatusExpired, tr.Status(sid(1)))
+	tr.ClearFinalized(sid(1))
+	require.Equal(t, api.ProofStatusUnknown, tr.Status(sid(1)))
+	// ClearPending alone does not touch the expired memory
+	tr.MarkExpired(sid(2))
+	tr.ClearPending(sid(2))
+	require.Equal(t, api.ProofStatusExpired, tr.Status(sid(2)))
+}
+
+func TestPendingEntryCap(t *testing.T) {
+	c := &clock{now: time.Unix(1000, 0), ref: 100}
+	tr := New(Config{MaxPending: 100, ReferenceTime: c.Ref, Now: c.Now})
+	var added int
+	for i := 0; i < 150; i++ {
+		if tr.MarkPending(sid(i), 1<<40) {
+			added++
+		}
+	}
+	require.Equal(t, 100, added)
+	p, _ := tr.Counts()
+	require.Equal(t, 100, p)
+	require.Equal(t, api.ProofStatusUnknown, tr.Status(sid(149)), "untracked beyond the cap")
+	tr.ClearFinalized(sid(0))
+	require.True(t, tr.MarkPending(sid(149), 1<<40), "room again once entries leave")
 }

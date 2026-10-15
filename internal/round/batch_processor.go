@@ -84,6 +84,7 @@ func (rm *RoundManager) processMiniBatchForRound(ctx context.Context, round *Rou
 		round.PendingLeaves = append(round.PendingLeaves, addedLeaves...)
 		round.PendingCommitments = append(round.PendingCommitments, addedCommitments...)
 		rm.markProofsPending(addedCommitments)
+		rm.clearStaleAdmissionMarks(dropped)
 		return append(expired, dropped...), nil
 	}
 

@@ -277,6 +277,13 @@ var (
 		},
 	)
 
+	ProofStatusPendingRejected = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_proof_status_pending_rejected_total",
+			Help: "Requests not tracked as pending because the pending entry cap was reached.",
+		},
+	)
+
 	ProofStatusExpiredEvictions = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "aggregator_proof_status_expired_evictions_total",

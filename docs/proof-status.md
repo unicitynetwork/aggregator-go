@@ -43,15 +43,21 @@ With mixed outcomes on a latest request, `unknown` takes precedence over `expire
 ```
 
 Exact-root errors use `{"not_in_root":[...]}`. A state with a stored finalized record that the pinned latest view does
-not contain yet (finalized after the view) is classified `pending`. The batch stays at most two database commands:
+not contain yet (finalized after the view) is always classified `pending`, whatever the status memory says. The batch stays at most two database commands:
 classification is memory only.
 
 ## How it works and where it is weak
 
 - Marked **pending at admission** (before the request is queued, so a round cannot finalize it first), idempotently; also
-  when a round pulls a request that was queued before a restart. Cleared on finalization. A pending request whose
-  deadline passes is moved to the expired memory even if no round dropped it yet. All lookups are O(1) in memory; no extra
-  database round trip.
+  when a round pulls a request that was queued before a restart. Cleared (together with any expired record) on
+  finalization. A **queued** request (not yet pulled into a round) whose deadline passes is moved to the expired memory:
+  the next round pins a reference time at least that large, so the drop is guaranteed. A request a round has pulled is
+  never swept by deadline (it is being certified, even if the certified round's reference time already passed its
+  deadline); the round reports real drops. All lookups are O(1) in memory; no extra database round trip.
+- **Bounds:** pending entries are capped (1 048 576; beyond it a request is simply untracked and counted in
+  `aggregator_proof_status_pending_rejected_total`), the deadline heap holds only queued requests with a finite deadline
+  and loses a node whenever its request is cleared, finalized, expired or pulled into a round, and requests without a
+  deadline never cost a heap node. An exact copy of an already certified leaf leaves no admission mark behind.
 - Per node and volatile. **HA / multi-instance:** the queue (Redis/Mongo) is shared, the sets are not, so a node that did
   not admit a request may answer `unknown`. **Restart:** the sets are empty, so queued requests answer `unknown` until a
   round pulls them.

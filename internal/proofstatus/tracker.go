@@ -10,6 +10,7 @@ package proofstatus
 
 import (
 	"container/heap"
+	"math"
 	"sync"
 	"time"
 
@@ -21,6 +22,9 @@ import (
 const (
 	DefaultExpiredCapacity = 100_000
 	DefaultExpiredTTL      = 10 * time.Minute
+	// DefaultMaxPending is the hard cap of pending entries. Beyond it new requests are not
+	// tracked (their status stays unknown) and the rejection is counted.
+	DefaultMaxPending = 1 << 20
 )
 
 // Config bounds the tracker.
@@ -29,6 +33,9 @@ type Config struct {
 	ExpiredCapacity int
 	// ExpiredTTL caps how long an expired state ID is remembered.
 	ExpiredTTL time.Duration
+	// MaxPending caps the pending entries (memory bound against floods of admitted requests,
+	// including ones with a far-future deadline).
+	MaxPending int
 	// ReferenceTime returns the aggregator's current reference time (seconds): the time base
 	// of request deadlines. A pending request whose deadline has passed is answered as
 	// expired, and swept into the expired set, even if no round has dropped it yet.
@@ -37,21 +44,40 @@ type Config struct {
 	Now func() time.Time
 }
 
-type deadlineEntry struct {
+// pendEntry is the pending record of one state ID.
+type pendEntry struct {
 	id       string
 	deadline uint64
+	// inRound: a round has pulled the request, so it either becomes a leaf or is dropped by
+	// the round (reported through MarkExpired). Such entries are never swept by deadline: a
+	// leaf accepted under a round's pinned reference time is being certified, however far the
+	// reference time has advanced since.
+	inRound bool
+	heapIdx int // position in the deadline heap, -1 when not a member
 }
 
-type deadlineHeap []deadlineEntry
+// deadlineHeap is an indexed min-heap of the queued (not yet pulled) requests with a finite
+// deadline. Its size is bounded by the number of pending entries: every removal of a pending
+// entry removes its heap node in O(log n).
+type deadlineHeap []*pendEntry
 
-func (h deadlineHeap) Len() int            { return len(h) }
-func (h deadlineHeap) Less(i, j int) bool  { return h[i].deadline < h[j].deadline }
-func (h deadlineHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *deadlineHeap) Push(x interface{}) { *h = append(*h, x.(deadlineEntry)) }
+func (h deadlineHeap) Len() int           { return len(h) }
+func (h deadlineHeap) Less(i, j int) bool { return h[i].deadline < h[j].deadline }
+func (h deadlineHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].heapIdx, h[j].heapIdx = i, j
+}
+func (h *deadlineHeap) Push(x interface{}) {
+	e := x.(*pendEntry)
+	e.heapIdx = len(*h)
+	*h = append(*h, e)
+}
 func (h *deadlineHeap) Pop() interface{} {
 	old := *h
 	n := len(old)
 	e := old[n-1]
+	old[n-1] = nil
+	e.heapIdx = -1
 	*h = old[:n-1]
 	return e
 }
@@ -66,8 +92,8 @@ type Tracker struct {
 	cfg Config
 
 	mu       sync.Mutex
-	pending  map[string]uint64 // state ID -> effective deadline
-	deadline deadlineHeap      // lazy: entries whose map value changed or vanished are skipped
+	pending  map[string]*pendEntry
+	deadline deadlineHeap
 
 	expired map[string]time.Time
 	ring    []expiredEntry // FIFO of expired insertions (may hold stale entries)
@@ -82,10 +108,13 @@ func New(cfg Config) *Tracker {
 	if cfg.ExpiredTTL <= 0 {
 		cfg.ExpiredTTL = DefaultExpiredTTL
 	}
+	if cfg.MaxPending <= 0 {
+		cfg.MaxPending = DefaultMaxPending
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Tracker{cfg: cfg, pending: make(map[string]uint64), expired: make(map[string]time.Time)}
+	return &Tracker{cfg: cfg, pending: make(map[string]*pendEntry), expired: make(map[string]time.Time)}
 }
 
 func (t *Tracker) refTime() (uint64, bool) {
@@ -102,28 +131,82 @@ func (t *Tracker) SetReferenceTime(f func() uint64) {
 	t.mu.Unlock()
 }
 
-// MarkPending records an admitted request with its effective deadline (reference-time
-// seconds). Re-admitting a pending ID (resubmission of the same request) is idempotent
-// and keeps the later deadline. It reports whether the ID was newly marked pending. An ID which was recently expired and is admitted again
-// is pending again.
+// MarkPending records an admitted (queued) request with its effective deadline
+// (reference-time seconds). Re-admitting a pending ID (resubmission of the same request) is
+// idempotent and keeps the later deadline. It reports whether the ID was newly marked
+// pending; false also when the entry cap is reached (the request is then untracked).
+// An ID which was recently expired and is admitted again is pending again.
 func (t *Tracker) MarkPending(id api.StateID, deadline uint64) (added bool) {
 	key := id.String()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sweepLocked()
 	delete(t.expired, key)
-	old, was := t.pending[key]
-	if was && old >= deadline {
+	if e, ok := t.pending[key]; ok {
+		if deadline > e.deadline {
+			e.deadline = deadline
+			if e.heapIdx >= 0 {
+				heap.Fix(&t.deadline, e.heapIdx)
+			}
+		}
 		return false
 	}
-	t.pending[key] = deadline
-	heap.Push(&t.deadline, deadlineEntry{id: key, deadline: deadline})
+	if len(t.pending) >= t.cfg.MaxPending {
+		metrics.ProofStatusPendingRejected.Inc()
+		return false
+	}
+	e := &pendEntry{id: key, deadline: deadline, heapIdx: -1}
+	t.pending[key] = e
+	t.pushLocked(e)
 	t.gaugesLocked()
-	return !was
+	return true
 }
 
-// ClearPending removes the pending marks (finalization, rejection, failed admission).
-// It never touches the expired memory.
+// MarkInRound records that a round pulled the request (also for requests replayed from the
+// queue after a restart, which were never admitted here). From then on its fate is decided by
+// the round: it is cleared on finalization or reported through MarkExpired, and the deadline
+// sweep leaves it alone.
+func (t *Tracker) MarkInRound(id api.StateID, deadline uint64) {
+	key := id.String()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, ok := t.pending[key]
+	if !ok {
+		delete(t.expired, key)
+		if len(t.pending) >= t.cfg.MaxPending {
+			metrics.ProofStatusPendingRejected.Inc()
+			return
+		}
+		e = &pendEntry{id: key, deadline: deadline, heapIdx: -1}
+		t.pending[key] = e
+	}
+	e.inRound = true
+	t.removeFromHeapLocked(e)
+	t.gaugesLocked()
+}
+
+func (t *Tracker) pushLocked(e *pendEntry) {
+	if e.inRound || e.deadline == math.MaxUint64 {
+		return // never expires by deadline: not worth a heap node
+	}
+	heap.Push(&t.deadline, e)
+}
+
+func (t *Tracker) removeFromHeapLocked(e *pendEntry) {
+	if e.heapIdx >= 0 {
+		heap.Remove(&t.deadline, e.heapIdx)
+	}
+}
+
+func (t *Tracker) deleteLocked(key string) {
+	if e, ok := t.pending[key]; ok {
+		t.removeFromHeapLocked(e)
+		delete(t.pending, key)
+	}
+}
+
+// ClearPending removes the pending marks (a request which could not be queued, or was
+// rejected). It never touches the expired memory.
 func (t *Tracker) ClearPending(ids ...api.StateID) {
 	if len(ids) == 0 {
 		return
@@ -131,7 +214,36 @@ func (t *Tracker) ClearPending(ids ...api.StateID) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, id := range ids {
-		delete(t.pending, id.String())
+		t.deleteLocked(id.String())
+	}
+	t.gaugesLocked()
+}
+
+// ReturnToQueue marks requests which a round pulled but did not keep (an abandoned round) as
+// queued again, so the deadline sweep covers them once more.
+func (t *Tracker) ReturnToQueue(ids ...api.StateID) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, id := range ids {
+		if e, ok := t.pending[id.String()]; ok && e.inRound {
+			e.inRound = false
+			t.pushLocked(e)
+		}
+	}
+}
+
+// ClearFinalized removes the pending marks of states which were certified and forgets any
+// expired record of them (a state which is certified was not dropped).
+func (t *Tracker) ClearFinalized(ids ...api.StateID) {
+	if len(ids) == 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, id := range ids {
+		key := id.String()
+		t.deleteLocked(key)
+		delete(t.expired, key)
 	}
 	t.gaugesLocked()
 }
@@ -140,9 +252,16 @@ func (t *Tracker) ClearPending(ids ...api.StateID) {
 func (t *Tracker) Reset() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.pending = make(map[string]uint64)
+	t.pending = make(map[string]*pendEntry)
 	t.deadline = nil
 	t.gaugesLocked()
+}
+
+// HeapLen returns the size of the deadline heap (diagnostics, tests).
+func (t *Tracker) HeapLen() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.deadline)
 }
 
 // MarkExpired records state IDs dropped because their effective timeout passed.
@@ -155,7 +274,7 @@ func (t *Tracker) MarkExpired(ids ...api.StateID) {
 	now := t.cfg.Now()
 	for _, id := range ids {
 		key := id.String()
-		delete(t.pending, key)
+		t.deleteLocked(key)
 		t.addExpiredLocked(key, now)
 	}
 	t.gaugesLocked()
@@ -191,7 +310,10 @@ func (t *Tracker) trimLocked(now time.Time) {
 	}
 }
 
-// sweepLocked moves pending requests whose deadline passed into the expired memory.
+// sweepLocked moves queued requests whose deadline passed into the expired memory. Only
+// requests no round has pulled are swept: for those the next round pins a reference time that
+// is at least the current one, so the deadline guarantees the drop. Requests already in a
+// round are decided by the round.
 func (t *Tracker) sweepLocked() {
 	ref, ok := t.refTime()
 	if !ok {
@@ -199,11 +321,9 @@ func (t *Tracker) sweepLocked() {
 	}
 	now := t.cfg.Now()
 	for len(t.deadline) > 0 && t.deadline[0].deadline <= ref {
-		e := heap.Pop(&t.deadline).(deadlineEntry)
-		if cur, ok := t.pending[e.id]; ok && cur == e.deadline {
-			delete(t.pending, e.id)
-			t.addExpiredLocked(e.id, now)
-		}
+		e := heap.Pop(&t.deadline).(*pendEntry)
+		delete(t.pending, e.id)
+		t.addExpiredLocked(e.id, now)
 	}
 	t.trimLocked(now)
 }

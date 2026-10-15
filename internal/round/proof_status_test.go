@@ -134,6 +134,7 @@ func TestProofStatus_ResubmittingAPendingRequestIsHarmless(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, dropped, 1)
 	require.Empty(t, rm.currentRound.PendingLeaves)
+	require.Zero(t, countPending(rm), "a copy of an already certified leaf leaves no admission mark behind")
 	rootAfter, err := rm.currentRound.Snapshot.RootHashRaw(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, rootBefore, rootAfter)
@@ -165,4 +166,44 @@ func TestProofStatus_ConcurrentAdmissionAndFinalization(t *testing.T) {
 	}
 	wg.Wait()
 	require.Zero(t, countPending(rm))
+}
+
+// Review major 2: a request which a round accepted is never called expired just because the
+// certified round's UC moved the reference time past its deadline before finalization cleared it.
+func TestProofStatus_ReferenceTimeAdvancingDuringCertificationDoesNotExpireAcceptedLeaf(t *testing.T) {
+	rm := newStatusRM(t)
+	accepted := testutil.CreateTestCertificationRequest(t, "status_accepted")
+	queued := testutil.CreateTestCertificationRequest(t, "status_queued")
+	admit(rm, accepted, 1500) // deadline D = 1500, round pins 1000 < D: accepted
+	admit(rm, queued, 1500)   // same deadline, but never pulled into a round
+
+	rm.startStatusRound(t, 1, 1000)
+	process(t, rm, accepted)
+	require.Len(t, rm.currentRound.PendingLeaves, 1)
+
+	rm.referenceTime.Store(1600) // the UC of that round (timestamp >= D) arrives; finalization is not done yet
+
+	require.Equal(t, api.ProofStatusPending, rm.ProofStatus(accepted.StateID), "being certified: pending")
+	// admission/queries sweep: still not expired
+	other := testutil.CreateTestCertificationRequest(t, "status_other")
+	admit(rm, other, 9000)
+	require.Equal(t, api.ProofStatusPending, rm.ProofStatus(accepted.StateID))
+	require.Equal(t, api.ProofStatusExpired, rm.ProofStatus(queued.StateID), "queued past its deadline: the next round must drop it")
+
+	rm.markProofsReady(&models.Block{Index: api.NewBigInt(big.NewInt(1))}, []api.StateID{accepted.StateID}, nil)
+	require.Equal(t, api.ProofStatusUnknown, rm.ProofStatus(accepted.StateID), "certified: the proof answers; never expired")
+	_, exp := rm.statusTracker.Counts()
+	require.Equal(t, 1, exp, "only the genuinely dropped request is remembered as expired")
+}
+
+// A finalization also forgets an earlier expired record of the same state.
+func TestProofStatus_FinalizationForgetsExpiredRecord(t *testing.T) {
+	rm := newStatusRM(t)
+	c := testutil.CreateTestCertificationRequest(t, "status_forget")
+	rm.statusTracker.MarkExpired(c.StateID)
+	rm.markProofsReady(&models.Block{Index: api.NewBigInt(big.NewInt(1))}, []api.StateID{c.StateID}, nil)
+	require.Equal(t, api.ProofStatusUnknown, rm.ProofStatus(c.StateID))
+	rm.statusTracker.MarkExpired(c.StateID)
+	rm.clearProofStateIDsPending([]api.StateID{c.StateID}) // recovered finalization
+	require.Equal(t, api.ProofStatusUnknown, rm.ProofStatus(c.StateID))
 }
