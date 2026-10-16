@@ -1,9 +1,0 @@
-{
-  "base": "shards-4",
-  "description": "reference time lowered by one",
-  "stage": "consolidate",
-  "outcome": "binding_mismatch",
-  "changedFiles": [
-    "responses.json"
-  ]
-}

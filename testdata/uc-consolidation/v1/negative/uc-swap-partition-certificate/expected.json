@@ -1,9 +1,0 @@
-{
-  "base": "shards-4",
-  "description": "partition certificate of another partition",
-  "stage": "consolidate",
-  "outcome": "invalid_input",
-  "changedFiles": [
-    "responses.json"
-  ]
-}
