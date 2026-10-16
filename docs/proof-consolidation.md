@@ -93,7 +93,7 @@ A structured error object is printed to stderr.
 
 ```
 export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock TESTCONTAINERS_RYUK_DISABLED=true
-CONSOLIDATION_E2E_SHARDS=4,8 go test -tags e2e_bft ./test/integration -run TestBFTConsolidationE2E -v -timeout 20m
+CONSOLIDATION_E2E_SHARDS=1,4,8 go test -tags e2e_bft ./test/integration -run TestBFTConsolidationE2E -v -timeout 20m
 ```
 
 - The root is a host process of the `ubft` binary built from the bft-core module version pinned in `go.mod` (it contains the

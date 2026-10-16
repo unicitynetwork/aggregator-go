@@ -10,7 +10,7 @@
 //
 //	go test -tags=e2e_bft ./test/integration -run TestBFTConsolidationE2E -v -timeout 20m
 //
-// CONSOLIDATION_E2E_SHARDS selects the shard counts (default "4,8"); UBFT_BIN may
+// CONSOLIDATION_E2E_SHARDS selects the shard counts (default "1,4,8"; 1 is the unsharded standalone deployment with a restart leg); UBFT_BIN may
 // point at a prebuilt ubft binary; the trusted topology is written to a file in the
 // BFT_CONSOLIDATION_TOPOLOGY_FILE format and loaded from there.
 package integration
@@ -61,7 +61,7 @@ import (
 func TestBFTConsolidationE2E(t *testing.T) {
 	counts := os.Getenv("CONSOLIDATION_E2E_SHARDS")
 	if counts == "" {
-		counts = "4,8"
+		counts = "1,4,8"
 	}
 	ubft := buildBinary(t, os.Getenv("UBFT_BIN"), "github.com/unicitynetwork/bft-core/cli/ubft", "ubft")
 	cli := buildBinary(t, "", "github.com/unicitynetwork/aggregator-go/cmd/consolidate-proofs", "consolidate-proofs")
