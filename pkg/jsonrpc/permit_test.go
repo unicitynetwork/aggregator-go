@@ -217,3 +217,21 @@ func TestError_WithWaited(t *testing.T) {
 	var nilErr *Error
 	require.Nil(t, nilErr.WithWaited(1))
 }
+
+type boundedEcho struct{ ms uint64 }
+
+func (b boundedEcho) AppendJSONBounded(dst []byte, max int) ([]byte, error) {
+	return nil, ErrResponseTooLarge
+}
+func (b boundedEcho) WaitedEcho() (uint64, bool) { return b.ms, true }
+
+// The response_bytes replacement of an oversized result keeps the result's wait echo.
+func TestResponseTooLargeFallbackKeepsTheEcho(t *testing.T) {
+	s := testServer(t, 2)
+	s.RegisterMethodWithLimits("m", func(ctx context.Context, _ json.RawMessage) (interface{}, *Error) {
+		return boundedEcho{ms: 7}, nil
+	}, MethodLimits{MaxResponseBytes: 1000})
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"m"}`)))
+	require.Contains(t, rec.Body.String(), `"detail":"response_bytes","retryable":false,"limit":1000,"waitedMs":7}`)
+}

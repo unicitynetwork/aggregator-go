@@ -2,10 +2,10 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/unicitynetwork/aggregator-go/internal/longpoll"
@@ -105,28 +105,74 @@ func (l trackedListener) Accept() (net.Conn, error) {
 	return l.t.wrap(c), nil
 }
 
-// trackInflight counts the handlers in flight, hijacked h2c streams included (they all pass the
-// handler), so shutdown can wait for them while storage is still open.
+// MethodTimeout is the application deadline of a JSON-RPC method (the TimeoutMiddleware budget).
+// Variable for tests only.
+var MethodTimeout = 30 * time.Second
+
+// ErrShutdownIncomplete: handlers or opt-in request workers were still running after the
+// shutdown deadline, even after their contexts and connections were cut. The caller must not close
+// the storage and round manager beneath them.
+var ErrShutdownIncomplete = errors.New("gateway: handlers still running after the shutdown deadline")
+
+// trackInflight is the admission gate and the in-flight register of the HTTP handlers, hijacked
+// h2c streams included (they all pass here). Once shutdown closed the gate, new work is refused
+// without reaching the service, also on connections that are already open; admitted handlers run
+// to completion. It also hands every request the shutdown context (cancelled at the deadline) and
+// the real start of its transport write deadline.
 func (s *Server) trackInflight(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt64(&s.inflightN, 1)
-		defer atomic.AddInt64(&s.inflightN, -1)
-		h.ServeHTTP(w, r)
+		s.admitMu.Lock()
+		if s.closing {
+			s.admitMu.Unlock()
+			w.Header().Set("Retry-After", "1")
+			if r.ProtoMajor == 1 {
+				w.Header().Set("Connection", "close")
+			}
+			http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+			return
+		}
+		s.inflightN++
+		s.admitMu.Unlock()
+		defer func() {
+			s.admitMu.Lock()
+			s.inflightN--
+			s.admitMu.Unlock()
+		}()
+
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		stop := context.AfterFunc(s.baseCtx, cancel)
+		defer stop()
+		if wt := s.config.Server.WriteTimeout; wt > 0 {
+			ctx = longpoll.WithTransportDeadline(ctx, time.Now().Add(wt))
+		}
+		h.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 // Inflight is the number of HTTP handlers currently running.
-func (s *Server) Inflight() int { return int(atomic.LoadInt64(&s.inflightN)) }
+func (s *Server) Inflight() int {
+	s.admitMu.Lock()
+	defer s.admitMu.Unlock()
+	return s.inflightN
+}
 
-// drain stops long-poll admission, signals every wait, and waits until the handlers and the waits
-// have finished (storage is still open for them), or ctx ends.
-func (s *Server) drain(ctx context.Context) error {
+func (s *Server) closeAdmission() {
+	s.admitMu.Lock()
+	s.closing = true
+	s.admitMu.Unlock()
 	if s.longPoll != nil {
 		s.longPoll.Reg.Drain(true)
 	}
-	tick := time.NewTicker(5 * time.Millisecond)
+}
+
+// joinWork waits until no handler runs, no owned request worker holds an active-work token (a
+// proof worker that outlived its response - the timeout middleware returns before it stops - keeps
+// the token of an opt-in request until it ends) and every wait is closed; or ctx ends.
+func (s *Server) joinWork(ctx context.Context) error {
+	tick := time.NewTicker(2 * time.Millisecond)
 	defer tick.Stop()
-	for s.Inflight() > 0 {
+	for s.Inflight() > 0 || s.rpcServer.ActiveRequests() > 0 {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

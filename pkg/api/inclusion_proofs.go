@@ -55,6 +55,14 @@ type GetInclusionProofsResponseV1 struct {
 	WaitedMs *uint64 `json:"waitedMs,omitempty"`
 }
 
+// WaitedEcho reports the long-poll echo of the response (present iff the request carried waitMs).
+func (r *GetInclusionProofsResponseV1) WaitedEcho() (uint64, bool) {
+	if r == nil || r.WaitedMs == nil {
+		return 0, false
+	}
+	return *r.WaitedMs, true
+}
+
 // ErrBoundedOutputExceeded is returned by AppendJSONBounded when the output would
 // exceed the limit. It satisfies the ResponseTooLarge() contract of
 // jsonrpc.BoundedJSON without importing that package.

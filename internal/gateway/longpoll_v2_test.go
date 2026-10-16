@@ -203,3 +203,29 @@ func TestV2Waited_OptInRequestBoundsApplyOnlyToWaitRequests(t *testing.T) {
 	_, body = postRPC(t, srv.rpcServer, v2req(7, `{"stateId":"`+stateIDHex+`","waitMs":1000}`)+strings.Repeat(" ", api.InclusionProofsMaxRequestBytes))
 	require.Contains(t, body, `"detail":"request_bytes"`)
 }
+
+// Every handled error of a request carrying a valid waitMs echoes zero, whatever else is wrong
+// with its typed fields; an invalid waitMs keeps the legacy bytes.
+func TestV2Waited_TypedFieldErrorsStillEchoWhenWaitMsIsValid(t *testing.T) {
+	svc := &waitService{}
+	_, _, post := lpServer(t, svc, 8, 8)
+	for _, params := range []string{
+		`{"stateId":123,"waitMs":0}`,
+		`{"stateId":"zz","waitMs":0}`,
+		`{"stateId":"` + stateIDHex + `","includeStatus":"yes","waitMs":5}`,
+		`{"waitMs":5,"stateId":[1]}`,
+	} {
+		body := post(v2req(7, params))
+		require.Contains(t, body, `"code":-32000`, params)
+		require.Contains(t, body, `"data":{"waitedMs":0}`, params)
+	}
+	for _, params := range []string{
+		`{"stateId":123,"waitMs":-1}`,
+		`{"stateId":"` + stateIDHex + `","includeStatus":"yes","waitMs":"5"}`,
+		`{"stateId":123}`,
+	} {
+		body := post(v2req(7, params))
+		require.Contains(t, body, `"code":-32000`, params)
+		require.NotContains(t, body, "waitedMs", params)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -30,9 +31,15 @@ type Server struct {
 	router     *gin.Engine
 	service    Service
 
-	longPoll  *longpoll.Coordinator
-	inflightN int64
-	conns     *connTracker
+	longPoll *longpoll.Coordinator
+	conns    *connTracker
+
+	// admission gate and in-flight register of the handlers (see trackInflight)
+	admitMu    sync.Mutex
+	closing    bool
+	inflightN  int
+	baseCtx    context.Context // cancelled to cut residual work at the shutdown deadline
+	baseCancel context.CancelFunc
 }
 
 // Service represents the business logic service interface
@@ -87,6 +94,7 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 		service:   service,
 		conns:     newConnTracker(),
 	}
+	server.baseCtx, server.baseCancel = context.WithCancel(context.Background())
 
 	// Setup routes
 	server.setupRoutes()
@@ -114,6 +122,11 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 			gatewayLogger.Info("Configured HTTP/2 (TLS) server", "maxConcurrentStreams", cfg.Server.HTTP2MaxConcurrentStreams)
 		}
 	} else if cfg.Server.EnableH2C {
+		// ConfigureServer registers h2Config with the http.Server, so that Shutdown sends GOAWAY to
+		// the connections h2c serves (h2c hijacks them, Shutdown does not know them otherwise).
+		if err := http2.ConfigureServer(server.httpServer, h2Config); err != nil {
+			gatewayLogger.Warn("Failed to register h2c graceful shutdown", "error", err.Error())
+		}
 		server.httpServer.Handler = h2c.NewHandler(server.trackInflight(router), h2Config)
 		gatewayLogger.Info("Configured h2c (HTTP/2 cleartext) server", "maxConcurrentStreams", cfg.Server.HTTP2MaxConcurrentStreams)
 	} else {
@@ -162,7 +175,7 @@ func (s *Server) setupJSONRPCHandlers() {
 	// Add middleware
 	s.rpcServer.AddMiddleware(jsonrpc.RequestIDMiddleware())
 	s.rpcServer.AddMiddleware(jsonrpc.LoggingMiddleware(s.logger))
-	s.rpcServer.AddMiddleware(jsonrpc.TimeoutMiddleware(30*time.Second, s.logger))
+	s.rpcServer.AddMiddleware(jsonrpc.TimeoutMiddleware(MethodTimeout, s.logger))
 
 	// Register handlers based on mode
 	if s.config.Sharding.Mode.IsParent() {
@@ -239,28 +252,57 @@ func (s *Server) Start() error {
 	return s.httpServer.Serve(ln)
 }
 
-// Stop stops the HTTP server gracefully: long-poll waits are ended and refused from now on,
-// the listener is closed, and the handlers - those of hijacked h2c connections included, which
-// http.Server.Shutdown does not wait for - are drained while the caller's storage is still open.
-// Whatever is left at the ctx deadline is cut by closing the tracked connections.
+// Stop stops the HTTP server gracefully. In order: the admission gate closes (new requests are
+// refused without reaching the service, on open h2c connections too) and long-poll waits are
+// ended and refused; the listener closes and HTTP/2 connections get GOAWAY; the admitted handlers
+// and the workers of opt-in requests are joined while the caller's storage is still open. If that
+// has not happened shortly before the ctx deadline, residual work is cut - request contexts are
+// cancelled and the tracked connections closed - and joined for the remaining time. When even
+// that fails Stop returns ErrShutdownIncomplete and the caller must not close what the handlers
+// use. Stop uses only the time of its ctx: pass a derived context to keep time for later steps.
 func (s *Server) Stop(ctx context.Context) error {
 	s.logger.WithComponent("gateway").Info("Stopping HTTP server")
-	if s.longPoll != nil {
-		s.longPoll.Reg.Drain(true)
-	}
+	s.closeAdmission()
 	shutdownErr := make(chan error, 1)
 	go func() { shutdownErr <- s.httpServer.Shutdown(ctx) }()
-	drainErr := s.drain(ctx)
-	if drainErr != nil {
-		// the deadline: stop what is still running instead of leaving it to touch closed storage
+
+	soft := ctx
+	if dl, ok := ctx.Deadline(); ok {
+		cut := time.Until(dl) / 5
+		if cut > 2*time.Second {
+			cut = 2 * time.Second
+		}
+		var cancel context.CancelFunc
+		soft, cancel = context.WithDeadline(ctx, dl.Add(-cut))
+		defer cancel()
+	}
+	var result error
+	if err := s.joinWork(soft); err != nil {
+		s.logger.WithComponent("gateway").Warn("Shutdown deadline: cutting residual handlers", "error", err.Error())
+		s.baseCancel() // request contexts end: cooperative storage calls return
 		s.conns.CloseAll()
+		if err := s.joinWork(ctx); err != nil {
+			return fmt.Errorf("%w: %d handlers, %d active-work tokens: %v", ErrShutdownIncomplete, s.Inflight(), s.rpcServer.ActiveRequests(), err)
+		}
+		result = fmt.Errorf("shutdown deadline reached, residual handlers were cancelled: %w", context.DeadlineExceeded)
 	}
-	err := <-shutdownErr
-	if drainErr == nil {
-		s.conns.CloseAll() // idle hijacked h2c connections
+	// Handlers are done, but their last bytes may still be on the way: Shutdown waits for the
+	// HTTP/1 connections to finish their responses, and the h2c connections (GOAWAY sent) close
+	// themselves once their streams ended. Only what is left after a short grace is closed.
+	if err := <-shutdownErr; err != nil && result == nil {
+		result = err
 	}
-	if drainErr != nil {
-		return drainErr
+	grace := time.NewTimer(time.Second)
+	defer grace.Stop()
+	for s.conns.Open() > 0 {
+		select {
+		case <-grace.C:
+			s.conns.CloseAll()
+		case <-time.After(5 * time.Millisecond):
+			continue
+		}
+		break
 	}
-	return err
+	s.baseCancel()
+	return result
 }

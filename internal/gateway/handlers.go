@@ -56,23 +56,24 @@ func (s *Server) parseCertificationRequest(params json.RawMessage) (*api.Certifi
 // v2 requires stateId to be exactly 32 raw bytes with no algorithm prefix.
 func (s *Server) handleGetInclusionProofV2(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
 	var req api.GetInclusionProofRequestV2
-	if err := json.Unmarshal(params, &req); err != nil {
-		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
-	}
-
-	// waitMs is validated here; with long-poll wired a valid one opts into the echo envelope.
-	wait, err := api.ScanWaitMs(params)
-	if err != nil {
-		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
-	}
-	req.WaitMs = wait
-	waited := wait.Present && s.longPoll != nil
+	// A valid waitMs is recognized independently of the typed fields: every handled error of such
+	// a request - a mistyped stateId or includeStatus included - echoes zero. An invalid waitMs
+	// is not a wait: it gets the legacy bytes.
+	wait, werr := api.ScanWaitMs(params)
+	waited := werr == nil && wait.Present && s.longPoll != nil
 	fail := func(e *jsonrpc.Error) *jsonrpc.Error {
-		if waited { // a recognized wait-bearing request echoes zero in its validation errors
+		if waited {
 			return e.WithWaited(0)
 		}
 		return e
 	}
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, fail(jsonrpc.NewValidationError("Invalid parameters: " + err.Error()))
+	}
+	if werr != nil {
+		return nil, jsonrpc.NewValidationError("Invalid parameters: " + werr.Error())
+	}
+	req.WaitMs = wait
 
 	// Validate required fields
 	if req.StateID == nil {

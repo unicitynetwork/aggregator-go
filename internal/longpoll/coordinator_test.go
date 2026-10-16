@@ -331,3 +331,67 @@ func TestRun_TimeoutMiddlewareWorkerKeepsTheTokenUntilItStops(t *testing.T) {
 	close(release)
 	require.Eventually(t, func() bool { return r.srv.ActiveRequests() == 0 && r.reg.Stats().Reserved == 0 }, time.Second, time.Millisecond)
 }
+
+// The transport's write deadline, counted from the real start of the request, bounds the wait
+// together with the application budget: after a slow request body too little time remains.
+func TestRun_TransportDeadlineBoundsTheWait(t *testing.T) {
+	co := &Coordinator{MaxWait: 20 * time.Second, Budget: 30 * time.Second}
+	now := time.Now()
+	// WriteTimeout 9s, 1.2s already spent: 7.8s left < the 8s reserve -> do not park
+	ctx := WithTransportDeadline(t.Context(), now.Add(7800*time.Millisecond))
+	require.Zero(t, co.effectiveWait(ctx, nil, 500, now))
+	// plenty of transport time: the other bounds apply
+	ctx = WithTransportDeadline(t.Context(), now.Add(40*time.Second))
+	require.Equal(t, 500*time.Millisecond, co.effectiveWait(ctx, nil, 500, now))
+	// the earliest of transport / middleware / application deadline wins
+	ctx = WithTransportDeadline(t.Context(), now.Add(12*time.Second))
+	short, cancel := context.WithDeadline(ctx, now.Add(20*time.Second))
+	defer cancel()
+	require.Equal(t, 4*time.Second, co.effectiveWait(short, nil, 20000, now).Round(10*time.Millisecond))
+}
+
+// A first read which used up the window (and the resume reserve) is the final read: the completed
+// pending result is returned, the token is not released and no overload error is made up.
+func TestRun_SlowFirstReadIsTheFinalReadNotAnOverload(t *testing.T) {
+	r := newRig(t, 8, 8, nil)
+	out := make(chan call, 1)
+	r.handler(1, out, func(context.Context) Result {
+		r.evals.Add(1)
+		time.Sleep(80 * time.Millisecond) // longer than wait (1ms) + resume reserve (200ms test value is smaller than needed? use more)
+		return Result{Pending: true, Value: "pending"}
+	})
+	r.co.ResumeReserveOverride = 20 * time.Millisecond
+	r.post(context.Background(), `{"waitMs":1}`)
+	c := <-out
+	require.Nil(t, c.res.Err, "no busy/deadline error")
+	require.True(t, c.res.Pending)
+	require.True(t, c.held, "the token was never given up")
+	require.EqualValues(t, 1, r.evals.Load())
+	require.Zero(t, r.reg.Stats().Running)
+}
+
+// An early wake queues for at most the resume reserve, not until the cutoff.
+func TestRun_EarlyWakeResumeIsBoundedByTheResumeReserve(t *testing.T) {
+	r := newRig(t, 8, 4, func(c *Coordinator) { c.ResumeReserveOverride = 50 * time.Millisecond })
+	out := make(chan call, 1)
+	r.handler(2000, out, nil)
+	done := make(chan struct{})
+	go func() { r.post(context.Background(), `{"waitMs":2000}`); close(done) }()
+	require.Eventually(t, func() bool { return r.reg.Stats().Reserved == 1 && r.srv.ActiveRequests() == 0 }, 2*time.Second, time.Millisecond)
+	var hold []*jsonrpc.Permit
+	for i := 0; i < 3; i++ { // saturate: the resumption cannot be granted
+		p, ok := r.srv.AcquirePermit()
+		require.True(t, ok)
+		hold = append(hold, p)
+	}
+	start := time.Now()
+	r.reg.Notify() // an immediate notification, 2s before the cutoff
+	<-done
+	require.Less(t, time.Since(start), 600*time.Millisecond, "queued ~50ms, not until the 2s cutoff")
+	c := <-out
+	require.NotNil(t, c.res.Err)
+	require.Equal(t, jsonrpc.ConcurrencyLimitCode, c.res.Err.Code)
+	for _, p := range hold {
+		p.Close()
+	}
+}

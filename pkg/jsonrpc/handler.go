@@ -329,8 +329,14 @@ func (s *Server) writeLimitedResponse(w http.ResponseWriter, response *Response,
 	data, err := encodeLimited(response, max)
 	if tooLarge(err) {
 		n := max
-		data, err = json.Marshal(NewErrorResponse(
-			NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "response_bytes", false, &n), response.ID))
+		e := NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "response_bytes", false, &n)
+		// the result that did not fit carried the wait echo: the replacement error keeps it
+		if w, ok := response.Result.(interface{ WaitedEcho() (uint64, bool) }); ok {
+			if ms, has := w.WaitedEcho(); has {
+				e = e.WithWaited(ms)
+			}
+		}
+		data, err = json.Marshal(NewErrorResponse(e, response.ID))
 	}
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to encode JSON response")
@@ -500,7 +506,11 @@ func TimeoutMiddleware(timeout time.Duration, log *logger.Logger) MiddlewareFunc
 		case response := <-done:
 			return response
 		case <-ctx.Done():
-			return NewErrorResponse(NewError(InternalErrorCode, "Request timeout", nil), req.ID)
+			e := NewError(InternalErrorCode, "Request timeout", nil)
+			if permit != nil && permit.Owned() { // an opt-in request: the echo is part of every handled error
+				e = e.WithWaited(permit.Waited())
+			}
+			return NewErrorResponse(e, req.ID)
 		}
 	}
 }

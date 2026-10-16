@@ -62,6 +62,39 @@ func busyDeadline() *jsonrpc.Error {
 	return jsonrpc.NewDetailedError(jsonrpc.ConcurrencyLimitCode, "Concurrency limit exceeded", "busy", "deadline", true, nil)
 }
 
+type transportKey struct{}
+
+// WithTransportDeadline records when the transport will cut the response (the HTTP write
+// deadline, counted from the start of the request). The wait budget never extends it.
+func WithTransportDeadline(ctx context.Context, t time.Time) context.Context {
+	return context.WithValue(ctx, transportKey{}, t)
+}
+
+// requestDeadline is the earliest of the application budget (counted from admission), the
+// context deadline (the method middleware) and the transport deadline; ok=false if none is known.
+func (c *Coordinator) requestDeadline(ctx context.Context, p *jsonrpc.Permit, now time.Time) (time.Time, bool) {
+	var deadline time.Time
+	consider := func(t time.Time) {
+		if deadline.IsZero() || t.Before(deadline) {
+			deadline = t
+		}
+	}
+	if c.Budget > 0 {
+		if p != nil {
+			consider(p.Created().Add(c.Budget))
+		} else {
+			consider(now.Add(c.Budget))
+		}
+	}
+	if d, ok := ctx.Deadline(); ok {
+		consider(d)
+	}
+	if t, ok := ctx.Value(transportKey{}).(time.Time); ok {
+		consider(t)
+	}
+	return deadline, !deadline.IsZero()
+}
+
 // effectiveWait clamps the requested wait to the configured maximum and to the remaining request
 // budget minus the post-wait reserve; zero means "do not park".
 func (c *Coordinator) effectiveWait(ctx context.Context, p *jsonrpc.Permit, requested uint64, now time.Time) time.Duration {
@@ -73,17 +106,7 @@ func (c *Coordinator) effectiveWait(ctx context.Context, p *jsonrpc.Permit, requ
 	if requested < uint64(c.MaxWait/time.Millisecond) {
 		wait = time.Duration(requested) * time.Millisecond
 	}
-	deadline := now.Add(c.Budget)
-	if p != nil && c.Budget > 0 {
-		deadline = p.Created().Add(c.Budget)
-	}
-	if c.Budget <= 0 {
-		deadline = time.Time{}
-	}
-	if d, ok := ctx.Deadline(); ok && (deadline.IsZero() || d.Before(deadline)) {
-		deadline = d
-	}
-	if !deadline.IsZero() {
+	if deadline, ok := c.requestDeadline(ctx, p, now); ok {
 		if rem := deadline.Sub(now) - c.reserve(); rem < wait {
 			wait = rem
 		}
@@ -127,7 +150,8 @@ func (c *Coordinator) Run(ctx context.Context, method string, requested uint64, 
 	defer w.Close()
 
 	cutoff := start.Add(wait)
-	resumeUntil := cutoff.Add(c.resumeReserve())
+	hard, hasHard := c.requestDeadline(ctx, p, start)
+	postResume := c.reserve() - c.resumeReserve() // final read + response write after the resume
 	var (
 		waited  time.Duration
 		grant   *Grant
@@ -161,12 +185,19 @@ func (c *Coordinator) Run(ctx context.Context, method string, requested uint64, 
 			return c.finish(method, outcome, res, waited)
 		}
 
+		// The completed read is the final one if no waiting remains (a slow first read can use
+		// up the window): never release and reacquire only to turn it into an overload error.
+		if !time.Now().Before(cutoff) {
+			return c.finish(method, "timeout", res, waited)
+		}
+
 		// park: give the active-work token back, retain nothing but the compact wait state
 		p.Release()
 		parked = true
 		t0 := time.Now()
 		k := w.Wait(ctx, gen, cutoff)
 		waited += time.Since(t0)
+		p.SetWaited(ceilMs(waited))
 		woken = k == WakeSignal || k == WakeChanged
 		switch k {
 		case WakeSignal:
@@ -183,7 +214,13 @@ func (c *Coordinator) Run(ctx context.Context, method string, requested uint64, 
 			metrics.LongPollWakesTotal.WithLabelValues("cancel").Inc()
 			return c.finish(method, "cancelled", Result{Err: jsonrpc.NewError(jsonrpc.InternalErrorCode, "Request cancelled", nil)}, waited)
 		}
+		// every resumption, also an early one, queues for at most the resume reserve and never
+		// past the point that leaves the final read and the write their time
 		qStart := time.Now()
+		resumeUntil := qStart.Add(c.resumeReserve())
+		if hasHard && resumeUntil.After(hard.Add(-postResume)) {
+			resumeUntil = hard.Add(-postResume)
+		}
 		g, err := w.Resume(ctx, p, resumeUntil)
 		metrics.LongPollResumeQueueSeconds.Observe(time.Since(qStart).Seconds())
 		if err != nil {
@@ -198,10 +235,12 @@ func (c *Coordinator) Run(ctx context.Context, method string, requested uint64, 
 }
 
 func (c *Coordinator) finish(method, outcome string, res Result, waited time.Duration) (Result, uint64) {
-	ms := uint64((waited + time.Millisecond - 1) / time.Millisecond) // ceiling
+	ms := ceilMs(waited)
 	metrics.LongPollRequestsTotal.WithLabelValues(method, outcome).Inc()
 	if outcome != "immediate_final" {
 		metrics.LongPollWaitSeconds.WithLabelValues(method).Observe(waited.Seconds())
 	}
 	return res, ms
 }
+
+func ceilMs(d time.Duration) uint64 { return uint64((d + time.Millisecond - 1) / time.Millisecond) }

@@ -3,6 +3,7 @@ package jsonrpc
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -60,6 +61,8 @@ type Permit struct {
 	closed  bool
 	owned   bool
 	workers int
+
+	waitedMs atomic.Uint64 // cumulative long-poll wait so far (the echo of a response the middleware writes)
 }
 
 // Owned reports whether the request opted in to permit ownership (a long-poll wait): only then
@@ -70,6 +73,14 @@ func (p *Permit) Owned() bool {
 	defer p.mu.Unlock()
 	return p.owned
 }
+
+// SetWaited records the cumulative wait of the request so far (milliseconds, rounded up). The
+// timeout middleware echoes it in the error it writes for an opt-in request whose handler is
+// still running.
+func (p *Permit) SetWaited(ms uint64) { p.waitedMs.Store(ms) }
+
+// Waited is the last recorded wait.
+func (p *Permit) Waited() uint64 { return p.waitedMs.Load() }
 
 // Created is when the request was admitted.
 func (p *Permit) Created() time.Time { return p.created }

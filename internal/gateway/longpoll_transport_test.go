@@ -188,10 +188,16 @@ func TestTransport_ShutdownDrainsHTTP1AndH2CWaitsBeforeStorageCloses(t *testing.
 	guard := &guardedService{waitService: svc, closed: &closed, bad: &readAfterClose}
 	g := startGateway(t, guard, 8, 20)
 	res := make(chan string, 3)
-	go func() { b, _ := post(context.Background(), h1Client(), g.url, g.body(8000)); res <- b }()
-	go func() { b, _ := post(context.Background(), h1Client(), g.url, g.body(8000)); res <- b }()
+	go func() {
+		b, err := post(context.Background(), h1Client(), g.url, g.body(8000))
+		res <- fmt.Sprint(b, err)
+	}()
+	go func() {
+		b, err := post(context.Background(), h1Client(), g.url, g.body(8000))
+		res <- fmt.Sprint(b, err)
+	}()
 	c2 := h2cClient()
-	go func() { b, _ := post(context.Background(), c2, g.url, g.body(8000)); res <- b }()
+	go func() { b, err := post(context.Background(), c2, g.url, g.body(8000)); res <- fmt.Sprint(b, err) }()
 	require.Eventually(t, func() bool { return g.reg.Stats().Reserved == 3 }, 3*time.Second, 5*time.Millisecond)
 	require.Positive(t, g.srv.conns.Open())
 
@@ -243,7 +249,7 @@ func TestTransport_ShutdownDeadlineClosesLeftovers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	err := g.srv.Stop(ctx)
-	require.Error(t, err, "the deadline is reported")
+	require.ErrorIs(t, err, ErrShutdownIncomplete, "a handler that ignores cancellation is still running: the caller must not close storage")
 	require.Zero(t, g.srv.conns.Open(), "leftover connections were closed")
 	require.Error(t, <-res, "the client of the stuck handler lost its connection")
 	close(svc.release)
@@ -285,4 +291,109 @@ func TestTransport_H2CUpgradeConnectionIsTrackedAndClosedAtShutdown(t *testing.T
 			break // EOF / reset: the connection is closed
 		}
 	}
+}
+
+// Shutdown closes admission on the connections that are already open: while one request is held,
+// a sibling stream on the same h2c connection is refused without reaching the service, and Stop
+// returns with nothing in flight.
+func TestTransport_ShutdownRefusesNewStreamsOnOpenH2CConnections(t *testing.T) {
+	svc := &blockingService{release: make(chan struct{}), entered: make(chan struct{}, 64)}
+	g := startGateway(t, svc, 8, 20)
+	c := h2cClient()
+	held := make(chan error, 1)
+	go func() { _, err := post(context.Background(), c, g.url, g.body(0)); held <- err }()
+	<-svc.entered
+
+	stopped := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		stopped <- g.srv.Stop(ctx)
+	}()
+	require.Eventually(t, func() bool { g.srv.admitMu.Lock(); defer g.srv.admitMu.Unlock(); return g.srv.closing }, 2*time.Second, time.Millisecond)
+
+	// continuous arrivals on the same connection while draining
+	for i := 0; i < 20; i++ {
+		resp, err := c.Post(g.url, "application/json", strings.NewReader(g.body(0)))
+		if err == nil {
+			require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, "refused, not served")
+			_ = resp.Body.Close()
+		}
+	}
+	select {
+	case <-svc.entered:
+		t.Fatal("a request entered the service after shutdown began")
+	default:
+	}
+	require.EqualValues(t, 1, g.srv.Inflight(), "only the admitted request is still in flight")
+
+	close(svc.release)
+	require.NoError(t, <-stopped)
+	require.Zero(t, g.srv.Inflight())
+	require.Zero(t, g.srv.rpcServer.ActiveRequests())
+	<-held
+}
+
+// An opt-in request whose worker outlives its (timeout) response keeps its token: Stop does not
+// report completion while the worker runs, and returns once it stopped; if it never does, Stop
+// says so and main must not close storage.
+func TestTransport_ShutdownJoinsWorkersOfImmediateOptInRequests(t *testing.T) {
+	old := MethodTimeout
+	MethodTimeout = 50 * time.Millisecond
+	defer func() { MethodTimeout = old }()
+
+	svc := &blockingService{release: make(chan struct{}), entered: make(chan struct{}, 4)}
+	g := startGateway(t, svc, 0, 20) // cap 0: waitMs requests are served immediately, no reservation
+	res := make(chan string, 1)
+	go func() { b, _ := post(context.Background(), h2cClient(), g.url, g.body(0)); res <- b }()
+	<-svc.entered
+	body := <-res
+	require.Contains(t, body, "Request timeout")
+	require.Contains(t, body, `"waitedMs":0`, "the middleware's error carries the echo of an opt-in request")
+	require.Equal(t, 1, g.srv.rpcServer.ActiveRequests(), "the proof worker is still running and accounted")
+	require.Zero(t, g.srv.Inflight(), "the outer handler is long gone: this is the case an in-flight count misses")
+
+	// deadline passes while the worker blocks: reported as incomplete
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	err := g.srv.Stop(ctx)
+	cancel()
+	require.ErrorIs(t, err, ErrShutdownIncomplete)
+
+	// once the worker ends, a later Stop completes
+	close(svc.release)
+	require.Eventually(t, func() bool { return g.srv.rpcServer.ActiveRequests() == 0 }, 2*time.Second, 5*time.Millisecond)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+	require.NoError(t, g.srv.Stop(ctx2))
+}
+
+type observingService struct {
+	fixedV2Service
+	entered chan struct{}
+	running atomic.Int32
+}
+
+func (s *observingService) GetInclusionProofV2(ctx context.Context, _ *api.GetInclusionProofRequestV2) (*api.GetInclusionProofResponseV2, error) {
+	s.running.Add(1)
+	defer s.running.Add(-1)
+	s.entered <- struct{}{}
+	<-ctx.Done() // a cooperative storage call: returns when its request context is cancelled
+	return nil, ctx.Err()
+}
+
+// At the deadline residual work is cancelled through its context, joined, and nothing runs when
+// Stop returns.
+func TestTransport_ShutdownDeadlineCancelsAndJoinsCooperativeWork(t *testing.T) {
+	svc := &observingService{entered: make(chan struct{}, 4)}
+	g := startGateway(t, svc, 8, 20)
+	go func() { _, _ = post(context.Background(), h2cClient(), g.url, g.body(0)) }()
+	<-svc.entered
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+	err := g.srv.Stop(ctx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NotErrorIs(t, err, ErrShutdownIncomplete)
+	require.Zero(t, svc.running.Load(), "the work was cancelled and joined before Stop returned")
+	require.Zero(t, g.srv.Inflight())
+	require.Zero(t, g.srv.rpcServer.ActiveRequests())
 }

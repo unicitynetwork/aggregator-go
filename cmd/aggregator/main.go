@@ -304,8 +304,20 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
-	// Stop server
-	if err := server.Stop(shutdownCtx); err != nil {
+	// Stop server: it drains the handlers (h2c included) and the workers of long-poll requests
+	// while storage is open. It gets a share of the shutdown time; the rest remains for the later
+	// steps. If work is still running afterwards, storage must not be closed beneath it.
+	serverCtx, serverCancel := context.WithTimeout(shutdownCtx, 20*time.Second)
+	err = server.Stop(serverCtx)
+	serverCancel()
+	if errors.Is(err, gateway.ErrShutdownIncomplete) {
+		log.WithComponent("main").Error("Handlers still running after the shutdown deadline; not closing storage", "error", err.Error())
+		if asyncLogger != nil {
+			asyncLogger.Stop()
+		}
+		os.Exit(1)
+	}
+	if err != nil {
 		log.WithComponent("main").Error("Failed to stop server gracefully", "error", err.Error())
 	}
 
