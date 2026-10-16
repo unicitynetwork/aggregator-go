@@ -457,7 +457,7 @@ func Test_Notify_OnlyForInvalidationAndLateMaterial(t *testing.T) {
 	require.Equal(t, 1, n, "a late view turns partition_view_unavailable into a proof")
 
 	e.pub.InvalidateLatest()
-	require.Equal(t, 2, n, "a waiter must see the unavailable outcome")
+	require.Equal(t, 1, n, "no wake from inside the caller's lock: the finalizing caller signals after unlocking")
 	_, err := e.cat.AcquireLatest(t.Context())
 	require.Error(t, err)
 

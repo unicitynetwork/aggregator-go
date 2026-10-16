@@ -57,7 +57,7 @@ type Publisher struct {
 	// sealVerifier authenticates stored views again (nil: stored views are not republished).
 	sealVerifier func(ctx context.Context) types.SealVerifier
 	// notify wakes long-poll waiters after a publication outcome which no finalization path
-	// reports itself: late certification material and invalidation. Finalization publishes
+	// reports itself: late certification material. Finalization publishes
 	// first and its caller notifies afterwards, once the proof-ready update is done (a wake
 	// from inside publish would precede markProofsReady). Called without publisher locks.
 	notify func()
@@ -138,7 +138,8 @@ func (p *Publisher) EnsurePublishedAtStartup(ctx context.Context, latest *models
 func (p *Publisher) InvalidateLatest() {
 	if p != nil {
 		p.catalog.MarkLatestUnavailable()
-		p.wake() // a waiter must see the unavailable outcome, never sleep through it
+		// No wake here: its callers hold finalizationMu, and each of them signals after its own
+		// completion and unlock, so the waiter still observes the unavailable outcome.
 	}
 }
 
