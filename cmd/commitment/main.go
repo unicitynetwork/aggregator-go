@@ -48,6 +48,7 @@ var (
 	flagTimeout      = flag.Duration("timeout", 45*time.Second, "Maximum time to wait for inclusion proof")
 	flagPollInterval = flag.Duration("poll-interval", time.Second, "Polling interval for inclusion proof checks")
 	flagVerbose      = flag.Bool("v", true, "Log request and response payloads")
+	flagLongPoll     = flag.Bool("long-poll", true, "Ask the aggregator to hold get_inclusion_proof.v2 until the proof is ready (waitMs); --long-poll=false polls every --poll-interval")
 )
 
 func main() {
@@ -100,7 +101,12 @@ func main() {
 	logger.Printf("Certification request %s accepted. Polling for inclusion proof...", certReq.StateID)
 
 	submittedAt := time.Now()
-	inclusionProof, attempts, err := waitForInclusionProof(ctx, client, certReq, logger)
+	waiter := &proofWaiter{
+		client: client, url: *flagURL, auth: *flagAuth, logger: logger,
+		longPoll: *flagLongPoll, interval: *flagPollInterval, transportMax: client.Timeout,
+		verify: proofverify.VerifyInclusionProofLocal,
+	}
+	inclusionProof, attempts, err := waiter.wait(ctx, certReq)
 	if err != nil {
 		logger.Fatalf("failed to retrieve inclusion proof after %d attempt(s): %v", attempts, err)
 	}
@@ -198,59 +204,4 @@ func callJSONRPC(ctx context.Context, client *http.Client, url, authHeader, meth
 	}
 
 	return &rpcResp, nil
-}
-
-func waitForInclusionProof(ctx context.Context, client *http.Client, req *api.CertificationRequest, logger *log.Logger) (*api.GetInclusionProofResponseV2, int, error) {
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(45 * time.Second)
-	}
-
-	attempts := 0
-	for time.Now().Before(deadline) {
-		attempts++
-		select {
-		case <-ctx.Done():
-			return nil, attempts, ctx.Err()
-		default:
-		}
-
-		proofResp, err := callJSONRPC(ctx, client, *flagURL, *flagAuth, "get_inclusion_proof.v2", api.GetInclusionProofRequestV2{
-			StateID: req.StateID,
-		})
-		if err != nil {
-			logger.Printf("get_inclusion_proof.v2 attempt %d failed: %v", attempts, err)
-			time.Sleep(*flagPollInterval)
-			continue
-		}
-
-		if proofResp.Error != nil {
-			logger.Printf("get_inclusion_proof.v2 attempt %d returned error: %s (code %d)", attempts, proofResp.Error.Message, proofResp.Error.Code)
-			time.Sleep(*flagPollInterval)
-			continue
-		}
-
-		var payload api.GetInclusionProofResponseV2
-		if err := json.Unmarshal(proofResp.Result, &payload); err != nil {
-			logger.Printf("get_inclusion_proof.v2 attempt %d decode error: %v", attempts, err)
-			time.Sleep(*flagPollInterval)
-			continue
-		}
-
-		if payload.InclusionProof == nil || len(payload.InclusionProof.UnicityCertificate) == 0 {
-			logger.Printf("get_inclusion_proof.v2 attempt %d: proof payload incomplete, retrying...", attempts)
-			time.Sleep(*flagPollInterval)
-			continue
-		}
-
-		if err := proofverify.VerifyInclusionProofLocal(payload.InclusionProof, req); err != nil {
-			logger.Printf("get_inclusion_proof.v2 attempt %d verification error: %v", attempts, err)
-			time.Sleep(*flagPollInterval)
-			continue
-		}
-
-		return &payload, attempts, nil
-	}
-
-	return nil, attempts, fmt.Errorf("timed out waiting for inclusion proof for state ID %s", req.StateID)
 }
