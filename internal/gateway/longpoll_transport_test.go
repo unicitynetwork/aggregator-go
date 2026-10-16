@@ -397,3 +397,34 @@ func TestTransport_ShutdownDeadlineCancelsAndJoinsCooperativeWork(t *testing.T) 
 	require.Zero(t, g.srv.Inflight())
 	require.Zero(t, g.srv.rpcServer.ActiveRequests())
 }
+
+// Legacy (no waitMs) requests: their token is released with the timeout response but the proof
+// worker may still run. Shutdown must join those workers too, with the response unchanged.
+func TestTransport_ShutdownJoinsWorkersOfLegacyRequests(t *testing.T) {
+	old := MethodTimeout
+	MethodTimeout = 50 * time.Millisecond
+	defer func() { MethodTimeout = old }()
+
+	svc := &blockingService{release: make(chan struct{}), entered: make(chan struct{}, 4)}
+	g := startGateway(t, svc, 8, 20)
+	legacy := `{"jsonrpc":"2.0","id":1,"method":"get_inclusion_proof.v2","params":{"stateId":"` + stateIDHex + `"}}`
+	res := make(chan string, 1)
+	go func() { b, _ := post(context.Background(), h2cClient(), g.url, legacy); res <- b }()
+	<-svc.entered
+	body := <-res
+	require.JSONEq(t, `{"jsonrpc":"2.0","error":{"code":-32603,"message":"Request timeout"},"id":1}`, body, "legacy response bytes are unchanged")
+	require.Zero(t, g.srv.rpcServer.ActiveRequests(), "the legacy token went back with the response")
+	require.Zero(t, g.srv.Inflight())
+	require.Equal(t, 1, g.srv.rpcServer.ActiveWorkers(), "but the worker still runs")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	err := g.srv.Stop(ctx)
+	cancel()
+	require.ErrorIs(t, err, ErrShutdownIncomplete, "storage must not be closed beneath it")
+
+	close(svc.release)
+	require.Eventually(t, func() bool { return g.srv.rpcServer.ActiveWorkers() == 0 }, 2*time.Second, 5*time.Millisecond)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+	require.NoError(t, g.srv.Stop(ctx2))
+}

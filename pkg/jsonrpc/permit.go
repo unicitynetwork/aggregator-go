@@ -261,3 +261,10 @@ func (s *Server) optInLimitsFor(req *Request) (MethodLimits, bool) {
 	}
 	return l, true
 }
+
+type workerCountKey struct{}
+
+// ActiveWorkers is the number of method workers (TimeoutMiddleware goroutines of requests served
+// by this server) which have not stopped yet - including workers whose response was already
+// written. Shutdown joins them before dependencies close.
+func (s *Server) ActiveWorkers() int { return int(s.workers.Load()) }

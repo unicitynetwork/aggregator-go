@@ -282,7 +282,7 @@ func (s *Server) Stop(ctx context.Context) error {
 		s.baseCancel() // request contexts end: cooperative storage calls return
 		s.conns.CloseAll()
 		if err := s.joinWork(ctx); err != nil {
-			return fmt.Errorf("%w: %d handlers, %d active-work tokens: %v", ErrShutdownIncomplete, s.Inflight(), s.rpcServer.ActiveRequests(), err)
+			return fmt.Errorf("%w: %d handlers, %d workers, %d active-work tokens: %v", ErrShutdownIncomplete, s.Inflight(), s.rpcServer.ActiveWorkers(), s.rpcServer.ActiveRequests(), err)
 		}
 		result = fmt.Errorf("shutdown deadline reached, residual handlers were cancelled: %w", context.DeadlineExceeded)
 	}

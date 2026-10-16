@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +28,7 @@ type Server struct {
 	pool         *slotPool
 	ownership    map[string]OwnershipPredicate
 	optIn        map[string]MethodLimits
+	workers      atomic.Int64 // method workers running, also after their response (see TimeoutMiddleware)
 	maxBodyBytes int64
 	mutex        sync.RWMutex
 }
@@ -140,6 +142,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Add request ID to context
 	ctx := context.WithValue(r.Context(), logger.StateIDKey, uuid.New().String())
 	ctx = ContextWithPermit(ctx, permit)
+	ctx = context.WithValue(ctx, workerCountKey{}, &s.workers)
 
 	// Parse request. The ID is kept raw so that method-limited requests can
 	// validate its original encoding and echo it without number conversion.
@@ -479,8 +482,19 @@ func TimeoutMiddleware(timeout time.Duration, log *logger.Logger) MiddlewareFunc
 		// A request's permit must then stay held until the worker really stops (C07).
 		permit := PermitFromContext(ctx)
 		tracked := permit != nil && permit.Owned() && permit.AddWorker()
+		// Independently of any permit accounting (legacy requests release their token with the
+		// response), the server counts every method worker until it really stops, so shutdown
+		// can join workers that outlive their response. Response bytes and timing are unchanged.
+		var wc *atomic.Int64
+		if c, ok := ctx.Value(workerCountKey{}).(*atomic.Int64); ok {
+			c.Add(1)
+			wc = c
+		}
 
 		go func() {
+			if wc != nil {
+				defer wc.Add(-1)
+			}
 			if tracked {
 				defer permit.WorkerDone()
 			}

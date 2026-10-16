@@ -166,13 +166,13 @@ func (s *Server) closeAdmission() {
 	}
 }
 
-// joinWork waits until no handler runs, no owned request worker holds an active-work token (a
-// proof worker that outlived its response - the timeout middleware returns before it stops - keeps
-// the token of an opt-in request until it ends) and every wait is closed; or ctx ends.
+// joinWork waits until no handler runs, no method worker runs (the timeout middleware returns
+// before its worker stops, for legacy requests too, whose token is already released), no owned
+// request holds an active-work token and every wait is closed; or ctx ends.
 func (s *Server) joinWork(ctx context.Context) error {
 	tick := time.NewTicker(2 * time.Millisecond)
 	defer tick.Stop()
-	for s.Inflight() > 0 || s.rpcServer.ActiveRequests() > 0 {
+	for s.Inflight() > 0 || s.rpcServer.ActiveRequests() > 0 || s.rpcServer.ActiveWorkers() > 0 {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
