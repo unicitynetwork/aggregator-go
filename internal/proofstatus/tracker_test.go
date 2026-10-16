@@ -1,7 +1,6 @@
 package proofstatus
 
 import (
-	"fmt"
 	"math"
 	"sync"
 	"testing"
@@ -146,17 +145,42 @@ func TestConcurrentUse(t *testing.T) {
 	require.LessOrEqual(t, e, 64)
 }
 
-func TestLookupDoesNotScale(t *testing.T) {
+// Lookup cost does not depend on the number of pending entries: the work of a Status call
+// (heap sweep steps, map probes) is counted, not timed, for a small and a 100x larger set.
+func TestLookupWorkDoesNotGrowWithPendingCount(t *testing.T) {
+	work := func(n int) (perLookupHeapOps float64, heapLen int) {
+		c := &clock{now: time.Unix(1000, 0), ref: 100}
+		tr := newTracker(c, 10, time.Minute)
+		for i := 0; i < n; i++ {
+			tr.MarkPending(sid(i), uint64(1<<40+i)) // none due
+		}
+		before := tr.sweepSteps()
+		const lookups = 1000
+		for i := 0; i < lookups; i++ {
+			require.Equal(t, api.ProofStatusPending, tr.Status(sid(i%n)))
+		}
+		return float64(tr.sweepSteps()-before) / lookups, tr.HeapLen()
+	}
+	small, hs := work(500)
+	large, hl := work(50000)
+	require.Equal(t, 500, hs)
+	require.Equal(t, 50000, hl)
+	require.Zero(t, small, "no deadline is due: a lookup pops nothing")
+	require.Zero(t, large, "and that does not depend on how many entries are pending")
+
+	// when deadlines are due, the sweep pays once per expired entry, not once per lookup
 	c := &clock{now: time.Unix(1000, 0), ref: 100}
-	tr := newTracker(c, 10, time.Minute)
-	for i := 0; i < 50000; i++ {
-		tr.MarkPending(sid(i), 1<<40)
+	tr := newTracker(c, 1<<20, time.Minute)
+	for i := 0; i < 5000; i++ {
+		tr.MarkPending(sid(i), 150)
 	}
-	start := time.Now()
-	for i := 0; i < 50000; i++ {
-		require.Equal(t, api.ProofStatusPending, tr.Status(sid(i)))
+	c.advance(time.Second, 200)
+	before := tr.sweepSteps()
+	for i := 0; i < 5000; i++ {
+		_ = tr.Status(sid(i))
 	}
-	require.Less(t, time.Since(start), 2*time.Second, fmt.Sprintf("50k lookups took %s", time.Since(start)))
+	require.EqualValues(t, 5000, tr.sweepSteps()-before, "each deadline is processed exactly once in total")
+	require.EqualValues(t, 0, tr.HeapLen())
 }
 
 // The deadline heap indexes only live pending entries: finalization/expiry of a request
@@ -164,7 +188,8 @@ func TestLookupDoesNotScale(t *testing.T) {
 func TestHeapStaysBoundedByPendingUnderChurn(t *testing.T) {
 	c := &clock{now: time.Unix(1000, 0), ref: 100}
 	tr := newTracker(c, 10, time.Minute)
-	for i := 0; i < 200000; i++ {
+	maxHeap := 0
+	for i := 0; i < 20000; i++ {
 		id := sid(i)
 		tr.MarkPending(id, 1<<62) // far-future client-chosen deadline
 		tr.ClearFinalized(id)     // certified right away
@@ -172,8 +197,11 @@ func TestHeapStaysBoundedByPendingUnderChurn(t *testing.T) {
 			tr.MarkPending(id, 1<<61)
 			tr.MarkExpired(id)
 		}
-		require.LessOrEqual(t, tr.HeapLen(), 2, "heap must not accumulate finalized/expired requests")
+		if n := tr.HeapLen(); n > maxHeap {
+			maxHeap = n
+		}
 	}
+	require.LessOrEqual(t, maxHeap, 2, "heap must not accumulate finalized/expired requests")
 	p, _ := tr.Counts()
 	require.Zero(t, p)
 	require.Zero(t, tr.HeapLen())

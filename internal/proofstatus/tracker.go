@@ -98,6 +98,16 @@ type Tracker struct {
 	expired map[string]time.Time
 	ring    []expiredEntry // FIFO of expired insertions (may hold stale entries)
 	head    int
+
+	// sweepCount counts deadline entries processed by the sweep (a hardware independent
+	// work metric for tests).
+	sweepCount uint64
+}
+
+func (t *Tracker) sweepSteps() uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.sweepCount
 }
 
 // New creates a tracker.
@@ -232,6 +242,20 @@ func (t *Tracker) ReturnToQueue(ids ...api.StateID) {
 	}
 }
 
+// ReturnAllToQueue is ReturnToQueue for every pulled request: the node abandoned its rounds
+// and precollected state, but the requests are still in the shared queue and will be pulled
+// again, so they stay pending (and are swept by deadline again) rather than becoming unknown.
+func (t *Tracker) ReturnAllToQueue() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, e := range t.pending {
+		if e.inRound {
+			e.inRound = false
+			t.pushLocked(e)
+		}
+	}
+}
+
 // ClearFinalized removes the pending marks of states which were certified and forgets any
 // expired record of them (a state which is certified was not dropped).
 func (t *Tracker) ClearFinalized(ids ...api.StateID) {
@@ -322,6 +346,7 @@ func (t *Tracker) sweepLocked() {
 	now := t.cfg.Now()
 	for len(t.deadline) > 0 && t.deadline[0].deadline <= ref {
 		e := heap.Pop(&t.deadline).(*pendEntry)
+		t.sweepCount++
 		delete(t.pending, e.id)
 		t.addExpiredLocked(e.id, now)
 	}

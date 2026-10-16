@@ -54,6 +54,9 @@ classification is memory only.
   the next round pins a reference time at least that large, so the drop is guaranteed. A request a round has pulled is
   never swept by deadline (it is being certified, even if the certified round's reference time already passed its
   deadline); the round reports real drops. All lookups are O(1) in memory; no extra database round trip.
+- Abandoned rounds (round timeout, repeat UC, precollector discard) hand their requests back to the queue: they stay
+  pending and are swept by their deadline again. Only deactivation (the node stops answering for the queue) forgets the
+  pending marks.
 - **Bounds:** pending entries are capped (1 048 576; beyond it a request is simply untracked and counted in
   `aggregator_proof_status_pending_rejected_total`), the deadline heap holds only queued requests with a finite deadline
   and loses a node whenever its request is cleared, finalized, expired or pulled into a round, and requests without a

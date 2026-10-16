@@ -527,11 +527,15 @@ func (rm *RoundManager) markProofsReady(block *models.Block, stateIDs []api.Stat
 	rm.statusTracker.ClearFinalized(stateIDs...)
 }
 
+// clearProofPending forgets which requests this node's rounds have pulled (abandoned rounds,
+// discarded precollector, deactivation). Admitted requests are still in the shared queue and
+// will be pulled again: they stay pending in the status hints, only handed back to the queue.
+// Deactivation alone also resets the status memory (see Deactivate).
 func (rm *RoundManager) clearProofPending() {
 	rm.proofCacheMu.Lock()
 	defer rm.proofCacheMu.Unlock()
 	rm.proofPending = make(map[string]struct{})
-	rm.statusTracker.Reset()
+	rm.statusTracker.ReturnAllToQueue()
 }
 
 func (rm *RoundManager) clearProofsPending(commitments []*models.CertificationRequest) {
@@ -587,6 +591,14 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 
 // StartNewRound starts a new round for processing commitments (delegates to unified function)
 func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt, referenceTime uint64) error {
+	rm.abandonSupersededRound(ctx, roundNumber, referenceTime)
+	return rm.StartNewRoundWithSnapshot(ctx, roundNumber, referenceTime, nil, nil, nil, false, "")
+}
+
+// abandonSupersededRound drops an unresolved round which the new round supersedes, with its
+// snapshot, precollected state and pending sweep. The requests it had pulled are still in the
+// shared queue: their status hints stay pending (see clearProofPending).
+func (rm *RoundManager) abandonSupersededRound(ctx context.Context, roundNumber *api.BigInt, referenceTime uint64) {
 	rm.roundMutex.Lock()
 	supersededSnapshot, resetPendingSweep, unresolved := rm.abandonSupersededRoundLocked(roundNumber, referenceTime)
 	rm.roundMutex.Unlock()
@@ -600,7 +612,6 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 			rm.resetRedisPendingSweep(ctx)
 		}
 	}
-	return rm.StartNewRoundWithSnapshot(ctx, roundNumber, referenceTime, nil, nil, nil, false, "")
 }
 
 // StartNewRoundWithSnapshot starts a new round, optionally with pre-collected data.
@@ -1490,6 +1501,8 @@ func (rm *RoundManager) Deactivate(ctx context.Context) error {
 	rm.currentRound = nil
 	rm.roundMutex.Unlock()
 	rm.clearProofPending()
+	// this node no longer answers for the queue: forget what it admitted
+	rm.statusTracker.Reset()
 
 	return nil
 }

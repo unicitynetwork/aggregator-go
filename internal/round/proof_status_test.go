@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
@@ -146,7 +147,9 @@ func TestProofStatus_DeactivationForgetsPendingButNotExpired(t *testing.T) {
 	b := testutil.CreateTestCertificationRequest(t, "status_b")
 	admit(rm, a, 5000)
 	rm.statusTracker.MarkExpired(b.StateID)
-	rm.clearProofPending()
+	rm.clearProofPending() // abandoned rounds / precollector discard: admissions stay pending
+	require.Equal(t, api.ProofStatusPending, rm.ProofStatus(a.StateID))
+	rm.statusTracker.Reset() // deactivation
 	require.Equal(t, api.ProofStatusUnknown, rm.ProofStatus(a.StateID))
 	require.Equal(t, api.ProofStatusExpired, rm.ProofStatus(b.StateID))
 }
@@ -205,5 +208,46 @@ func TestProofStatus_FinalizationForgetsExpiredRecord(t *testing.T) {
 	require.Equal(t, api.ProofStatusUnknown, rm.ProofStatus(c.StateID))
 	rm.statusTracker.MarkExpired(c.StateID)
 	rm.clearProofStateIDsPending([]api.StateID{c.StateID}) // recovered finalization
+	require.Equal(t, api.ProofStatusUnknown, rm.ProofStatus(c.StateID))
+}
+
+// Review major: a superseded round (an ordinary BFT event: round timeout, repeat UC) hands its
+// requests back to the queue; it must not make them, or any other queued request, unknown.
+func TestProofStatus_SupersededRoundKeepsAdmissionsPending(t *testing.T) {
+	rm := newStatusRM(t)
+	rm.config = &config.Config{}
+	inRound := testutil.CreateTestCertificationRequest(t, "status_sup_round")
+	queued := testutil.CreateTestCertificationRequest(t, "status_sup_queued")
+	admit(rm, inRound, 5000)
+	admit(rm, queued, 5000)
+
+	rm.startStatusRound(t, 1, 1000)
+	rm.currentRound.Commitments = []*models.CertificationRequest{inRound}
+	process(t, rm, inRound)
+	require.Equal(t, api.ProofStatusPending, rm.ProofStatus(inRound.StateID))
+	require.Equal(t, api.ProofStatusPending, rm.ProofStatus(queued.StateID))
+
+	// round 2 supersedes the unresolved round 1 (the exact sequence of StartNewRound)
+	rm.abandonSupersededRound(context.Background(), api.NewBigInt(big.NewInt(2)), 1001)
+	require.Nil(t, rm.currentRound, "round 1 was abandoned")
+
+	require.Equal(t, api.ProofStatusPending, rm.ProofStatus(inRound.StateID), "handed back to the queue, not unknown")
+	require.Equal(t, api.ProofStatusPending, rm.ProofStatus(queued.StateID), "never pulled: untouched")
+	require.Equal(t, 2, countPending(rm))
+
+	// handed-back requests are swept by their deadline again (a drop is guaranteed)
+	rm.referenceTime.Store(6000)
+	require.Equal(t, api.ProofStatusExpired, rm.ProofStatus(inRound.StateID))
+	require.Equal(t, api.ProofStatusExpired, rm.ProofStatus(queued.StateID))
+}
+
+// Only deactivation forgets the admissions: the node no longer answers for the queue.
+func TestProofStatus_DeactivationResetsAdmissionsButClearProofPendingDoesNot(t *testing.T) {
+	rm := newStatusRM(t)
+	c := testutil.CreateTestCertificationRequest(t, "status_deact")
+	admit(rm, c, 5000)
+	rm.clearProofPending()
+	require.Equal(t, api.ProofStatusPending, rm.ProofStatus(c.StateID))
+	rm.statusTracker.Reset() // what Deactivate does after clearProofPending
 	require.Equal(t, api.ProofStatusUnknown, rm.ProofStatus(c.StateID))
 }
