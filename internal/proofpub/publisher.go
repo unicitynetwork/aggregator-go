@@ -313,6 +313,12 @@ func (p *Publisher) publishCertifiedEmpty(ctx context.Context, m *proofmaterial.
 	if m.Kind == proofmaterial.KindFinalized || m.Kind == proofmaterial.KindSidecarFill || m.HasBlock {
 		return reject(ResultRejected, fmt.Errorf("%w: an empty root is not a finalized block", ErrEmptyTreeNotPublishable))
 	}
+	if m.UC.InputRecord.Hash == nil {
+		// native null: the certified empty tree
+	} else {
+		// an empty byte string is a different encoding and is not the empty tree
+		return reject(ResultRejected, fmt.Errorf("%w: the input record hash is an empty byte string, not null", ErrEmptyTreeNotPublishable))
+	}
 	id := proofview.BlockIdentity{Number: api.NewBigIntFromUint64(EmptyTreeBlockNumber), ConfigLineage: lineage}
 	cert := proofview.Certification{UC: m.UCBytes}
 	// a later UC of the same empty state (repeat/timeout) attaches to the retained snapshot

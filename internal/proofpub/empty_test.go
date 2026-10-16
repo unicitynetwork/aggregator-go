@@ -107,6 +107,13 @@ func TestEmptyRootNeverAuthorizesAnythingElse(t *testing.T) {
 	noVerifier.pub.SetSealVerifier(nil)
 	require.ErrorIs(t, noVerifier.pub.PublishProofMaterial(ctx, noVerifier.material(t, proofmaterial.KindInitial, uc)), proofpub.ErrEmptyTreeNotPublishable)
 
+	// an empty byte string is not the empty tree (only native null is)
+	bs := *uc
+	ir := *uc.InputRecord
+	ir.Hash = []byte{}
+	bs.InputRecord = &ir
+	require.ErrorIs(t, e.pub.PublishProofMaterial(ctx, e.material(t, proofmaterial.KindInitial, &bs)), proofpub.ErrEmptyTreeNotPublishable)
+
 	// a node with committed history is not at the empty state
 	root := commit(t, e.b, 1, 0, 5)
 	require.NotEmpty(t, root)
