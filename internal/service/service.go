@@ -375,7 +375,7 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 					return nil, fmt.Errorf("failed to get latest block by root hash: %w", err)
 				}
 				if block == nil {
-					return nil, fmt.Errorf("no block found with root hash %s", rootHashRaw.String())
+					return nil, fmt.Errorf("%w: no block found with root hash %s", api.ErrProofNotYetAvailable, rootHashRaw.String())
 				}
 			}
 			responseBlockNumber, err := proofBundleBlockNumber(as.config.Sharding.Mode, block)
@@ -406,7 +406,7 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 			return nil, fmt.Errorf("failed to get latest block by root hash: %w", err)
 		}
 		if block == nil {
-			return nil, fmt.Errorf("no block found with root hash %s", rootHashRaw.String())
+			return nil, fmt.Errorf("%w: no block found with root hash %s", api.ErrProofNotYetAvailable, rootHashRaw.String())
 		}
 	} else {
 		as.recordProofPath(ctx, proofPathMetadataHit)
