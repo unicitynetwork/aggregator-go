@@ -60,11 +60,11 @@ import (
 
 const benchPendingIDs = 256 // the batch waiters ask for the first L of these
 
-// batchBurstStrict: a wake burst of batch waiters must complete with no error. False in this
-// revision because F1 (resumed batch reads are rejected busy when B=P=8, see interop-lp.md) is not
-// fixed here: the burst is then gated on ACCOUNTING only (every waiter answered, every failure a
-// retryable -32006 with the echo, nothing leaked), unless B and P cover the whole burst.
-var batchBurstStrict = false
+// batchBurstStrict: a wake burst of batch waiters must complete with no error, also with the
+// production B = P = 8 (F1 ruling: coordinated resume admission). Before the fix the burst could
+// only be gated on accounting (every waiter answered, every failure a retryable -32006 with the
+// echo, nothing leaked).
+var batchBurstStrict = true
 
 // ---------------------------------------------------------------------------------------------
 // child: the server under measurement
