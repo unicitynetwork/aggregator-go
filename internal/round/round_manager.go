@@ -138,7 +138,11 @@ type RoundManager struct {
 	proofCacheMu          sync.RWMutex
 	proofPending          map[string]struct{}
 	latestProofReadyBlock *models.Block
-	proofMetadataCache    *proofMetadataCache
+
+	// testHookBeforeProofViewPublish runs between disk finalization in storage and the proof-view
+	// publication (tests only).
+	testHookBeforeProofViewPublish func()
+	proofMetadataCache             *proofMetadataCache
 	// statusTracker backs the unauthenticated proof status hints (pending/expired/unknown).
 	statusTracker *proofstatus.Tracker
 
@@ -1946,4 +1950,10 @@ func (rm *RoundManager) clearStaleAdmissionMarks(dropped []interfaces.Certificat
 			rm.statusTracker.ClearPending(d.StateID)
 		}
 	}
+}
+
+// SetTestHookBeforeProofViewPublish installs a function run between disk finalization in storage
+// and proof-view publication. For tests only.
+func (rm *RoundManager) SetTestHookBeforeProofViewPublish(f func()) {
+	rm.testHookBeforeProofViewPublish = f
 }

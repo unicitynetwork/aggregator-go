@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
@@ -80,6 +81,9 @@ func (s *Server) handleGetInclusionProofV2(ctx context.Context, params json.RawM
 
 	// Call service
 	response, err := s.service.GetInclusionProofV2(ctx, &req)
+	if errors.Is(err, api.ErrProofNotYetAvailable) {
+		return nil, jsonrpc.NewDetailedError(jsonrpc.ProofUnavailableCode, "Proof unavailable", "proof_unavailable", "no_finalized_view", true, nil)
+	}
 	if err != nil {
 		s.logger.WithContext(ctx).Error("Failed to get inclusion proof", "error", err.Error())
 		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to get inclusion proof", err.Error())

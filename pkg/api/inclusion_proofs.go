@@ -289,3 +289,9 @@ func decodeStateRoot(raw json.RawMessage, req *GetInclusionProofsRequestV1) erro
 	req.Root = root
 	return nil
 }
+
+// ErrProofNotYetAvailable is returned by get_inclusion_proof.v2 when no certified block binds the
+// current tree root yet (before the first block). It is retryable and must never be answered with
+// an empty-tree proof: no UC certifies the empty root. The gateway maps it to the typed
+// proof_unavailable / no_finalized_view error (-32008, retryable) of the batch method.
+var ErrProofNotYetAvailable = errors.New("proof not yet available: no finalized block")

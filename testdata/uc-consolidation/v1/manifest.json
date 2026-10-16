@@ -5,13 +5,13 @@
     "command": "UC_FIXTURE_AGGREGATOR_COMMIT=$(git rev-parse HEAD) go run ./cmd/gen-uc-consolidation-fixtures -out testdata/uc-consolidation/v1",
     "toolchain": "go1.27.2",
     "commits": {
-      "aggregator-go": "d6d8fad4b76d6c436b1a86d7fd962e62d0ef337e",
+      "aggregator-go": "0e518dac38bd986c74dd2439158eb7f81e7043d2",
       "bft-core": "8b05d19f564f",
-      "bft-go-base": "8e08f74f29fa"
+      "bft-go-base": "eeedaa7a8843"
     },
     "modules": {
       "github.com/unicitynetwork/bft-core": "v1.1.1-0.20261015121647-8b05d19f564f",
-      "github.com/unicitynetwork/bft-go-base": "v1.1.1-0.20261015113011-8e08f74f29fa"
+      "github.com/unicitynetwork/bft-go-base": "v1.1.1-0.20261016114947-eeedaa7a8843"
     }
   },
   "limits": {

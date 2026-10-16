@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
+	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
 
 type statusV2Service struct {
@@ -146,4 +148,30 @@ func TestV2StatusOldServerCompatibility(t *testing.T) {
 	_, bad := postRPC(t, rpc, rpcBody(8, `{"stateId":"abcd","includeStatus":true}`))
 	require.Contains(t, bad, "stateId must be exactly 32 bytes")
 	_ = context.Background
+}
+
+type notYetService struct{ fixedV2Service }
+
+func (notYetService) GetInclusionProofV2(context.Context, *api.GetInclusionProofRequestV2) (*api.GetInclusionProofResponseV2, error) {
+	return nil, fmt.Errorf("%w: no block found with root hash 00", api.ErrProofNotYetAvailable)
+}
+
+// Before the first block the answer is the typed retryable proof_unavailable/no_finalized_view
+// of the batch method, never an internal error and never an empty-tree proof.
+func TestV2BeforeFirstBlockIsTypedRetryable(t *testing.T) {
+	rpc := newRPCTestServer(t, notYetService{}, nil)
+	for _, params := range []string{`{"stateId":"` + stateIDHex + `"}`, `{"stateId":"` + stateIDHex + `","includeStatus":true}`} {
+		_, body := postRPC(t, rpc, rpcBody(7, params))
+		var env struct {
+			Result json.RawMessage `json:"result"`
+			Error  *jsonrpc.Error  `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(body), &env))
+		require.Nil(t, env.Result)
+		require.NotNil(t, env.Error)
+		require.Equal(t, jsonrpc.ProofUnavailableCode, env.Error.Code)
+		data, err := json.Marshal(env.Error.Data)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"reason":"proof_unavailable","detail":"no_finalized_view","retryable":true}`, string(data))
+	}
 }
