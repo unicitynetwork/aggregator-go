@@ -133,11 +133,10 @@ func negatives(base, golden, empty, zero, chain Vector) ([]Vector, error) {
 }
 
 // ucNegatives mutate the unicity certificate of base (the signature or content), context default.
-func ucNegatives(base Vector, tb *types.RootTrustBaseV1, prod *ucfixture.Producer, contexts map[string]Context, tbs map[string]types.RootTrustBase) ([]Vector, error) {
+func ucNegatives(base, emptyBase Vector, tb *types.RootTrustBaseV1, prod *ucfixture.Producer, contexts map[string]Context, tbs map[string]types.RootTrustBase) ([]Vector, error) {
 	var out []Vector
 	block := uint64(0)
 	fmt.Sscan(base.Block, &block)
-	cert := unhex(base.Certificate)
 	var orig types.UnicityCertificate
 	if err := types.Cbor.Unmarshal(unhex(base.UC), &orig); err != nil {
 		return nil, err
@@ -149,17 +148,36 @@ func ucNegatives(base Vector, tb *types.RootTrustBaseV1, prod *ucfixture.Produce
 		}
 		return &c
 	}
-	emit := func(name, desc, verdict string, uc *types.UnicityCertificate) error {
+	emitFrom := func(b Vector, name, desc, verdict string, uc *types.UnicityCertificate, acceptable ...string) error {
 		ucb, err := uc.MarshalCBOR()
 		if err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}
-		v := derive(base, name, desc, verdict, func(v *Vector) {
+		var blk uint64
+		fmt.Sscan(b.Block, &blk)
+		v := derive(b, name, desc, verdict, func(v *Vector) {
 			v.UC = hex.EncodeToString(ucb)
-			v.Wrapper = hex.EncodeToString(EncodeWrapper(block, cert, ucb))
+			v.Wrapper = hex.EncodeToString(EncodeWrapper(blk, unhex(b.Certificate), ucb))
+			v.Expected.Acceptable = acceptable
 		})
 		out = append(out, v)
 		return nil
+	}
+	emit := func(name, desc, verdict string, uc *types.UnicityCertificate, acceptable ...string) error {
+		return emitFrom(base, name, desc, verdict, uc, acceptable...)
+	}
+	// the certified empty tree is native null; an empty byte string is a different encoding which is not it
+	{
+		var uc types.UnicityCertificate
+		if err := types.Cbor.Unmarshal(unhex(emptyBase.UC), &uc); err != nil {
+			return nil, err
+		}
+		uc.InputRecord.Hash = []byte{}
+		if err := emitFrom(emptyBase, "uc-empty-root-as-empty-byte-string",
+			"the input record hash is the empty byte string (40) instead of native null (f6): not the empty-tree root; the signed shard path no longer holds either", VerdictUCInvalid, &uc,
+			VerdictMalformed, VerdictCertInvalid); err != nil {
+			return nil, err
+		}
 	}
 	// altered signature
 	{
@@ -203,14 +221,14 @@ func ucNegatives(base Vector, tb *types.RootTrustBaseV1, prod *ucfixture.Produce
 	{
 		uc := clone()
 		uc.InputRecord.Hash = bytes.Repeat([]byte{0x77}, 32)
-		if err := emit("uc-input-record-altered", "state hash of the input record replaced: the shard path no longer reaches the seal hash", VerdictUCInvalid, uc); err != nil {
+		if err := emit("uc-input-record-altered", "state hash of the input record replaced: the shard path no longer reaches the seal hash", VerdictUCInvalid, uc, VerdictCertInvalid); err != nil {
 			return nil, err
 		}
 	}
 	{
 		uc := clone()
 		uc.UnicityTreeCertificate = nil
-		if err := emit("uc-no-unicity-tree-certificate", "unicity tree certificate absent", VerdictUCInvalid, uc); err != nil {
+		if err := emit("uc-no-unicity-tree-certificate", "unicity tree certificate absent", VerdictUCInvalid, uc, VerdictMalformed); err != nil {
 			return nil, err
 		}
 	}
@@ -220,7 +238,7 @@ func ucNegatives(base Vector, tb *types.RootTrustBaseV1, prod *ucfixture.Produce
 			return nil, fmt.Errorf("base has no partition path")
 		}
 		uc.UnicityTreeCertificate.HashSteps[0] = nil
-		if err := emit("uc-null-partition-path-step", "null entry in the partition path", VerdictUCInvalid, uc); err != nil {
+		if err := emit("uc-null-partition-path-step", "null entry in the partition path", VerdictUCInvalid, uc, VerdictMalformed); err != nil {
 			return nil, err
 		}
 	}

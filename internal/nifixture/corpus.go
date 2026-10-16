@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"runtime/debug"
 	"sort"
 	"strings"
 
@@ -49,8 +50,10 @@ type Files map[string][]byte
 // Context is a named verification context: everything the verifier trusts.
 type Context struct {
 	Description string `json:"description"`
-	// TrustBase is the corpus path of the CBOR encoded trust base (authority).
-	TrustBase string `json:"trustBase"`
+	// TrustBase is the corpus path of the CBOR encoded trust base (authority); TrustBaseJSON is the
+	// same authority in the JSON form the SDKs read (RootTrustBase.from_json / fromJSON).
+	TrustBase     string `json:"trustBase"`
+	TrustBaseJSON string `json:"trustBaseJson"`
 	// Partition is the expected application partition.
 	Partition uint32 `json:"partition"`
 	// NextEpochStart is the authenticated end boundary of the epoch (first round of
@@ -66,7 +69,11 @@ type Context struct {
 // Expected is the expected verdict of a vector.
 type Expected struct {
 	Verdict string `json:"verdict"`
-	Note    string `json:"note,omitempty"`
+	// Acceptable lists other REJECTION verdicts a conformant strict implementation may report
+	// for this vector (decoders of different strictness stop at different stages). Verdicts
+	// absent and state_included must always match exactly.
+	Acceptable []string `json:"acceptable,omitempty"`
+	Note       string   `json:"note,omitempty"`
 }
 
 // LeafJSON is a tree leaf.
@@ -178,6 +185,9 @@ func Verdict(wrapper []byte, query [KeySize]byte, ctx Context, trustBase types.R
 func refUCBody(uc *types.UnicityCertificate, ctx Context) error {
 	if uc.InputRecord == nil || uc.UnicitySeal == nil {
 		return errors.New("missing component")
+	}
+	if uc.InputRecord.Hash != nil && len(uc.InputRecord.Hash) == 0 {
+		return errors.New("an empty byte string is not the empty-tree root (native null is)")
 	}
 	if uc.UnicityTreeCertificate == nil {
 		return errors.New("no unicity tree certificate")
@@ -492,6 +502,17 @@ func Generate(aggregatorCommit string) (Files, error) {
 		return nil, err
 	}
 	files["authority/trust-base.cbor"] = tbBytes
+	jsonOf := func(file string, t *types.RootTrustBaseV1) error {
+		b, err := json.MarshalIndent(t, "", "  ")
+		if err != nil {
+			return err
+		}
+		files[strings.TrimSuffix(file, ".cbor")+".json"] = append(b, '\n')
+		return nil
+	}
+	if err := jsonOf("authority/trust-base.cbor", tb); err != nil {
+		return nil, err
+	}
 
 	// other authorities (reused node IDs, other networks/epochs/keys)
 	mkTB := func(network types.NetworkID, keys func(i int) abcrypto.Signer, opts ...types.Option) (*types.RootTrustBaseV1, []byte, error) {
@@ -536,7 +557,7 @@ func Generate(aggregatorCommit string) (Files, error) {
 		}
 		files[file] = b
 		tbs[file] = t
-		return nil
+		return jsonOf(file, t)
 	}
 	if err := addTB("authority/other-network.cbor", types.NetworkMainNet, fixtureKey, types.WithEpochStart(1)); err != nil {
 		return nil, err
@@ -644,6 +665,10 @@ func Generate(aggregatorCommit string) (Files, error) {
 	contexts["too-stale"] = Context{Description: "requires a root round above the certified one",
 		TrustBase: "authority/trust-base.cbor", Partition: uint32(Partition), NextEpochStart: "0", MinRootRound: fmt.Sprint(gr + 1)}
 
+	for n, c := range contexts {
+		c.TrustBaseJSON = strings.TrimSuffix(c.TrustBase, ".cbor") + ".json"
+		contexts[n] = c
+	}
 	ctxNames := make([]string, 0, len(contexts))
 	for n := range contexts {
 		ctxNames = append(ctxNames, n)
@@ -723,7 +748,7 @@ func Generate(aggregatorCommit string) (Files, error) {
 		}
 	}
 	// UC mutations
-	ucNegs, err := ucNegatives(g.vec, tb, prod, contexts, tbs)
+	ucNegs, err := ucNegatives(g.vec, byName["empty-tree"].vec, tb, prod, contexts, tbs)
 	if err != nil {
 		return nil, err
 	}
@@ -786,9 +811,12 @@ func manifest(files Files, commit string) ([]byte, error) {
 	}
 	m := map[string]any{
 		"corpus": "non-inclusion", "version": Version,
-		"generator": map[string]string{
-			"command": "UC_FIXTURE_AGGREGATOR_COMMIT=$(git rev-parse HEAD) go run ./cmd/gen-ni-fixtures -out testdata/non-inclusion/v1",
+		"generator": map[string]any{
+			"command": "UC_FIXTURE_AGGREGATOR_COMMIT=<commit> go run ./cmd/gen-ni-fixtures -out testdata/non-inclusion/v1",
+			// commit is the aggregator-go commit which CONTAINS cmd/gen-ni-fixtures and internal/nifixture as
+			// used to produce these files (not the commit which added the files)
 			"commit":  commit,
+			"modules": generatorModules(),
 		},
 		"limits": map[string]uint64{"maxCertificateBytes": MaxCertificateBytes, "maxRequestBytes": 64 << 10, "maxResponseBytes": 8 << 20},
 		"cases":  cases,
@@ -796,4 +824,18 @@ func manifest(files Files, commit string) ([]byte, error) {
 	}
 	b, err := json.MarshalIndent(m, "", "  ")
 	return append(b, '\n'), err
+}
+
+// generatorModules are the module versions which determine every UC and signature byte.
+func generatorModules() map[string]string {
+	out := map[string]string{}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, d := range bi.Deps {
+			switch d.Path {
+			case "github.com/unicitynetwork/bft-core", "github.com/unicitynetwork/bft-go-base":
+				out[d.Path] = d.Version
+			}
+		}
+	}
+	return out
 }

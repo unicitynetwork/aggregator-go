@@ -37,8 +37,14 @@ bitmap depths in decreasing order; at each junction the child on the terminal's 
 
 1. Decode in the exact profile (any deviation: `malformed`).
 2. For every bitmap depth the query bit equals the terminal key bit; otherwise `certificate_invalid`.
-3. The fold reaches the root of the UC input record (a missing or empty root is the empty tree; the 32 byte all-zero
-   hash is **not** an empty tree). Empty certificate verifies only against the empty root; otherwise `certificate_invalid`.
+3. The fold reaches the root of the UC input record. **The certified empty tree is exactly the native input record
+   hash `null` (CBOR `f6`), which is what BFT certifies for the initial record and its timeout repeats.** The empty byte
+   string (`40`) is a different encoding and is **not** the empty tree (`uc_invalid`; vector
+   `uc-empty-root-as-empty-byte-string`); the 32 byte all-zero hash is not an empty tree either. The empty certificate
+   verifies only against the empty root, a nonempty certificate never does; otherwise `certificate_invalid`.
+   Required SDK follow-up: the input record `hash` must be decodable as nullable and re-encode as `f6` (Rust currently
+   decodes it as a byte string and rejects the genuine empty-tree UC; re-encoding `null` as `40` would break the shard-tree
+   hash).
 4. Terminal key == query: `state_included` (the authenticated leaf is the query). Otherwise absent.
 
 ## Verification order (`nifixture.Verdict`) and verdicts
@@ -52,7 +58,8 @@ bitmap depths in decreasing order; at each junction the child on the terminal's 
 4. required minimum root round: `stale`
 5. relation above: `certificate_invalid`, `state_included`, or `absent` (success)
 
-Contexts (`contexts.json`) hold everything the verifier trusts: trust base file, expected partition, optional
+Contexts (`contexts.json`) hold everything the verifier trusts: trust base (`authority/*.cbor`, and the same authority
+as `authority/*.json` in the form the SDKs parse), expected partition, optional
 `nextEpochStart` (authenticated end boundary), `minRootRound`, optional `shardConfHash` pin. Numbers are decimal
 strings. A signed old snapshot can establish historical absence but never satisfies a newer `minRootRound`.
 
@@ -75,5 +82,13 @@ strings. A signed old snapshot can establish historical absence but never satisf
 ## Conformance
 
 Implementations must reproduce, for every vector, exact certificate/wrapper bytes where they generate them from the
-leaves (memory and disk trees), and the expected verdict where they verify. Signatures and block numbers may differ
-in other producers; compare verdicts there.
+leaves (memory and disk trees). Verdicts: `absent` and `state_included` must match exactly. For a rejection the verdict
+must be a rejection and equal `expected.verdict` or one of `expected.acceptable`; strict decoders legitimately stop at
+an earlier stage (for example a null path step is `malformed` for a strict decoder and `uc_invalid` for a lenient one),
+and a decoder must never be loosened to reach a later class. Signatures and block numbers may differ in other producers;
+compare verdicts there.
+
+Provenance: `manifest.json` records the aggregator-go commit which contains the generator and the bft-core / bft-go-base
+module versions (they determine every UC and signature byte).
+
+Known gap: the seal verifier of bft-go-base ignores the secp256k1 recovery id (65th signature byte); no vector pins it.
