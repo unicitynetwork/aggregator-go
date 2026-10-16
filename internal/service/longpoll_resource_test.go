@@ -135,6 +135,9 @@ func TestLongPollResourceServer(t *testing.T) {
 
 	reg := longpoll.New(longpoll.Config{MaxWaiters: maxWaiters, Concurrency: conc})
 	co := &longpoll.Coordinator{Reg: reg, MaxWait: 10 * time.Minute, Budget: time.Hour}
+	if ms, _ := strconv.Atoi(os.Getenv("LONGPOLL_RESOURCE_RESUME_RESERVE_MS")); ms > 0 {
+		co.ResumeReserveOverride = time.Duration(ms) * time.Millisecond // provoke admission expiry on purpose
+	}
 	e.svc.longPoll = co
 
 	cfg := &config.Config{}
@@ -828,6 +831,13 @@ func (r scenarioResult) assertParked(t *testing.T) {
 	require.Equal(t, r.FreshTotal, r.FreshOK, "fresh requests keep their headroom while parked")
 }
 
+func resumeReserveSeconds() float64 {
+	if ms, _ := strconv.Atoi(os.Getenv("LONGPOLL_RESOURCE_RESUME_RESERVE_MS")); ms > 0 {
+		return float64(ms) / 1000
+	}
+	return longpoll.ResumeReserve.Seconds()
+}
+
 func batchConcurrency() int {
 	if n, _ := strconv.Atoi(os.Getenv("LONGPOLL_RESOURCE_BATCH_SLOTS")); n > 0 {
 		return n
@@ -875,7 +885,8 @@ func (r scenarioResult) assertBurst(t *testing.T) {
 			require.Zero(t, r.Errors, "a controlled burst is served in full: %s", r.Notes)
 			require.Equal(t, r.Admitted, r.Completed)
 		} else if r.ErrorsAdmission > 0 {
-			require.GreaterOrEqual(t, r.DrainSeconds, 1.5, "admission expiry only when the drain really used up the 2 s resume reserve (%d expired)", r.ErrorsAdmission)
+			reserve := resumeReserveSeconds()
+			require.GreaterOrEqual(t, r.DrainSeconds, 0.75*reserve, "admission expiry only when the drain really used up the %.1f s resume reserve (%d expired)", reserve, r.ErrorsAdmission)
 		}
 		require.Equal(t, r.Admitted, r.Completed+r.ErrorsAdmission)
 	}
