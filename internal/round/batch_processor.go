@@ -550,6 +550,9 @@ func (rm *RoundManager) reconcileRecoveredFinalization(ctx context.Context, reco
 	}
 	rm.roundMutex.RUnlock()
 
+	// Runs after the deferred unlock below, i.e. after publication AND the clearing of the
+	// pending markers (ClearFinalized does not signal), also without a retained publisher.
+	defer rm.notifyWaiters()
 	rm.finalizationMu.Lock()
 	defer rm.finalizationMu.Unlock()
 
@@ -668,6 +671,10 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		record.ProposalID = existingBlock.ProposalID
 	}
 	block.ProposalID = existingBlock.ProposalID
+	// Runs after every return below, so after finalizationMu is released and after publication,
+	// the proof-ready update and the clearing of the pending hints; on failure it lets waiters
+	// observe the (unavailable) outcome instead of sleeping on a missed wake.
+	defer rm.notifyWaiters()
 	if existingBlock.Finalized {
 		localRoot, err := rm.smtBackend.RootHashRaw(ctx)
 		if err != nil {

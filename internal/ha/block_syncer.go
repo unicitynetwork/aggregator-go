@@ -40,6 +40,7 @@ type (
 		syncInterval   time.Duration
 		stateTracker   *state.Tracker
 		viewPublisher  ViewPublisher
+		notify         func()
 
 		syncSem chan struct{}
 		wg      sync.WaitGroup
@@ -72,6 +73,13 @@ func NewBlockSyncer(
 	}
 }
 
+// SetNotify registers the long-poll wake-up (nil disables). It is called after every replayed
+// block once that block's local publication attempt is done - the legacy read view of a disk
+// backend is refreshed per block, the retained view only for the sync target - so a waiter is
+// rechecked against the newest local published view even if its state entered at a skipped
+// intermediate block. It must not block. Call before Start.
+func (bs *BlockSyncer) SetNotify(f func()) { bs.notify = f }
+
 // SetViewPublisher sets the retained-view publisher used after replaying the final
 // block of a sync run (nil disables). Call before Start.
 func (bs *BlockSyncer) SetViewPublisher(p ViewPublisher) { bs.viewPublisher = p }
@@ -83,6 +91,14 @@ func (bs *BlockSyncer) publishView(ctx context.Context, block *models.Block, tar
 		return
 	}
 	bs.viewPublisher.PublishFinalized(ctx, block)
+}
+
+// published records that the local published view advanced (or failed to) for block.
+func (bs *BlockSyncer) published(ctx context.Context, block *models.Block, target *big.Int) {
+	bs.publishView(ctx, block, target)
+	if bs.notify != nil {
+		bs.notify()
+	}
 }
 
 func (bs *BlockSyncer) Start(ctx context.Context) {
@@ -206,7 +222,7 @@ func (bs *BlockSyncer) syncMemoryToBlock(ctx context.Context, endBlock *big.Int)
 
 		currBlock = b.Index.Int
 		bs.stateTracker.SetLastSyncedBlock(currBlock)
-		bs.publishView(ctx, b, endBlock)
+		bs.published(ctx, b, endBlock)
 		bs.logger.Info("SMT updated for round", "roundNumber", currBlock)
 	}
 	return nil
@@ -241,7 +257,7 @@ func (bs *BlockSyncer) syncDiskToBlock(ctx context.Context, endBlock *big.Int) e
 		if bs.stateTracker != nil {
 			bs.stateTracker.SetLastSyncedBlock(currBlock)
 		}
-		bs.publishView(ctx, b, endBlock) // disk read views: the committed state is exactly this block
+		bs.published(ctx, b, endBlock) // disk read views: the committed state is exactly this block
 		bs.logger.Info("Disk SMT updated for round", "roundNumber", currBlock)
 	}
 	return nil
