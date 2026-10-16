@@ -559,6 +559,11 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 	if wasInitializing {
 		c.logger.WithContext(ctx).Info("BFT client initialization finished",
 			"nextRoundNumber", nextRoundNumber.String())
+		if len(uc.InputRecord.Hash) == 0 {
+			// the genesis/empty certified state: a node without committed blocks serves
+			// non-inclusion at it (the sink refuses it for any node with history)
+			c.publishProofMaterial(ctx, uc, proofmaterial.KindInitial, 0, false)
+		}
 
 		recovered, err := c.finalizeCertifiedDurableProposalLocked(ctx, uc)
 		if err != nil {

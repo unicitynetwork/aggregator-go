@@ -40,3 +40,8 @@ func TestInitProofViewsWiresTheAccountantRocksDBBackend(t *testing.T) {
 	}
 	require.InDelta(t, wired[0], wired[len(wired)-1], 3.0, "flat in V: %v", wired)
 }
+
+// The same production path on RocksDB: the empty root has no pinned snapshot, the first block does.
+func TestProductionPathServesTheCertifiedEmptyTreeRocksDBBackend(t *testing.T) {
+	runCertifiedEmptyThenBlock(t, newDiskBackend(t))
+}

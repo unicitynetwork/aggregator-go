@@ -202,6 +202,13 @@ func (v *diskReadView) GetInclusionCert(ctx context.Context, key []byte) (*api.I
 	return cert, nil
 }
 
+// IsEmptyState: the retained root is the tree's explicit empty root (no snapshot is held for it).
+func (v *diskReadView) IsEmptyState() bool {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return !v.closed && v.root == disk.EmptyRootHash()
+}
+
 // GetNonInclusionCert builds the non-inclusion certificate from this view's pinned snapshot only:
 // no live node is read, so later commits, tombstones and compactions cannot change it.
 func (v *diskReadView) GetNonInclusionCert(ctx context.Context, key []byte) (*api.NonInclusionCert, error) {
@@ -305,6 +312,7 @@ func (v *diskReadView) Close() error {
 
 var (
 	_ NonInclusionReadView = (*diskReadView)(nil)
+	_ EmptyStateReadView   = (*diskReadView)(nil)
 	_ ReadView             = (*diskReadView)(nil)
 	_ BatchReadView        = (*diskReadView)(nil)
 	_ ReadViewRetainer     = (*DiskBackend)(nil)
