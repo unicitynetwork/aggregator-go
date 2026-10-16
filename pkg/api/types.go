@@ -115,6 +115,11 @@ type GetInclusionProofRequestV2 struct {
 	// IncludedProofStatusResponse). Without it the result is exactly the v2 hex-CBOR string.
 	// Old servers ignore the field, so a string result means "status unsupported".
 	IncludeStatus bool `json:"includeStatus,omitempty"`
+
+	// WaitMs is the optional long-poll wait (see ScanWaitMs). It is decoded by the handler, not
+	// by encoding/json, so that the legacy permissive decoding is unchanged. Reserved: it is
+	// validated but not yet acted upon.
+	WaitMs WaitMs `json:"-"`
 }
 
 // GetInclusionProofResponseV2 represents the get_inclusion_proof JSON-RPC response
