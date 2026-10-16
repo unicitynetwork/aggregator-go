@@ -42,9 +42,10 @@ bitmap depths in decreasing order; at each junction the child on the terminal's 
    string (`40`) is a different encoding and is **not** the empty tree (`uc_invalid`; vector
    `uc-empty-root-as-empty-byte-string`); the 32 byte all-zero hash is not an empty tree either. The empty certificate
    verifies only against the empty root, a nonempty certificate never does; otherwise `certificate_invalid`.
-   Required SDK follow-up: the input record `hash` must be decodable as nullable and re-encode as `f6` (Rust currently
-   decodes it as a byte string and rejects the genuine empty-tree UC; re-encoding `null` as `40` would break the shard-tree
-   hash).
+   Required SDK follow-up: every nullable input record field must decode `null` and re-encode it as `null` (`f6`).
+   The genuine empty-tree input record is `8a 01 00 00 f6 f6 f6 00 f6 00 f6`: `previousHash`, **`hash` and
+   `summaryValue`** are all `null` (an SDK which reads either as a byte string rejects the genuine UC). Re-encoding any
+   `null` as `40` changes the input record bytes and so the shard-tree hash.
 4. Terminal key == query: `state_included` (the authenticated leaf is the query). Otherwise absent.
 
 ## Verification order (`nifixture.Verdict`) and verdicts

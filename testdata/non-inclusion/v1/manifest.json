@@ -424,7 +424,7 @@
   "corpus": "non-inclusion",
   "generator": {
     "command": "UC_FIXTURE_AGGREGATOR_COMMIT=\u003ccommit\u003e go run ./cmd/gen-ni-fixtures -out testdata/non-inclusion/v1",
-    "commit": "029d5a88b937365c684ba9f4ccf369ac9e8dcd6a",
+    "commit": "94f1947fe1fc40ce90d37f2370590eee5643b64f",
     "modules": {
       "github.com/unicitynetwork/bft-core": "v1.1.1-0.20261015121647-8b05d19f564f",
       "github.com/unicitynetwork/bft-go-base": "v1.1.1-0.20261015113011-8e08f74f29fa"
@@ -436,7 +436,7 @@
     "maxResponseBytes": 8388608
   },
   "sha256": {
-    "SPEC.md": "f4f3297080c101fc57bb76165a5a2a5604a6e95d37e863d87ed033d9f8791daa",
+    "SPEC.md": "3c324b72a2d9aa1d6ae00c187bc548868485cdaf6e1bf8f9bba4b50c23983ffb",
     "authority/late-epoch-start.cbor": "e719e8f39f61e4061d54906cc78cffb577b7d2afcf6a3149657477cb7f7f710a",
     "authority/late-epoch-start.json": "7dc46736c57dd09f8c17716338bf97fd0a8dd0f2753a36d4f7ed66fe12505a32",
     "authority/other-epoch.cbor": "40d8223f44a3d0adccda98a75d372265cd45a7a1e20bf0f8e8d589829919b691",
