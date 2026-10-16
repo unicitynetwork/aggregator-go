@@ -2,7 +2,11 @@ package longpoll
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -322,6 +326,7 @@ func TestResume_FIFOWithinQuotaAndHeadroom(t *testing.T) {
 			mu.Unlock()
 			time.Sleep(5 * time.Millisecond)
 			g.Done()
+			permits[i].Release() // the request ended: the response was written, the token goes back
 		}()
 		require.Eventually(t, func() bool { return reg.Stats().Queued+reg.Stats().Running > i }, time.Second, time.Millisecond)
 	}
@@ -445,19 +450,27 @@ func TestResume_ClosedPermitInQueueAndWaiterClose(t *testing.T) {
 	p2.Close() // the request ended (client gone, middleware timeout) while queued
 	g1.Done()  // frees the quota; the scheduler drops the dead ticket
 	require.ErrorIs(t, <-done, ErrWaiterClosed)
+	p1.Release() // p1's request ends
 	require.Zero(t, srv.ActiveRequests(), "the finished resume and the dead ticket hold nothing")
 	require.False(t, p2.TryReacquire(0))
 
-	// closing a waiter that holds a granted, unfinished resumption returns token and quota
+	// closing a waiter whose resumed read is still running does not stop that work: token, quota
+	// slot and the reservation stay accounted until the grant is done
 	p3 := holder(t, srv)
 	p3.Release()
 	w3, _ := reg.Admit()
-	_, err = w3.Resume(context.Background(), p3, time.Now().Add(time.Second))
+	g3, err := w3.Resume(context.Background(), p3, time.Now().Add(time.Second))
 	require.NoError(t, err)
 	require.Equal(t, 1, reg.Stats().Running)
+	reserved := reg.Stats().Reserved
 	w3.Close()
+	require.Equal(t, 1, reg.Stats().Running)
+	require.True(t, p3.Held())
+	require.Equal(t, reserved, reg.Stats().Reserved, "the reservation lives until the work stops")
+	g3.Done()
 	require.Zero(t, reg.Stats().Running)
-	require.False(t, p3.Held())
+	require.True(t, p3.Held(), "the token goes back when the request ends, not with the quota slot")
+	require.Equal(t, reserved-1, reg.Stats().Reserved)
 	for _, p := range []*jsonrpc.Permit{p1, p3} {
 		p.Close()
 	}
@@ -547,4 +560,205 @@ func TestChurn_NoLeaksAndCountsReturnToBaseline(t *testing.T) {
 		return s.Reserved == 0 && s.Queued == 0 && s.Running == 0 && srv.ActiveRequests() == 0
 	}, 2*time.Second, 5*time.Millisecond)
 	require.Eventually(t, func() bool { return runtime.NumGoroutine() <= base+2 }, 2*time.Second, 10*time.Millisecond)
+}
+
+// --- architect findings on A1 ---
+
+// An old grant's Done, called again after the same waiter/permit resumed as a newer grant, must
+// not release the newer grant's token or quota slot.
+func TestGrantDone_OldGrantNeverReleasesALaterGrant(t *testing.T) {
+	reg, srv := newPair(t, 4, 8)
+	p := holder(t, srv)
+	p.Release()
+	w, _ := reg.Admit()
+	g1, err := w.Resume(context.Background(), p, time.Now().Add(time.Second))
+	require.NoError(t, err)
+	g1.Done()
+	require.True(t, p.Held(), "Done gives back the quota only: the token stays with the request")
+	p.Release() // parks again
+	g2, err := w.Resume(context.Background(), p, time.Now().Add(time.Second))
+	require.NoError(t, err)
+	require.True(t, p.Held())
+	require.Equal(t, 1, reg.Stats().Running)
+
+	g1.Done() // e.g. a deferred cleanup of the first attempt
+	g1.Done()
+	require.True(t, p.Held(), "the later grant keeps its active token")
+	require.Equal(t, 1, srv.ActiveRequests())
+	require.Equal(t, 1, reg.Stats().Running, "and its quota slot")
+
+	g2.Done()
+	g2.Done()
+	require.Zero(t, reg.Stats().Running)
+	require.True(t, p.Held(), "released only when the request ends")
+	p.Close()
+	require.Zero(t, srv.ActiveRequests())
+	w.Close()
+}
+
+// The resumed response is built and written under the request's token (rev3 section 7): after the
+// final resumed read the request still counts against the concurrency limit until ServeHTTP
+// returns.
+func TestResumedResponseHoldsTheTokenUntilTheRequestEnds(t *testing.T) {
+	reg, srv := newPair(t, 4, 8)
+	var during, afterDone int
+	srv.RegisterMethod("m", func(ctx context.Context, _ json.RawMessage) (interface{}, *jsonrpc.Error) {
+		p := jsonrpc.PermitFromContext(ctx)
+		w, a := reg.Admit()
+		require.Equal(t, Admitted, a)
+		defer w.Close()
+		p.Release() // parked
+		g, err := w.Resume(ctx, p, time.Now().Add(time.Second))
+		require.NoError(t, err)
+		during = srv.ActiveRequests()
+		g.Done() // the read attempt is over; the response is still to be built and written
+		afterDone = srv.ActiveRequests()
+		return "ok", nil
+	})
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"m"}`)))
+	require.Contains(t, rec.Body.String(), `"result":"ok"`)
+	require.Equal(t, 1, during)
+	require.Equal(t, 1, afterDone, "Done does not release the token")
+	require.Zero(t, srv.ActiveRequests(), "the owner's Close releases it after the write")
+}
+
+// A permit which was not released before Resume would block the FIFO head for everyone else.
+func TestResume_RejectsAHeldPermitAndDoesNotBlockTheQueue(t *testing.T) {
+	reg, srv := newPair(t, 8, 8)
+	held := holder(t, srv)
+	wa, _ := reg.Admit()
+	_, err := wa.Resume(context.Background(), held, time.Now().Add(time.Second))
+	require.ErrorIs(t, err, ErrPermitHeld)
+	require.Zero(t, reg.Stats().Queued)
+
+	pb := holder(t, srv)
+	pb.Release()
+	wb, _ := reg.Admit()
+	g, err := wb.Resume(context.Background(), pb, time.Now().Add(time.Second))
+	require.NoError(t, err)
+	g.Done()
+	held.Close()
+	pb.Close()
+	wa.Close()
+	wb.Close()
+}
+
+// Generation traffic cannot supersede a passed cutoff or a cancelled context.
+func TestWait_StaleGenerationDoesNotOutliveCutoffOrCancel(t *testing.T) {
+	r := New(Config{MaxWaiters: 2, Concurrency: 8})
+	w, _ := r.Admit()
+	defer w.Close()
+	past := time.Now().Add(-time.Second)
+	for i := 0; i < 100; i++ {
+		seen := w.Generation()
+		r.Notify()
+		require.Equal(t, WakeTimeout, w.Wait(context.Background(), seen, past))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	seen := w.Generation()
+	r.Notify()
+	require.Equal(t, WakeCancel, w.Wait(ctx, seen, time.Now().Add(time.Minute)))
+
+	// a notification which is ready when the cutoff passes does not extend the wait either
+	seen = w.Generation()
+	got := make(chan Wake, 1)
+	cutoff := time.Now().Add(60 * time.Millisecond)
+	go func() { got <- w.Wait(context.Background(), seen, cutoff) }()
+	require.Eventually(t, func() bool { r.mu.Lock(); defer r.mu.Unlock(); return w.armed }, time.Second, time.Millisecond)
+	time.Sleep(80 * time.Millisecond)
+	require.Equal(t, WakeTimeout, <-got)
+}
+
+// An expired or cancelled resumption is rejected before it is queued, never granted by the
+// scheduler, and revalidated at the hand-over.
+func TestResume_ExpiredOrCancelledIsNeverGranted(t *testing.T) {
+	reg, srv := newPair(t, 8, 8)
+	p := holder(t, srv)
+	p.Release()
+	w, _ := reg.Admit()
+	for i := 0; i < 100; i++ { // capacity is free: a naive select would grant about half
+		_, err := w.Resume(context.Background(), p, time.Now().Add(-time.Millisecond))
+		require.ErrorIs(t, err, ErrResumeTimeout)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err = w.Resume(ctx, p, time.Now().Add(time.Minute))
+		require.ErrorIs(t, err, context.Canceled)
+	}
+	require.Zero(t, reg.Stats().Running)
+	require.Zero(t, reg.Stats().Queued)
+	require.False(t, p.Held())
+
+	// cancelled / expired while queued behind the quota: the scheduler drops it when capacity frees
+	one, srv1 := newPair(t, 8, 4) // quota 1
+	pa, pb := holder(t, srv1), holder(t, srv1)
+	pa.Release()
+	pb.Release()
+	wa, _ := one.Admit()
+	wb, _ := one.Admit()
+	ga, err := wa.Resume(context.Background(), pa, time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := wb.Resume(ctx, pb, time.Now().Add(time.Minute)); done <- err }()
+	require.Eventually(t, func() bool { return one.Stats().Queued == 1 }, time.Second, time.Millisecond)
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+	ga.Done()
+	require.Zero(t, one.Stats().Running, "the cancelled ticket was not granted when the quota freed")
+	require.False(t, pb.Held())
+
+	// the context ends between the grant and its delivery: the grant is revoked, not delivered
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	one.testHookDeliver = func() { cancel2() }
+	_, err = wb.Resume(ctx2, pb, time.Now().Add(time.Minute))
+	one.testHookDeliver = nil
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, one.Stats().Running)
+	require.False(t, pb.Held())
+	for _, x := range []*jsonrpc.Permit{pa, pb} {
+		x.Close()
+	}
+	wa.Close()
+	wb.Close()
+}
+
+// Close racing a granted-but-undelivered resumption: Resume fails, nothing runs after the
+// reservation disappeared, token and quota return exactly once.
+func TestResume_CloseBetweenGrantAndDeliveryRevokes(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		reg, srv := newPair(t, 8, 8)
+		p := holder(t, srv)
+		p.Release()
+		w, _ := reg.Admit()
+		reg.testHookDeliver = func() { w.Close() } // after the scheduler granted, before delivery
+		g, err := w.Resume(context.Background(), p, time.Now().Add(time.Second))
+		require.ErrorIs(t, err, ErrWaiterClosed)
+		require.Nil(t, g)
+		st := reg.Stats()
+		require.Zero(t, st.Running)
+		require.Zero(t, st.Reserved)
+		require.False(t, p.Held())
+		require.NoError(t, reg.Join(context.Background()))
+		p.Close()
+		require.Zero(t, srv.ActiveRequests())
+	}
+}
+
+// Join accounts for a resumed read which is still running after its waiter was closed.
+func TestJoin_WaitsForRunningResumedWorkAfterClose(t *testing.T) {
+	reg, srv := newPair(t, 8, 8)
+	p := holder(t, srv)
+	p.Release()
+	w, _ := reg.Admit()
+	g, err := w.Resume(context.Background(), p, time.Now().Add(time.Second))
+	require.NoError(t, err)
+	w.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, reg.Join(ctx), context.DeadlineExceeded)
+	g.Done()
+	require.NoError(t, reg.Join(context.Background()))
+	p.Close()
 }

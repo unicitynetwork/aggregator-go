@@ -13,8 +13,8 @@
 //     one active-work token for fresh requests;
 //   - drains (role change: reopen afterwards; shutdown: permanent) and a join.
 //
-// Nothing here runs under a publisher, tracker or catalog lock: Notify is O(1) plus a
-// non-blocking signal per armed waiter, and callers invoke it after releasing their own locks.
+// Nothing here runs under a publisher, tracker or catalog lock: Notify is a counter bump plus a
+// non-blocking signal per armed waiter (O(armed waiters) under the registry lock), and callers invoke it after releasing their own locks.
 package longpoll
 
 import (
@@ -67,6 +67,9 @@ var (
 	ErrResumeQueueFull = errors.New("longpoll: resume queue full")
 	ErrResumeTimeout   = errors.New("longpoll: resume deadline passed in the queue")
 	ErrWaiterClosed    = errors.New("longpoll: waiter closed")
+	// ErrPermitHeld: Resume was given a permit which still holds its token. A wait releases the
+	// permit before it parks (Permit.Release); resuming without that is a caller bug.
+	ErrPermitHeld = errors.New("longpoll: permit still held, release it before parking")
 )
 
 // Registry is safe for concurrent use.
@@ -83,6 +86,7 @@ type Registry struct {
 	waiters   map[*Waiter]struct{}
 	queue     []*ticket
 	running   int
+	queueLen  atomic.Int32  // len(queue), readable without the lock (Schedule fast path)
 	idle      chan struct{} // closed while there are no waiters
 
 	shedCapacity atomic.Uint64
@@ -92,6 +96,8 @@ type Registry struct {
 
 	// testHookArm runs in Wait before the arm check; tests use it as a barrier.
 	testHookArm func()
+	// testHookDeliver runs in Resume between the grant and its hand-over to the caller.
+	testHookDeliver func()
 }
 
 // New builds a registry.
@@ -127,7 +133,7 @@ func (r *Registry) Generation() uint64 {
 }
 
 // Notify records that something a waiter may care about changed and wakes the armed waiters to
-// recheck. It never blocks and runs no proof work; call it after releasing publisher, tracker
+// recheck. It never blocks and runs no proof work (O(W) signals under the registry lock); call it after releasing publisher, tracker
 // and catalog locks. Waiters which are not armed (evaluating or queued) see the new generation
 // when they next arm, so the newest generation is never lost.
 func (r *Registry) Notify() {
@@ -253,6 +259,11 @@ func (w *Waiter) Wait(ctx context.Context, seen uint64, cutoff time.Time) Wake {
 	if h := r.testHookArm; h != nil {
 		h()
 	}
+	// Termination outranks generation traffic: a request whose context ended or whose cutoff
+	// passed must finish its wait even if publications keep arriving during every evaluation.
+	if k, done := w.terminated(ctx, cutoff); done {
+		return k
+	}
 	r.mu.Lock()
 	if w.closed {
 		r.mu.Unlock()
@@ -273,16 +284,14 @@ func (w *Waiter) Wait(ctx context.Context, seen uint64, cutoff time.Time) Wake {
 	}
 	r.mu.Unlock()
 
-	d := time.Until(cutoff)
-	if d <= 0 {
-		w.disarm()
-		return WakeTimeout
-	}
-	timer := time.NewTimer(d)
+	timer := time.NewTimer(time.Until(cutoff))
 	defer timer.Stop()
 	select {
 	case <-w.wake:
 		r.wakes.Add(1)
+		if k, done := w.terminated(ctx, cutoff); done {
+			return k // a ready notification does not supersede a passed cutoff or a cancel
+		}
 		r.mu.Lock()
 		drained := w.epoch != r.epoch
 		r.mu.Unlock()
@@ -299,47 +308,104 @@ func (w *Waiter) Wait(ctx context.Context, seen uint64, cutoff time.Time) Wake {
 	}
 }
 
+// terminated reports a cancelled context or a passed cutoff (and disarms the waiter).
+func (w *Waiter) terminated(ctx context.Context, cutoff time.Time) (Wake, bool) {
+	if ctx.Err() != nil {
+		w.disarm()
+		return WakeCancel, true
+	}
+	if !time.Now().Before(cutoff) {
+		w.disarm()
+		return WakeTimeout, true
+	}
+	return 0, false
+}
+
 func (w *Waiter) disarm() {
 	w.reg.mu.Lock()
 	w.armed = false
 	w.reg.mu.Unlock()
 }
 
+// Ticket states (guarded by Registry.mu). A resumption is queued, then either granted (the token
+// and the quota slot are taken, delivery to the caller still pending) and delivered (running), or
+// cancelled; finished is terminal. The token/quota are held exactly in granted and running.
+const (
+	ticketQueued = iota
+	ticketGranted
+	ticketCancelled
+	ticketFinished
+	ticketRunning
+)
+
 // ticket is a queued resumption.
 type ticket struct {
 	w       *Waiter
 	permit  *jsonrpc.Permit
-	granted chan struct{}
-	state   int // 0 queued, 1 granted, 2 cancelled, 3 finished; guarded by reg.mu
+	ctx     context.Context
+	until   time.Time
+	granted chan struct{} // closed on grant or cancellation
+	state   int
+	cause   error // why a cancelled ticket was cancelled by the scheduler
 }
 
-// Grant is a running resumed read. Done releases the active-work token and the quota slot; it is
-// idempotent. Call it as soon as the read attempt finished, before building the response.
+// Grant is a running resumed read. It owns one slot of the resumed-read quota; the active-work
+// token stays with the request's permit. Done gives the quota slot back, once: only the call that
+// wins this grant's running->finished transition does anything, so a late or repeated Done of an
+// old grant can never affect a later grant. Done does NOT release the permit: the response of the
+// resumed request is built and written under its token, like a legacy request, and the token is
+// released by the owner closing the permit when the request ends (or by the handler calling
+// Permit.Release before it parks again). Call Done as soon as the read attempt finished.
 type Grant struct {
-	r      *Registry
-	permit *jsonrpc.Permit
-	t      *ticket
+	r *Registry
+	t *ticket
 }
 
-// Done ends the resumed read.
+// Done ends the resumed read's quota slot.
 func (g *Grant) Done() {
-	g.r.mu.Lock()
-	if g.t.state == 1 {
-		g.t.state = 3
-		g.r.running--
+	r := g.r
+	r.mu.Lock()
+	if g.t.state != ticketRunning {
+		r.mu.Unlock()
+		return
 	}
-	g.r.mu.Unlock()
-	g.permit.Release()
-	g.r.Schedule()
+	g.t.state = ticketFinished
+	r.running--
+	if w := g.t.w; w.closed { // the wait was closed while this read ran: its reservation ends with the work
+		r.removeLocked(w)
+	}
+	r.mu.Unlock()
+	r.Schedule()
+}
+
+// removeLocked drops a closed waiter's reservation.
+func (r *Registry) removeLocked(w *Waiter) {
+	if _, ok := r.waiters[w]; !ok {
+		return
+	}
+	delete(r.waiters, w)
+	if len(r.waiters) == 0 {
+		close(r.idle)
+	}
 }
 
 // Resume queues a recheck for active-work capacity and returns when it is granted, in FIFO
 // order, within the resumed-read quota and leaving a token for fresh requests. The permit is
 // reacquired by the scheduler. No registry, tracker or catalog lock may be held by the caller.
-// A wait which cannot be served before until fails with ErrResumeTimeout (the handler answers
-// with the existing busy/deadline error); a cancelled ctx fails with its error.
+// A resumption whose ctx ended or whose deadline passed is never granted - checked before it is
+// queued, by the scheduler, and again when the grant is handed over; it fails with ctx's error
+// or ErrResumeTimeout (the handler answers with the existing busy/deadline error).
 func (w *Waiter) Resume(ctx context.Context, p *jsonrpc.Permit, until time.Time) (*Grant, error) {
 	r := w.reg
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !time.Now().Before(until) {
+		return nil, ErrResumeTimeout
+	}
+	if p.Held() {
+		return nil, ErrPermitHeld
+	}
 	r.mu.Lock()
 	if w.closed {
 		r.mu.Unlock()
@@ -349,54 +415,69 @@ func (w *Waiter) Resume(ctx context.Context, p *jsonrpc.Permit, until time.Time)
 		r.mu.Unlock()
 		return nil, ErrResumeQueueFull
 	}
-	t := &ticket{w: w, permit: p, granted: make(chan struct{})}
+	t := &ticket{w: w, permit: p, ctx: ctx, until: until, granted: make(chan struct{})}
 	w.ticket = t
 	r.queue = append(r.queue, t)
+	r.queueLen.Store(int32(len(r.queue)))
 	r.mu.Unlock()
 	r.Schedule()
 
-	var timeout <-chan time.Time
-	if d := time.Until(until); d > 0 {
-		tm := time.NewTimer(d)
-		defer tm.Stop()
-		timeout = tm.C
-	} else {
-		timeout = closedChan
-	}
+	tm := time.NewTimer(time.Until(until))
+	defer tm.Stop()
 	select {
 	case <-t.granted:
-	case <-timeout:
-		return nil, r.cancelTicket(t, ErrResumeTimeout)
+	case <-tm.C:
+		return nil, r.abandon(t, ErrResumeTimeout)
 	case <-ctx.Done():
-		return nil, r.cancelTicket(t, ctx.Err())
+		return nil, r.abandon(t, ctx.Err())
 	}
+	if h := r.testHookDeliver; h != nil {
+		h()
+	}
+	// Hand-over: the grant counts only if it is still ours, the waiter is open and neither the
+	// context nor the deadline ended in the meantime.
 	r.mu.Lock()
-	if t.state == 2 { // the permit was found closed while queued
+	switch {
+	case t.state == ticketGranted && !w.closed && ctx.Err() == nil && time.Now().Before(until):
+		t.state = ticketRunning
 		r.mu.Unlock()
-		return nil, ErrWaiterClosed
+		return &Grant{r: r, t: t}, nil
+	case t.state == ticketGranted: // revoked before delivery: give token and quota back
+		t.state = ticketFinished
+		r.running--
+		w.ticket = nil
+		cause := ctx.Err()
+		switch {
+		case w.closed:
+			cause = ErrWaiterClosed
+		case cause == nil:
+			cause = ErrResumeTimeout
+		}
+		r.mu.Unlock()
+		p.Release()
+		r.Schedule()
+		return nil, cause
+	default: // cancelled while queued (waiter closed, request ended, or scheduler found it stale)
+		cause := t.cause
+		if cause == nil {
+			cause = ErrWaiterClosed
+		}
+		r.mu.Unlock()
+		return nil, cause
 	}
-	r.mu.Unlock()
-	return &Grant{r: r, permit: p, t: t}, nil
 }
 
-var closedChan = func() <-chan time.Time { c := make(chan time.Time); close(c); return c }()
-
-// cancelTicket removes a queued ticket, or returns a grant which raced the cancellation.
-func (r *Registry) cancelTicket(t *ticket, cause error) error {
+// abandon withdraws a queued ticket, or hands back a grant which raced the cancellation.
+func (r *Registry) abandon(t *ticket, cause error) error {
 	r.mu.Lock()
 	switch t.state {
-	case 0:
-		t.state = 2
-		for i, q := range r.queue {
-			if q == t {
-				r.queue = append(r.queue[:i], r.queue[i+1:]...)
-				break
-			}
-		}
+	case ticketQueued:
+		t.state = ticketCancelled
+		r.dequeueLocked(t)
 		t.w.ticket = nil
 		r.mu.Unlock()
-	case 1: // granted concurrently: hand the token and the quota slot back
-		t.state = 3
+	case ticketGranted: // granted concurrently, never delivered: hand the token and the quota back
+		t.state = ticketFinished
 		r.running--
 		t.w.ticket = nil
 		r.mu.Unlock()
@@ -408,15 +489,39 @@ func (r *Registry) cancelTicket(t *ticket, cause error) error {
 	return cause
 }
 
+func (r *Registry) dequeueLocked(t *ticket) {
+	for i, q := range r.queue {
+		if q == t {
+			r.queue = append(r.queue[:i], r.queue[i+1:]...)
+			r.queueLen.Store(int32(len(r.queue)))
+			return
+		}
+	}
+}
+
 // Schedule grants queued resumptions while the quota and the headroom allow. The server calls it
-// whenever an active-work token is released (jsonrpc.Server.SetReleaseHook).
+// whenever an active-work token is released (jsonrpc.Server.SetReleaseHook). Stale work - a
+// finished request, a cancelled context, a passed deadline - is dropped, never granted.
 func (r *Registry) Schedule() {
+	if r.queueLen.Load() == 0 {
+		return // nothing queued: legacy request completions do not contend on the registry lock
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer func() { r.queueLen.Store(int32(len(r.queue))) }()
 	for len(r.queue) > 0 && r.running < r.maxRunning {
 		t := r.queue[0]
-		if t.permit.Closed() { // the request ended while queued
-			t.state = 2
+		switch {
+		case t.permit.Closed():
+			t.cause = ErrWaiterClosed
+		case t.ctx.Err() != nil:
+			t.cause = t.ctx.Err()
+		case !time.Now().Before(t.until):
+			t.cause = ErrResumeTimeout
+		}
+		if t.cause != nil {
+			t.state = ticketCancelled
+			t.w.ticket = nil
 			close(t.granted)
 			r.queue = r.queue[1:]
 			continue
@@ -424,7 +529,7 @@ func (r *Registry) Schedule() {
 		if !t.permit.TryReacquire(1) {
 			return
 		}
-		t.state = 1
+		t.state = ticketGranted
 		r.running++
 		r.queue = r.queue[1:]
 		close(t.granted)
@@ -432,7 +537,10 @@ func (r *Registry) Schedule() {
 }
 
 // Close releases the reservation and every other resource of the wait, exactly once. It does not
-// touch the HTTP permit (its owner closes it).
+// touch the HTTP permit (its owner closes it). A queued resumption is cancelled and a granted but
+// undelivered one is revoked (its Resume fails). A resumed read which is already running keeps
+// its token, quota slot and the reservation (and Join keeps waiting) until its Grant.Done: its
+// proof work is not stopped by closing.
 func (w *Waiter) Close() {
 	r := w.reg
 	r.mu.Lock()
@@ -443,27 +551,29 @@ func (w *Waiter) Close() {
 	w.closed = true
 	w.armed = false
 	var release *jsonrpc.Permit
+	keep := false
 	if t := w.ticket; t != nil {
 		switch t.state {
-		case 0:
-			t.state = 2
+		case ticketQueued:
+			t.state = ticketCancelled
+			t.cause = ErrWaiterClosed
 			close(t.granted) // a Resume blocked on it returns ErrWaiterClosed
-			for i, q := range r.queue {
-				if q == t {
-					r.queue = append(r.queue[:i], r.queue[i+1:]...)
-					break
-				}
-			}
-		case 1: // a granted resumption nobody finished
-			t.state = 3
+			r.dequeueLocked(t)
+		case ticketGranted:
+			// revoke: the grant was not delivered. Resume observes the closed waiter and fails;
+			// the token and the quota slot go back here exactly once.
+			t.state = ticketFinished
 			r.running--
 			release = t.permit
+		case ticketRunning:
+			keep = true
 		}
-		w.ticket = nil
+		if !keep {
+			w.ticket = nil
+		}
 	}
-	delete(r.waiters, w)
-	if len(r.waiters) == 0 {
-		close(r.idle)
+	if !keep {
+		r.removeLocked(w)
 	}
 	r.mu.Unlock()
 	if release != nil {
