@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -140,8 +141,8 @@ func ParseGetNonInclusionProofRequestV1(params json.RawMessage) (*GetNonInclusio
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
 		return nil, errors.New("malformed params")
 	}
-	if _, err := dec.Token(); err == nil {
-		return nil, errors.New("trailing data after params")
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("trailing data after params") // a token, or a malformed suffix
 	}
 	if !seen {
 		return nil, errors.New("stateId is required")
