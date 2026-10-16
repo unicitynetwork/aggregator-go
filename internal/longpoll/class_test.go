@@ -280,3 +280,41 @@ func TestClass_AdmissionIsHandedOverAndReleasedOnRevocation(t *testing.T) {
 	w.Close()
 	w3.Close()
 }
+
+// A pass looks at queue heads only: the cost does not grow with the number of waiting tickets of a
+// blocked class, and the oldest eligible head still goes first across classes.
+func TestSchedule_CostIsIndependentOfTheBlockedQueueLength(t *testing.T) {
+	reg, srv := newPair(t, 3000, 3000)
+	adm := &fakeAdmitter{free: 0}
+	batch := reg.NewClass("batch", 4, adm)
+	var ps []*jsonrpc.Permit
+	var ws []*Waiter
+	for i := 0; i < 2000; i++ {
+		p := parkedPermit(t, srv)
+		w, _ := reg.Admit()
+		ps, ws = append(ps, p), append(ws, w)
+		go func() { _, _ = w.ResumeClass(context.Background(), p, time.Now().Add(30*time.Second), batch) }()
+	}
+	require.Eventually(t, func() bool { return reg.Stats().Queued == 2000 }, 5*time.Second, 5*time.Millisecond)
+	before := adm.denials()
+	for i := 0; i < 500; i++ {
+		reg.Schedule()
+	}
+	// one admission attempt per pass (the head), not one per queued ticket
+	require.LessOrEqual(t, adm.denials()-before, 500, "each pass asks the blocked class once")
+	start := time.Now()
+	for i := 0; i < 2000; i++ {
+		reg.Schedule()
+	}
+	require.Less(t, time.Since(start), 500*time.Millisecond, "2000 passes over 2000 blocked tickets stay cheap")
+	for i := range ps {
+		ps[i].Close()
+		ws[i].Close()
+	}
+}
+
+func (f *fakeAdmitter) denials() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.denied
+}

@@ -248,6 +248,7 @@ type Stats struct {
 	Views         int
 	RetiredPinned int
 	ActivePins    int
+	ReservedPins  int // pins set aside by TryReservePin and not yet converted or released
 	RetainedBytes uint64
 	Evictions     uint64
 	PressureKills uint64
@@ -261,6 +262,7 @@ func (c *Catalog) Stats() Stats {
 		Views:         c.nViews,
 		RetiredPinned: len(c.retired),
 		ActivePins:    len(c.leases),
+		ReservedPins:  c.reservedPins,
 		RetainedBytes: c.retainedBytesLocked(),
 		Evictions:     c.evictions,
 		PressureKills: c.pressureKills,

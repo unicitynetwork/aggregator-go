@@ -54,6 +54,7 @@ func TestBatchTryAdmit_LeavesCapacityForFreshRequestsAndRollsBack(t *testing.T) 
 	}
 	require.Zero(t, len(e.svc.slots))
 	require.Zero(t, e.catalog.Stats().ActivePins)
+	require.Zero(t, e.catalog.Stats().ReservedPins, "released admissions leave no pin reservation behind")
 
 	// complete rollback: slots free but pins occupied by leases -> nothing is held
 	var leases []*proofview.Lease
@@ -76,6 +77,7 @@ func TestBatchTryAdmit_LeavesCapacityForFreshRequestsAndRollsBack(t *testing.T) 
 	require.False(t, ok)
 	_, reserveOK := e.catalog.TryReservePin(0)
 	require.True(t, reserveOK, "no pin reservation leaked from the failed admission")
+	require.Equal(t, 1, e.catalog.Stats().ReservedPins, "only the probe above")
 }
 
 // The read uses the slot and the pin it was granted; it does not go through a second admission
@@ -114,12 +116,13 @@ func TestBatchResumedReadConsumesItsGrant(t *testing.T) {
 	l.Release()
 	require.Zero(t, len(e.svc.slots))
 	require.Zero(t, e.catalog.Stats().ActivePins)
+	require.Zero(t, e.catalog.Stats().ReservedPins, "the grant's pin was converted and released, the unused ones given back")
 	_, ok := e.catalog.TryReservePin(0)
 	require.True(t, ok)
 }
 
 func longpolWithResources(ctx context.Context, r longpoll.Resources) context.Context {
-	return longpoll.WithResourcesForTest(ctx, r)
+	return longpoll.WithResources(ctx, r)
 }
 
 // With fewer than two batch slots or pins parking is disabled: the ordinary immediate outcome
@@ -265,7 +268,7 @@ func TestLongPollBatch_WakeBurstWithProductionBatchConcurrency(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		st := r.reg.Stats()
-		return st.Reserved == 0 && st.Queued == 0 && st.Running == 0 && len(r.e.svc.slots) == 0 && r.e.catalog.Stats().ActivePins == 0
+		return st.Reserved == 0 && st.Queued == 0 && st.Running == 0 && len(r.e.svc.slots) == 0 && r.e.catalog.Stats().ActivePins == 0 && r.e.catalog.Stats().ReservedPins == 0
 	}, 5*time.Second, 5*time.Millisecond, "complete resource cleanup")
 	_, canReserve := r.e.catalog.TryReservePin(0)
 	require.True(t, canReserve)
@@ -315,7 +318,7 @@ func TestLongPollBatch_ResumeQueueIsDeadlineBounded(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		st := r.reg.Stats()
-		return st.Reserved == 0 && st.Queued == 0 && st.Running == 0 && len(r.e.svc.slots) == 0 && r.e.catalog.Stats().ActivePins == 0
+		return st.Reserved == 0 && st.Queued == 0 && st.Running == 0 && len(r.e.svc.slots) == 0 && r.e.catalog.Stats().ActivePins == 0 && r.e.catalog.Stats().ReservedPins == 0
 	}, 5*time.Second, 5*time.Millisecond)
 }
 

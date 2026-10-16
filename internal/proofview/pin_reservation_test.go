@@ -25,6 +25,7 @@ func TestPinReservation(t *testing.T) {
 	}
 	_, ok := c.TryReservePin(1)
 	require.False(t, ok, "the last pin is left to fresh requests")
+	require.Equal(t, 3, c.Stats().ReservedPins)
 
 	// a fresh acquisition gets that last pin, and then the limit applies to it too
 	fresh, err := c.AcquireLatest(ctx)
@@ -69,6 +70,7 @@ func TestPinReservation(t *testing.T) {
 	fresh.Release()
 	l1.Release()
 	require.Zero(t, c.Stats().ActivePins)
+	require.Zero(t, c.Stats().ReservedPins, "every reservation was converted or released")
 	for i := 0; i < 4; i++ { // nothing leaked from the reservation counter
 		x, ok := c.TryReservePin(0)
 		require.True(t, ok, i)

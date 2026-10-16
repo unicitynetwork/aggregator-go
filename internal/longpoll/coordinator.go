@@ -131,6 +131,12 @@ func (c *Coordinator) Run(ctx context.Context, method string, requested uint64, 
 
 type resourcesKey struct{}
 
+// WithResources attaches the capacity granted to a resumed read to its context (RunClass does it
+// for the re-read; methods read it with ResourcesFromContext).
+func WithResources(ctx context.Context, r Resources) context.Context {
+	return context.WithValue(ctx, resourcesKey{}, r)
+}
+
 // ResourcesFromContext returns the method capacity the scheduler granted to this resumed read
 // (nil for a first read or a class-less wait). The read consumes it instead of acquiring again.
 func ResourcesFromContext(ctx context.Context) Resources {
@@ -185,7 +191,7 @@ func (c *Coordinator) RunClass(ctx context.Context, method string, requested uin
 		evalCtx, resumed := ctx, grant != nil
 		if grant != nil {
 			if r := grant.Resources(); r != nil {
-				evalCtx = context.WithValue(ctx, resourcesKey{}, r)
+				evalCtx = WithResources(ctx, r)
 			}
 		}
 		res := eval(evalCtx)
@@ -268,9 +274,3 @@ func (c *Coordinator) finish(method, outcome string, res Result, waited time.Dur
 }
 
 func ceilMs(d time.Duration) uint64 { return uint64((d + time.Millisecond - 1) / time.Millisecond) }
-
-// WithResourcesForTest attaches granted resources to a context the way RunClass does (tests of
-// the methods that consume a grant).
-func WithResourcesForTest(ctx context.Context, r Resources) context.Context {
-	return context.WithValue(ctx, resourcesKey{}, r)
-}

@@ -85,9 +85,12 @@ type Registry struct {
 	admitting bool
 	shutdown  bool
 	waiters   map[*Waiter]struct{}
-	queue     []*ticket
+	plain     []*ticket // queued class-less resumptions (FIFO)
+	classes   []*Class  // classes, each with its own FIFO queue
+	qlen      int       // queued tickets in total
+	seq       uint64    // arrival order across the queues
 	running   int
-	queueLen  atomic.Int32  // len(queue), readable without the lock (Schedule fast path)
+	queueLen  atomic.Int32  // qlen, readable without the lock (Schedule fast path)
 	idle      chan struct{} // closed while there are no waiters
 
 	shedCapacity atomic.Uint64
@@ -235,7 +238,7 @@ type Stats struct {
 func (r *Registry) Stats() Stats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return Stats{Reserved: len(r.waiters), Queued: len(r.queue), Running: r.running, Generation: r.gen,
+	return Stats{Reserved: len(r.waiters), Queued: r.qlen, Running: r.running, Generation: r.gen,
 		ShedCapacity: r.shedCapacity.Load(), ShedDraining: r.shedDraining.Load(), Wakes: r.wakes.Load(), Notifies: r.notifies.Load(), Enqueued: r.enqueued.Load()}
 }
 
@@ -368,7 +371,8 @@ type Class struct {
 	name     string
 	cap      int
 	admitter Admitter
-	running  int // guarded by Registry.mu
+	running  int       // guarded by Registry.mu
+	q        []*ticket // queued resumptions of this class, FIFO (guarded by Registry.mu)
 }
 
 // NewClass defines a resumption class. A cap below one is raised to one.
@@ -379,7 +383,11 @@ func (r *Registry) NewClass(name string, cap int, a Admitter) *Class {
 	if cap > r.maxRunning {
 		cap = r.maxRunning
 	}
-	return &Class{name: name, cap: cap, admitter: a}
+	c := &Class{name: name, cap: cap, admitter: a}
+	r.mu.Lock()
+	r.classes = append(r.classes, c)
+	r.mu.Unlock()
+	return c
 }
 
 // Cap is the class's running cap.
@@ -396,6 +404,7 @@ type ticket struct {
 	cause   error // why a cancelled ticket was cancelled by the scheduler
 	class   *Class
 	adm     Resources
+	seq     uint64
 }
 
 // uncountLocked takes a granted ticket out of the running counts and returns its admission, which
@@ -491,15 +500,19 @@ func (w *Waiter) ResumeClass(ctx context.Context, p *jsonrpc.Permit, until time.
 		r.mu.Unlock()
 		return nil, ErrWaiterClosed
 	}
-	if len(r.queue) >= r.cfg.ResumeQueueMax {
+	if r.qlen >= r.cfg.ResumeQueueMax {
 		r.mu.Unlock()
 		return nil, ErrResumeQueueFull
 	}
 	t := &ticket{w: w, permit: p, ctx: ctx, until: until, granted: make(chan struct{}), class: class}
 	w.ticket = t
-	r.queue = append(r.queue, t)
+	r.seq++
+	t.seq = r.seq
+	q := r.queueOf(t)
+	*q = append(*q, t)
+	r.qlen++
 	r.enqueued.Add(1)
-	r.queueLen.Store(int32(len(r.queue)))
+	r.queueLen.Store(int32(r.qlen))
 	r.mu.Unlock()
 	r.Schedule()
 
@@ -576,11 +589,20 @@ func (r *Registry) abandon(t *ticket, cause error) error {
 	return cause
 }
 
+func (r *Registry) queueOf(t *ticket) *[]*ticket {
+	if t.class != nil {
+		return &t.class.q
+	}
+	return &r.plain
+}
+
 func (r *Registry) dequeueLocked(t *ticket) {
-	for i, q := range r.queue {
-		if q == t {
-			r.queue = append(r.queue[:i], r.queue[i+1:]...)
-			r.queueLen.Store(int32(len(r.queue)))
+	q := r.queueOf(t)
+	for i, x := range *q {
+		if x == t {
+			*q = append((*q)[:i], (*q)[i+1:]...)
+			r.qlen--
+			r.queueLen.Store(int32(r.qlen))
 			return
 		}
 	}
@@ -591,56 +613,71 @@ func (r *Registry) dequeueLocked(t *ticket) {
 // BatchProofService.SetReleaseHook): it never polls. Stale work - a finished request, a cancelled
 // context, a passed deadline - is dropped, never granted.
 //
-// FIFO holds per class: a ticket whose class cannot be admitted (its cap is reached or its
-// method capacity is occupied) lets later tickets of OTHER classes pass, but never overtakes an
-// earlier ticket of its own class. Exhausted shared capacity (the HTTP pool or the global quota)
-// stops the pass. A grant takes the HTTP permit and the class admission together; if the class
-// cannot be admitted the permit is given back (quietly: this runs under the registry lock).
+// Every class has its own FIFO queue (plus one for class-less resumptions); a pass looks only at the
+// queue heads, so its cost is O(classes), independent of how many tickets wait. The oldest
+// eligible head goes first. A head whose class cannot be admitted (cap reached, or the method
+// capacity is occupied) lets heads of OTHER classes pass, but a class never overtakes itself.
+// Exhausted shared capacity (the HTTP pool or the global quota) stops the pass. A grant takes the
+// HTTP permit and the class admission together; if the class cannot be admitted the permit is
+// given back (quietly: this runs under the registry lock).
 func (r *Registry) Schedule() {
 	if r.queueLen.Load() == 0 {
 		return // nothing queued: legacy request completions do not contend on the registry lock
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	defer func() { r.queueLen.Store(int32(len(r.queue))) }()
+	defer func() { r.queueLen.Store(int32(r.qlen)) }()
 	var blocked map[*Class]bool
-	for i := 0; i < len(r.queue) && r.running < r.maxRunning; {
-		t := r.queue[i]
-		switch {
-		case t.permit.Closed():
-			t.cause = ErrWaiterClosed
-		case t.ctx.Err() != nil:
-			t.cause = t.ctx.Err()
-		case !time.Now().Before(t.until):
-			t.cause = ErrResumeTimeout
-		}
-		if t.cause != nil {
-			t.state = ticketCancelled
-			t.w.ticket = nil
-			close(t.granted)
-			r.queue = append(r.queue[:i], r.queue[i+1:]...)
-			continue
-		}
-		if c := t.class; c != nil && (blocked[c] || c.running >= c.cap) {
-			if blocked == nil {
-				blocked = map[*Class]bool{}
+	for r.running < r.maxRunning {
+		var best *ticket
+		consider := func(q *[]*ticket, c *Class) {
+			for len(*q) > 0 { // drop stale heads
+				t := (*q)[0]
+				var cause error
+				switch {
+				case t.permit.Closed():
+					cause = ErrWaiterClosed
+				case t.ctx.Err() != nil:
+					cause = t.ctx.Err()
+				case !time.Now().Before(t.until):
+					cause = ErrResumeTimeout
+				}
+				if cause == nil {
+					break
+				}
+				t.cause = cause
+				t.state = ticketCancelled
+				t.w.ticket = nil
+				close(t.granted)
+				*q = (*q)[1:]
+				r.qlen--
 			}
-			blocked[c] = true
-			i++
-			continue
+			if len(*q) == 0 || (c != nil && (blocked[c] || c.running >= c.cap)) {
+				return
+			}
+			if t := (*q)[0]; best == nil || t.seq < best.seq {
+				best = t
+			}
 		}
+		consider(&r.plain, nil)
+		for _, c := range r.classes {
+			consider(&c.q, c)
+		}
+		if best == nil {
+			return
+		}
+		t := best
 		if !t.permit.TryReacquire(1) {
 			return // the shared HTTP pool is exhausted: nothing else can run either
 		}
 		if c := t.class; c != nil && c.admitter != nil {
 			adm, ok := c.admitter.TryAdmit()
 			if !ok {
-				t.permit.ReleaseQuiet() // complete rollback; capacity release will schedule again
+				t.permit.ReleaseQuiet() // complete rollback; a capacity release will schedule again
 				if blocked == nil {
 					blocked = map[*Class]bool{}
 				}
 				blocked[c] = true
-				i++
 				continue
 			}
 			t.adm = adm
@@ -650,7 +687,9 @@ func (r *Registry) Schedule() {
 		if t.class != nil {
 			t.class.running++
 		}
-		r.queue = append(r.queue[:i], r.queue[i+1:]...)
+		q := r.queueOf(t)
+		*q = (*q)[1:]
+		r.qlen--
 		close(t.granted)
 	}
 }

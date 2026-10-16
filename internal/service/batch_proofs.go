@@ -769,8 +769,8 @@ func (s *BatchProofService) fireRelease() {
 // resumed batch reads inside the global quota: min(B-1, P-1) for batch concurrency B and pin
 // limit P (the global max(1, C/4) is applied by the registry). With B or P below two, parking is
 // disabled: a resumption could not leave capacity to fresh requests.
-func (s *BatchProofService) resumeCapacity() (cap int, ok bool) {
-	b, p := cap2(s.slots), 1<<30
+func (s *BatchProofService) resumeCapacity() (n int, ok bool) {
+	b, p := cap(s.slots), 1<<30
 	if pr, isPR := s.views.(pinReserver); isPR {
 		p = pr.PinLimit()
 	}
@@ -779,8 +779,6 @@ func (s *BatchProofService) resumeCapacity() (cap int, ok bool) {
 	}
 	return min(b-1, p-1), true
 }
-
-func cap2(c chan struct{}) int { return cap(c) }
 
 // BatchProofsMethod is the JSON-RPC method of the batch inclusion proof API.
 const BatchProofsMethod = "get_inclusion_proofs.v1"
