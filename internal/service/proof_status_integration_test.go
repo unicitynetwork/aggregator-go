@@ -57,6 +57,11 @@ func proofStatusFlow(t *testing.T, cfg config.Config) {
 	require.NoError(t, rm.Start(ctx))
 	require.NoError(t, rm.Activate(ctx))
 
+	// before the first block no certificate binds the (empty) tree root: typed and retryable, never
+	// an empty-tree proof
+	_, err = svc.GetInclusionProofV2(ctx, &api.GetInclusionProofRequestV2{StateID: testutil.CreateTestCertificationRequest(t, "pre_block").ToAPI().StateID})
+	require.ErrorIs(t, err, api.ErrProofNotYetAvailable)
+
 	// something to certify first, so the service has a reference time
 	warm := testutil.CreateTestCertificationRequest(t, "status_warm").ToAPI()
 	resp, err := svc.CertificationRequest(ctx, warm)

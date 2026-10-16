@@ -771,8 +771,10 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		}
 		precomputeProofDuration = time.Since(precomputeProofStart)
 	}
-	rm.markProofsReady(block, stateIDs, records)
 	if preparedProofView != nil {
+		if rm.testHookBeforeProofViewPublish != nil {
+			rm.testHookBeforeProofViewPublish()
+		}
 		if err := preparedProofView.Publish(ctx); err != nil {
 			return fmt.Errorf("failed to publish disk SMT proof view: %w", err)
 		}
@@ -782,6 +784,10 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		// A backend without read-view support leaves the publisher nil (no-op).
 		rm.proofPub.PublishFinalizedAdmitted(ctx, block)
 	}
+	// Last: this clears the pending status hints. On the disk backend readers take no
+	// finalization lock, so a hint cleared before the proof view is published would let a
+	// state certified in storage be answered "unknown" with the previous (empty) proof.
+	rm.markProofsReady(block, stateIDs, records)
 	if !diskFinalize {
 		rm.finalizationMu.Unlock()
 	}

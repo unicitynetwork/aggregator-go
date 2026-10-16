@@ -203,3 +203,45 @@ func TestBatchStatus_RPCErrorShape(t *testing.T) {
 	require.NoError(t, jerr)
 	require.JSONEq(t, `{"code":-32008,"message":"Proof unavailable","data":{"reason":"proof_unavailable","detail":"state_pending","retryable":true,"indexes":{"pending":[1]}}}`, string(raw))
 }
+
+// clearingStatus reports pending until the record query has run, then unknown: what the status
+// tracker does when the state finalizes (markProofsReady clears the hint) while the request runs.
+type clearingStatus struct {
+	cleared *bool
+	id      api.StateID
+}
+
+func (s clearingStatus) ProofStatus(id api.StateID) api.ProofStatus {
+	if id.String() == s.id.String() && !*s.cleared {
+		return api.ProofStatusPending
+	}
+	return api.ProofStatusUnknown
+}
+
+type clearAfterSizes struct {
+	BatchRecordSource
+	cleared *bool
+}
+
+func (c clearAfterSizes) GetStoredSizesByStateIDs(ctx context.Context, ids []api.StateID) (map[string]int64, error) {
+	out, err := c.BatchRecordSource.GetStoredSizesByStateIDs(ctx, ids)
+	*c.cleared = true // the state finalizes right after the record query found nothing
+	return out, err
+}
+
+// A state which finalizes while the request runs was pending when its hint was read: the batch
+// is retryable state_pending, never the non-retryable state_unknown from a hint cleared by that
+// very finalization.
+func TestBatchStatus_HintIsSnapshottedBeforeTheRecordQuery(t *testing.T) {
+	e, ids, _ := statusEnv(t)
+	gone := unseen(e, 1)[0]
+	cleared := false
+	e.svc.status = clearingStatus{cleared: &cleared, id: gone}
+	e.svc.records = clearAfterSizes{BatchRecordSource: e.svc.records, cleared: &cleared}
+
+	_, err := e.svc.GetInclusionProofsV1(context.Background(), e.request([]api.StateID{ids[0], gone}, nil))
+	require.True(t, cleared, "the hook ran")
+	requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_pending")
+	require.True(t, err.Retryable)
+	requireIndexes(t, err, map[string][]int{"pending": {1}})
+}

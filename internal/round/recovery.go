@@ -136,13 +136,13 @@ func (rm *RoundManager) FinalizeCertifiedProposal(
 		block.Status = models.FinalityStatusFinalized
 	}
 
-	rm.markProofsReady(block, stateIDs, records)
 	if preparedProofView != nil {
 		if err := preparedProofView.Publish(ctx); err != nil {
 			return false, fmt.Errorf("failed to publish durable proposal proof view: %w", err)
 		}
 		proofViewPublished = true
 	}
+	rm.markProofsReady(block, stateIDs, records) // after the publish, see FinalizeBlock
 	// finalizationMu is held: the backend is at exactly this finalized state.
 	rm.proofPub.PublishFinalized(ctx, block)
 	rm.stateTracker.SetLastSyncedBlock(block.Index.Int)
