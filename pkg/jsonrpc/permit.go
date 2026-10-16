@@ -3,6 +3,7 @@ package jsonrpc
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // slotPool is the non-blocking active-work limit of the server: CONCURRENCY_LIMIT tokens, one per
@@ -51,7 +52,8 @@ func (p *slotPool) release() {
 //     token; the last worker's Done does. Active-work accounting is therefore never released
 //     before proof work actually stops.
 type Permit struct {
-	pool *slotPool
+	pool    *slotPool
+	created time.Time // when the request was admitted: the start of its application deadline
 
 	mu      sync.Mutex
 	held    bool
@@ -68,6 +70,9 @@ func (p *Permit) Owned() bool {
 	defer p.mu.Unlock()
 	return p.owned
 }
+
+// Created is when the request was admitted.
+func (p *Permit) Created() time.Time { return p.created }
 
 // Held reports whether the permit currently owns a token.
 func (p *Permit) Held() bool {
@@ -190,7 +195,7 @@ func (s *Server) newPermit() (*Permit, bool) {
 	if !s.pool.tryAcquire(0) {
 		return nil, false
 	}
-	return &Permit{pool: s.pool, held: true}, true
+	return &Permit{pool: s.pool, held: true, created: time.Now()}, true
 }
 
 // OwnershipPredicate decides from the raw params whether a request of a method takes part in
@@ -222,3 +227,26 @@ func (s *Server) markOwned(permit *Permit, req *Request) {
 // AcquirePermit takes an active-work token outside an HTTP request (tests and embedders), or
 // reports false when the server is saturated.
 func (s *Server) AcquirePermit() (*Permit, bool) { return s.newPermit() }
+
+// SetOptInLimits bounds the requests of an otherwise unlimited method which opt in (the method's
+// ownership predicate holds): their complete request, params and ID are limited before the
+// handler runs. Legacy requests of the method are not affected.
+func (s *Server) SetOptInLimits(method string, l MethodLimits) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.optIn == nil {
+		s.optIn = map[string]MethodLimits{}
+	}
+	s.optIn[method] = l
+}
+
+func (s *Server) optInLimitsFor(req *Request) (MethodLimits, bool) {
+	s.mutex.RLock()
+	l, hasLimits := s.optIn[req.Method]
+	f := s.ownership[req.Method]
+	s.mutex.RUnlock()
+	if !hasLimits || f == nil || !f(req.Params) {
+		return MethodLimits{}, false
+	}
+	return l, true
+}

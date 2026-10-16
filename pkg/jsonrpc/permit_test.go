@@ -199,3 +199,21 @@ func TestServeHTTP_OwnershipPredicateMarksOnlyOptInRequests(t *testing.T) {
 	}
 	require.Equal(t, []bool{false, true}, owned)
 }
+
+func TestError_WithWaited(t *testing.T) {
+	enc := func(e *Error) string { b, err := json.Marshal(e); require.NoError(t, err); return string(b) }
+	require.JSONEq(t, `{"code":-32008,"message":"m","data":{"reason":"r","detail":"d","retryable":true,"waitedMs":7}}`,
+		enc(NewDetailedError(-32008, "m", "r", "d", true, nil).WithWaited(7)))
+	require.Equal(t, `{"code":-32008,"message":"m","data":{"reason":"r","detail":"d","retryable":true,"indexes":{"pending":[0]},"waitedMs":8000}}`,
+		enc(NewDetailedErrorWithIndexes(-32008, "m", "r", "d", true, map[string][]int{"pending": {0}}).WithWaited(8000)), "existing members first, echo last")
+	require.Equal(t, `{"code":-32000,"message":"m","data":{"waitedMs":0}}`, enc(NewValidationError("m").WithWaited(0)), "absent data becomes an object")
+	require.Equal(t, `{"code":-32603,"message":"m","data":{"originalData":"db down","waitedMs":0}}`, enc(NewError(-32603, "m", "db down").WithWaited(0)))
+	require.Equal(t, `{"code":-32603,"message":"m","data":{"originalData":[1,2],"waitedMs":3}}`, enc(NewError(-32603, "m", []int{1, 2}).WithWaited(3)))
+	require.Equal(t, `{"code":1,"message":"m","data":{"waitedMs":4}}`, enc(NewError(1, "m", map[string]int{}).WithWaited(4)), "empty object")
+	// shared predefined errors are not modified
+	_ = ErrConcurrencyLimit.WithWaited(9)
+	require.Nil(t, ErrConcurrencyLimit.Data)
+	require.Equal(t, `{"code":-32006,"message":"Concurrency limit exceeded","data":{"waitedMs":5}}`, enc(ErrConcurrencyLimit.WithWaited(5).WithWaited(5)))
+	var nilErr *Error
+	require.Nil(t, nilErr.WithWaited(1))
+}

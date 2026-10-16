@@ -10,6 +10,7 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/aggregator-go/internal/longpoll"
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/proofview"
@@ -171,6 +172,7 @@ type BatchProofService struct {
 	maxBytes int
 	mode     string
 	status   BatchStatusSource
+	longPoll *longpoll.Coordinator
 }
 
 // BatchProofConfig configures the service. Zero values take the plan defaults.
@@ -182,6 +184,9 @@ type BatchProofConfig struct {
 	// Status answers the unauthenticated pending/expired/unknown hint of a state ID from
 	// memory (the round manager). Nil answers unknown for every absent state.
 	Status BatchStatusSource
+	// LongPoll serves requests carrying waitMs; nil keeps the reservation-only behavior (waitMs is
+	// validated and ignored, no echo).
+	LongPoll *longpoll.Coordinator
 }
 
 // BatchStatusSource is the O(1) in-memory proof status lookup.
@@ -201,7 +206,7 @@ func NewBatchProofService(views BatchViewSource, records BatchRecordSource, shar
 		cfg.MaxResponseBytes = api.InclusionProofsMaxResponseBytes
 	}
 	return &BatchProofService{views: views, records: records, shard: shard, slots: make(chan struct{}, cfg.MaxConcurrent),
-		timeout: cfg.MaxExecution, maxBytes: cfg.MaxResponseBytes, status: cfg.Status}
+		timeout: cfg.MaxExecution, maxBytes: cfg.MaxResponseBytes, status: cfg.Status, longPoll: cfg.LongPoll}
 }
 
 // GetInclusionProofsV1 returns proofs for every state ID, in request order,
@@ -552,14 +557,44 @@ func (e *BatchError) nonRetryable() *BatchError { e.Retryable = false; return e 
 func (s *BatchProofService) HandleRPC(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
 	req, err := api.ParseGetInclusionProofsRequestV1(params)
 	if err != nil {
-		return nil, ParamsBatchError(err).RPCError()
+		rpcErr := ParamsBatchError(err).RPCError()
+		if s.longPoll != nil {
+			// A params object carrying a valid waitMs is a recognized wait-bearing request: its
+			// validation errors echo zero (and tell the client the server understands waitMs).
+			// An invalid or duplicate waitMs is not recognized: the same bytes as without support.
+			if w, serr := api.ScanWaitMs(params); serr == nil && w.Present {
+				rpcErr = rpcErr.WithWaited(0)
+			}
+		}
+		return nil, rpcErr
 	}
-	resp, berr := s.GetInclusionProofsV1(ctx, req)
-	if berr != nil {
-		return nil, berr.RPCError()
+	if !req.WaitMs.Present || s.longPoll == nil {
+		resp, berr := s.GetInclusionProofsV1(ctx, req)
+		if berr != nil {
+			return nil, berr.RPCError()
+		}
+		return resp, nil
 	}
+	res, waited := s.longPoll.Run(ctx, BatchProofsMethod, req.WaitMs.Value, func(ctx context.Context) longpoll.Result {
+		resp, berr := s.GetInclusionProofsV1(ctx, req)
+		if berr != nil {
+			// Wait only while every non-included state is pending (the batch is all-or-nothing and
+			// unknown/expired end the wait at once, the normal error precedence applies).
+			pending := berr.Reason == "proof_unavailable" && berr.Detail == detailStatePending
+			return longpoll.Result{Pending: pending, Err: berr.RPCError()}
+		}
+		return longpoll.Result{Value: resp}
+	})
+	if res.Err != nil {
+		return nil, res.Err.WithWaited(waited)
+	}
+	resp := res.Value.(*api.GetInclusionProofsResponseV1)
+	resp.WaitedMs = &waited
 	return resp, nil
 }
+
+// BatchProofsMethod is the JSON-RPC method of the batch inclusion proof API.
+const BatchProofsMethod = "get_inclusion_proofs.v1"
 
 // UnsupportedRPC is the handler for deployments that cannot serve the method.
 func UnsupportedRPC(context.Context, json.RawMessage) (interface{}, *jsonrpc.Error) {

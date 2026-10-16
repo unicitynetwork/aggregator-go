@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -49,6 +50,9 @@ type GetInclusionProofsRequestV1 struct {
 type GetInclusionProofsResponseV1 struct {
 	Proofs        []*GetInclusionProofResponseV2 `json:"proofs"`
 	PartitionView HexBytes                       `json:"partitionView,omitempty"`
+	// WaitedMs is the long-poll echo; nil (omitted) for requests without waitMs, a pointer so
+	// that an explicit zero is serialized.
+	WaitedMs *uint64 `json:"waitedMs,omitempty"`
 }
 
 // ErrBoundedOutputExceeded is returned by AppendJSONBounded when the output would
@@ -100,6 +104,10 @@ func (r *GetInclusionProofsResponseV1) AppendJSONBounded(dst []byte, max int) ([
 		}
 		dst = append(dst, `,"partitionView":`...)
 		dst = appendHexString(dst, r.PartitionView, max)
+	}
+	if r.WaitedMs != nil {
+		dst = append(dst, `,"waitedMs":`...)
+		dst = strconv.AppendUint(dst, *r.WaitedMs, 10)
 	}
 	dst = append(dst, '}')
 	if len(dst) > max {

@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
 
@@ -93,6 +94,7 @@ type Registry struct {
 	shedDraining atomic.Uint64
 	wakes        atomic.Uint64
 	notifies     atomic.Uint64
+	lastNotify   atomic.Int64 // unix nanos of the last Notify
 	enqueued     atomic.Uint64
 
 	// testHookArm runs in Wait before the arm check; tests use it as a barrier.
@@ -126,6 +128,14 @@ func (r *Registry) Capacity() int { return r.capacity }
 // MaxRunning is the quota of simultaneously running resumed reads.
 func (r *Registry) MaxRunning() int { return r.maxRunning }
 
+// LastNotify is the time of the most recent wake-up event (zero if none).
+func (r *Registry) LastNotify() time.Time {
+	if n := r.lastNotify.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
+}
+
 // Generation returns the current publication/status/lifecycle generation.
 func (r *Registry) Generation() uint64 {
 	r.mu.Lock()
@@ -139,6 +149,8 @@ func (r *Registry) Generation() uint64 {
 // when they next arm, so the newest generation is never lost.
 func (r *Registry) Notify() {
 	r.notifies.Add(1)
+	r.lastNotify.Store(time.Now().UnixNano())
+	metrics.LongPollNotifiesTotal.Inc()
 	r.mu.Lock()
 	r.gen++
 	for w := range r.waiters {

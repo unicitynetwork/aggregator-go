@@ -26,6 +26,7 @@ type Server struct {
 	logger       *logger.Logger
 	pool         *slotPool
 	ownership    map[string]OwnershipPredicate
+	optIn        map[string]MethodLimits
 	maxBodyBytes int64
 	mutex        sync.RWMutex
 }
@@ -178,6 +179,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			recordMetrics("unknown", "error")
 			s.writeErrorResponse(w, ErrInvalidRequest, req.ID)
 			return
+		}
+		// Requests which opt in to a long-poll wait are bounded like a method-limited request
+		// (the legacy requests of the method keep their unbounded legacy decoding).
+		if l, ok := s.optInLimitsFor(&req); ok {
+			if rpcErr := checkRequestBody(l, dec, r.Body); rpcErr != nil {
+				recordMetrics(metrics.NormalizeMethod(req.Method), "error")
+				s.writeErrorResponse(w, rpcErr, nil)
+				return
+			}
+			if !validRawID(env.ID, l.MaxIDBytes) {
+				recordMetrics(metrics.NormalizeMethod(req.Method), "error")
+				s.writeErrorResponse(w, NewDetailedError(InvalidParamsCode, "Invalid params", "invalid_request", "invalid_id", false, nil), nil)
+				return
+			}
+			if rpcErr := checkParamsLimit(l, &req); rpcErr != nil {
+				recordMetrics(metrics.NormalizeMethod(req.Method), "error")
+				s.writeErrorResponse(w, rpcErr, req.ID)
+				return
+			}
 		}
 	} else {
 		idOK := validRawID(env.ID, limits.MaxIDBytes)

@@ -19,6 +19,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/gateway"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/longpoll"
 	"github.com/unicitynetwork/aggregator-go/internal/proofview"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
@@ -48,7 +49,7 @@ func batchIDsJSON(ids ...api.StateID) string {
 // goldenGateway starts the production gateway server (gin router, the RequestID/Logging/
 // Timeout(30s) middleware stack, the real method registration and limits) on a loopback port and
 // returns its URL. svc serves get_inclusion_proof.v2 (the batch method gets batch, when set).
-func goldenGateway(t *testing.T, svc gateway.Service, batch jsonrpc.HandlerFunc) string {
+func goldenGateway(t *testing.T, svc gateway.Service, batch jsonrpc.HandlerFunc, lp ...*longpoll.Coordinator) string {
 	t.Helper()
 	log, err := logger.New("error", "text", "stdout", false)
 	require.NoError(t, err)
@@ -62,6 +63,9 @@ func goldenGateway(t *testing.T, svc gateway.Service, batch jsonrpc.HandlerFunc)
 		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute}
 	cfg.Sharding.Mode = config.ShardingModeStandalone
 	srv := gateway.NewServer(cfg, log, svc)
+	if len(lp) > 0 && lp[0] != nil {
+		srv.SetLongPoll(lp[0])
+	}
 	if batch != nil {
 		srv.SetBatchProofHandler(batch)
 	}
@@ -93,7 +97,18 @@ func goldenPost(t *testing.T, url, body string) string {
 	return string(b)
 }
 
+// goldenCoordinator is a long-poll coordinator as production wires it (default limits).
+func goldenCoordinator(t *testing.T) *longpoll.Coordinator {
+	return &longpoll.Coordinator{Reg: longpoll.New(longpoll.Config{MaxWaiters: 1024, Concurrency: 100}), MaxWait: 20 * time.Second, Budget: 30 * time.Second}
+}
+
+// The no-wait bytes are identical whether or not long-poll is wired into the server.
 func TestLongPollGolden_BatchNoWait(t *testing.T) {
+	t.Run("legacy", func(t *testing.T) { batchNoWaitGolden(t, false) })
+	t.Run("long-poll wired", func(t *testing.T) { batchNoWaitGolden(t, true) })
+}
+
+func batchNoWaitGolden(t *testing.T, wired bool) {
 	batchReq := func(id int, params string) string {
 		return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"get_inclusion_proofs.v1","params":%s}`, id, params)
 	}
@@ -112,16 +127,23 @@ func TestLongPollGolden_BatchNoWait(t *testing.T) {
 		more[0].String(): api.ProofStatusPending,
 	}}
 	e.svc.status = st
-	h := goldenGateway(t, &AggregatorService{}, e.svc.HandleRPC)
+	var lp *longpoll.Coordinator
+	if wired {
+		lp = goldenCoordinator(t)
+		e.svc.longPoll = lp
+	}
+	h := goldenGateway(t, &AggregatorService{}, e.svc.HandleRPC, lp)
 
 	// A deployment before its first block, and one whose newest block has no partition view.
 	empty := newBatchEnv(t, proofview.DefaultLimits())
 	emptyIDs := empty.addRecords(1, 1000)
-	hEmpty := goldenGateway(t, &AggregatorService{}, empty.svc.HandleRPC)
+	empty.svc.longPoll = lp
+	hEmpty := goldenGateway(t, &AggregatorService{}, empty.svc.HandleRPC, lp)
 	noView := newBatchEnv(t, proofview.DefaultLimits())
 	noViewIDs := noView.addRecords(1, 1000)
 	noView.finalize(nil)
-	hNoView := goldenGateway(t, &AggregatorService{}, noView.svc.HandleRPC)
+	noView.svc.longPoll = lp
+	hNoView := goldenGateway(t, &AggregatorService{}, noView.svc.HandleRPC, lp)
 
 	type spec struct {
 		name string

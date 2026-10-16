@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/longpoll"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
@@ -27,6 +29,10 @@ type Server struct {
 	httpServer *http.Server
 	router     *gin.Engine
 	service    Service
+
+	longPoll  *longpoll.Coordinator
+	inflightN int64
+	conns     *connTracker
 }
 
 // Service represents the business logic service interface
@@ -79,6 +85,7 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 		rpcServer: rpcServer,
 		router:    router,
 		service:   service,
+		conns:     newConnTracker(),
 	}
 
 	// Setup routes
@@ -88,7 +95,7 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 	// Create HTTP server
 	server.httpServer = &http.Server{
 		Addr:           fmt.Sprintf("%s:%s", cfg.Server.Host, cfg.Server.Port),
-		Handler:        router,
+		Handler:        server.trackInflight(router),
 		ReadTimeout:    cfg.Server.ReadTimeout,
 		WriteTimeout:   cfg.Server.WriteTimeout,
 		IdleTimeout:    cfg.Server.IdleTimeout,
@@ -107,7 +114,7 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 			gatewayLogger.Info("Configured HTTP/2 (TLS) server", "maxConcurrentStreams", cfg.Server.HTTP2MaxConcurrentStreams)
 		}
 	} else if cfg.Server.EnableH2C {
-		server.httpServer.Handler = h2c.NewHandler(router, h2Config)
+		server.httpServer.Handler = h2c.NewHandler(server.trackInflight(router), h2Config)
 		gatewayLogger.Info("Configured h2c (HTTP/2 cleartext) server", "maxConcurrentStreams", cfg.Server.HTTP2MaxConcurrentStreams)
 	} else {
 		gatewayLogger.Info("h2c disabled, using HTTP/1.1 only")
@@ -217,15 +224,43 @@ func (s *Server) SetNonInclusionHandler(h jsonrpc.HandlerFunc) {
 func (s *Server) Start() error {
 	s.logger.WithComponent("gateway").Info("Starting HTTP server", "addr", s.httpServer.Addr)
 
-	if s.config.Server.EnableTLS {
-		return s.httpServer.ListenAndServeTLS(s.config.Server.TLSCertFile, s.config.Server.TLSKeyFile)
+	addr := s.httpServer.Addr
+	if addr == "" {
+		addr = ":http"
 	}
-
-	return s.httpServer.ListenAndServe()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	ln = trackedListener{Listener: ln, t: s.conns}
+	if s.config.Server.EnableTLS {
+		return s.httpServer.ServeTLS(ln, s.config.Server.TLSCertFile, s.config.Server.TLSKeyFile)
+	}
+	return s.httpServer.Serve(ln)
 }
 
-// Stop stops the HTTP server gracefully
+// Stop stops the HTTP server gracefully: long-poll waits are ended and refused from now on,
+// the listener is closed, and the handlers - those of hijacked h2c connections included, which
+// http.Server.Shutdown does not wait for - are drained while the caller's storage is still open.
+// Whatever is left at the ctx deadline is cut by closing the tracked connections.
 func (s *Server) Stop(ctx context.Context) error {
 	s.logger.WithComponent("gateway").Info("Stopping HTTP server")
-	return s.httpServer.Shutdown(ctx)
+	if s.longPoll != nil {
+		s.longPoll.Reg.Drain(true)
+	}
+	shutdownErr := make(chan error, 1)
+	go func() { shutdownErr <- s.httpServer.Shutdown(ctx) }()
+	drainErr := s.drain(ctx)
+	if drainErr != nil {
+		// the deadline: stop what is still running instead of leaving it to touch closed storage
+		s.conns.CloseAll()
+	}
+	err := <-shutdownErr
+	if drainErr == nil {
+		s.conns.CloseAll() // idle hijacked h2c connections
+	}
+	if drainErr != nil {
+		return drainErr
+	}
+	return err
 }
