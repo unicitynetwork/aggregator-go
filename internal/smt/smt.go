@@ -640,6 +640,79 @@ func (smt *SparseMerkleTree) GetInclusionCert(key []byte) (*api.InclusionCert, e
 	return &cert, nil
 }
 
+// ErrNonInclusionUnsupported: the tree cannot produce a non-inclusion certificate (parent
+// trees with placeholder leaves, terminal values which are not the 32 byte profile value).
+var ErrNonInclusionUnsupported = errors.New("smt: non-inclusion certificate unsupported for this tree")
+
+// GetNonInclusionCert builds the non-inclusion certificate of the key: the terminal leaf
+// reached by walking the key at every actual junction, with the sibling hashes of the walk.
+// It returns api.ErrStateIncluded (and no certificate) when that terminal is the key's own
+// leaf. The empty tree yields the empty-tree certificate. It never converts a failure
+// into an absence: only a complete walk to a real leaf yields a certificate.
+//
+// Inclusion and non-inclusion share the walk (the junction siblings and the unary
+// pass-through rule); inclusion additionally requires the terminal to be the key.
+func (smt *SparseMerkleTree) GetNonInclusionCert(key []byte) (*api.NonInclusionCert, error) {
+	if len(key) != api.StateTreeKeyLengthBytes {
+		return nil, fmt.Errorf("%w: got %d, want %d", api.ErrCertKeyLength, len(key), api.StateTreeKeyLengthBytes)
+	}
+	if smt.parentMode {
+		return nil, ErrNonInclusionUnsupported
+	}
+	hasher := api.NewDataHasher(smt.algorithm)
+	_ = smt.root.calculateHash(hasher) // prime the hash caches: sibling reads below are hits
+
+	var bitmap [api.BitmapSize]byte
+	var sibs [][api.SiblingSize]byte
+	current := branch(smt.root)
+	for {
+		if current == nil {
+			return nil, fmt.Errorf("smt: non-inclusion traversal reached a nil subtree")
+		}
+		if current.isLeaf() {
+			break
+		}
+		node := current.(*NodeBranch)
+		switch {
+		case node.Left != nil && node.Right != nil:
+			depth := int(node.Depth)
+			if depth < 0 || depth >= api.StateTreeKeyLengthBits {
+				return nil, fmt.Errorf("smt: invalid branch depth %d", depth)
+			}
+			child, sibling := node.Left, node.Right
+			if keyBit(key, depth) == 1 {
+				child, sibling = node.Right, node.Left
+			}
+			sibHash := sibling.calculateHash(hasher)
+			if len(sibHash) != api.SiblingSize {
+				return nil, fmt.Errorf("smt: sibling hash of %d bytes", len(sibHash))
+			}
+			api.SetBitBE(bitmap[:], depth)
+			var sib [api.SiblingSize]byte
+			copy(sib[:], sibHash)
+			sibs = append(sibs, sib)
+			current = child
+		case node.Left != nil: // unary pass-through (root of a tree with one leaf)
+			current = node.Left
+		case node.Right != nil:
+			current = node.Right
+		default:
+			if node.isRoot && len(sibs) == 0 {
+				return api.EmptyTreeNonInclusionCert(), nil
+			}
+			return nil, fmt.Errorf("smt: non-inclusion traversal reached an empty subtree")
+		}
+	}
+	leaf := current.(*LeafBranch)
+	if leaf.Key == nil || len(leaf.Key) != api.StateTreeKeyLengthBytes || len(leaf.Value) != api.NonInclusionTerminalValueSize {
+		return nil, ErrNonInclusionUnsupported
+	}
+	if bytes.Equal(leaf.Key, key) {
+		return nil, api.ErrStateIncluded
+	}
+	return api.NewNonInclusionCert(bitmap, sibs, leaf.Key, leaf.Value)
+}
+
 // GetShardInclusionFragment builds the native parent proof fragment used by a
 // child aggregator to later compose a full v2 proof locally. The fragment uses
 // the same bitmap+sibling wire shape as InclusionCert but only contains the
