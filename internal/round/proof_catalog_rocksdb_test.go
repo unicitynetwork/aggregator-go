@@ -45,3 +45,7 @@ func TestInitProofViewsWiresTheAccountantRocksDBBackend(t *testing.T) {
 func TestProductionPathServesTheCertifiedEmptyTreeRocksDBBackend(t *testing.T) {
 	runCertifiedEmptyThenBlock(t, newDiskBackend(t))
 }
+
+func TestProductionPathEmptyTreeAfterEmptyBlocksRocksDBBackend(t *testing.T) {
+	runEmptyTreeAfterEmptyBlocks(t, newDiskBackend(t))
+}

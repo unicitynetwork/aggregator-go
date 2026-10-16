@@ -204,6 +204,7 @@ func TestNonInclusionAtAZeroRootIsUnavailable(t *testing.T) {
 	require.NotNil(t, rerr)
 	require.Equal(t, api.NonInclusionCodeNotFound, rerr.Code)
 	require.Equal(t, "empty_snapshot_not_provable", errData(t, rerr).Detail)
+	require.True(t, errData(t, rerr).Retryable)
 }
 
 type niFakeLease struct {

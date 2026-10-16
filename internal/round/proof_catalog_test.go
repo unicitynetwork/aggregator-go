@@ -266,6 +266,105 @@ func runCertifiedEmptyThenBlock(t *testing.T, be smtbackend.Backend) {
 	require.False(t, p.Certificate.IsEmptyTree())
 }
 
+// runEmptyTreeAfterEmptyBlocks drives the production path through genesis, empty blocks that certify the 32 zero
+// byte root of the empty tree, a restart over the same backend and the first commitment: the certified empty tree
+// serves only at genesis; afterwards no verifier accepts an absence from the zero root (nothing is fabricated)
+// until a commitment is certified, which then serves again.
+func runEmptyTreeAfterEmptyBlocks(t *testing.T, be smtbackend.Backend) {
+	ctx := context.Background()
+	auth, err := nifixture.NewAuthority()
+	require.NoError(t, err)
+	tb := auth.TrustBase()
+	verify := func(rm *RoundManager, key []byte) (*noninclusion.Result, error) {
+		v, err := noninclusion.NewVerifier(noninclusion.Context{Partition: nifixture.Partition,
+			Resolver: func(*types.UnicitySeal) (types.RootTrustBase, error) { return tb, nil }})
+		require.NoError(t, err)
+		l, err := rm.ProofViewCatalog().AcquireLatest(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer l.Release()
+		cert, err := l.GetNonInclusionCert(key)
+		if err != nil {
+			return nil, err
+		}
+		return v.VerifyFor(key, &api.NonInclusionProofV1{Certificate: cert, UnicityCertificate: types.RawCBOR(l.UC())})
+	}
+	newRM := func() *RoundManager {
+		rm := proofRoundManager(t, be, 8)
+		rm.ProofViewPublisher().SetSealVerifier(func(context.Context) types.SealVerifier { return types.TrustBaseSealVerifier(tb) })
+		return rm
+	}
+	publishInitial := func(rm *RoundManager) error {
+		uc, ucb, err := auth.CertifyRepeat()
+		require.NoError(t, err)
+		d, _, err := proofmaterial.DigestOfUC(uc)
+		require.NoError(t, err)
+		return rm.ProofViewPublisher().PublishProofMaterial(ctx, &proofmaterial.Material{Kind: proofmaterial.KindInitial, UC: uc, UCBytes: ucb, UCDigest: d})
+	}
+	emptyBlock := func(rm *RoundManager, n uint64) {
+		zero := make([]byte, 32)
+		snap, err := be.CreateSnapshot(ctx)
+		require.NoError(t, err)
+		require.NoError(t, snap.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: api.NewBigIntFromUint64(n), RootHash: zero}))
+		_, ucb, err := auth.CertifyRoot(zero)
+		require.NoError(t, err)
+		blk := models.NewBlock(api.NewBigIntFromUint64(n), "unicity", 0, "1.0", "mainnet", api.NewHexBytes(zero), api.HexBytes{}, api.NewHexBytes(ucb), 1)
+		blk.Finalized = true
+		rm.ProofViewPublisher().PublishFinalized(ctx, blk)
+	}
+	key := make([]byte, 32)
+	key[0] = 0x42
+
+	// genesis: the certified empty tree serves
+	rm := newRM()
+	require.NoError(t, publishInitial(rm))
+	res, err := verify(rm, key)
+	require.NoError(t, err)
+	require.True(t, res.EmptyTree)
+
+	// empty blocks certify the zero root: the empty tree no longer serves, and no absence is verifiable
+	emptyBlock(rm, 1)
+	_, err = verify(rm, key)
+	require.Error(t, err)
+	emptyBlock(rm, 2)
+	_, err = verify(rm, key)
+	require.Error(t, err)
+
+	// restart over the same backend: a repeated genesis UC is not an empty tree any more (blocks are committed)
+	rm = newRM()
+	_ = publishInitial(rm)
+	_, err = verify(rm, key)
+	require.Error(t, err)
+	// recovery re-publishes the latest finalized (empty) block: still nothing provable
+	emptyBlockRepublish := func() {
+		zero := make([]byte, 32)
+		_, ucb, err := auth.CertifyRoot(zero)
+		require.NoError(t, err)
+		blk := models.NewBlock(api.NewBigIntFromUint64(2), "unicity", 0, "1.0", "mainnet", api.NewHexBytes(zero), api.HexBytes{}, api.NewHexBytes(ucb), 1)
+		blk.Finalized = true
+		rm.ProofViewPublisher().PublishFinalized(ctx, blk)
+	}
+	emptyBlockRepublish()
+	_, err = verify(rm, key)
+	require.Error(t, err)
+
+	// the first commitment clears the condition
+	root := commitLeaf(t, be, 3)
+	_, ucb3, err := auth.CertifyRoot(root)
+	require.NoError(t, err)
+	blk := models.NewBlock(api.NewBigIntFromUint64(3), "unicity", 0, "1.0", "mainnet", api.NewHexBytes(root), api.HexBytes{}, api.NewHexBytes(ucb3), 1)
+	blk.Finalized = true
+	rm.ProofViewPublisher().PublishFinalized(ctx, blk)
+	res, err = verify(rm, key)
+	require.NoError(t, err)
+	require.False(t, res.EmptyTree)
+}
+
+func TestProductionPathEmptyTreeAfterEmptyBlocksMemoryBackend(t *testing.T) {
+	runEmptyTreeAfterEmptyBlocks(t, newMemoryBackend())
+}
+
 func TestProductionPathServesTheCertifiedEmptyTreeMemoryBackend(t *testing.T) {
 	runCertifiedEmptyThenBlock(t, newMemoryBackend())
 }

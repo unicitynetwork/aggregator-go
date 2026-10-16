@@ -31,7 +31,10 @@ disabled answer `unsupported_configuration`. Limits: 64 KiB request, 8 MiB respo
 Certified empty tree: an authenticated native UC whose input record carries the empty state hash, accepted at
 initialization (or as a repeat) by a node with no committed block whose backend explicitly reports the empty state, is
 retained as the empty snapshot (block identity 0). It is selected as latest only; no exact-root selector reaches it. A UC
-certifying 32 zero bytes is an ordinary root (nothing to prove an absence against).
+certifying 32 zero bytes is an ordinary root (nothing to prove an absence against). This aggregator certifies exactly
+that zero root for an empty tree after genesis (empty rounds still finalize blocks), so the certified empty tree serves
+only until the first block; from then until the first commitment is certified, requests answer `-32020`
+`empty_snapshot_not_provable` with `retryable: true`.
 
 Client verification: `pkg/noninclusion.Verifier` (anchored authority, expected partition/shard, optional configuration pin,
 epoch end, minimum root round).

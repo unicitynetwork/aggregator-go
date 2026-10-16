@@ -187,9 +187,10 @@ func (s *NonInclusionService) GetNonInclusionProofV1(ctx context.Context, req *a
 	case errors.Is(verr, api.ErrStateIncluded):
 		return nil, niIncluded()
 	case cert.IsEmptyTree() && !lease.EmptyTree():
-		// the UC certifies a nonempty root (for example 32 zero bytes) which an empty
-		// tree certificate cannot prove: nothing certified to prove absence against
-		return nil, niUnavailable("empty_snapshot_not_provable", false)
+		// the UC certifies a nonempty root (the 32 zero bytes this aggregator certifies for an
+		// empty tree after genesis) which an empty tree certificate cannot prove: nothing
+		// certified to prove absence against yet. It clears with the next certified commitment.
+		return nil, niUnavailable("empty_snapshot_not_provable", true)
 	default:
 		return nil, niInternal(fmt.Errorf("generated certificate does not verify: %w", verr))
 	}
