@@ -575,8 +575,8 @@ func (s *benchServer) park(t *testing.T, ctx context.Context, cl *clientKind, me
 			outs <- cl.do(ctx, s.rpc, body)
 		}()
 		switch {
-		case method == "batch":
-			// the batch method has its own admission (8 concurrent reads by default): arrive one
+		case method == "batch" || s.conc < 100:
+			// the batch method has its own admission (and a small CONCURRENCY_LIMIT has few tokens) (8 concurrent reads by default): arrive one
 			// at a time so that the parked state, not an arrival burst, is what is measured
 			for tries := 0; tries < 5000; tries++ {
 				st := s.counts(t)
@@ -698,8 +698,16 @@ collect:
 			burstMu.Lock()
 			burstLat = append(burstLat, o.latency)
 			burstMu.Unlock()
-			if o.status == 200 && strings.Contains(o.body, `"result"`) {
+			// served = an ordinary outcome: a result, or the typed state_pending of a state that is
+			// still pending (the fresh client asks for one of them); a rejection is a busy/transport error
+			if o.status == 200 && (strings.Contains(o.body, `"result"`) || strings.Contains(o.body, `"detail":"state_pending"`)) {
 				burstOK.Add(1)
+			} else {
+				burstMu.Lock()
+				if !strings.Contains(res.Notes, "fresh failure:") {
+					res.Notes += fmt.Sprintf("fresh failure: %d %.200s; ", o.status, o.body)
+				}
+				burstMu.Unlock()
 			}
 			time.Sleep(time.Millisecond)
 		}
