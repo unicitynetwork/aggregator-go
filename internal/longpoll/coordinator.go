@@ -126,6 +126,21 @@ func (c *Coordinator) effectiveWait(ctx context.Context, p *jsonrpc.Permit, requ
 // The active-work token is released only while parked and held again (resume queue) for every
 // re-read; the one held when Run returns stays with the request until its response is written.
 func (c *Coordinator) Run(ctx context.Context, method string, requested uint64, eval Eval) (Result, uint64) {
+	return c.RunClass(ctx, method, requested, nil, eval)
+}
+
+type resourcesKey struct{}
+
+// ResourcesFromContext returns the method capacity the scheduler granted to this resumed read
+// (nil for a first read or a class-less wait). The read consumes it instead of acquiring again.
+func ResourcesFromContext(ctx context.Context) Resources {
+	r, _ := ctx.Value(resourcesKey{}).(Resources)
+	return r
+}
+
+// RunClass is Run for a class of reads whose resumptions are admitted together with their method
+// capacity (see Registry.NewClass): the re-read receives the admission through its context.
+func (c *Coordinator) RunClass(ctx context.Context, method string, requested uint64, class *Class, eval Eval) (Result, uint64) {
 	p := jsonrpc.PermitFromContext(ctx)
 	start := time.Now()
 	wait := c.effectiveWait(ctx, p, requested, start)
@@ -167,7 +182,16 @@ func (c *Coordinator) Run(ctx context.Context, method string, requested uint64, 
 	}()
 	for {
 		gen := w.Generation()
-		res := eval(ctx)
+		evalCtx, resumed := ctx, grant != nil
+		if grant != nil {
+			if r := grant.Resources(); r != nil {
+				evalCtx = context.WithValue(ctx, resourcesKey{}, r)
+			}
+		}
+		res := eval(evalCtx)
+		if resumed && res.Err != nil && res.Err.Code == jsonrpc.ConcurrencyLimitCode {
+			outcome = "busy_downstream" // admitted by the scheduler but rejected by the method itself
+		}
 		if grant != nil {
 			grant.Done()
 			grant = nil
@@ -221,14 +245,14 @@ func (c *Coordinator) Run(ctx context.Context, method string, requested uint64, 
 		if hasHard && resumeUntil.After(hard.Add(-postResume)) {
 			resumeUntil = hard.Add(-postResume)
 		}
-		g, err := w.Resume(ctx, p, resumeUntil)
+		g, err := w.ResumeClass(ctx, p, resumeUntil, class)
 		metrics.LongPollResumeQueueSeconds.Observe(time.Since(qStart).Seconds())
 		if err != nil {
 			if ctx.Err() != nil {
 				return c.finish(method, "cancelled", Result{Err: jsonrpc.NewError(jsonrpc.InternalErrorCode, "Request cancelled", nil)}, waited)
 			}
 			// Overloaded: the existing retryable busy/deadline error, not a new long-poll error.
-			return c.finish(method, "busy", Result{Err: busyDeadline()}, waited)
+			return c.finish(method, "busy_admission_deadline", Result{Err: busyDeadline()}, waited)
 		}
 		grant = g
 	}
@@ -244,3 +268,9 @@ func (c *Coordinator) finish(method, outcome string, res Result, waited time.Dur
 }
 
 func ceilMs(d time.Duration) uint64 { return uint64((d + time.Millisecond - 1) / time.Millisecond) }
+
+// WithResourcesForTest attaches granted resources to a context the way RunClass does (tests of
+// the methods that consume a grant).
+func WithResourcesForTest(ctx context.Context, r Resources) context.Context {
+	return context.WithValue(ctx, resourcesKey{}, r)
+}

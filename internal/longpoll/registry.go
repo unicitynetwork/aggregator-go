@@ -352,6 +352,39 @@ const (
 	ticketRunning
 )
 
+// Resources is method-specific capacity granted to a resumed read together with its HTTP permit
+// (for batch reads: a batch slot and a pin). It is owned by the read, which consumes what it uses
+// and releases it itself; Release gives back what is left unused. Idempotent.
+type Resources interface{ Release() }
+
+// Admitter grants a method's capacity without blocking, leaving room for fresh requests, or says
+// no. It is called by the scheduler under the registry lock, so it must neither block nor call
+// back into the registry.
+type Admitter interface{ TryAdmit() (Resources, bool) }
+
+// Class is a kind of resumed read with its own concurrency cap inside the global resume quota
+// and its own admission (the batch reads: cap min(max(1,C/4), B-1, P-1)).
+type Class struct {
+	name     string
+	cap      int
+	admitter Admitter
+	running  int // guarded by Registry.mu
+}
+
+// NewClass defines a resumption class. A cap below one is raised to one.
+func (r *Registry) NewClass(name string, cap int, a Admitter) *Class {
+	if cap < 1 {
+		cap = 1
+	}
+	if cap > r.maxRunning {
+		cap = r.maxRunning
+	}
+	return &Class{name: name, cap: cap, admitter: a}
+}
+
+// Cap is the class's running cap.
+func (c *Class) Cap() int { return c.cap }
+
 // ticket is a queued resumption.
 type ticket struct {
 	w       *Waiter
@@ -361,6 +394,20 @@ type ticket struct {
 	granted chan struct{} // closed on grant or cancellation
 	state   int
 	cause   error // why a cancelled ticket was cancelled by the scheduler
+	class   *Class
+	adm     Resources
+}
+
+// uncountLocked takes a granted ticket out of the running counts and returns its admission, which
+// the caller releases after unlocking.
+func (r *Registry) uncountLocked(t *ticket) Resources {
+	r.running--
+	if t.class != nil {
+		t.class.running--
+	}
+	a := t.adm
+	t.adm = nil
+	return a
 }
 
 // Grant is a running resumed read. It owns one slot of the resumed-read quota; the active-work
@@ -384,12 +431,23 @@ func (g *Grant) Done() {
 		return
 	}
 	g.t.state = ticketFinished
-	r.running--
+	adm := r.uncountLocked(g.t)
 	if w := g.t.w; w.closed { // the wait was closed while this read ran: its reservation ends with the work
 		r.removeLocked(w)
 	}
 	r.mu.Unlock()
+	if adm != nil {
+		adm.Release() // what the read did not consume
+	}
 	r.Schedule()
+}
+
+// Resources is the method-specific capacity the scheduler granted with this resumption (nil for
+// a class-less resume). The read must use it instead of acquiring capacity a second time.
+func (g *Grant) Resources() Resources {
+	g.r.mu.Lock()
+	defer g.r.mu.Unlock()
+	return g.t.adm
 }
 
 // removeLocked drops a closed waiter's reservation.
@@ -410,6 +468,14 @@ func (r *Registry) removeLocked(w *Waiter) {
 // queued, by the scheduler, and again when the grant is handed over; it fails with ctx's error
 // or ErrResumeTimeout (the handler answers with the existing busy/deadline error).
 func (w *Waiter) Resume(ctx context.Context, p *jsonrpc.Permit, until time.Time) (*Grant, error) {
+	return w.ResumeClass(ctx, p, until, nil)
+}
+
+// ResumeClass is Resume for a class of reads: besides the HTTP permit and the global quota, the
+// scheduler grants the class's capacity (Class admitter) atomically and non-blockingly, rolling
+// the permit back if the class cannot be admitted, and hands the admission over with the grant.
+// The deadline until is shared by all contention and never reset.
+func (w *Waiter) ResumeClass(ctx context.Context, p *jsonrpc.Permit, until time.Time, class *Class) (*Grant, error) {
 	r := w.reg
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -429,7 +495,7 @@ func (w *Waiter) Resume(ctx context.Context, p *jsonrpc.Permit, until time.Time)
 		r.mu.Unlock()
 		return nil, ErrResumeQueueFull
 	}
-	t := &ticket{w: w, permit: p, ctx: ctx, until: until, granted: make(chan struct{})}
+	t := &ticket{w: w, permit: p, ctx: ctx, until: until, granted: make(chan struct{}), class: class}
 	w.ticket = t
 	r.queue = append(r.queue, t)
 	r.enqueued.Add(1)
@@ -457,9 +523,9 @@ func (w *Waiter) Resume(ctx context.Context, p *jsonrpc.Permit, until time.Time)
 		t.state = ticketRunning
 		r.mu.Unlock()
 		return &Grant{r: r, t: t}, nil
-	case t.state == ticketGranted: // revoked before delivery: give token and quota back
+	case t.state == ticketGranted: // revoked before delivery: give token, quota and admission back
 		t.state = ticketFinished
-		r.running--
+		adm := r.uncountLocked(t)
 		w.ticket = nil
 		cause := ctx.Err()
 		switch {
@@ -470,6 +536,9 @@ func (w *Waiter) Resume(ctx context.Context, p *jsonrpc.Permit, until time.Time)
 		}
 		r.mu.Unlock()
 		p.Release()
+		if adm != nil {
+			adm.Release()
+		}
 		r.Schedule()
 		return nil, cause
 	default: // cancelled while queued (waiter closed, request ended, or scheduler found it stale)
@@ -491,12 +560,15 @@ func (r *Registry) abandon(t *ticket, cause error) error {
 		r.dequeueLocked(t)
 		t.w.ticket = nil
 		r.mu.Unlock()
-	case ticketGranted: // granted concurrently, never delivered: hand the token and the quota back
+	case ticketGranted: // granted concurrently, never delivered: hand token, quota and admission back
 		t.state = ticketFinished
-		r.running--
+		adm := r.uncountLocked(t)
 		t.w.ticket = nil
 		r.mu.Unlock()
 		t.permit.Release()
+		if adm != nil {
+			adm.Release()
+		}
 		r.Schedule()
 	default:
 		r.mu.Unlock()
@@ -514,9 +586,16 @@ func (r *Registry) dequeueLocked(t *ticket) {
 	}
 }
 
-// Schedule grants queued resumptions while the quota and the headroom allow. The server calls it
-// whenever an active-work token is released (jsonrpc.Server.SetReleaseHook). Stale work - a
-// finished request, a cancelled context, a passed deadline - is dropped, never granted.
+// Schedule grants queued resumptions while the quotas and the headroom allow. The server and the
+// batch service call it whenever active-work capacity is released (jsonrpc.Server.SetReleaseHook,
+// BatchProofService.SetReleaseHook): it never polls. Stale work - a finished request, a cancelled
+// context, a passed deadline - is dropped, never granted.
+//
+// FIFO holds per class: a ticket whose class cannot be admitted (its cap is reached or its
+// method capacity is occupied) lets later tickets of OTHER classes pass, but never overtakes an
+// earlier ticket of its own class. Exhausted shared capacity (the HTTP pool or the global quota)
+// stops the pass. A grant takes the HTTP permit and the class admission together; if the class
+// cannot be admitted the permit is given back (quietly: this runs under the registry lock).
 func (r *Registry) Schedule() {
 	if r.queueLen.Load() == 0 {
 		return // nothing queued: legacy request completions do not contend on the registry lock
@@ -524,8 +603,9 @@ func (r *Registry) Schedule() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	defer func() { r.queueLen.Store(int32(len(r.queue))) }()
-	for len(r.queue) > 0 && r.running < r.maxRunning {
-		t := r.queue[0]
+	var blocked map[*Class]bool
+	for i := 0; i < len(r.queue) && r.running < r.maxRunning; {
+		t := r.queue[i]
 		switch {
 		case t.permit.Closed():
 			t.cause = ErrWaiterClosed
@@ -538,15 +618,39 @@ func (r *Registry) Schedule() {
 			t.state = ticketCancelled
 			t.w.ticket = nil
 			close(t.granted)
-			r.queue = r.queue[1:]
+			r.queue = append(r.queue[:i], r.queue[i+1:]...)
+			continue
+		}
+		if c := t.class; c != nil && (blocked[c] || c.running >= c.cap) {
+			if blocked == nil {
+				blocked = map[*Class]bool{}
+			}
+			blocked[c] = true
+			i++
 			continue
 		}
 		if !t.permit.TryReacquire(1) {
-			return
+			return // the shared HTTP pool is exhausted: nothing else can run either
+		}
+		if c := t.class; c != nil && c.admitter != nil {
+			adm, ok := c.admitter.TryAdmit()
+			if !ok {
+				t.permit.ReleaseQuiet() // complete rollback; capacity release will schedule again
+				if blocked == nil {
+					blocked = map[*Class]bool{}
+				}
+				blocked[c] = true
+				i++
+				continue
+			}
+			t.adm = adm
 		}
 		t.state = ticketGranted
 		r.running++
-		r.queue = r.queue[1:]
+		if t.class != nil {
+			t.class.running++
+		}
+		r.queue = append(r.queue[:i], r.queue[i+1:]...)
 		close(t.granted)
 	}
 }
@@ -566,6 +670,7 @@ func (w *Waiter) Close() {
 	w.closed = true
 	w.armed = false
 	var release *jsonrpc.Permit
+	var relAdm Resources
 	keep := false
 	if t := w.ticket; t != nil {
 		switch t.state {
@@ -578,7 +683,7 @@ func (w *Waiter) Close() {
 			// revoke: the grant was not delivered. Resume observes the closed waiter and fails;
 			// the token and the quota slot go back here exactly once.
 			t.state = ticketFinished
-			r.running--
+			relAdm = r.uncountLocked(t)
 			release = t.permit
 		case ticketRunning:
 			keep = true
@@ -593,6 +698,9 @@ func (w *Waiter) Close() {
 	r.mu.Unlock()
 	if release != nil {
 		release.Release()
+	}
+	if relAdm != nil {
+		relAdm.Release()
 	}
 	r.Schedule()
 }

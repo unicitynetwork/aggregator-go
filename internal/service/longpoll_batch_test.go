@@ -57,7 +57,7 @@ func newLPBatchRig(t *testing.T, waiters, c int) *lpBatchRig {
 	e := newBatchEnv(t, proofview.DefaultLimits())
 	ids := e.addRecords(4, 1000)
 	e.finalize([]byte("pv1"))
-	later := e.addRecords(3, 1000) // in the tree and the record store, not in the pinned view
+	later := e.addRecords(16, 1000) // in the tree and the record store, not in the pinned view
 	st := &lockedStatus{m: map[string]api.ProofStatus{}}
 	e.svc.status = st
 	reg := longpoll.New(longpoll.Config{MaxWaiters: waiters, Concurrency: c})
