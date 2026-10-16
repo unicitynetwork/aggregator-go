@@ -284,6 +284,16 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 	if err := ctx.Err(); err != nil {
 		return nil, ctxError(err)
 	}
+	// Status hints are snapshotted before the record query: a state which finalizes while the
+	// request runs was pending when read (retryable) or has a record, and is never classified
+	// from a hint cleared by its own finalization (state_unknown is not retryable).
+	var hints []api.ProofStatus
+	if latest && s.status != nil {
+		hints = make([]api.ProofStatus, len(req.StateIDs))
+		for i, id := range req.StateIDs {
+			hints[i] = s.status.ProofStatus(id)
+		}
+	}
 	sizes, serr := s.records.GetStoredSizesByStateIDs(ctx, req.StateIDs)
 	if serr != nil {
 		return nil, dbError(ctx, serr)
@@ -311,7 +321,7 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 		}
 	}
 	if len(present) == 0 {
-		return nil, s.absentError(req, latest, allIndexes(len(req.StateIDs)), nil)
+		return nil, s.absentError(req, latest, hints, allIndexes(len(req.StateIDs)), nil)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, ctxError(err)
@@ -361,7 +371,7 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 		}
 	}
 	if len(noRecord) > 0 || len(absent) > 0 {
-		return nil, s.absentError(req, latest, noRecord, absent)
+		return nil, s.absentError(req, latest, hints, noRecord, absent)
 	}
 	return &api.GetInclusionProofsResponseV1{Proofs: proofs, PartitionView: view}, nil
 }
@@ -390,11 +400,11 @@ func allIndexes(n int) []int {
 // Exact-root requests: every such state is absent from that retained root (state_not_in_root,
 // not retryable). Latest requests: noRecord are states without a stored finalized record, and
 // absentInView have a record which the pinned view does not contain yet; each is classified from
-// the in-memory status hint. A state with a stored finalized record is always pending (finalized
+// the in-memory status hint snapshotted before the record query. A state with a stored finalized record is always pending (finalized
 // after the pinned view), whatever the hint says. With mixed outcomes unknown takes precedence over
 // expired, which takes precedence over pending; only pending is retryable. The error data lists
 // the offending request indexes per class.
-func (s *BatchProofService) absentError(req *api.GetInclusionProofsRequestV1, latest bool, noRecord, absentInView []int) *BatchError {
+func (s *BatchProofService) absentError(req *api.GetInclusionProofsRequestV1, latest bool, hints []api.ProofStatus, noRecord, absentInView []int) *BatchError {
 	if !latest {
 		idx := append(append([]int(nil), noRecord...), absentInView...)
 		sort.Ints(idx)
@@ -410,8 +420,8 @@ func (s *BatchProofService) absentError(req *api.GetInclusionProofsRequestV1, la
 		st := api.ProofStatusPending
 		if !hasRecord {
 			st = api.ProofStatusUnknown
-			if s.status != nil {
-				st = s.status.ProofStatus(req.StateIDs[i])
+			if hints != nil {
+				st = hints[i]
 			}
 		}
 		classes[string(st)] = append(classes[string(st)], i)
