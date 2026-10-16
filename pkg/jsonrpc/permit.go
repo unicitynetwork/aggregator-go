@@ -29,12 +29,14 @@ func (p *slotPool) tryAcquire(reserve int) bool {
 	return true
 }
 
-func (p *slotPool) release() {
+func (p *slotPool) release() { p.releaseHook(true) }
+
+func (p *slotPool) releaseHook(runHook bool) {
 	p.mu.Lock()
 	p.active--
 	hook := p.onRelease
 	p.mu.Unlock()
-	if hook != nil {
+	if runHook && hook != nil {
 		hook()
 	}
 }
@@ -110,6 +112,20 @@ func (p *Permit) Release() bool {
 	p.held = false
 	p.mu.Unlock()
 	p.pool.release()
+	return true
+}
+
+// ReleaseQuiet is Release without notifying the pool's release hook: for the resume scheduler,
+// which gives a token back while it holds its own lock and is already scheduling.
+func (p *Permit) ReleaseQuiet() bool {
+	p.mu.Lock()
+	if !p.held {
+		p.mu.Unlock()
+		return false
+	}
+	p.held = false
+	p.mu.Unlock()
+	p.pool.releaseHook(false)
 	return true
 }
 

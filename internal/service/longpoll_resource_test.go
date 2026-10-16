@@ -60,11 +60,11 @@ import (
 
 const benchPendingIDs = 256 // the batch waiters ask for the first L of these
 
-// batchBurstStrict: a wake burst of batch waiters must complete with no error. False in this
-// revision because F1 (resumed batch reads are rejected busy when B=P=8, see interop-lp.md) is not
-// fixed here: the burst is then gated on ACCOUNTING only (every waiter answered, every failure a
-// retryable -32006 with the echo, nothing leaked), unless B and P cover the whole burst.
-var batchBurstStrict = false
+// batchBurstStrict: a wake burst of batch waiters must complete with no error, also with the
+// production B = P = 8 (F1 ruling: coordinated resume admission). Before the fix the burst could
+// only be gated on accounting (every waiter answered, every failure a retryable -32006 with the
+// echo, nothing leaked).
+var batchBurstStrict = true
 
 // ---------------------------------------------------------------------------------------------
 // child: the server under measurement
@@ -75,7 +75,7 @@ type serverStats struct {
 	Goroutines                                                              int
 	Reserved, Queued, Running                                               int
 	ShedCapacity, ShedDraining                                              uint64
-	ActiveRequests, ActiveWorkers, Inflight, Pins, BatchSlots               int
+	ActiveRequests, ActiveWorkers, Inflight, Pins, BatchSlots               int // Pins: leases + reserved pins
 	Capacity                                                                int
 }
 
@@ -135,6 +135,9 @@ func TestLongPollResourceServer(t *testing.T) {
 
 	reg := longpoll.New(longpoll.Config{MaxWaiters: maxWaiters, Concurrency: conc})
 	co := &longpoll.Coordinator{Reg: reg, MaxWait: 10 * time.Minute, Budget: time.Hour}
+	if ms, _ := strconv.Atoi(os.Getenv("LONGPOLL_RESOURCE_RESUME_RESERVE_MS")); ms > 0 {
+		co.ResumeReserveOverride = time.Duration(ms) * time.Millisecond // provoke admission expiry on purpose
+	}
 	e.svc.longPoll = co
 
 	cfg := &config.Config{}
@@ -158,7 +161,7 @@ func TestLongPollResourceServer(t *testing.T) {
 		st := reg.Stats()
 		return serverStats{Goroutines: runtime.NumGoroutine(), Reserved: st.Reserved, Queued: st.Queued, Running: st.Running,
 			ShedCapacity: st.ShedCapacity, ShedDraining: st.ShedDraining, ActiveRequests: srv.ActiveRequests(), ActiveWorkers: srv.ActiveWorkers(),
-			Inflight: srv.Inflight(), Pins: e.catalog.Stats().ActivePins, BatchSlots: len(e.svc.slots), Capacity: reg.Capacity()}
+			Inflight: srv.Inflight(), Pins: pinsInUse(e), BatchSlots: len(e.svc.slots), Capacity: reg.Capacity()}
 	}
 
 	// in-server peak sampler: counts every ~100 us and the heap from runtime/metrics
@@ -275,6 +278,12 @@ func TestLongPollResourceServer(t *testing.T) {
 	hello, _ := json.Marshal(map[string]any{"rpc": fmt.Sprintf("127.0.0.1:%d", port), "ctl": ctl.Addr().String(), "pid": os.Getpid()})
 	fmt.Printf("READY %s\n", hello)
 	_, _ = io.Copy(io.Discard, os.Stdin) // the parent closes stdin to stop the server
+}
+
+// pinsInUse counts leases AND pin reservations: a leaked reservation would shrink P for good.
+func pinsInUse(e *batchEnv) int {
+	st := e.catalog.Stats()
+	return st.ActivePins + st.ReservedPins
 }
 
 func freePort(t *testing.T) int {
@@ -502,12 +511,13 @@ type scenarioResult struct {
 	ParkedActiveRequests, ParkedPins, ParkedSlots int
 
 	// the wake burst: fresh traffic is in flight while the publisher resumes
-	BurstFreshOK, BurstFreshTotal int
-	BurstFreshP99ms               float64
-	DrainSeconds                  float64
-	Completed, Errors, ErrorsBusy int
-	ErrorsOther                   int
-	Peak                          peaks
+	BurstFreshOK, BurstFreshTotal       int
+	BurstFreshP99ms                     float64
+	DrainSeconds                        float64
+	Completed, Errors, ErrorsDownstream int // ErrorsDownstream: busy from slot/pin/token exhaustion (must be 0 after the fix)
+	ErrorsAdmission                     int // admission expiry: busy/deadline at the shared resume deadline (permitted by the ruling)
+	ErrorsOther                         int
+	Peak                                peaks
 
 	AfterReserved, AfterQueued, AfterRunning int
 	AfterActive, AfterWorkers, AfterInflight int
@@ -733,10 +743,14 @@ collect:
 		switch {
 		case o.status == 200 && strings.Contains(o.body, `"result"`):
 			res.Completed++
+		case o.status == 200 && strings.Contains(o.body, `"code":-32006`) && strings.Contains(o.body, `"detail":"deadline"`) &&
+			strings.Contains(o.body, `"retryable":true`) && strings.Contains(o.body, `"waitedMs":`):
+			res.Errors++ // the shared resume deadline expired in the queue: the ruling's permitted outcome
+			res.ErrorsAdmission++
 		case o.status == 200 && strings.Contains(o.body, `"code":-32006`) && strings.Contains(o.body, `"retryable":true`) && strings.Contains(o.body, `"waitedMs":`):
 			res.Errors++
-			res.ErrorsBusy++
-			if res.ErrorsBusy <= 2 {
+			res.ErrorsDownstream++
+			if res.ErrorsDownstream <= 2 {
 				i := strings.Index(o.body, `"data"`)
 				res.Notes += fmt.Sprintf("busy sample: %.140s; ", o.body[max(i, 0):])
 			}
@@ -817,6 +831,13 @@ func (r scenarioResult) assertParked(t *testing.T) {
 	require.Equal(t, r.FreshTotal, r.FreshOK, "fresh requests keep their headroom while parked")
 }
 
+func resumeReserveSeconds() float64 {
+	if ms, _ := strconv.Atoi(os.Getenv("LONGPOLL_RESOURCE_RESUME_RESERVE_MS")); ms > 0 {
+		return float64(ms) / 1000
+	}
+	return longpoll.ResumeReserve.Seconds()
+}
+
 func batchConcurrency() int {
 	if n, _ := strconv.Atoi(os.Getenv("LONGPOLL_RESOURCE_BATCH_SLOTS")); n > 0 {
 		return n
@@ -845,13 +866,29 @@ func (r scenarioResult) assertBurst(t *testing.T) {
 		require.LessOrEqual(t, r.Peak.Slots, b, "batch slots never exceed B")
 		require.LessOrEqual(t, r.Peak.Pins, b, "pins never exceed P")
 		if batchBurstStrict {
-			require.LessOrEqual(t, r.Peak.Running, max(1, min(quota, b-1)), "resumed batch reads are capped at min(max(1,C/4), B-1, P-1)")
+			capBatch := max(1, min(quota, b-1))
+			require.LessOrEqual(t, r.Peak.Running, capBatch, "resumed batch reads are capped at min(max(1,C/4), B-1, P-1)")
+			if r.Peak.Queued >= capBatch { // hardware independent: the scheduler never idles below its cap while work is queued
+				require.Equal(t, capBatch, r.Peak.Running, "with %d tickets queued the scheduler must have run %d reads at once", r.Peak.Queued, capBatch)
+			}
 		}
 	}
-	// v2 has no method capacity of its own; batch is strict when the fix is in or B, P cover the burst
+	// v2 has no method capacity of its own; batch is strict when the fix is in or B, P cover the burst.
+	// "Strict" means: no DOWNSTREAM rejection (slot/pin/token busy) at all - the scheduler admitted
+	// every read it started. Admission-deadline expiry is the ruling's permitted outcome when the
+	// burst cannot be served within the resume reserve (slow or shared hardware): it is reported
+	// separately, must carry the echo (classification above), and is only legitimate when the drain
+	// really used up the reserve; a controlled smaller burst (<= 256 waiters) must be served in full.
 	if r.Method == "v2" || batchBurstStrict || (batchConcurrency() >= r.Admitted && batchConcurrency() >= quota) {
-		require.Zero(t, r.Errors, "no woken waiter fails: %s", r.Notes)
-		require.Equal(t, r.Admitted, r.Completed)
+		require.Zero(t, r.ErrorsDownstream, "no read admitted by the scheduler is rejected downstream: %s", r.Notes)
+		if r.Admitted <= 256 || r.Method == "v2" {
+			require.Zero(t, r.Errors, "a controlled burst is served in full: %s", r.Notes)
+			require.Equal(t, r.Admitted, r.Completed)
+		} else if r.ErrorsAdmission > 0 {
+			reserve := resumeReserveSeconds()
+			require.GreaterOrEqual(t, r.DrainSeconds, 0.75*reserve, "admission expiry only when the drain really used up the %.1f s resume reserve (%d expired)", reserve, r.ErrorsAdmission)
+		}
+		require.Equal(t, r.Admitted, r.Completed+r.ErrorsAdmission)
 	}
 }
 
