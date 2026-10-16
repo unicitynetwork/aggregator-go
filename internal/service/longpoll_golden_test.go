@@ -1,17 +1,23 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/gateway"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/proofview"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
@@ -39,26 +45,52 @@ func batchIDsJSON(ids ...api.StateID) string {
 	return strings.Join(q, ",")
 }
 
-func goldenRPC(t *testing.T, h jsonrpc.HandlerFunc) http.Handler {
+// goldenGateway starts the production gateway server (gin router, the RequestID/Logging/
+// Timeout(30s) middleware stack, the real method registration and limits) on a loopback port and
+// returns its URL. svc serves get_inclusion_proof.v2 (the batch method gets batch, when set).
+func goldenGateway(t *testing.T, svc gateway.Service, batch jsonrpc.HandlerFunc) string {
 	t.Helper()
 	log, err := logger.New("error", "text", "stdout", false)
 	require.NoError(t, err)
-	rpc := jsonrpc.NewServer(log, 8)
-	rpc.RegisterMethodWithLimits("get_inclusion_proofs.v1", h, jsonrpc.MethodLimits{
-		MaxRequestBytes:  api.InclusionProofsMaxRequestBytes,
-		MaxParamsBytes:   api.InclusionProofsMaxParamsBytes,
-		MaxIDBytes:       api.InclusionProofsMaxIDBytes,
-		MaxResponseBytes: api.InclusionProofsMaxResponseBytes,
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := l.Addr().(*net.TCPAddr).Port
+	require.NoError(t, l.Close())
+
+	cfg := &config.Config{}
+	cfg.Server = config.ServerConfig{Host: "127.0.0.1", Port: strconv.Itoa(port), ConcurrencyLimit: 100,
+		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute}
+	cfg.Sharding.Mode = config.ShardingModeStandalone
+	srv := gateway.NewServer(cfg, log, svc)
+	if batch != nil {
+		srv.SetBatchProofHandler(batch)
+	}
+	go func() { _ = srv.Start() }()
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Stop(c)
 	})
-	return rpc
+	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	require.Eventually(t, func() bool {
+		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
+		if err == nil {
+			_ = c.Close()
+		}
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond)
+	return url
 }
 
-func goldenPost(t *testing.T, h http.Handler, body string) string {
+func goldenPost(t *testing.T, url, body string) string {
 	t.Helper()
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body)))
-	require.Equal(t, http.StatusOK, rec.Code)
-	return rec.Body.String()
+	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	return string(b)
 }
 
 func TestLongPollGolden_BatchNoWait(t *testing.T) {
@@ -80,20 +112,20 @@ func TestLongPollGolden_BatchNoWait(t *testing.T) {
 		more[0].String(): api.ProofStatusPending,
 	}}
 	e.svc.status = st
-	h := goldenRPC(t, e.svc.HandleRPC)
+	h := goldenGateway(t, &AggregatorService{}, e.svc.HandleRPC)
 
 	// A deployment before its first block, and one whose newest block has no partition view.
 	empty := newBatchEnv(t, proofview.DefaultLimits())
 	emptyIDs := empty.addRecords(1, 1000)
-	hEmpty := goldenRPC(t, empty.svc.HandleRPC)
+	hEmpty := goldenGateway(t, &AggregatorService{}, empty.svc.HandleRPC)
 	noView := newBatchEnv(t, proofview.DefaultLimits())
 	noViewIDs := noView.addRecords(1, 1000)
 	noView.finalize(nil)
-	hNoView := goldenRPC(t, noView.svc.HandleRPC)
+	hNoView := goldenGateway(t, &AggregatorService{}, noView.svc.HandleRPC)
 
 	type spec struct {
 		name string
-		h    http.Handler
+		h    string
 		body string
 	}
 	rootHex := fmt.Sprintf("%x", oldRoot)
