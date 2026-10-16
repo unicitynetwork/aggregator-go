@@ -165,3 +165,38 @@ func TestReferenceRelationOnRandomTrees(t *testing.T) {
 		}
 	}
 }
+
+// The SDKs read the JSON form: it must be the same authority as the CBOR one, and acceptable verdicts are rejections.
+func TestJSONTrustBasesAndAcceptableVerdicts(t *testing.T) {
+	files := readCorpus(t)
+	var contexts map[string]Context
+	require.NoError(t, json.Unmarshal(files["contexts.json"], &contexts))
+	for name, c := range contexts {
+		cb, ok := files[c.TrustBase]
+		require.True(t, ok, name)
+		jb, ok := files[c.TrustBaseJSON]
+		require.True(t, ok, name)
+		a, b := &types.RootTrustBaseV1{}, &types.RootTrustBaseV1{}
+		require.NoError(t, a.UnmarshalCBOR(cb))
+		require.NoError(t, json.Unmarshal(jb, b), name)
+		ab, err := a.MarshalCBOR()
+		require.NoError(t, err)
+		bb, err := b.MarshalCBOR()
+		require.NoError(t, err)
+		require.Equal(t, ab, bb, name)
+	}
+	for name, b := range files {
+		if !strings.HasPrefix(name, "negative/") {
+			continue
+		}
+		var v Vector
+		require.NoError(t, json.Unmarshal(b, &v))
+		for _, a := range v.Expected.Acceptable {
+			require.NotEqual(t, VerdictAbsent, a, name)
+			require.NotEqual(t, VerdictStateInclude, a, name)
+		}
+		if v.Expected.Verdict == VerdictAbsent || v.Expected.Verdict == VerdictStateInclude {
+			require.Empty(t, v.Expected.Acceptable, name)
+		}
+	}
+}

@@ -288,6 +288,13 @@
       "description": "the query chooses the other branch at the root junction; the certificate is for the left side"
     },
     {
+      "name": "uc-empty-root-as-empty-byte-string",
+      "kind": "negative",
+      "verdict": "uc_invalid",
+      "context": "default",
+      "description": "the input record hash is the empty byte string (40) instead of native null (f6): not the empty-tree root; the signed shard path no longer holds either"
+    },
+    {
       "name": "uc-empty-shard-id-with-sibling",
       "kind": "negative",
       "verdict": "uc_invalid",
@@ -416,8 +423,12 @@
   ],
   "corpus": "non-inclusion",
   "generator": {
-    "command": "UC_FIXTURE_AGGREGATOR_COMMIT=$(git rev-parse HEAD) go run ./cmd/gen-ni-fixtures -out testdata/non-inclusion/v1",
-    "commit": "4a52493547eca4b8a6d5939d9431d15a71ece285"
+    "command": "UC_FIXTURE_AGGREGATOR_COMMIT=\u003ccommit\u003e go run ./cmd/gen-ni-fixtures -out testdata/non-inclusion/v1",
+    "commit": "029d5a88b937365c684ba9f4ccf369ac9e8dcd6a",
+    "modules": {
+      "github.com/unicitynetwork/bft-core": "v1.1.1-0.20261015121647-8b05d19f564f",
+      "github.com/unicitynetwork/bft-go-base": "v1.1.1-0.20261015113011-8e08f74f29fa"
+    }
   },
   "limits": {
     "maxCertificateBytes": 8288,
@@ -425,12 +436,17 @@
     "maxResponseBytes": 8388608
   },
   "sha256": {
-    "SPEC.md": "cee944de90aefc53f324ecdc5dea617d72e2717bc7b50ced65e3241753f842c6",
+    "SPEC.md": "f4f3297080c101fc57bb76165a5a2a5604a6e95d37e863d87ed033d9f8791daa",
     "authority/late-epoch-start.cbor": "e719e8f39f61e4061d54906cc78cffb577b7d2afcf6a3149657477cb7f7f710a",
+    "authority/late-epoch-start.json": "7dc46736c57dd09f8c17716338bf97fd0a8dd0f2753a36d4f7ed66fe12505a32",
     "authority/other-epoch.cbor": "40d8223f44a3d0adccda98a75d372265cd45a7a1e20bf0f8e8d589829919b691",
+    "authority/other-epoch.json": "21fc10cfdb30bd4c234fa0cdf2a3ded3371f53d4f29efe926ee73cb87ac94863",
     "authority/other-network.cbor": "177c2161af86f3709d5c46394099f1018acc0b5ac842deddc27d2e2252e6c7e4",
+    "authority/other-network.json": "e16bb842e9f060de42c8a604d204afc4472edf80df5006a1a1800b5a07ed0232",
     "authority/trust-base.cbor": "a2909914b7a076efbeb839650f273ade6802f236970461c5dcb19dcbdd204446",
+    "authority/trust-base.json": "28c18ee8af0e1d49b90f4db860b9b7be3c796de681b915a9136942b178017775",
     "authority/untrusted-keys.cbor": "c0f98a05708723a22621cdf421f39a03998ae7b37270a0cf30ecb2b26e210d92",
+    "authority/untrusted-keys.json": "7d992dd3ba0592b080c08a409a80594fcc48a0308940a80fed99fcc7f99fc65b",
     "cases/depth-0.json": "e2d6d1f721ad46e46de5113989de17fa8e33288abf2422c27869c2e444ecf19d",
     "cases/depth-255.json": "5312355289707a4636bc66a812ae91bdaf99376a259d8d66017c8bd558c728d8",
     "cases/diverges-in-compressed-edge.json": "3505b866f0085bb55017c0ead6b5e6d3aceba8f49829e915369c6f74dc430f7f",
@@ -447,7 +463,7 @@
     "cases/singleton.json": "4189cdeb4cfee07401d398b4a5c03d0e952a4d75bf56b19578f92bcc4eb4eac4",
     "cases/under-quorum.json": "550122e66437a3ce85599af5c7062984605764078ea69aa9d6691e6338f0494c",
     "cases/zero-root.json": "97891d69ecbfe69c2ae9d4b03146856a4253a01d5714ddd9b0512db780eb4a9c",
-    "contexts.json": "bfbcc631cc9ef4923ae4a95f687c788ead04b889c51f32056985a66317dd9738",
+    "contexts.json": "65af97344668aff77aece1a5fb43aecac6edd0601f6dba6d30c6819bca815c29",
     "direct-unsharded/latest.json": "8547cc4b7edbf5a004b84aa1edcf489db5e1facdf3e6a85bb43e6972b05c9c40",
     "negative/cert-bitmap-bit-moved.json": "74cfa1e4eaad9fda85c7e628b97db378bf6e33aeb2df13bd7b797efc9129ac90",
     "negative/cert-bitmap-extra-bit.json": "99bf10327b3a819fe3a0b4f80be2606b5ff3703024029f4e8f2334acda9bdcdf",
@@ -474,11 +490,12 @@
     "negative/query-diverges-at-last-junction.json": "ce634f59d50a0b91dfa524fcee5b8871b3dd8aa7d17e39133feab4f542bad5a3",
     "negative/query-is-terminal.json": "bd89bebeaf62537c350ffc5eb7c972b4beac853ccaefd99ecfd10d89afbb7ce5",
     "negative/query-other-branch.json": "bcabe643f8513e459f8948cb812734872fa1aff13a847fffa0a1a1dcafbfadd0",
+    "negative/uc-empty-root-as-empty-byte-string.json": "9eaa431ebf2e33b75499cace40b839195772c5da8f6dab9cf8354286588e1c54",
     "negative/uc-empty-shard-id-with-sibling.json": "d4ad1b9220fb44d5d54874fc0f33c30be75a62a67e0674364bbc71e9681beaa0",
-    "negative/uc-input-record-altered.json": "70ad310dfa634f5447791d86060e8ebb2766085819aeda00b74192568be0d06b",
-    "negative/uc-no-unicity-tree-certificate.json": "79e322293a28fc365bf870446475023ceb74ba34d003563c29bcfd74303fe4f5",
+    "negative/uc-input-record-altered.json": "672369ea6c66237b13f644b718991949d54217767c26062a6cdc94de9e6a99c7",
+    "negative/uc-no-unicity-tree-certificate.json": "002fdae006828206f96a8613df076117b4b96079ffaba7c1e049e34c81460957",
     "negative/uc-nonempty-shard-id-without-path.json": "a91cf032913d36c4144617489d8cd391efb69456a00cef6bee697c1bb8833ceb",
-    "negative/uc-null-partition-path-step.json": "b40f73520a88b245ccb76daeb055964fbead47b8ffd11c531cd23b028ddb93d9",
+    "negative/uc-null-partition-path-step.json": "2db308bfe57b89b0f3b688e66899f6bd8154ba2fd1f633da25253ee9fa872b57",
     "negative/uc-self-signed.json": "2773c5711c53e2dca8d0156fb77df9ff979c2b5e209f9112a24c95341d53e115",
     "negative/uc-signature-altered.json": "765564cfd7bcf100ea85a12631dcb02e0e8caf3d9abcb206d84e31c0553b6218",
     "negative/uc-signatures-removed-below-quorum.json": "af94aab46b78254c1c64f3f6e315f3a483dfc3c92c4c13f33bf8ac66525e4da6",
