@@ -20,14 +20,14 @@ type HandlerFunc func(ctx context.Context, params json.RawMessage) (interface{},
 
 // Server represents a JSON-RPC server
 type Server struct {
-	handlers         map[string]HandlerFunc
-	limits           map[string]MethodLimits
-	middleware       []MiddlewareFunc
-	logger           *logger.Logger
-	concurrencyLimit int
-	activeSemaphore  chan struct{}
-	maxBodyBytes     int64
-	mutex            sync.RWMutex
+	handlers     map[string]HandlerFunc
+	limits       map[string]MethodLimits
+	middleware   []MiddlewareFunc
+	logger       *logger.Logger
+	pool         *slotPool
+	ownership    map[string]OwnershipPredicate
+	maxBodyBytes int64
+	mutex        sync.RWMutex
 }
 
 // DefaultMaxRequestBodyBytes is the outer ceiling on any JSON-RPC request body,
@@ -67,12 +67,11 @@ type MiddlewareFunc func(ctx context.Context, req *Request, next func(context.Co
 // NewServer creates a new JSON-RPC server
 func NewServer(logger *logger.Logger, concurrencyLimit int) *Server {
 	return &Server{
-		handlers:         make(map[string]HandlerFunc),
-		limits:           make(map[string]MethodLimits),
-		middleware:       make([]MiddlewareFunc, 0),
-		logger:           logger,
-		concurrencyLimit: concurrencyLimit,
-		activeSemaphore:  make(chan struct{}, concurrencyLimit),
+		handlers:   make(map[string]HandlerFunc),
+		limits:     make(map[string]MethodLimits),
+		middleware: make([]MiddlewareFunc, 0),
+		logger:     logger,
+		pool:       &slotPool{limit: concurrencyLimit},
 	}
 }
 
@@ -129,17 +128,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check concurrency limit
-	select {
-	case s.activeSemaphore <- struct{}{}:
-		defer func() { <-s.activeSemaphore }()
-	default:
+	permit, ok := s.newPermit()
+	if !ok {
 		recordMetrics("unknown", "error")
 		s.writeErrorResponse(w, ErrConcurrencyLimit, nil)
 		return
 	}
+	defer permit.Close()
 
 	// Add request ID to context
 	ctx := context.WithValue(r.Context(), logger.StateIDKey, uuid.New().String())
+	ctx = ContextWithPermit(ctx, permit)
 
 	// Parse request. The ID is kept raw so that method-limited requests can
 	// validate its original encoding and echo it without number conversion.
@@ -216,6 +215,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctxID = string(raw)
 	}
 	ctx = context.WithValue(ctx, logger.JSONRPCIDKey, ctxID)
+
+	s.markOwned(permit, &req)
 
 	// Process request
 	response := s.processRequest(ctx, &req)
@@ -448,7 +449,15 @@ func TimeoutMiddleware(timeout time.Duration, log *logger.Logger) MiddlewareFunc
 
 		done := make(chan *Response, 1)
 
+		// The worker may outlive this middleware (it returns on the deadline without waiting).
+		// A request's permit must then stay held until the worker really stops (C07).
+		permit := PermitFromContext(ctx)
+		tracked := permit != nil && permit.Owned() && permit.AddWorker()
+
 		go func() {
+			if tracked {
+				defer permit.WorkerDone()
+			}
 			defer func() {
 				if r := recover(); r != nil {
 					log.WithContext(ctx).Error("panic in JSON-RPC handler", "panic", r, "method", req.Method)
