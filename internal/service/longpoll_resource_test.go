@@ -10,6 +10,14 @@ package service
 //
 //	LONGPOLL_RESOURCE=1 LONGPOLL_RESOURCE_OUT=/tmp/t11.json \
 //	    go test ./internal/service -run TestLongPollResource -count=1 -timeout 60m -v
+//
+// What is GATED (asserted, a regression fails the test): the plateau at LONG_POLL_MAX_WAITERS and
+// immediate zero-echo shedding of the surplus; no active-work token, batch slot or pin held while
+// parked; fresh requests keep working while parked AND during the wake burst; the burst never runs
+// more resumed reads than max(1, C/4) nor uses more than C tokens, B slots, P pins (peaks recorded
+// INSIDE the server at ~100 us resolution); every woken waiter is answered, and served without
+// error (see batchBurstStrict for the batch method); counters and goroutines return to baseline
+// after the drain and after cancellation. What is only REPORTED: heap/RSS per waiter, latencies.
 
 import (
 	"bufio"
@@ -24,6 +32,7 @@ import (
 	"os/exec"
 	"runtime"
 	"runtime/debug"
+	"runtime/metrics"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,6 +60,12 @@ import (
 
 const benchPendingIDs = 256 // the batch waiters ask for the first L of these
 
+// batchBurstStrict: a wake burst of batch waiters must complete with no error. False in this
+// revision because F1 (resumed batch reads are rejected busy when B=P=8, see interop-lp.md) is not
+// fixed here: the burst is then gated on ACCOUNTING only (every waiter answered, every failure a
+// retryable -32006 with the echo, nothing leaked), unless B and P cover the whole burst.
+var batchBurstStrict = false
+
 // ---------------------------------------------------------------------------------------------
 // child: the server under measurement
 
@@ -60,8 +75,15 @@ type serverStats struct {
 	Goroutines                                                              int
 	Reserved, Queued, Running                                               int
 	ShedCapacity, ShedDraining                                              uint64
-	ActiveRequests, ActiveWorkers, Inflight, Conns, Pins, BatchSlots        int
+	ActiveRequests, ActiveWorkers, Inflight, Pins, BatchSlots               int
 	Capacity                                                                int
+}
+
+type peaks struct {
+	Running, Queued, Reserved, Active, Slots, Pins, Goroutines int
+	HeapBytes                                                  uint64 // sampled from runtime/metrics, no stop-the-world
+	AllocBytes, Mallocs                                        uint64 // TotalAlloc / Mallocs across the window
+	Samples                                                    int
 }
 
 func TestLongPollResourceServer(t *testing.T) {
@@ -106,7 +128,6 @@ func TestLongPollResourceServer(t *testing.T) {
 	e := newBatchEnv(t, limits)
 	e.addRecords(4, 1000)
 	e.finalize([]byte("pv1"))
-	pending := e.addRecords(benchPendingIDs, 1000)
 	e.svc.status = &lockedStatus{m: map[string]api.ProofStatus{}}
 	if batchSlots > 0 {
 		e.svc.slots = make(chan struct{}, batchSlots)
@@ -133,8 +154,85 @@ func TestLongPollResourceServer(t *testing.T) {
 		return err == nil
 	}, 5*time.Second, 10*time.Millisecond)
 
+	counts := func() serverStats { // cheap: no ReadMemStats (no stop-the-world)
+		st := reg.Stats()
+		return serverStats{Goroutines: runtime.NumGoroutine(), Reserved: st.Reserved, Queued: st.Queued, Running: st.Running,
+			ShedCapacity: st.ShedCapacity, ShedDraining: st.ShedDraining, ActiveRequests: srv.ActiveRequests(), ActiveWorkers: srv.ActiveWorkers(),
+			Inflight: srv.Inflight(), Pins: e.catalog.Stats().ActivePins, BatchSlots: len(e.svc.slots), Capacity: reg.Capacity()}
+	}
+
+	// in-server peak sampler: counts every ~100 us and the heap from runtime/metrics
+	var (
+		pkMu      sync.Mutex
+		pk        peaks
+		pkStop    chan struct{}
+		pkDone    chan struct{}
+		pkStart   runtime.MemStats
+		heapProbe = []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
+	)
+	maxi := func(a *int, v int) {
+		if v > *a {
+			*a = v
+		}
+	}
+	startPeaks := func() {
+		pkMu.Lock()
+		defer pkMu.Unlock()
+		if pkStop != nil {
+			return
+		}
+		pk = peaks{}
+		runtime.ReadMemStats(&pkStart)
+		pkStop, pkDone = make(chan struct{}), make(chan struct{})
+		stop, done := pkStop, pkDone
+		go func() {
+			defer close(done)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				c := counts()
+				metrics.Read(heapProbe)
+				pkMu.Lock()
+				maxi(&pk.Running, c.Running)
+				maxi(&pk.Queued, c.Queued)
+				maxi(&pk.Reserved, c.Reserved)
+				maxi(&pk.Active, c.ActiveRequests)
+				maxi(&pk.Slots, c.BatchSlots)
+				maxi(&pk.Pins, c.Pins)
+				maxi(&pk.Goroutines, c.Goroutines)
+				if heapProbe[0].Value.Kind() == metrics.KindUint64 && heapProbe[0].Value.Uint64() > pk.HeapBytes {
+					pk.HeapBytes = heapProbe[0].Value.Uint64()
+				}
+				pk.Samples++
+				pkMu.Unlock()
+				time.Sleep(100 * time.Microsecond)
+			}
+		}()
+	}
+	stopPeaks := func() peaks {
+		pkMu.Lock()
+		stop, done := pkStop, pkDone
+		pkStop = nil
+		pkMu.Unlock()
+		if stop == nil {
+			return peaks{}
+		}
+		close(stop)
+		<-done
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		pkMu.Lock()
+		defer pkMu.Unlock()
+		pk.AllocBytes, pk.Mallocs = m.TotalAlloc-pkStart.TotalAlloc, m.Mallocs-pkStart.Mallocs
+		return pk
+	}
+
 	// control plane
 	mux := http.NewServeMux()
+	mux.HandleFunc("/counts", func(w http.ResponseWriter, r *http.Request) { _ = json.NewEncoder(w).Encode(counts()) })
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("gc") != "" {
 			runtime.GC()
@@ -143,14 +241,21 @@ func TestLongPollResourceServer(t *testing.T) {
 		}
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
-		st := reg.Stats()
-		_ = json.NewEncoder(w).Encode(serverStats{
-			HeapAlloc: m.HeapAlloc, HeapInuse: m.HeapInuse, HeapObjects: m.HeapObjects, StackInuse: m.StackInuse, Sys: m.Sys,
-			TotalAlloc: m.TotalAlloc, Mallocs: m.Mallocs, NumGC: m.NumGC, Goroutines: runtime.NumGoroutine(),
-			Reserved: st.Reserved, Queued: st.Queued, Running: st.Running, ShedCapacity: st.ShedCapacity, ShedDraining: st.ShedDraining,
-			ActiveRequests: srvActive(srv), ActiveWorkers: srvWorkers(srv), Inflight: srv.Inflight(), Pins: e.catalog.Stats().ActivePins,
-			BatchSlots: len(e.svc.slots), Capacity: reg.Capacity(),
-		})
+		c := counts()
+		c.HeapAlloc, c.HeapInuse, c.HeapObjects, c.StackInuse, c.Sys = m.HeapAlloc, m.HeapInuse, m.HeapObjects, m.StackInuse, m.Sys
+		c.TotalAlloc, c.Mallocs, c.NumGC = m.TotalAlloc, m.Mallocs, m.NumGC
+		_ = json.NewEncoder(w).Encode(c)
+	})
+	// /arm (re)creates the stalled state: the v2 state is pending again and fresh batch records
+	// exist that the next view will contain; returns the batch ids to ask for
+	mux.HandleFunc("/arm", func(w http.ResponseWriter, r *http.Request) {
+		status.MarkPending(absent.StateID, 1<<62)
+		pending := e.addRecords(benchPendingIDs, 1000)
+		ids := make([]string, len(pending))
+		for i, id := range pending {
+			ids[i] = id.String()
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"v2StateId": absent.StateID.String(), "batchIds": ids})
 	})
 	// the stalled publisher resumes: the pending states become servable
 	mux.HandleFunc("/release", func(w http.ResponseWriter, r *http.Request) {
@@ -159,22 +264,16 @@ func TestLongPollResourceServer(t *testing.T) {
 		reg.Notify()
 		_, _ = io.WriteString(w, "ok")
 	})
+	mux.HandleFunc("/peaks/start", func(w http.ResponseWriter, r *http.Request) { startPeaks(); _, _ = io.WriteString(w, "ok") })
+	mux.HandleFunc("/peaks/stop", func(w http.ResponseWriter, r *http.Request) { _ = json.NewEncoder(w).Encode(stopPeaks()) })
 	ctl, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	go func() { _ = http.Serve(ctl, mux) }()
 
-	ids := make([]string, len(pending))
-	for i, id := range pending {
-		ids[i] = id.String()
-	}
-	hello, _ := json.Marshal(map[string]any{"rpc": fmt.Sprintf("127.0.0.1:%d", port), "ctl": ctl.Addr().String(),
-		"v2StateId": absent.StateID.String(), "batchIds": ids, "pid": os.Getpid()})
+	hello, _ := json.Marshal(map[string]any{"rpc": fmt.Sprintf("127.0.0.1:%d", port), "ctl": ctl.Addr().String(), "pid": os.Getpid()})
 	fmt.Printf("READY %s\n", hello)
 	_, _ = io.Copy(io.Discard, os.Stdin) // the parent closes stdin to stop the server
 }
-
-func srvActive(s *gateway.Server) int  { return s.ActiveRequests() }
-func srvWorkers(s *gateway.Server) int { return s.ActiveWorkers() }
 
 func freePort(t *testing.T) int {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -203,10 +302,12 @@ func raiseFDLimit() {
 type benchServer struct {
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser
+	copied    chan struct{}
 	pid       int
 	rpc, ctl  string
 	v2StateID string
 	batchIDs  []string
+	conc      int
 }
 
 func startBenchServer(t *testing.T, maxWaiters, conc int) *benchServer {
@@ -221,11 +322,9 @@ func startBenchServer(t *testing.T, maxWaiters, conc int) *benchServer {
 	require.NoError(t, cmd.Start())
 	rd := bufio.NewReader(out)
 	var hello struct {
-		RPC       string   `json:"rpc"`
-		Ctl       string   `json:"ctl"`
-		V2StateID string   `json:"v2StateId"`
-		BatchIDs  []string `json:"batchIds"`
-		Pid       int      `json:"pid"`
+		RPC string `json:"rpc"`
+		Ctl string `json:"ctl"`
+		Pid int    `json:"pid"`
 	}
 	for {
 		line, err := rd.ReadString('\n')
@@ -235,34 +334,61 @@ func startBenchServer(t *testing.T, maxWaiters, conc int) *benchServer {
 			break
 		}
 	}
-	go func() { _, _ = io.Copy(io.Discard, rd) }()
-	s := &benchServer{cmd: cmd, stdin: stdin, pid: hello.Pid, rpc: hello.RPC, ctl: hello.Ctl, v2StateID: hello.V2StateID, batchIDs: hello.BatchIDs}
+	s := &benchServer{cmd: cmd, stdin: stdin, copied: make(chan struct{}), pid: hello.Pid, rpc: hello.RPC, ctl: hello.Ctl, conc: conc}
+	go func() { _, _ = io.Copy(io.Discard, rd); close(s.copied) }()
 	t.Cleanup(s.stop)
+	s.arm(t)
 	return s
 }
 
 func (s *benchServer) stop() {
 	_ = s.stdin.Close()
-	done := make(chan struct{})
-	go func() { _ = s.cmd.Wait(); close(done) }()
+	// os/exec: all reads from the stdout pipe must finish before Wait
 	select {
-	case <-done:
+	case <-s.copied:
 	case <-time.After(5 * time.Second):
 		_ = s.cmd.Process.Kill()
+		<-s.copied
+	}
+	_ = s.cmd.Wait()
+}
+
+func (s *benchServer) get(t *testing.T, path string, out any) {
+	t.Helper()
+	resp, err := http.Get("http://" + s.ctl + path)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	if out != nil {
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(out))
+	} else {
+		_, _ = io.Copy(io.Discard, resp.Body)
 	}
 }
 
-func (s *benchServer) stats(t *testing.T, gc bool) (serverStats, uint64) {
-	q := ""
-	if gc {
-		q = "?gc=1"
+// arm makes the awaited states pending again (a fresh stalled publisher) and learns the batch ids.
+func (s *benchServer) arm(t *testing.T) {
+	var a struct {
+		V2StateID string   `json:"v2StateId"`
+		BatchIDs  []string `json:"batchIds"`
 	}
-	resp, err := http.Get("http://" + s.ctl + "/stats" + q)
-	require.NoError(t, err)
-	defer resp.Body.Close()
+	s.get(t, "/arm", &a)
+	s.v2StateID, s.batchIDs = a.V2StateID, a.BatchIDs
+}
+
+func (s *benchServer) stats(t *testing.T, gc bool) (serverStats, uint64) {
 	var st serverStats
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&st))
+	q := "/stats"
+	if gc {
+		q += "?gc=1"
+	}
+	s.get(t, q, &st)
 	return st, s.rssKB()
+}
+
+func (s *benchServer) counts(t *testing.T) serverStats {
+	var st serverStats
+	s.get(t, "/counts", &st)
+	return st
 }
 
 func (s *benchServer) rssKB() uint64 {
@@ -274,57 +400,67 @@ func (s *benchServer) rssKB() uint64 {
 	return v
 }
 
-func (s *benchServer) release(t *testing.T) {
-	resp, err := http.Post("http://"+s.ctl+"/release", "text/plain", nil)
-	require.NoError(t, err)
-	_ = resp.Body.Close()
-}
+func (s *benchServer) release(t *testing.T) { s.get(t, "/release", nil) }
 
 type clientKind struct {
-	name string
-	hc   *http.Client
+	name  string
+	hcs   []*http.Client
+	next  atomic.Uint64
+	conns int
 }
 
-func newClient(transport string) clientKind {
-	if transport == "h2c" {
-		return clientKind{"h2c", &http.Client{Transport: &http2.Transport{AllowHTTP: true,
+func newClient(transport string) *clientKind {
+	h2c := func() *http.Client {
+		return &http.Client{Transport: &http2.Transport{AllowHTTP: true,
 			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
 				return (&net.Dialer{}).DialContext(ctx, network, addr)
-			}}}}
+			}}}
 	}
-	return clientKind{"h1", &http.Client{Transport: &http.Transport{DisableKeepAlives: true, MaxConnsPerHost: 0, MaxIdleConns: 0}}}
+	switch transport {
+	case "h2c": // one TCP connection multiplexing every stream
+		return &clientKind{name: transport, hcs: []*http.Client{h2c()}, conns: 1}
+	case "h2c8": // eight connections
+		c := &clientKind{name: transport, conns: 8}
+		for i := 0; i < 8; i++ {
+			c.hcs = append(c.hcs, h2c())
+		}
+		return c
+	}
+	return &clientKind{name: "h1", hcs: []*http.Client{{Transport: &http.Transport{DisableKeepAlives: true, MaxConnsPerHost: 0, MaxIdleConns: 0}}}}
 }
 
 type outcome struct {
 	latency time.Duration
 	status  int
-	shed    bool // answered at once with a zero echo
 	body    string
 }
 
-func (s *benchServer) waitBody(method string, l int, wantWaitMs int) string {
+func (s *benchServer) waitBody(method string, l int, waitMs int) string {
 	if method == "v2" {
-		return `{"jsonrpc":"2.0","id":1,"method":"get_inclusion_proof.v2","params":{"stateId":"` + s.v2StateID + `","includeStatus":true,"waitMs":` + strconv.Itoa(wantWaitMs) + `}}`
+		return `{"jsonrpc":"2.0","id":1,"method":"get_inclusion_proof.v2","params":{"stateId":"` + s.v2StateID + `","includeStatus":true,"waitMs":` + strconv.Itoa(waitMs) + `}}`
 	}
-	return `{"jsonrpc":"2.0","id":1,"method":"get_inclusion_proofs.v1","params":{"stateIds":["` + strings.Join(s.batchIDs[:l], `","`) + `"],"waitMs":` + strconv.Itoa(wantWaitMs) + `}}`
+	return `{"jsonrpc":"2.0","id":1,"method":"get_inclusion_proofs.v1","params":{"stateIds":["` + strings.Join(s.batchIDs[:l], `","`) + `"],"waitMs":` + strconv.Itoa(waitMs) + `}}`
 }
 
-func (s *benchServer) legacyBody() string {
+func (s *benchServer) freshBody(kind string) string {
+	if kind == "batch" {
+		return `{"jsonrpc":"2.0","id":1,"method":"get_inclusion_proofs.v1","params":{"stateIds":["` + s.batchIDs[0] + `"]}}`
+	}
 	return `{"jsonrpc":"2.0","id":1,"method":"get_inclusion_proof.v2","params":{"stateId":"` + s.v2StateID + `"}}`
 }
 
-func (c clientKind) do(addr, body string) outcome {
+func (c *clientKind) do(ctx context.Context, addr, body string) outcome {
 	start := time.Now()
-	req, _ := http.NewRequest(http.MethodPost, "http://"+addr+"/", strings.NewReader(body))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.hc.Do(req)
+	hc := c.hcs[int(c.next.Add(1))%len(c.hcs)]
+	resp, err := hc.Do(req)
 	if err != nil {
 		return outcome{latency: time.Since(start), status: -1, body: err.Error()}
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
-	o := outcome{latency: time.Since(start), status: resp.StatusCode, body: string(b)}
-	return o
+	return outcome{latency: time.Since(start), status: resp.StatusCode, body: string(b)}
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -338,12 +474,13 @@ type scenarioResult struct {
 	Method    string `json:"method"`
 	L         int    `json:"l,omitempty"`
 	Transport string `json:"transport"`
+	Conns     int    `json:"conns,omitempty"`
 	Cap       int    `json:"cap"`
+	C         int    `json:"concurrency"`
 	W         int    `json:"w"`
 	Extra     int    `json:"extra,omitempty"`
 
 	Admitted  int `json:"admitted"`
-	Parked    int `json:"parked_reserved"`
 	Shed      int `json:"shed_immediate"`
 	ShedP50ms float64
 	ShedP99ms float64
@@ -352,7 +489,6 @@ type scenarioResult struct {
 	BaseHeapKB, BaseRSSKB, BaseGoroutines       float64
 	ParkedHeapKB, ParkedRSSKB, ParkedGoroutines float64
 	Per                                         perWaiter
-	PerIDHeapB                                  float64 `json:",omitempty"`
 	SetupSeconds                                float64
 
 	FreshOK, FreshTotal                           int
@@ -360,13 +496,18 @@ type scenarioResult struct {
 	BaseFreshP50ms, BaseFreshP99ms                float64
 	ParkedActiveRequests, ParkedPins, ParkedSlots int
 
-	DrainSeconds                             float64
+	// the wake burst: fresh traffic is in flight while the publisher resumes
+	BurstFreshOK, BurstFreshTotal int
+	BurstFreshP99ms               float64
+	DrainSeconds                  float64
+	Completed, Errors, ErrorsBusy int
+	ErrorsOther                   int
+	Peak                          peaks
+
 	AfterReserved, AfterQueued, AfterRunning int
 	AfterActive, AfterWorkers, AfterInflight int
 	AfterPins, AfterSlots, AfterGoroutines   int
 	AfterHeapKB, AfterRSSKB                  float64
-	PeakHeapKB, PeakRunning                  float64
-	Completed, Errors                        int
 	Notes                                    string `json:",omitempty"`
 }
 
@@ -376,8 +517,7 @@ func quant(d []time.Duration, q float64) float64 {
 	}
 	s := append([]time.Duration(nil), d...)
 	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
-	i := int(q * float64(len(s)-1))
-	return float64(s[i].Microseconds()) / 1000
+	return float64(s[int(q*float64(len(s)-1))].Microseconds()) / 1000
 }
 
 func medianStats(t *testing.T, s *benchServer) (serverStats, uint64) {
@@ -394,17 +534,19 @@ func medianStats(t *testing.T, s *benchServer) (serverStats, uint64) {
 	return sts[1], rss[1]
 }
 
-func freshLatencies(s *benchServer, n int) (ok int, lat []time.Duration) {
+// fresh runs n ordinary requests (8 workers) and returns the successes and latencies.
+func (s *benchServer) fresh(n int, kind string) (ok int, lat []time.Duration) {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	var next atomic.Int64
 	hc := newClient("h1")
+	body := s.freshBody(kind)
 	for w := 0; w < 8; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for next.Add(1) <= int64(n) {
-				o := hc.do(s.rpc, s.legacyBody())
+				o := hc.do(context.Background(), s.rpc, body)
 				mu.Lock()
 				lat = append(lat, o.latency)
 				if o.status == 200 && strings.Contains(o.body, `"result"`) {
@@ -418,77 +560,21 @@ func freshLatencies(s *benchServer, n int) (ok int, lat []time.Duration) {
 	return
 }
 
-// runScenario parks w waiters (plus extra beyond the cap), measures, runs fresh requests against
-// the parked server, releases the stalled publisher and checks the drain.
-func runScenario(t *testing.T, method string, l int, transport string, capacity, w, extra int) scenarioResult {
-	t.Helper()
-	return runScenarioOn(t, startBenchServer(t, capacity, 1000), method, l, transport, capacity, w, extra)
-}
-
-// runScenarioOn is runScenario against an already running server (repeated cycles).
-func runScenarioOn(t *testing.T, s *benchServer, method string, l int, transport string, capacity, w, extra int) scenarioResult {
-	t.Helper()
-	res := scenarioResult{Method: method, L: l, Transport: transport, Cap: capacity, W: w, Extra: extra}
-
-	// warm up the lazily built structures (one immediate request of each kind), then baseline
-	cl := newClient(transport)
-	_ = cl.do(s.rpc, s.waitBody(method, max(l, 1), 0))
-	ok, lat := freshLatencies(s, 200)
-	_ = ok
-	res.BaseFreshP50ms, res.BaseFreshP99ms = quant(lat, 0.5), quant(lat, 0.99)
-	base, baseRSS := medianStats(t, s)
-	res.BaseHeapKB, res.BaseRSSKB, res.BaseGoroutines = float64(base.HeapAlloc)/1024, float64(baseRSS), float64(base.Goroutines)
-
-	// peak sampler
-	var peakHeap, peakRunning atomic.Uint64
-	stopSampler := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-stopSampler:
-				return
-			case <-time.After(100 * time.Millisecond):
-				resp, err := http.Get("http://" + s.ctl + "/stats")
-				if err != nil {
-					continue
-				}
-				var st serverStats
-				_ = json.NewDecoder(resp.Body).Decode(&st)
-				resp.Body.Close()
-				for {
-					p := peakHeap.Load()
-					if st.HeapAlloc <= p || peakHeap.CompareAndSwap(p, st.HeapAlloc) {
-						break
-					}
-				}
-				for {
-					p := peakRunning.Load()
-					if uint64(st.Running) <= p || peakRunning.CompareAndSwap(p, uint64(st.Running)) {
-						break
-					}
-				}
-			}
-		}
-	}()
-
-	// park
+// park opens total clients that wait; their outcomes arrive on outs.
+func (s *benchServer) park(t *testing.T, ctx context.Context, cl *clientKind, method string, l, total int, outs chan outcome, wg *sync.WaitGroup) {
 	body := s.waitBody(method, max(l, 1), 600000)
-	total := w + extra
-	outs := make(chan outcome, total)
-	setupStart := time.Now()
-	var parkWG sync.WaitGroup
 	for i := 0; i < total; i++ {
-		parkWG.Add(1)
+		wg.Add(1)
 		go func() {
-			defer parkWG.Done()
-			outs <- cl.do(s.rpc, body)
+			defer wg.Done()
+			outs <- cl.do(ctx, s.rpc, body)
 		}()
 		switch {
 		case method == "batch" && i%4 == 3:
 			// the batch method has its own admission (8 concurrent reads by default); arrive no
 			// faster than it reads so that the parked state, not the arrival burst, is measured
 			for tries := 0; tries < 2000; tries++ {
-				st, _ := s.stats(t, false)
+				st := s.counts(t)
 				if st.Reserved+int(st.ShedCapacity) >= i+1-2 {
 					break
 				}
@@ -498,15 +584,43 @@ func runScenarioOn(t *testing.T, s *benchServer, method string, l int, transport
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
-	// requests are in flight; wait until the server reached the expected plateau
-	wantParked := w
-	if wantParked > capacity {
-		wantParked = capacity
+}
+
+// runScenario parks w waiters (plus extra beyond the cap), measures, runs fresh requests against
+// the parked server, releases the stalled publisher WITH fresh traffic in flight, and checks the
+// drain.
+func runScenario(t *testing.T, method string, l int, transport string, capacity, conc, w, extra int) scenarioResult {
+	t.Helper()
+	return runScenarioOn(t, startBenchServer(t, capacity, conc), method, l, transport, capacity, w, extra)
+}
+
+func runScenarioOn(t *testing.T, s *benchServer, method string, l int, transport string, capacity, w, extra int) scenarioResult {
+	t.Helper()
+	cl := newClient(transport)
+	res := scenarioResult{Method: method, L: l, Transport: transport, Conns: cl.conns, Cap: capacity, C: s.conc, W: w, Extra: extra}
+	s.arm(t)
+	freshKind := "v2"
+	if method == "batch" {
+		freshKind = "batch"
 	}
-	var st serverStats
+
+	// warm up the lazily built structures, then baseline
+	_ = cl.do(context.Background(), s.rpc, s.waitBody(method, max(l, 1), 0))
+	_, lat := s.fresh(200, "v2")
+	res.BaseFreshP50ms, res.BaseFreshP99ms = quant(lat, 0.5), quant(lat, 0.99)
+	base, baseRSS := medianStats(t, s)
+	res.BaseHeapKB, res.BaseRSSKB, res.BaseGoroutines = float64(base.HeapAlloc)/1024, float64(baseRSS), float64(base.Goroutines)
+
+	// park
+	total := w + extra
+	outs := make(chan outcome, total)
+	var parkWG sync.WaitGroup
+	setupStart := time.Now()
+	s.park(t, context.Background(), cl, method, l, total, outs, &parkWG)
+	wantParked := min(w, capacity)
 	deadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(deadline) {
-		st, _ = s.stats(t, false)
+		st := s.counts(t)
 		if st.Reserved >= wantParked && (extra == 0 || st.ShedCapacity >= uint64(max(0, total-capacity))) {
 			break
 		}
@@ -515,9 +629,9 @@ func runScenarioOn(t *testing.T, s *benchServer, method string, l int, transport
 	res.SetupSeconds = time.Since(setupStart).Seconds()
 	time.Sleep(500 * time.Millisecond)
 
-	// shed responses are the ones that arrive before the release
+	// shed responses are the ones that arrived before the release
 	var shedLat []time.Duration
-	shedZero := true
+	res.ShedZero = true
 collect:
 	for {
 		select {
@@ -525,17 +639,15 @@ collect:
 			res.Shed++
 			shedLat = append(shedLat, o.latency)
 			if !(o.status == 200 && strings.Contains(o.body, `"waitedMs":0`)) {
-				shedZero = false
+				res.ShedZero = false
 			}
 		default:
 			break collect
 		}
 	}
-	res.ShedZero = shedZero
 	res.ShedP50ms, res.ShedP99ms = quant(shedLat, 0.5), quant(shedLat, 0.99)
 
 	parked, parkedRSS := medianStats(t, s)
-	res.Parked = parked.Reserved
 	res.Admitted = parked.Reserved
 	res.ParkedHeapKB, res.ParkedRSSKB, res.ParkedGoroutines = float64(parked.HeapAlloc)/1024, float64(parkedRSS), float64(parked.Goroutines)
 	res.ParkedActiveRequests, res.ParkedPins, res.ParkedSlots = parked.ActiveRequests, parked.Pins, parked.BatchSlots
@@ -552,12 +664,41 @@ collect:
 		}
 	}
 
-	// headroom: ordinary requests while everything is parked
+	// headroom while parked
 	res.FreshTotal = 200
-	res.FreshOK, lat = freshLatencies(s, res.FreshTotal)
+	res.FreshOK, lat = s.fresh(res.FreshTotal, "v2")
 	res.FreshP50ms, res.FreshP99ms = quant(lat, 0.5), quant(lat, 0.99)
 
-	// release the stalled publisher: a synchronized wake burst
+	// the wake burst: the stalled publisher resumes while fresh traffic keeps arriving
+	s.get(t, "/peaks/start", nil)
+	var burstOK, burstTotal atomic.Int64
+	var burstLat []time.Duration
+	var burstMu sync.Mutex
+	stopFresh := make(chan struct{})
+	var freshWG sync.WaitGroup
+	hc := newClient("h1")
+	body := s.freshBody(freshKind)
+	freshWG.Add(1)
+	go func() { // one sequential fresh client: it must always find its token (and slot and pin)
+		defer freshWG.Done()
+		for {
+			select {
+			case <-stopFresh:
+				return
+			default:
+			}
+			o := hc.do(context.Background(), s.rpc, body)
+			burstTotal.Add(1)
+			burstMu.Lock()
+			burstLat = append(burstLat, o.latency)
+			burstMu.Unlock()
+			if o.status == 200 && strings.Contains(o.body, `"result"`) {
+				burstOK.Add(1)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	time.Sleep(20 * time.Millisecond) // fresh traffic is flowing before the release
 	relStart := time.Now()
 	s.release(t)
 	done := make(chan struct{})
@@ -568,29 +709,139 @@ collect:
 		res.Notes += "drain timed out; "
 	}
 	res.DrainSeconds = time.Since(relStart).Seconds()
-	close(stopSampler)
+	close(stopFresh)
+	freshWG.Wait()
+	s.get(t, "/peaks/stop", &res.Peak)
+	res.BurstFreshOK, res.BurstFreshTotal, res.BurstFreshP99ms = int(burstOK.Load()), int(burstTotal.Load()), quant(burstLat, 0.99)
+
 	for len(outs) > 0 {
 		o := <-outs
-		if o.status == 200 && strings.Contains(o.body, `"result"`) {
+		switch {
+		case o.status == 200 && strings.Contains(o.body, `"result"`):
 			res.Completed++
-		} else {
+		case o.status == 200 && strings.Contains(o.body, `"code":-32006`) && strings.Contains(o.body, `"retryable":true`) && strings.Contains(o.body, `"waitedMs":`):
 			res.Errors++
-			if res.Errors <= 2 {
-				res.Notes += fmt.Sprintf("error sample: %d %.400s; ", o.status, o.body)
+			res.ErrorsBusy++
+			if res.ErrorsBusy <= 2 {
+				i := strings.Index(o.body, `"data"`)
+				res.Notes += fmt.Sprintf("busy sample: %.140s; ", o.body[max(i, 0):])
+			}
+		default:
+			res.Errors++
+			res.ErrorsOther++
+			if res.ErrorsOther <= 2 {
+				res.Notes += fmt.Sprintf("error sample: %d %.200s; ", o.status, o.body)
 			}
 		}
 	}
-	res.PeakHeapKB, res.PeakRunning = float64(peakHeap.Load())/1024, float64(peakRunning.Load())
 
-	// back to baseline once everything finished (connections of h1 are closed per request)
-	time.Sleep(1 * time.Second)
+	// back to baseline once everything finished
+	time.Sleep(time.Second)
 	after, afterRSS := medianStats(t, s)
 	res.AfterReserved, res.AfterQueued, res.AfterRunning = after.Reserved, after.Queued, after.Running
 	res.AfterActive, res.AfterWorkers, res.AfterInflight = after.ActiveRequests, after.ActiveWorkers, after.Inflight
 	res.AfterPins, res.AfterSlots, res.AfterGoroutines = after.Pins, after.BatchSlots, after.Goroutines
 	res.AfterHeapKB, res.AfterRSSKB = float64(after.HeapAlloc)/1024, float64(afterRSS)
-	cl.hc.CloseIdleConnections()
+	for _, h := range cl.hcs {
+		h.CloseIdleConnections()
+	}
 	return res
+}
+
+// runCancel parks w waiters and aborts them all (cancelled contexts / closed connections)
+// WITHOUT releasing the publisher: everything must be cleaned up.
+func runCancel(t *testing.T, method string, l int, transport string, capacity, conc, w int) scenarioResult {
+	t.Helper()
+	s := startBenchServer(t, capacity, conc)
+	cl := newClient(transport)
+	res := scenarioResult{Method: method, L: l, Transport: transport, Conns: cl.conns, Cap: capacity, C: s.conc, W: w}
+	_ = cl.do(context.Background(), s.rpc, s.waitBody(method, max(l, 1), 0))
+	base, _ := medianStats(t, s)
+	res.BaseGoroutines = float64(base.Goroutines)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	outs := make(chan outcome, w)
+	var wg sync.WaitGroup
+	s.park(t, ctx, cl, method, l, w, outs, &wg)
+	require.Eventually(t, func() bool { return s.counts(t).Reserved >= min(w, capacity) }, 120*time.Second, 50*time.Millisecond)
+	res.Admitted = s.counts(t).Reserved
+	cancel() // aborts every in-flight request: RST_STREAM / closed connections
+	wg.Wait()
+	require.Eventually(t, func() bool {
+		c := s.counts(t)
+		return c.Reserved == 0 && c.Queued == 0 && c.Running == 0 && c.ActiveRequests == 0 && c.ActiveWorkers == 0 && c.Inflight == 0 && c.Pins == 0 && c.BatchSlots == 0
+	}, 15*time.Second, 50*time.Millisecond, "cancelled waits must free every reservation and resource")
+	time.Sleep(time.Second)
+	after, _ := medianStats(t, s)
+	res.AfterReserved, res.AfterQueued, res.AfterRunning = after.Reserved, after.Queued, after.Running
+	res.AfterActive, res.AfterWorkers, res.AfterInflight = after.ActiveRequests, after.ActiveWorkers, after.Inflight
+	res.AfterPins, res.AfterSlots, res.AfterGoroutines = after.Pins, after.BatchSlots, after.Goroutines
+	return res
+}
+
+func (r scenarioResult) assertParked(t *testing.T) {
+	t.Helper()
+	if r.W+r.Extra > r.Cap {
+		require.Equal(t, r.Cap, r.Admitted, "plateau at LONG_POLL_MAX_WAITERS")
+		require.Equal(t, r.W+r.Extra-r.Cap, r.Shed, "everything beyond the cap is shed at once")
+		require.True(t, r.ShedZero, "shed answers are ordinary reads with a zero echo")
+	} else {
+		require.Equal(t, r.W, r.Admitted)
+		require.Zero(t, r.Shed)
+	}
+	require.Zero(t, r.ParkedActiveRequests, "parked waits hold no active-work token")
+	require.Zero(t, r.ParkedPins, "parked waits pin no view")
+	require.Zero(t, r.ParkedSlots, "parked waits hold no batch slot")
+	require.Equal(t, r.FreshTotal, r.FreshOK, "fresh requests keep their headroom while parked")
+}
+
+func batchConcurrency() int {
+	if n, _ := strconv.Atoi(os.Getenv("LONGPOLL_RESOURCE_BATCH_SLOTS")); n > 0 {
+		return n
+	}
+	return 8
+}
+
+func (r scenarioResult) assertBurst(t *testing.T) {
+	t.Helper()
+	if r.Admitted == 0 {
+		return
+	}
+	quota := max(1, r.C/4)
+	require.Positive(t, r.Peak.Samples, "the in-server sampler ran")
+	require.LessOrEqual(t, r.Peak.Running, quota, "resumed reads never exceed max(1, C/4)")
+	require.LessOrEqual(t, r.Peak.Active, r.C, "active-work tokens never exceed C")
+	require.Positive(t, r.BurstFreshTotal)
+	require.Equal(t, r.BurstFreshTotal, r.BurstFreshOK, "fresh requests during the wake burst keep working (%d requests)", r.BurstFreshTotal)
+	require.NotContains(t, r.Notes, "drain timed out")
+	require.Equal(t, r.Admitted, r.Completed+r.Errors, "every woken waiter is answered")
+	require.Zero(t, r.ErrorsOther, "no failure other than the documented busy rejection: %s", r.Notes)
+	if r.Method == "batch" {
+		b := batchConcurrency()
+		require.LessOrEqual(t, r.Peak.Slots, b, "batch slots never exceed B")
+		require.LessOrEqual(t, r.Peak.Pins, b, "pins never exceed P")
+		if batchBurstStrict {
+			require.LessOrEqual(t, r.Peak.Running, max(1, min(quota, b-1)), "resumed batch reads are capped at min(max(1,C/4), B-1, P-1)")
+		}
+	}
+	// v2 has no method capacity of its own; batch is strict when the fix is in or B, P cover the burst
+	if r.Method == "v2" || batchBurstStrict || (batchConcurrency() >= r.Admitted && batchConcurrency() >= quota) {
+		require.Zero(t, r.Errors, "no woken waiter fails: %s", r.Notes)
+		require.Equal(t, r.Admitted, r.Completed)
+	}
+}
+
+func (r scenarioResult) assertBaseline(t *testing.T) {
+	t.Helper()
+	require.Zero(t, r.AfterReserved)
+	require.Zero(t, r.AfterQueued)
+	require.Zero(t, r.AfterRunning)
+	require.Zero(t, r.AfterActive)
+	require.Zero(t, r.AfterWorkers)
+	require.Zero(t, r.AfterInflight)
+	require.Zero(t, r.AfterPins)
+	require.Zero(t, r.AfterSlots)
+	require.LessOrEqual(t, float64(r.AfterGoroutines), r.BaseGoroutines+2, "goroutines return to the baseline")
 }
 
 func TestLongPollResource(t *testing.T) {
@@ -601,60 +852,68 @@ func TestLongPollResource(t *testing.T) {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	only := os.Getenv("LONGPOLL_RESOURCE_ONLY") // e.g. "v2,h2c" to run a subset
 	var results []scenarioResult
-	add := func(method string, l int, transport string, capacity, w, extra int) {
-		name := fmt.Sprintf("%s-L%d-%s-cap%d-W%d+%d", method, l, transport, capacity, w, extra)
-		if only != "" {
-			ok := false
-			for _, f := range strings.Split(only, ",") {
-				if strings.Contains(name, f) {
-					ok = true
-				}
-			}
-			if !ok {
-				return
+	selected := func(name string) bool {
+		if only == "" {
+			return true
+		}
+		for _, f := range strings.Split(only, ",") {
+			if strings.Contains(name, f) {
+				return true
 			}
 		}
+		return false
+	}
+	add := func(method string, l int, transport string, capacity, conc, w, extra int) {
+		name := fmt.Sprintf("%s-L%d-%s-cap%d-C%d-W%d+%d", method, l, transport, capacity, conc, w, extra)
+		if !selected(name) {
+			return
+		}
 		t.Run(name, func(t *testing.T) {
-			r := runScenario(t, method, l, transport, capacity, w, extra)
+			r := runScenario(t, method, l, transport, capacity, conc, w, extra)
 			results = append(results, r)
 			b, _ := json.Marshal(r)
 			t.Logf("RESULT %s", b)
-			// the gate: plateau, immediate zero-echo shedding, headroom, baseline after drain
-			if w+extra > capacity {
-				require.Equal(t, capacity, r.Admitted, "plateau at LONG_POLL_MAX_WAITERS")
-				require.Equal(t, w+extra-capacity, r.Shed, "everything beyond the cap is shed at once")
-				require.True(t, r.ShedZero, "shed answers are ordinary reads with a zero echo")
-			} else {
-				require.Equal(t, w, r.Admitted)
-			}
-			require.Zero(t, r.ParkedActiveRequests, "parked waits hold no active-work token")
-			require.Zero(t, r.ParkedPins, "parked waits pin no view")
-			require.Zero(t, r.ParkedSlots, "parked waits hold no batch slot")
-			require.Equal(t, r.FreshTotal, r.FreshOK, "fresh requests keep their headroom")
-			require.Zero(t, r.AfterReserved)
-			require.Zero(t, r.AfterQueued)
-			require.Zero(t, r.AfterRunning)
-			require.Zero(t, r.AfterActive)
-			require.Zero(t, r.AfterWorkers)
-			require.Zero(t, r.AfterInflight)
-			require.Zero(t, r.AfterPins)
-			require.Zero(t, r.AfterSlots)
+			r.assertParked(t)
+			r.assertBurst(t)
+			r.assertBaseline(t)
+		})
+	}
+	addCancel := func(method string, l int, transport string, capacity, conc, w int) {
+		name := fmt.Sprintf("cancel-%s-L%d-%s-cap%d-C%d-W%d", method, l, transport, capacity, conc, w)
+		if !selected(name) {
+			return
+		}
+		t.Run(name, func(t *testing.T) {
+			r := runCancel(t, method, l, transport, capacity, conc, w)
+			b, _ := json.Marshal(r)
+			t.Logf("RESULT %s", b)
+			require.Equal(t, min(w, capacity), r.Admitted)
+			r.assertBaseline(t)
 		})
 	}
 	// v2
 	for _, tr := range []string{"h1", "h2c"} {
-		add("v2", 0, tr, 1024, 0, 0)
-		add("v2", 0, tr, 1024, 256, 0)
-		add("v2", 0, tr, 1024, 1024, 128)
+		add("v2", 0, tr, 1024, 1000, 0, 0)
+		add("v2", 0, tr, 1024, 1000, 256, 0)
+		add("v2", 0, tr, 1024, 1000, 1024, 128)
 	}
-	add("v2", 0, "h2c", 256, 1024, 0) // plateau well below the offered load
+	add("v2", 0, "h2c8", 1024, 1000, 1024, 128) // the same waiters over eight connections
+	add("v2", 0, "h2c", 256, 1000, 1024, 0)     // plateau well below the offered load
+	add("v2", 0, "h1", 64, 8, 64, 16)           // small C: quota 2, one token left for fresh requests
 	// batch
 	for _, tr := range []string{"h1", "h2c"} {
 		for _, l := range []int{1, 16, 256} {
-			add("batch", l, tr, 1024, 256, 0)
-			add("batch", l, tr, 1024, 1024, 128)
+			add("batch", l, tr, 1024, 1000, 256, 0)
+			add("batch", l, tr, 1024, 1000, 1024, 128)
 		}
 	}
+	add("batch", 16, "h1", 64, 8, 64, 16) // small C and B=P=8
+	// cancellation: abort every parked wait, no release
+	addCancel("v2", 0, "h1", 1024, 1000, 512)
+	addCancel("v2", 0, "h2c", 1024, 1000, 512)
+	addCancel("batch", 16, "h1", 1024, 1000, 256)
+	addCancel("batch", 16, "h2c", 1024, 1000, 256)
+
 	if out := os.Getenv("LONGPOLL_RESOURCE_OUT"); out != "" {
 		t.Cleanup(func() {
 			b, _ := json.MarshalIndent(results, "", "  ")
@@ -682,11 +941,14 @@ func TestLongPollResourceCycles(t *testing.T) {
 			s := startBenchServer(t, 1024, 1000)
 			var heap, rss, gor []float64
 			for c := 0; c < cycles; c++ {
-				r := runScenarioOn(t, s, tc.method, tc.l, tc.transport, 1024, 1024, 0)
-				require.Zero(t, r.AfterReserved)
+				r := runScenarioOn(t, s, tc.method, tc.l, tc.transport, 1024, 512, 0)
+				require.Equal(t, 512, r.Admitted, "cycle %d actually parked its waiters", c)
+				r.assertBaseline(t)
 				heap, rss, gor = append(heap, r.AfterHeapKB), append(rss, r.AfterRSSKB), append(gor, float64(r.AfterGoroutines))
 			}
 			t.Logf("CYCLES %s-%s-L%d heapKB=%v rssKB=%v goroutines=%v", tc.method, tc.transport, tc.l, heap, rss, gor)
+			require.Equal(t, gor[0], gor[len(gor)-1], "goroutines do not grow across cycles")
+			require.LessOrEqual(t, heap[len(heap)-1], heap[0]+1024, "heap after a cycle stays within 1 MiB of the first cycle's")
 		})
 	}
 }
