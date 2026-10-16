@@ -184,3 +184,9 @@ func (s *Server) joinWork(ctx context.Context) error {
 	}
 	return nil
 }
+
+// ActiveRequests is the number of active-work tokens in use (diagnostics and the resource harness).
+func (s *Server) ActiveRequests() int { return s.rpcServer.ActiveRequests() }
+
+// ActiveWorkers is the number of method workers still running (diagnostics and the resource harness).
+func (s *Server) ActiveWorkers() int { return s.rpcServer.ActiveWorkers() }
