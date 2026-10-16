@@ -114,7 +114,7 @@ func TestBatch_AbsentLeafIsPerKeyOutcomeWithoutFallback(t *testing.T) {
 	extra := e.addRecordNoLeaf(1000)
 
 	_, berr := e.svc.GetInclusionProofsV1(context.Background(), e.request(append(append([]api.StateID{}, ids[:3]...), extra), nil))
-	requireBatchErr(t, berr, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_not_included")
+	requireBatchErr(t, berr, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_pending")
 	require.EqualValues(t, 1, bv.batches.Load())
 	require.Zero(t, bv.singles.Load(), "no per-key fallback materialization")
 }
@@ -132,7 +132,7 @@ func TestBatch_OlderRootWithIDFinalizedAfterIt(t *testing.T) {
 
 	req := append(append([]api.StateID{}, oldIDs...), later[0])
 	_, berr := e.svc.GetInclusionProofsV1(context.Background(), e.request(req, oldRoot))
-	requireBatchErr(t, berr, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_not_included")
+	requireBatchErr(t, berr, jsonrpc.ProofUnavailableCode, "proof_unavailable", "state_not_in_root")
 	require.EqualValues(t, 1, oldView.batches.Load())
 	require.Zero(t, oldView.singles.Load(), "one union build, no per-key builds")
 	require.Zero(t, newView.batches.Load()+newView.singles.Load())

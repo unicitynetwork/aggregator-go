@@ -165,6 +165,13 @@ func (as *AggregatorService) ShardValidator() BatchShardValidator {
 	return as.certificationRequestValidator
 }
 
+// ProofStatusHint is the unauthenticated hint for a state ID: pending, expired or unknown
+// (included is decided by the proof itself). O(1), no I/O; the sets are per node and
+// volatile, so another instance, or this one after a restart, answers unknown.
+func (as *AggregatorService) ProofStatusHint(stateID api.StateID) api.ProofStatus {
+	return as.roundManager.ProofStatus(stateID)
+}
+
 func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.CertificationRequest) (*api.CertificationResponse, error) {
 	// Create certificationRequest with aggregate count
 	aggregateCount := req.AggregateRequestCount
@@ -251,8 +258,18 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 		}
 	}
 
+	// Mark the state ID pending at admission (before queueing, so a round cannot finalize
+	// it before the mark exists), idempotently: resubmitting a still-pending request only
+	// reaches the queue again, where the leaf deduplication drops the second copy. A
+	// request that could not be queued must not stay marked, but only a mark made here is
+	// removed, never the original's.
+	newlyMarked := as.roundManager.MarkRequestAdmitted(req.StateID, effectiveTimeout)
+
 	// Store certificationRequest
 	if err := as.commitmentQueue.Store(ctx, certificationRequest); err != nil {
+		if newlyMarked {
+			as.roundManager.ClearRequestAdmitted(req.StateID)
+		}
 		return nil, fmt.Errorf("failed to store certificationRequest: %w", err)
 	}
 

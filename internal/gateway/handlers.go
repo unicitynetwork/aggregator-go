@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
@@ -67,6 +68,16 @@ func (s *Server) handleGetInclusionProofV2(ctx context.Context, params json.RawM
 			api.StateTreeKeyLengthBytes, len(req.StateID)))
 	}
 
+	// The hint is read before the proof is built: a state which finalizes in between then
+	// returns its proof (included wins), never an "unknown" for a state that has one.
+	var hint api.ProofStatus
+	if req.IncludeStatus {
+		hint = api.ProofStatusUnknown
+		if p, ok := s.service.(ProofStatusProvider); ok {
+			hint = p.ProofStatusHint(req.StateID)
+		}
+	}
+
 	// Call service
 	response, err := s.service.GetInclusionProofV2(ctx, &req)
 	if err != nil {
@@ -74,7 +85,26 @@ func (s *Server) handleGetInclusionProofV2(ctx context.Context, params json.RawM
 		return nil, jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to get inclusion proof", err.Error())
 	}
 
-	return response, nil
+	if !req.IncludeStatus {
+		return response, nil // byte-identical to the result without status support
+	}
+	status := hint
+	if proofIsIncluded(response) {
+		status = api.ProofStatusIncluded
+	}
+	metrics.ProofStatusServedTotal.WithLabelValues("get_inclusion_proof.v2", string(status)).Inc()
+	return &api.IncludedProofStatusResponse{Proof: response, Status: status}, nil
+}
+
+// ProofStatusProvider is implemented by services which keep proof status hints.
+type ProofStatusProvider interface {
+	ProofStatusHint(stateID api.StateID) api.ProofStatus
+}
+
+// proofIsIncluded reports whether the response carries an inclusion certificate; the
+// empty-proof shape of states which are not (yet) included has none.
+func proofIsIncluded(r *api.GetInclusionProofResponseV2) bool {
+	return r != nil && r.InclusionProof != nil && len(r.InclusionProof.CertificateBytes) > 0
 }
 
 // handleGetNoDeletionProof handles the get_no_deletion_proof method

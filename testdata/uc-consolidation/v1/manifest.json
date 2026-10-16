@@ -5,7 +5,7 @@
     "command": "UC_FIXTURE_AGGREGATOR_COMMIT=$(git rev-parse HEAD) go run ./cmd/gen-uc-consolidation-fixtures -out testdata/uc-consolidation/v1",
     "toolchain": "go1.27.2",
     "commits": {
-      "aggregator-go": "8cd12de71d7e24fbf78a0ee06b18976d7a43e228",
+      "aggregator-go": "d6d8fad4b76d6c436b1a86d7fd962e62d0ef337e",
       "bft-core": "8b05d19f564f",
       "bft-go-base": "8e08f74f29fa"
     },
@@ -590,7 +590,21 @@
       "description": "master batch call failed with a JSON-RPC error: Proof unavailable"
     },
     {
-      "name": "negative/rpc-master-state-not-included",
+      "name": "negative/rpc-master-state-pending",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "unavailable",
+      "description": "master batch call failed with a JSON-RPC error: Proof unavailable"
+    },
+    {
+      "name": "negative/rpc-master-state-expired",
+      "kind": "negative",
+      "stage": "rpc",
+      "outcome": "unavailable",
+      "description": "master batch call failed with a JSON-RPC error: Proof unavailable"
+    },
+    {
+      "name": "negative/rpc-master-state-unknown",
       "kind": "negative",
       "stage": "rpc",
       "outcome": "unavailable",
@@ -695,7 +709,7 @@
       "description": "peer batch call failed with a JSON-RPC error: Proof unavailable"
     },
     {
-      "name": "negative/rpc-peer-state-not-included",
+      "name": "negative/rpc-peer-state-not-in-root",
       "kind": "negative",
       "stage": "rpc",
       "outcome": "unavailable",
@@ -817,8 +831,12 @@
     "negative/rpc-master-no-finalized-view/responses.json": "1bb8669d397b3ac2ca243694c79cca80b0ec7664838a3266293958bd8441fb65",
     "negative/rpc-master-partition-view-unavailable/expected.json": "4f3c3050626a31049025d5fe37738170039f62dc63f0dc456999de57c029fde9",
     "negative/rpc-master-partition-view-unavailable/responses.json": "a2480bcc6f63331260a5a64ae812aa8a88c021f1be5bfca489e2d42e13229b05",
-    "negative/rpc-master-state-not-included/expected.json": "3dc62a7e1653e540e1f448c75945824eb67581bbd10bf942af2e354fce6218b9",
-    "negative/rpc-master-state-not-included/responses.json": "ad4d70c251b059dea32f1d258c37fab09c95ea40412c96da979159bc1b58cb1b",
+    "negative/rpc-master-state-expired/expected.json": "c98dc80ec49a4b4e685a05d27ecceac7c728cb89202522065f8ecdca24146e52",
+    "negative/rpc-master-state-expired/responses.json": "e196010921d17d180ef4a5af363ab9db8ece81946e4fead6d2efaacbe4084900",
+    "negative/rpc-master-state-pending/expected.json": "2765d603cbd7f30eb8568371a9c0c080c5c42a3a091526b8d7fbd277fb5af145",
+    "negative/rpc-master-state-pending/responses.json": "e831631496c40f779aa7fbd7c38dea27b3162b16a3c44b7de6cefdddb07f51b4",
+    "negative/rpc-master-state-unknown/expected.json": "9053bfd7f3650cb35e5bb5e8c4b6033bf7373ec369c420ffc065b75e17cc665e",
+    "negative/rpc-master-state-unknown/responses.json": "24db8435581739e541f590060da6257b26cccbb1d53908ba912f914df87b3346",
     "negative/rpc-master-unsupported-configuration/expected.json": "ce39148715340a02919efd98020139e59afdcd506015c7851ee04b699fe776d7",
     "negative/rpc-master-unsupported-configuration/responses.json": "23c8058f5c561e545e6c0e01ef5ee6a5fa9d506ebefa86ac11678018ae758ff9",
     "negative/rpc-master-view-not-retained/expected.json": "6fe231251720efb7d82ce600ca345badc1307e5c678fedeaa1379aadfb4e1d5e",
@@ -827,8 +845,8 @@
     "negative/rpc-peer-busy-pinned-views/responses.json": "ef9780704f23553a001a4d5f934f13391c615d2205cab08e6ec351e2b003d5ad",
     "negative/rpc-peer-limit-response-bytes/expected.json": "e5df898a4bbe3d21c99079797f7670f94a1cd3e94c340f3f30647064ac028975",
     "negative/rpc-peer-limit-response-bytes/responses.json": "f28b4a2ec5e82d9a043d93b4a22f7d2329ed083f9410b876de85d4ec2d49f0b7",
-    "negative/rpc-peer-state-not-included/expected.json": "b9f52cc52a1518947ff6bc4d14e933261523609f344a298850ea1138409fe1fb",
-    "negative/rpc-peer-state-not-included/responses.json": "2aefb5fa26884a60cfdce0d6073dc5a879cf55a31ea48c526917a6f53bb4c894",
+    "negative/rpc-peer-state-not-in-root/expected.json": "40eb1a02aa095aa05fa5cfaf1e31c146914b59462de81fa1b8f5264029b6c05a",
+    "negative/rpc-peer-state-not-in-root/responses.json": "06c5a62a6d2651d41fd5e2af82b4fc0d8734c3f8fd904e2cb528cfe7282e43a6",
     "negative/rpc-peer-unsupported-configuration/expected.json": "15e53b24316bbd5c0ea958c6b8cfa233209597b5fa22d7c319a527ee93519a9c",
     "negative/rpc-peer-unsupported-configuration/responses.json": "1b9fdfa93476685f67eababca1dabc63b9d36931c0e93b5a61ca1d2fd9220ef7",
     "negative/rpc-peer-view-not-retained/expected.json": "4f20e9c11b64cf7be3c365d682c9ddd8f75048b00e848b150d80d99b36a97a3a",

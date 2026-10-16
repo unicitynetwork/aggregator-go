@@ -111,6 +111,10 @@ func NewNoDeletionProof(proof HexBytes) *NoDeletionProof {
 // GetInclusionProofRequestV2 represents the get_inclusion_proof JSON-RPC request
 type GetInclusionProofRequestV2 struct {
 	StateID StateID `json:"stateId"`
+	// IncludeStatus opts in to {"proof": <unchanged result>, "status": <hint>} (see
+	// IncludedProofStatusResponse). Without it the result is exactly the v2 hex-CBOR string.
+	// Old servers ignore the field, so a string result means "status unsupported".
+	IncludeStatus bool `json:"includeStatus,omitempty"`
 }
 
 // GetInclusionProofResponseV2 represents the get_inclusion_proof JSON-RPC response

@@ -24,8 +24,13 @@
           "message": "Proof unavailable",
           "data": {
             "reason": "proof_unavailable",
-            "detail": "state_not_included",
-            "retryable": true
+            "detail": "state_not_in_root",
+            "retryable": false,
+            "indexes": {
+              "not_in_root": [
+                0
+              ]
+            }
           }
         }
       }
