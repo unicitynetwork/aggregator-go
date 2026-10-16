@@ -3,6 +3,8 @@ package jsonrpc
 import (
 	"context"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // slotPool is the non-blocking active-work limit of the server: CONCURRENCY_LIMIT tokens, one per
@@ -51,13 +53,16 @@ func (p *slotPool) release() {
 //     token; the last worker's Done does. Active-work accounting is therefore never released
 //     before proof work actually stops.
 type Permit struct {
-	pool *slotPool
+	pool    *slotPool
+	created time.Time // when the request was admitted: the start of its application deadline
 
 	mu      sync.Mutex
 	held    bool
 	closed  bool
 	owned   bool
 	workers int
+
+	waitedMs atomic.Uint64 // cumulative long-poll wait so far (the echo of a response the middleware writes)
 }
 
 // Owned reports whether the request opted in to permit ownership (a long-poll wait): only then
@@ -68,6 +73,17 @@ func (p *Permit) Owned() bool {
 	defer p.mu.Unlock()
 	return p.owned
 }
+
+// SetWaited records the cumulative wait of the request so far (milliseconds, rounded up). The
+// timeout middleware echoes it in the error it writes for an opt-in request whose handler is
+// still running.
+func (p *Permit) SetWaited(ms uint64) { p.waitedMs.Store(ms) }
+
+// Waited is the last recorded wait.
+func (p *Permit) Waited() uint64 { return p.waitedMs.Load() }
+
+// Created is when the request was admitted.
+func (p *Permit) Created() time.Time { return p.created }
 
 // Held reports whether the permit currently owns a token.
 func (p *Permit) Held() bool {
@@ -190,7 +206,7 @@ func (s *Server) newPermit() (*Permit, bool) {
 	if !s.pool.tryAcquire(0) {
 		return nil, false
 	}
-	return &Permit{pool: s.pool, held: true}, true
+	return &Permit{pool: s.pool, held: true, created: time.Now()}, true
 }
 
 // OwnershipPredicate decides from the raw params whether a request of a method takes part in
@@ -222,3 +238,33 @@ func (s *Server) markOwned(permit *Permit, req *Request) {
 // AcquirePermit takes an active-work token outside an HTTP request (tests and embedders), or
 // reports false when the server is saturated.
 func (s *Server) AcquirePermit() (*Permit, bool) { return s.newPermit() }
+
+// SetOptInLimits bounds the requests of an otherwise unlimited method which opt in (the method's
+// ownership predicate holds): their complete request, params and ID are limited before the
+// handler runs. Legacy requests of the method are not affected.
+func (s *Server) SetOptInLimits(method string, l MethodLimits) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.optIn == nil {
+		s.optIn = map[string]MethodLimits{}
+	}
+	s.optIn[method] = l
+}
+
+func (s *Server) optInLimitsFor(req *Request) (MethodLimits, bool) {
+	s.mutex.RLock()
+	l, hasLimits := s.optIn[req.Method]
+	f := s.ownership[req.Method]
+	s.mutex.RUnlock()
+	if !hasLimits || f == nil || !f(req.Params) {
+		return MethodLimits{}, false
+	}
+	return l, true
+}
+
+type workerCountKey struct{}
+
+// ActiveWorkers is the number of method workers (TimeoutMiddleware goroutines of requests served
+// by this server) which have not stopped yet - including workers whose response was already
+// written. Shutdown joins them before dependencies close.
+func (s *Server) ActiveWorkers() int { return int(s.workers.Load()) }

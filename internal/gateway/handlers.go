@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/unicitynetwork/aggregator-go/internal/longpoll"
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
@@ -55,25 +56,36 @@ func (s *Server) parseCertificationRequest(params json.RawMessage) (*api.Certifi
 // v2 requires stateId to be exactly 32 raw bytes with no algorithm prefix.
 func (s *Server) handleGetInclusionProofV2(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
 	var req api.GetInclusionProofRequestV2
-	if err := json.Unmarshal(params, &req); err != nil {
-		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
+	// A valid waitMs is recognized independently of the typed fields: every handled error of such
+	// a request - a mistyped stateId or includeStatus included - echoes zero. An invalid waitMs
+	// is not a wait: it gets the legacy bytes.
+	wait, werr := api.ScanWaitMs(params)
+	waited := werr == nil && wait.Present && s.longPoll != nil
+	fail := func(e *jsonrpc.Error) *jsonrpc.Error {
+		if waited {
+			return e.WithWaited(0)
+		}
+		return e
 	}
-
-	// waitMs is reserved: validated here, ignored until the long-poll handlers land.
-	wait, err := api.ScanWaitMs(params)
-	if err != nil {
-		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, fail(jsonrpc.NewValidationError("Invalid parameters: " + err.Error()))
+	}
+	if werr != nil {
+		return nil, jsonrpc.NewValidationError("Invalid parameters: " + werr.Error())
 	}
 	req.WaitMs = wait
 
 	// Validate required fields
 	if req.StateID == nil {
-		return nil, jsonrpc.NewValidationError("stateId is required")
+		return nil, fail(jsonrpc.NewValidationError("stateId is required"))
 	}
 	if len(req.StateID) != api.StateTreeKeyLengthBytes {
-		return nil, jsonrpc.NewValidationError(fmt.Sprintf(
+		return nil, fail(jsonrpc.NewValidationError(fmt.Sprintf(
 			"stateId must be exactly %d bytes (v2 wire format), got %d",
-			api.StateTreeKeyLengthBytes, len(req.StateID)))
+			api.StateTreeKeyLengthBytes, len(req.StateID))))
+	}
+	if waited {
+		return s.serveV2Waited(ctx, &req)
 	}
 
 	// The hint is read before the proof is built: a state which finalizes in between then
@@ -105,6 +117,50 @@ func (s *Server) handleGetInclusionProofV2(ctx context.Context, params json.RawM
 	}
 	metrics.ProofStatusServedTotal.WithLabelValues("get_inclusion_proof.v2", string(status)).Inc()
 	return &api.IncludedProofStatusResponse{Proof: response, Status: status}, nil
+}
+
+// v2Read is one read attempt of a waited get_inclusion_proof.v2.
+type v2Read struct {
+	resp   *api.GetInclusionProofResponseV2
+	status api.ProofStatus
+}
+
+// serveV2Waited serves a v2 request which carried a valid waitMs: {proof, [status], waitedMs}.
+// It waits only while the state is known pending and not yet included; unknown, expired,
+// included and every error end the wait at once. The hint is read before each proof read.
+func (s *Server) serveV2Waited(ctx context.Context, req *api.GetInclusionProofRequestV2) (interface{}, *jsonrpc.Error) {
+	eval := func(ctx context.Context) longpoll.Result {
+		hint := api.ProofStatusUnknown
+		if p, ok := s.service.(ProofStatusProvider); ok {
+			hint = p.ProofStatusHint(req.StateID)
+		}
+		response, err := s.service.GetInclusionProofV2(ctx, req)
+		if errors.Is(err, api.ErrProofNotYetAvailable) {
+			return longpoll.Result{Err: jsonrpc.NewDetailedError(jsonrpc.ProofUnavailableCode, "Proof unavailable", "proof_unavailable", "no_finalized_view", true, nil)}
+		}
+		if err != nil {
+			s.logger.WithContext(ctx).Error("Failed to get inclusion proof", "error", err.Error())
+			return longpoll.Result{Err: jsonrpc.NewError(jsonrpc.InternalErrorCode, "Failed to get inclusion proof", err.Error())}
+		}
+		status := hint
+		included := proofIsIncluded(response)
+		if included {
+			status = api.ProofStatusIncluded
+		}
+		return longpoll.Result{Pending: !included && hint == api.ProofStatusPending, Value: v2Read{resp: response, status: status}}
+	}
+	res, waitedMs := s.longPoll.Run(ctx, "get_inclusion_proof.v2", req.WaitMs.Value, eval)
+	if res.Err != nil {
+		return nil, res.Err.WithWaited(waitedMs)
+	}
+	read := res.Value.(v2Read)
+	out := &api.WaitedProofResponse{Proof: read.resp, WaitedMs: waitedMs}
+	if req.IncludeStatus {
+		st := read.status
+		out.Status = &st
+		metrics.ProofStatusServedTotal.WithLabelValues("get_inclusion_proof.v2", string(st)).Inc()
+	}
+	return out, nil
 }
 
 // ProofStatusProvider is implemented by services which keep proof status hints.

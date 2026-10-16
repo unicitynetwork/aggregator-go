@@ -10,6 +10,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/longpoll"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/proofstatus"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
@@ -55,6 +56,15 @@ func (m notReadyRoundManager) GetKnownNotReadyBlock(id api.StateID) (*models.Blo
 }
 
 func TestLongPollGolden_V2NoWaitThroughRealService(t *testing.T) {
+	t.Run("legacy", func(t *testing.T) { v2NoWaitGolden(t, false) })
+	t.Run("long-poll wired", func(t *testing.T) { v2NoWaitGolden(t, true) })
+}
+
+func v2NoWaitGolden(t *testing.T, wired bool) {
+	var lp *longpoll.Coordinator
+	if wired {
+		lp = goldenCoordinator(t)
+	}
 	log, err := logger.New("error", "text", "stdout", false)
 	require.NoError(t, err)
 	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
@@ -112,7 +122,7 @@ func TestLongPollGolden_V2NoWaitThroughRealService(t *testing.T) {
 
 	// 1. a block exists and the state is included
 	_, svcIncl := build(true, nil)
-	u := goldenGateway(t, svcIncl, nil)
+	u := goldenGateway(t, svcIncl, nil, lp)
 	specs = append(specs,
 		spec{"included-bare", u, req(1, `{`+sid(incl)+`}`)},
 		spec{"included-status-false", u, req(2, `{`+sid(incl)+`,"includeStatus":false}`)},
@@ -127,7 +137,7 @@ func TestLongPollGolden_V2NoWaitThroughRealService(t *testing.T) {
 	rmPend, svcPend := build(true, nil)
 	rmPend.status.MarkPending(absent.StateID, 1<<62)
 	rmPend.status.MarkExpired(absent2.StateID)
-	uPend := goldenGateway(t, svcPend, nil)
+	uPend := goldenGateway(t, svcPend, nil, lp)
 	specs = append(specs,
 		spec{"pending-hint-without-shortcut-status", uPend, req(7, `{`+sid(absent)+`,"includeStatus":true}`)},
 		spec{"expired-hint-status", uPend, req(8, `{`+sid(absent2)+`,"includeStatus":true}`)},
@@ -136,7 +146,7 @@ func TestLongPollGolden_V2NoWaitThroughRealService(t *testing.T) {
 	rmShort, svcShort := build(true, nil)
 	rmShort.status.MarkPending(absent.StateID, 1<<62)
 	svcShort.roundManager = notReadyRoundManager{stubRoundManager: rmShort, block: block}
-	uShort := goldenGateway(t, svcShort, nil)
+	uShort := goldenGateway(t, svcShort, nil, lp)
 	specs = append(specs,
 		spec{"known-not-ready-bare", uShort, req(10, `{`+sid(absent)+`}`)},
 		spec{"known-not-ready-status", uShort, req(11, `{`+sid(absent)+`,"includeStatus":true}`)},
@@ -146,7 +156,7 @@ func TestLongPollGolden_V2NoWaitThroughRealService(t *testing.T) {
 
 	// 3. before the first block: the real service's typed error
 	_, svcPre := build(false, nil)
-	uPre := goldenGateway(t, svcPre, nil)
+	uPre := goldenGateway(t, svcPre, nil, lp)
 	specs = append(specs,
 		spec{"no-finalized-view", uPre, req(13, `{`+sid(incl)+`}`)},
 		spec{"no-finalized-view-status", uPre, req(14, `{`+sid(incl)+`,"includeStatus":true}`)},
@@ -154,7 +164,7 @@ func TestLongPollGolden_V2NoWaitThroughRealService(t *testing.T) {
 
 	// 4. infrastructure and validation errors
 	_, svcNoTree := build(true, func(rm *stubRoundManager) { rm.smt = nil })
-	uNoTree := goldenGateway(t, svcNoTree, nil)
+	uNoTree := goldenGateway(t, svcNoTree, nil, lp)
 	specs = append(specs,
 		spec{"internal-error-no-tree", uNoTree, req(15, `{`+sid(incl)+`}`)},
 		spec{"state-id-too-short", u, req(16, `{"stateId":"abcd"}`)},
