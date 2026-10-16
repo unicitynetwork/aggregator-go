@@ -82,6 +82,18 @@ func TestNewBatchProofHandler(t *testing.T) {
 		data, _ := json.Marshal(rerr.Data)
 		require.Contains(t, string(data), "no_finalized_view", "the real service answered (empty catalog), not the unsupported stub")
 	})
+	t.Run("standalone with real BFT is the natural unsharded deployment: served, no sidecar machinery", func(t *testing.T) {
+		cfg := wiringConfig(config.ShardingModeStandalone) // empty BFT shard ID: one-leaf partition
+		h, reason := NewBatchProofHandler(cfg, wiringRM{cat}, storage, wiringSvc{})
+		require.Empty(t, reason)
+		_, rerr := h(t.Context(), stateIDParams(t))
+		require.NotNil(t, rerr)
+		data, _ := json.Marshal(rerr.Data)
+		require.Contains(t, string(data), "no_finalized_view", "the real service answered, not the unsupported stub")
+		require.NotContains(t, string(data), "unsupported_configuration")
+		// the topology file and any consolidation shard configuration are not needed
+		require.Empty(t, cfg.BFT.ConsolidationShards)
+	})
 	t.Run("explicitly unsupported modes", func(t *testing.T) {
 		for name, tc := range map[string]struct {
 			cfg *config.Config

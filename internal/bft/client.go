@@ -918,6 +918,12 @@ func (c *BFTClientImpl) stagePartitionViewOp(ctx context.Context, op *authOp, cr
 	if cr.PartitionView == nil {
 		return
 	}
+	if proofmaterial.IsUnshardedUC(&cr.UC) {
+		// the UC of an unsharded partition is complete by itself: the sidecar of a one-leaf
+		// partition is neither validated, staged, persisted nor served
+		metrics.BFTPartitionViewTotal.WithLabelValues("unsharded_skipped").Inc()
+		return
+	}
 	result, view, err := proofmaterial.ValidateView(cr.PartitionView, &cr.UC, c.partitionID, op.sealVerifier(), c.proofTopology)
 	metrics.BFTPartitionViewTotal.WithLabelValues(result).Inc()
 	if err != nil {
