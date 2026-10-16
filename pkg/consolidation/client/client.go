@@ -81,6 +81,19 @@ type Config struct {
 	// Master optionally selects the master shard; it must participate. When
 	// nil the shard of the newest authenticated evidence is used.
 	Master *types.ShardID
+
+	// LongPoll, when set, lets the one master "latest" request carry waitMs so the aggregator may
+	// hold it until the items' states are included (a still-pending outcome is then an ordinary
+	// retryable error for the caller, as before). It is off by default: an attempt stays a single
+	// non-waiting pass. Exact-root peer requests never carry waitMs. Servers which predate waitMs
+	// either ignore it or reject the unknown member; the one parser-negotiation retry without it
+	// (counted in Stats) is the only exception to "one request per shard".
+	LongPoll bool
+	// LongPollWindow is the preferred wait P (default api.DefaultLongPollWindow); the wait sent is
+	// min(P, remaining attempt time - margin, HTTP client timeout - margin).
+	LongPollWindow time.Duration
+	// LongPollMargin is the response margin M (default api.DefaultLongPollMargin).
+	LongPollMargin time.Duration
 }
 
 // Item is one original certification request and the proof it was certified by.
@@ -102,6 +115,15 @@ type Stats struct {
 	// RoutingVisits is the number of routing trie nodes visited to route the items
 	// (O(L · shard depth)).
 	RoutingVisits int
+	// WaitSent is the waitMs sent with the master request (zero: none).
+	WaitSent time.Duration
+	// ParserRetries is 1 if the master request was repeated once without waitMs because a strict
+	// batch parser rejected the unknown member (already included in Requests).
+	ParserRetries int
+	// EchoSeen reports that the server echoed waitedMs (it understands waitMs); WaitedMs is the
+	// echoed time. Unauthenticated metadata: informational only.
+	EchoSeen bool
+	WaitedMs uint64
 }
 
 // Result is a consolidated bundle with provenance and instrumentation.
@@ -513,6 +535,7 @@ type rpcRequest struct {
 type rpcParams struct {
 	StateIDs  []string `json:"stateIds"`
 	StateRoot string   `json:"stateRoot"`
+	WaitMs    *uint64  `json:"waitMs,omitempty"`
 }
 
 type rpcResponse struct {
@@ -525,6 +548,7 @@ type rpcResponse struct {
 type rpcResult struct {
 	Proofs        []*api.GetInclusionProofResponseV2 `json:"proofs"`
 	PartitionView api.HexBytes                       `json:"partitionView"`
+	WaitedMs      json.RawMessage                    `json:"waitedMs"`
 }
 
 type rpcErrorBody struct {
@@ -537,8 +561,56 @@ func present(raw json.RawMessage) bool {
 	return len(raw) > 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 
-// fetch makes exactly one request for the group's items; root nil means latest.
+// fetch makes one request for the group's items; root nil means latest. Only the latest request
+// of an attempt with LongPoll enabled carries waitMs, and only it can be repeated, once and
+// without waitMs, when a strict batch parser rejects the unknown member (the generic
+// -32602/invalid_request/malformed_params without a waitedMs echo).
 func (c *Client) fetch(ctx context.Context, g *shardGroup, items []Item, root []byte, stats *Stats) (*batchResponse, error) {
+	var wait *uint64
+	if root == nil && c.cfg.LongPoll {
+		wait = c.waitFor(ctx)
+	}
+	if wait != nil {
+		stats.WaitSent = time.Duration(*wait) * time.Millisecond
+	}
+	resp, negotiation, err := c.fetchOnce(ctx, g, items, root, wait, stats)
+	if err != nil && negotiation {
+		stats.ParserRetries++
+		stats.WaitSent = 0
+		resp, _, err = c.fetchOnce(ctx, g, items, root, nil, stats) // same deadline: ctx is shared
+	}
+	return resp, err
+}
+
+// waitFor is the waitMs of the master latest request: the preferred window clamped by the
+// remaining attempt time and the HTTP client timeout, each less the margin. nil: send none.
+func (c *Client) waitFor(ctx context.Context) *uint64 {
+	remaining := api.NoLimit
+	if d, ok := ctx.Deadline(); ok {
+		remaining = time.Until(d)
+	}
+	transport := api.NoLimit
+	if c.http.Timeout > 0 {
+		transport = c.http.Timeout
+	}
+	p, m := c.cfg.LongPollWindow, c.cfg.LongPollMargin
+	if p <= 0 {
+		p = api.DefaultLongPollWindow
+	}
+	if m <= 0 {
+		m = api.DefaultLongPollMargin
+	}
+	w := api.LongPollWindow(p, remaining, transport, m)
+	if w <= 0 {
+		return nil
+	}
+	ms := uint64(w / time.Millisecond)
+	return &ms
+}
+
+// fetchOnce makes exactly one request; the bool reports a parser-negotiation rejection of a
+// request which carried waitMs.
+func (c *Client) fetchOnce(ctx context.Context, g *shardGroup, items []Item, root []byte, wait *uint64, stats *Stats) (*batchResponse, bool, error) {
 	ids := make([]string, len(g.items))
 	for i, idx := range g.items {
 		ids[i] = hex.EncodeToString(items[idx].Request.StateID)
@@ -547,28 +619,28 @@ func (c *Client) fetch(ctx context.Context, g *shardGroup, items []Item, root []
 	if root != nil {
 		stateRoot = hex.EncodeToString(root)
 	}
-	body, err := json.Marshal(rpcRequest{JSONRPC: jsonrpc.Version, ID: requestID, Method: Method, Params: rpcParams{StateIDs: ids, StateRoot: stateRoot}})
+	body, err := json.Marshal(rpcRequest{JSONRPC: jsonrpc.Version, ID: requestID, Method: Method, Params: rpcParams{StateIDs: ids, StateRoot: stateRoot, WaitMs: wait}})
 	if err != nil {
-		return nil, &Error{Kind: KindInput, Shard: g.ep.ShardID, Err: err}
+		return nil, false, &Error{Kind: KindInput, Shard: g.ep.ShardID, Err: err}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.ep.URL, bytes.NewReader(body))
 	if err != nil {
-		return nil, &Error{Kind: KindInput, Shard: g.ep.ShardID, Err: err}
+		return nil, false, &Error{Kind: KindInput, Shard: g.ep.ShardID, Err: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	stats.Requests++
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, transportError(ctx, g.ep.ShardID, err)
+		return nil, false, transportError(ctx, g.ep.ShardID, err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
-		return nil, transportError(ctx, g.ep.ShardID, err)
+		return nil, false, transportError(ctx, g.ep.ShardID, err)
 	}
 	stats.ResponseBytes += len(raw)
 	if len(raw) > maxBody {
-		return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: errors.New("response exceeds the 8 MiB limit")}
+		return nil, false, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: errors.New("response exceeds the 8 MiB limit")}
 	}
 	var rr rpcResponse
 	parseErr := json.Unmarshal(raw, &rr)
@@ -578,48 +650,61 @@ func (c *Client) fetch(ctx context.Context, g *shardGroup, items []Item, root []
 		if parseErr == nil && rr.JSONRPC == jsonrpc.Version && present(rr.Error) {
 			var eb rpcErrorBody
 			if json.Unmarshal(rr.Error, &eb) == nil {
-				return nil, rpcError(g.ep.ShardID, eb.Code, eb.Message, eb.Data)
+				return nil, wait != nil && api.IsParserNegotiation(eb.Code, eb.Data), rpcError(g.ep.ShardID, eb.Code, eb.Message, eb.Data)
 			}
 		}
-		return nil, &Error{Kind: KindTransport, Shard: g.ep.ShardID, Detail: fmt.Sprintf("http_%d", resp.StatusCode),
+		return nil, false, &Error{Kind: KindTransport, Shard: g.ep.ShardID, Detail: fmt.Sprintf("http_%d", resp.StatusCode),
 			Retryable: retryableStatus(resp.StatusCode), Err: fmt.Errorf("%s: %s", resp.Status, snippet(raw))}
 	}
 	if parseErr != nil {
-		return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: parseErr}
+		return nil, false, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: parseErr}
 	}
 	invalid := func(format string, a ...any) error {
 		return &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: fmt.Errorf(format, a...)}
 	}
 	if rr.JSONRPC != jsonrpc.Version {
-		return nil, invalid("response jsonrpc version %q, want %q", rr.JSONRPC, jsonrpc.Version)
+		return nil, false, invalid("response jsonrpc version %q, want %q", rr.JSONRPC, jsonrpc.Version)
 	}
 	if string(bytes.TrimSpace(rr.ID)) != strconv.Itoa(requestID) {
-		return nil, invalid("response id %s does not match request id %d", rr.ID, requestID)
+		return nil, false, invalid("response id %s does not match request id %d", rr.ID, requestID)
 	}
 	hasResult, hasError := present(rr.Result), present(rr.Error)
 	if hasResult == hasError {
-		return nil, invalid("response must carry exactly one of result and error")
+		return nil, false, invalid("response must carry exactly one of result and error")
 	}
 	if hasError {
 		var eb rpcErrorBody
 		if err := json.Unmarshal(rr.Error, &eb); err != nil {
-			return nil, invalid("malformed error object: %v", err)
+			return nil, false, invalid("malformed error object: %v", err)
 		}
-		return nil, rpcError(g.ep.ShardID, eb.Code, eb.Message, eb.Data)
+		if ms, ok, err := api.FindEchoMs(eb.Data); ok {
+			if err != nil {
+				return nil, false, invalid("malformed waitedMs echo in the error data: %v", err)
+			}
+			stats.EchoSeen, stats.WaitedMs = true, stats.WaitedMs+ms
+		}
+		return nil, wait != nil && api.IsParserNegotiation(eb.Code, eb.Data), rpcError(g.ep.ShardID, eb.Code, eb.Message, eb.Data)
 	}
 	var res rpcResult
 	if err := json.Unmarshal(rr.Result, &res); err != nil {
-		return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: err}
+		return nil, false, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: err}
+	}
+	if len(res.WaitedMs) > 0 { // the echo: validated, informational, never used to extend anything
+		ms, err := api.ParseEchoMs(res.WaitedMs)
+		if err != nil {
+			return nil, false, invalid("malformed waitedMs echo: %v", err)
+		}
+		stats.EchoSeen, stats.WaitedMs = true, stats.WaitedMs+ms
 	}
 	if len(res.Proofs) != len(g.items) {
-		return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: fmt.Errorf("got %d proofs for %d states", len(res.Proofs), len(g.items))}
+		return nil, false, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: fmt.Errorf("got %d proofs for %d states", len(res.Proofs), len(g.items))}
 	}
 	for i, p := range res.Proofs {
 		if p == nil || p.InclusionProof == nil {
-			return nil, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: fmt.Errorf("proof %d is empty", i)}
+			return nil, false, &Error{Kind: KindInvalidResponse, Shard: g.ep.ShardID, Err: fmt.Errorf("proof %d is empty", i)}
 		}
 	}
-	return &batchResponse{proofs: res.Proofs, view: res.PartitionView}, nil
+	return &batchResponse{proofs: res.Proofs, view: res.PartitionView}, false, nil
 }
 
 // retryableStatus: transient HTTP statuses (as a new attempt).

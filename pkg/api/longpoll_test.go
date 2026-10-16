@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -112,4 +113,73 @@ func TestParseWaitMs(t *testing.T) {
 		_, err := ParseWaitMs([]byte(in))
 		require.ErrorIs(t, err, ErrInvalidWaitMs, in)
 	}
+}
+
+func TestLongPollWindow(t *testing.T) {
+	const s = time.Second
+	for name, tc := range map[string]struct {
+		p, r, tr, m, want time.Duration
+	}{
+		"preferred fits":        {20 * s, 40 * s, 30 * s, 2 * s, 20 * s},
+		"remaining budget":      {20 * s, 10 * s, 30 * s, 2 * s, 8 * s},
+		"transport maximum":     {20 * s, 40 * s, 15 * s, 2 * s, 13 * s}, // cmd/commitment's 15s HTTP timeout
+		"both bind":             {20 * s, 12 * s, 15 * s, 2 * s, 10 * s},
+		"unbounded remaining":   {20 * s, NoLimit, 30 * s, 2 * s, 20 * s},
+		"unbounded transport":   {20 * s, 40 * s, NoLimit, 2 * s, 20 * s},
+		"both unbounded":        {20 * s, NoLimit, NoLimit, 2 * s, 20 * s},
+		"nothing fits":          {20 * s, 2 * s, 30 * s, 2 * s, 0},
+		"negative after margin": {20 * s, s, 30 * s, 2 * s, 0},
+		"expired":               {20 * s, 0, 30 * s, 2 * s, 0},
+		"sub-millisecond floor": {20 * s, 2*s + 1500*time.Microsecond, 30 * s, 2 * s, time.Millisecond},
+		"configured margin":     {20 * s, 10 * s, 30 * s, 5 * s, 5 * s},
+	} {
+		require.Equal(t, tc.want, LongPollWindow(tc.p, tc.r, tc.tr, tc.m), name)
+	}
+}
+
+func TestParseEchoAndFindEcho(t *testing.T) {
+	ms, ok, err := FindEchoMs([]byte(`{"proofs":[],"waitedMs":1200}`))
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.EqualValues(t, 1200, ms)
+	_, ok, err = FindEchoMs([]byte(`{"proofs":[]}`))
+	require.NoError(t, err)
+	require.False(t, ok)
+	_, ok, err = FindEchoMs([]byte(`"a string"`))
+	require.NoError(t, err)
+	require.False(t, ok)
+	for _, bad := range []string{`-1`, `1.5`, `"7"`, `null`, `9007199254740992`, `1e3`, `true`} {
+		_, ok, err = FindEchoMs([]byte(`{"waitedMs":` + bad + `}`))
+		require.True(t, ok, bad)
+		require.Error(t, err, bad)
+	}
+}
+
+// The shared capability table decides which rejections trigger the one parser-negotiation retry.
+func TestIsParserNegotiation_FollowsTheCapabilityFixture(t *testing.T) {
+	raw, err := os.ReadFile("../../testdata/longpoll/capability.json")
+	require.NoError(t, err)
+	var f struct {
+		Cases []struct {
+			Name     string          `json:"name"`
+			Response json.RawMessage `json:"response"`
+			Action   string          `json:"action"`
+		} `json:"cases"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &f))
+	n := 0
+	for _, c := range f.Cases {
+		var r struct {
+			Error *struct {
+				Code int             `json:"code"`
+				Data json.RawMessage `json:"data"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(c.Response, &r) != nil || r.Error == nil {
+			continue // not a JSON-RPC error row (success, transport, multi-step rows)
+		}
+		n++
+		require.Equal(t, c.Action == "retry", IsParserNegotiation(r.Error.Code, r.Error.Data), c.Name)
+	}
+	require.Positive(t, n)
 }
