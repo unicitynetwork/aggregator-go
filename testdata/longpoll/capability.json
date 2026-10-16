@@ -18,6 +18,23 @@
       "note": "No field name is present or required."
     },
     {
+      "name": "malformed-params-with-echo",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params",
+          "data": {
+            "reason": "invalid_request",
+            "detail": "malformed_params",
+            "retryable": false,
+            "waitedMs": 0
+          }
+        }
+      },
+      "action": "propagate",
+      "note": "The echo proves the server parsed waitMs: never retry without it. Only the bare generic shape (no data.waitedMs) triggers the retry."
+    },
+    {
       "name": "retry-fails-again",
       "first": "as above",
       "second": {

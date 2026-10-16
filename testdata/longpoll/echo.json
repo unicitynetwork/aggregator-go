@@ -13,7 +13,7 @@
       },
       "response": {
         "jsonrpc": "2.0",
-        "result": "82182ad998798501d998778602d998788301410158210202020202020202020202020202020202020202020202020202020202020202025820030303030303030303030303030303030303030303030303030303030303030358202222222222222222222222222222222222222222222222222222222222222222f6584104040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404041a689b2cc05820000000000000000000000000000000000000000000000000000000000000000001",
+        "result": "8209d998798501d998778602d99878830141015821031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f5820baa501b37267c06d8d20f316622f90a3e343e9e730771f2ce2e314b794e31853582085e7eac2862f1cbd85bc18769c75172c3fdcd899ab468b9e973d59ec620d99911af486570058416ccd2bd923a58cea875b6a3f59a3a319ef3c0e4010d3c80f176992a089a091852940bcf3d0999d2fe3c1d09da718c94f5a9cba06dfa108ce85dfae6cbe749cb6011a689b2cc058404000000000000000000000000000000000000000000000000000000000000000679badfaa2b85f63e19d30d0271a0107187e3e0fad7e077b8c8e8651e5866d15d998598701d9985a8a010900f65820385e7ab1594d114f9a5d60d5a87fe4a70c22875114d448bbbafa3e582cdfa4fdf600f600f6f6f6d9985b83014180f6f6d9985d880100090000f6f6f6",
         "id": 1
       },
       "note": "No waitMs: the legacy bare string. Never carries an echo."
@@ -32,7 +32,7 @@
       "response": {
         "jsonrpc": "2.0",
         "result": {
-          "proof": "82182ad998798501f6f6f601",
+          "proof": "8209d998798501f6f6f6d998598701d9985a8a010900f65820385e7ab1594d114f9a5d60d5a87fe4a70c22875114d448bbbafa3e582cdfa4fdf600f600f6f6f6d9985b83014180f6f6d9985d880100090000f6f6f6",
           "status": "pending"
         },
         "id": 2
@@ -53,7 +53,7 @@
       "response": {
         "jsonrpc": "2.0",
         "result": {
-          "proof": "82182ad998798501d998778602d998788301410158210202020202020202020202020202020202020202020202020202020202020202025820030303030303030303030303030303030303030303030303030303030303030358202222222222222222222222222222222222222222222222222222222222222222f6584104040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404041a689b2cc05820000000000000000000000000000000000000000000000000000000000000000001",
+          "proof": "8209d998798501d998778602d99878830141015821031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f5820baa501b37267c06d8d20f316622f90a3e343e9e730771f2ce2e314b794e31853582085e7eac2862f1cbd85bc18769c75172c3fdcd899ab468b9e973d59ec620d99911af486570058416ccd2bd923a58cea875b6a3f59a3a319ef3c0e4010d3c80f176992a089a091852940bcf3d0999d2fe3c1d09da718c94f5a9cba06dfa108ce85dfae6cbe749cb6011a689b2cc058404000000000000000000000000000000000000000000000000000000000000000679badfaa2b85f63e19d30d0271a0107187e3e0fad7e077b8c8e8651e5866d15d998598701d9985a8a010900f65820385e7ab1594d114f9a5d60d5a87fe4a70c22875114d448bbbafa3e582cdfa4fdf600f600f6f6f6d9985b83014180f6f6d9985d880100090000f6f6f6",
           "waitedMs": 1200
         },
         "id": 3
@@ -74,7 +74,7 @@
       "response": {
         "jsonrpc": "2.0",
         "result": {
-          "proof": "82182ad998798501f6f6f601",
+          "proof": "8209d998798501f6f6f6d998598701d9985a8a010900f65820385e7ab1594d114f9a5d60d5a87fe4a70c22875114d448bbbafa3e582cdfa4fdf600f600f6f6f6d9985b83014180f6f6d9985d880100090000f6f6f6",
           "waitedMs": 5000
         },
         "id": 4
@@ -95,7 +95,7 @@
       "response": {
         "jsonrpc": "2.0",
         "result": {
-          "proof": "82182ad998798501f6f6f601",
+          "proof": "8209d998798501f6f6f6d998598701d9985a8a010900f65820385e7ab1594d114f9a5d60d5a87fe4a70c22875114d448bbbafa3e582cdfa4fdf600f600f6f6f6d9985b83014180f6f6d9985d880100090000f6f6f6",
           "waitedMs": 0
         },
         "id": 5
@@ -117,7 +117,7 @@
       "response": {
         "jsonrpc": "2.0",
         "result": {
-          "proof": "82182ad998798501f6f6f601",
+          "proof": "8209d998798501f6f6f6d998598701d9985a8a010900f65820385e7ab1594d114f9a5d60d5a87fe4a70c22875114d448bbbafa3e582cdfa4fdf600f600f6f6f6d9985b83014180f6f6d9985d880100090000f6f6f6",
           "status": "pending",
           "waitedMs": 5000
         },
@@ -139,7 +139,7 @@
       "response": {
         "jsonrpc": "2.0",
         "result": {
-          "proof": "82182ad998798501d998778602d998788301410158210202020202020202020202020202020202020202020202020202020202020202025820030303030303030303030303030303030303030303030303030303030303030358202222222222222222222222222222222222222222222222222222222222222222f6584104040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404041a689b2cc05820000000000000000000000000000000000000000000000000000000000000000001",
+          "proof": "8209d998798501d998778602d99878830141015821031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f5820baa501b37267c06d8d20f316622f90a3e343e9e730771f2ce2e314b794e31853582085e7eac2862f1cbd85bc18769c75172c3fdcd899ab468b9e973d59ec620d99911af486570058416ccd2bd923a58cea875b6a3f59a3a319ef3c0e4010d3c80f176992a089a091852940bcf3d0999d2fe3c1d09da718c94f5a9cba06dfa108ce85dfae6cbe749cb6011a689b2cc058404000000000000000000000000000000000000000000000000000000000000000679badfaa2b85f63e19d30d0271a0107187e3e0fad7e077b8c8e8651e5866d15d998598701d9985a8a010900f65820385e7ab1594d114f9a5d60d5a87fe4a70c22875114d448bbbafa3e582cdfa4fdf600f600f6f6f6d9985b83014180f6f6d9985d880100090000f6f6f6",
           "status": "included",
           "waitedMs": 300
         },
@@ -161,7 +161,7 @@
       "response": {
         "jsonrpc": "2.0",
         "result": {
-          "proof": "82182ad998798501f6f6f601",
+          "proof": "8209d998798501f6f6f6d998598701d9985a8a010900f65820385e7ab1594d114f9a5d60d5a87fe4a70c22875114d448bbbafa3e582cdfa4fdf600f600f6f6f6d9985b83014180f6f6d9985d880100090000f6f6f6",
           "status": "expired",
           "waitedMs": 40
         },
@@ -183,7 +183,7 @@
       "response": {
         "jsonrpc": "2.0",
         "result": {
-          "proof": "82182ad998798501f6f6f601",
+          "proof": "8209d998798501f6f6f6d998598701d9985a8a010900f65820385e7ab1594d114f9a5d60d5a87fe4a70c22875114d448bbbafa3e582cdfa4fdf600f600f6f6f6d9985b83014180f6f6d9985d880100090000f6f6f6",
           "status": "unknown",
           "waitedMs": 0
         },
@@ -573,6 +573,68 @@
         "id": 28
       },
       "note": "A wait-bearing params object which fails later validation echoes zero. A params object whose waitMs itself is invalid is malformed_params with no echo."
+    },
+    {
+      "name": "batch/unknown-member-with-valid-wait",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 30,
+        "method": "get_inclusion_proofs.v1",
+        "params": {
+          "stateIds": [
+            "abababababababababababababababababababababababababababababababab",
+            "acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac"
+          ],
+          "waitMs": 5000,
+          "foo": 1
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "error": {
+          "code": -32602,
+          "message": "Invalid params",
+          "data": {
+            "reason": "invalid_request",
+            "detail": "malformed_params",
+            "retryable": false,
+            "waitedMs": 0
+          }
+        },
+        "id": 30
+      },
+      "note": "A full server echoes zero on ANY batch params error when the object carries a valid top-level waitMs member (found by a scan independent of member order). The echo is what tells a client the server understands waitMs: such an error is propagated, never retried without waitMs."
+    },
+    {
+      "name": "batch/exact-root-with-wait",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 31,
+        "method": "get_inclusion_proofs.v1",
+        "params": {
+          "stateIds": [
+            "abababababababababababababababababababababababababababababababab",
+            "acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac"
+          ],
+          "stateRoot": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "waitMs": 0
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "error": {
+          "code": -32602,
+          "message": "Invalid params",
+          "data": {
+            "reason": "invalid_request",
+            "detail": "malformed_params",
+            "retryable": false,
+            "waitedMs": 0
+          }
+        },
+        "id": 31
+      },
+      "note": "Exact root plus a present waitMs is invalid; the valid waitMs member is still echoed (zero)."
     },
     {
       "name": "batch/invalid-wait-malformed-params",

@@ -55,6 +55,10 @@ func ParseWaitMs(raw []byte) (uint64, error) {
 // waitMs member, whatever else they contain, so legacy behaviour is untouched; non-objects have
 // none. The member name is matched exactly (after JSON unescaping).
 func ScanWaitMs(params []byte) (WaitMs, error) {
+	// Legacy traffic has neither the member nor an escape which could spell it: skip the tokenizer.
+	if !bytes.Contains(params, []byte("waitMs")) && !bytes.Contains(params, []byte(`\u`)) {
+		return WaitMs{}, nil
+	}
 	dec := json.NewDecoder(bytes.NewReader(params))
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
 		return WaitMs{}, nil
