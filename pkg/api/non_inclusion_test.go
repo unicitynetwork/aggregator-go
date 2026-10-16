@@ -160,17 +160,21 @@ func TestNonInclusionRequestParsing(t *testing.T) {
 	_, err = api.ParseGetNonInclusionProofRequestV1(json.RawMessage(`{"stateId":"0X` + id + `"}`))
 	require.NoError(t, err)
 	for name, p := range map[string]string{
-		"unknown field": `{"stateId":"` + id + `","stateRoot":"latest"}`,
-		"duplicate":     `{"stateId":"` + id + `","stateId":"` + id + `"}`,
-		"short":         `{"stateId":"abcd"}`,
-		"not hex":       `{"stateId":"` + id[:62] + `zz"}`,
-		"array":         `["` + id + `"]`,
-		"missing":       `{}`,
-		"trailing":      `{"stateId":"` + id + `"} {}`,
-		"number":        `{"stateId":5}`,
-		"double prefix": `{"stateId":"0x0X` + id + `"}`,
-		"empty":         ``,
-		"null":          `null`,
+		"unknown field":       `{"stateId":"` + id + `","stateRoot":"latest"}`,
+		"duplicate":           `{"stateId":"` + id + `","stateId":"` + id + `"}`,
+		"short":               `{"stateId":"abcd"}`,
+		"not hex":             `{"stateId":"` + id[:62] + `zz"}`,
+		"array":               `["` + id + `"]`,
+		"missing":             `{}`,
+		"trailing":            `{"stateId":"` + id + `"} {}`,
+		"number":              `{"stateId":5}`,
+		"suffix bang":         `{"stateId":"` + id + `"}!`,
+		"suffix unterminated": `{"stateId":"` + id + `"} "abc`,
+		"suffix garbage":      `{"stateId":"` + id + `"}}`,
+		"suffix number":       `{"stateId":"` + id + `"} 1`,
+		"double prefix":       `{"stateId":"0x0X` + id + `"}`,
+		"empty":               ``,
+		"null":                `null`,
 	} {
 		_, err := api.ParseGetNonInclusionProofRequestV1(json.RawMessage(p))
 		require.Error(t, err, name)
