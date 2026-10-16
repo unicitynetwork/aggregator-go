@@ -87,6 +87,19 @@ func (l *Lease) GetInclusionCert(key []byte) (*api.InclusionCert, error) {
 	return l.v.reader.GetInclusionCert(l.ctx, key)
 }
 
+// GetNonInclusionCert builds the non-inclusion certificate of the key from the leased state.
+// It returns an error wrapping api.ErrStateIncluded when the key is present at the leased
+// root and backend.ErrNonInclusionUnsupported when the backend cannot produce certificates.
+func (l *Lease) GetNonInclusionCert(key []byte) (*api.NonInclusionCert, error) {
+	if l.released.Load() {
+		return nil, ErrLeaseReleased
+	}
+	if err := l.ctx.Err(); err != nil {
+		return nil, err
+	}
+	return backend.NonInclusionCert(l.ctx, l.v.reader, key)
+}
+
 // GetInclusionCerts reads proofs for all keys from the leased state under the lease's
 // context, in order. Views with a batch path (RocksDB) build them from one union of the
 // proof paths; others fall back to one call per key.
