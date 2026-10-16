@@ -203,6 +203,10 @@ type BatchProofService struct {
 	classOnce   sync.Once
 	class       *longpoll.Class
 	releaseHook atomic.Pointer[func()]
+
+	// test hooks (nil in production)
+	testHookAdmitChecked func() // in TryAdmit after the headroom check, under admitMu
+	testHookFreshSlot    func() // in a fresh read right after it took its slot (outside admitMu), before its pin
 }
 
 // BatchProofConfig configures the service. Zero values take the plan defaults.
@@ -276,11 +280,12 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 	if granted != nil && granted.takeSlot() {
 		defer func() { <-s.slots }()
 	} else {
-		select {
-		case s.slots <- struct{}{}:
-			defer func() { <-s.slots }()
-		default:
+		if !s.acquireSlot() {
 			return nil, busy("active_requests")
+		}
+		defer func() { <-s.slots }()
+		if h := s.testHookFreshSlot; h != nil {
+			h()
 		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
@@ -699,6 +704,21 @@ func (b *batchResources) Release() {
 	}
 }
 
+// acquireSlot is the fresh requests' non-blocking slot acquisition. It takes admitMu - the same
+// short critical section in which TryAdmit checks the headroom and takes its slot - so that a
+// resumption's "two slots are free" observation cannot be invalidated by a fresh read between
+// the check and the take (the fresh read would then lose its guaranteed last slot).
+func (s *BatchProofService) acquireSlot() bool {
+	s.admitMu.Lock()
+	defer s.admitMu.Unlock()
+	select {
+	case s.slots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
 // TryAdmit grants the batch capacity of one resumed read without blocking: a batch slot and a
 // pin, together, leaving at least one of each free for fresh requests, or nothing (any partial
 // grant is rolled back). It implements longpoll.Admitter; the scheduler calls it under its lock,
@@ -708,6 +728,9 @@ func (s *BatchProofService) TryAdmit() (longpoll.Resources, bool) {
 	defer s.admitMu.Unlock()
 	if cap(s.slots)-len(s.slots) < 2 {
 		return nil, false
+	}
+	if h := s.testHookAdmitChecked; h != nil {
+		h() // tests: a fresh read started here must wait for this critical section
 	}
 	var pin *proofview.PinReservation
 	if pr, ok := s.views.(pinReserver); ok {

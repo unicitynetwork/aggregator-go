@@ -318,3 +318,80 @@ func TestLongPollBatch_ResumeQueueIsDeadlineBounded(t *testing.T) {
 		return st.Reserved == 0 && st.Queued == 0 && st.Running == 0 && len(r.e.svc.slots) == 0 && r.e.catalog.Stats().ActivePins == 0
 	}, 5*time.Second, 5*time.Millisecond)
 }
+
+// Architect review of #231: the headroom check of a resumption must be atomic with ALL fresh slot
+// acquisitions. Interleaving 1: a fresh read holds the seventh slot (and has not taken its pin
+// yet) - the resumption must see one free slot and stay queued. Interleaving 2: the fresh read
+// starts exactly between the resumption's headroom check and its slot take - it must wait for the
+// critical section, so the resumption never consumes the last free slot.
+func TestBatchHeadroomIsAtomicWithFreshAdmission(t *testing.T) {
+	newEnv := func(t *testing.T) (*batchEnv, []api.StateID) {
+		e := newBatchEnv(t, proofview.DefaultLimits()) // B = P = 8
+		ids := e.addRecords(2, 1000)
+		e.finalize([]byte("pv"))
+		for i := 0; i < 6; i++ { // six slots occupied by other reads
+			e.svc.slots <- struct{}{}
+		}
+		return e, ids
+	}
+
+	t.Run("fresh read holds the seventh slot before its pin", func(t *testing.T) {
+		e, ids := newEnv(t)
+		holding, release := make(chan struct{}), make(chan struct{})
+		e.svc.testHookFreshSlot = func() { close(holding); <-release }
+		done := make(chan *BatchError, 1)
+		go func() {
+			_, err := e.svc.GetInclusionProofsV1(context.Background(), e.request(ids[:1], nil))
+			done <- err
+		}()
+		<-holding
+		require.Equal(t, 7, len(e.svc.slots))
+		_, ok := e.svc.TryAdmit()
+		require.False(t, ok, "one free slot is left: the resumption must stay queued")
+		require.Equal(t, 7, len(e.svc.slots), "and took nothing")
+		_, reserved := e.catalog.TryReservePin(7)
+		require.True(t, reserved, "no pin reservation leaked either")
+		close(release)
+		require.Nil(t, <-done)
+		r, ok := e.svc.TryAdmit()
+		require.True(t, ok, "admitted once the fresh read finished")
+		r.Release()
+	})
+
+	t.Run("fresh read arrives between the check and the take", func(t *testing.T) {
+		e, ids := newEnv(t)
+		freshStarted := make(chan struct{})
+		freshDone := make(chan *BatchError, 1)
+		var slotsAtFreshStart atomic.Int32
+		e.svc.testHookAdmitChecked = func() {
+			go func() {
+				close(freshStarted)
+				_, err := e.svc.GetInclusionProofsV1(context.Background(), e.request(ids[:1], nil))
+				freshDone <- err
+			}()
+			<-freshStarted
+			time.Sleep(50 * time.Millisecond) // give the fresh read every chance to run ahead
+			slotsAtFreshStart.Store(int32(len(e.svc.slots)))
+		}
+		hold := make(chan struct{})
+		e.svc.testHookFreshSlot = func() { <-hold } // a fresh read that got its slot stays visible
+		r, ok := e.svc.TryAdmit()
+		close(hold)
+		require.True(t, ok, "two slots were free when the resumption was admitted")
+		require.EqualValues(t, 6, slotsAtFreshStart.Load(), "the fresh read could not take a slot inside the resumption's critical section")
+		require.Nil(t, <-freshDone, "the fresh read got the last slot afterwards: headroom intact")
+		require.Equal(t, 7, len(e.svc.slots), "six + the resumed one; the fresh read has finished")
+		r.Release()
+	})
+
+	t.Run("fresh requests keep immediate rejection when full", func(t *testing.T) {
+		e, ids := newEnv(t)
+		e.svc.slots <- struct{}{}
+		e.svc.slots <- struct{}{}
+		start := time.Now()
+		_, berr := e.svc.GetInclusionProofsV1(context.Background(), e.request(ids[:1], nil))
+		require.NotNil(t, berr)
+		require.Equal(t, "busy", berr.Reason)
+		require.Less(t, time.Since(start), 500*time.Millisecond)
+	})
+}

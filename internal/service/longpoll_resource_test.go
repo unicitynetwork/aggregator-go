@@ -505,7 +505,8 @@ type scenarioResult struct {
 	BurstFreshOK, BurstFreshTotal int
 	BurstFreshP99ms               float64
 	DrainSeconds                  float64
-	Completed, Errors, ErrorsBusy int
+	Completed, Errors, ErrorsBusy int // ErrorsBusy: downstream rejections (slot/pin/token busy)
+	ErrorsDeadline                int // admission expiry: busy/deadline at the shared resume deadline (allowed by the ruling)
 	ErrorsOther                   int
 	Peak                          peaks
 
@@ -733,6 +734,10 @@ collect:
 		switch {
 		case o.status == 200 && strings.Contains(o.body, `"result"`):
 			res.Completed++
+		case o.status == 200 && strings.Contains(o.body, `"code":-32006`) && strings.Contains(o.body, `"detail":"deadline"`) &&
+			strings.Contains(o.body, `"retryable":true`) && strings.Contains(o.body, `"waitedMs":`):
+			res.Errors++ // the shared resume deadline expired in the queue: the ruling's permitted outcome
+			res.ErrorsDeadline++
 		case o.status == 200 && strings.Contains(o.body, `"code":-32006`) && strings.Contains(o.body, `"retryable":true`) && strings.Contains(o.body, `"waitedMs":`):
 			res.Errors++
 			res.ErrorsBusy++
@@ -848,10 +853,21 @@ func (r scenarioResult) assertBurst(t *testing.T) {
 			require.LessOrEqual(t, r.Peak.Running, max(1, min(quota, b-1)), "resumed batch reads are capped at min(max(1,C/4), B-1, P-1)")
 		}
 	}
-	// v2 has no method capacity of its own; batch is strict when the fix is in or B, P cover the burst
+	// v2 has no method capacity of its own; batch is strict when the fix is in or B, P cover the burst.
+	// "Strict" means: no DOWNSTREAM rejection (slot/pin/token busy) at all - the scheduler admitted
+	// every read it started. Admission-deadline expiry is the ruling's permitted outcome when the
+	// burst cannot be served within the resume reserve (slow or shared hardware): it is reported
+	// separately, must carry the echo (classification above), and is only legitimate when the drain
+	// really used up the reserve; a controlled smaller burst (<= 256 waiters) must be served in full.
 	if r.Method == "v2" || batchBurstStrict || (batchConcurrency() >= r.Admitted && batchConcurrency() >= quota) {
-		require.Zero(t, r.Errors, "no woken waiter fails: %s", r.Notes)
-		require.Equal(t, r.Admitted, r.Completed)
+		require.Zero(t, r.ErrorsBusy, "no read admitted by the scheduler is rejected downstream: %s", r.Notes)
+		if r.Admitted <= 256 || r.Method == "v2" {
+			require.Zero(t, r.Errors, "a controlled burst is served in full: %s", r.Notes)
+			require.Equal(t, r.Admitted, r.Completed)
+		} else if r.ErrorsDeadline > 0 {
+			require.GreaterOrEqual(t, r.DrainSeconds, 1.5, "admission expiry only when the drain really used up the 2 s resume reserve (%d expired)", r.ErrorsDeadline)
+		}
+		require.Equal(t, r.Admitted, r.Completed+r.ErrorsDeadline)
 	}
 }
 
