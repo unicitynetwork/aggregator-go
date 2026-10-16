@@ -1,0 +1,82 @@
+[
+  {
+    "name": "included-bare",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"get_inclusion_proof.v2\",\"params\":{\"stateId\":\"abababababababababababababababababababababababababababababababab\"}}",
+    "response": "{\"jsonrpc\":\"2.0\",\"result\":\"82182ad998798501d998778602d998788301410158210202020202020202020202020202020202020202020202020202020202020202025820030303030303030303030303030303030303030303030303030303030303030358202222222222222222222222222222222222222222222222222222222222222222f6584104040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404041a689b2cc05820000000000000000000000000000000000000000000000000000000000000000001\",\"id\":1}\n"
+  },
+  {
+    "name": "empty-proof-bare",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"get_inclusion_proof.v2\",\"params\":{\"stateId\":\"abababababababababababababababababababababababababababababababab\"}}",
+    "response": "{\"jsonrpc\":\"2.0\",\"result\":\"82182ad998798501f6f6f601\",\"id\":2}\n"
+  },
+  {
+    "name": "included-status-false",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"get_inclusion_proof.v2\",\"params\":{\"stateId\":\"abababababababababababababababababababababababababababababababab\",\"includeStatus\":false}}",
+    "response": "{\"jsonrpc\":\"2.0\",\"result\":\"82182ad998798501d998778602d998788301410158210202020202020202020202020202020202020202020202020202020202020202025820030303030303030303030303030303030303030303030303030303030303030358202222222222222222222222222222222222222222222222222222222222222222f6584104040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404041a689b2cc05820000000000000000000000000000000000000000000000000000000000000000001\",\"id\":3}\n"
+  },
+  {
+    "name": "included-status",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"get_inclusion_proof.v2\",\"params\":{\"stateId\":\"abababababababababababababababababababababababababababababababab\",\"includeStatus\":true}}",
+    "response": "{\"jsonrpc\":\"2.0\",\"result\":{\"proof\":\"82182ad998798501d998778602d998788301410158210202020202020202020202020202020202020202020202020202020202020202025820030303030303030303030303030303030303030303030303030303030303030358202222222222222222222222222222222222222222222222222222222222222222f6584104040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404041a689b2cc05820000000000000000000000000000000000000000000000000000000000000000001\",\"status\":\"included\"},\"id\":4}\n"
+  },
+  {
+    "name": "pending-status",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"get_inclusion_proof.v2\",\"params\":{\"stateId\":\"abababababababababababababababababababababababababababababababab\",\"includeStatus\":true}}",
+    "response": "{\"jsonrpc\":\"2.0\",\"result\":{\"proof\":\"82182ad998798501f6f6f601\",\"status\":\"pending\"},\"id\":5}\n"
+  },
+  {
+    "name": "expired-status",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"get_inclusion_proof.v2\",\"params\":{\"stateId\":\"abababababababababababababababababababababababababababababababab\",\"includeStatus\":true}}",
+    "response": "{\"jsonrpc\":\"2.0\",\"result\":{\"proof\":\"82182ad998798501f6f6f601\",\"status\":\"expired\"},\"id\":6}\n"
+  },
+  {
+    "name": "unknown-status",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"get_inclusion_proof.v2\",\"params\":{\"stateId\":\"abababababababababababababababababababababababababababababababab\",\"includeStatus\":true}}",
+    "response": "{\"jsonrpc\":\"2.0\",\"result\":{\"proof\":\"82182ad998798501f6f6f601\",\"status\":\"unknown\"},\"id\":7}\n"
+  },
+  {
+    "name": "status-without-provider",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"get_inclusion_proof.v2\",\"params\":{\"stateId\":\"abababababababababababababababababababababababababababababababab\",\"includeStatus\":true}}",
+    "response": "{\"jsonrpc\":\"2.0\",\"result\":{\"proof\":\"82182ad998798501f6f6f601\",\"status\":\"unknown\"},\"id\":8}\n"
+  },
+  {
+    "name": "unknown-extra-field-ignored",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"get_inclusion_proof.v2\",\"params\":{\"stateId\":\"abababababababababababababababababababababababababababababababab\",\"foo\":1}}",
+    "response": "{\"jsonrpc\":\"2.0\",\"result\":\"82182ad998798501d998778602d998788301410158210202020202020202020202020202020202020202020202020202020202020202025820030303030303030303030303030303030303030303030303030303030303030358202222222222222222222222222222222222222222222222222222222222222222f6584104040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404041a689b2cc05820000000000000000000000000000000000000000000000000000000000000000001\",\"id\":9}\n"
+  },
+  {
+    "name": "no-finalized-view",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"get_inclusion_proof.v2\",\"params\":{\"stateId\":\"abababababababababababababababababababababababababababababababab\"}}",
+    "response": "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32008,\"message\":\"Proof unavailable\",\"data\":{\"reason\":\"proof_unavailable\",\"detail\":\"no_finalized_view\",\"retryable\":true}},\"id\":10}\n"
+  },
+  {
+    "name": "internal-error",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"get_inclusion_proof.v2\",\"params\":{\"stateId\":\"abababababababababababababababababababababababababababababababab\"}}",
+    "response": "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"Failed to get inclusion proof\",\"data\":\"db down\"},\"id\":11}\n"
+  },
+  {
+    "name": "state-id-too-short",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"get_inclusion_proof.v2\",\"params\":{\"stateId\":\"abcd\"}}",
+    "response": "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,\"message\":\"stateId must be exactly 32 bytes (v2 wire format), got 2\"},\"id\":12}\n"
+  },
+  {
+    "name": "state-id-missing",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"get_inclusion_proof.v2\",\"params\":{}}",
+    "response": "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,\"message\":\"stateId is required\"},\"id\":13}\n"
+  },
+  {
+    "name": "params-not-an-object",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"get_inclusion_proof.v2\",\"params\":\"x\"}",
+    "response": "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,\"message\":\"Invalid parameters: json: cannot unmarshal string into Go value of type api.GetInclusionProofRequestV2\"},\"id\":14}\n"
+  },
+  {
+    "name": "params-array",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"get_inclusion_proof.v2\",\"params\":[1]}",
+    "response": "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,\"message\":\"Invalid parameters: json: cannot unmarshal array into Go value of type api.GetInclusionProofRequestV2\"},\"id\":15}\n"
+  },
+  {
+    "name": "include-status-wrong-type",
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"get_inclusion_proof.v2\",\"params\":{\"stateId\":\"abababababababababababababababababababababababababababababababab\",\"includeStatus\":\"yes\"}}",
+    "response": "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,\"message\":\"Invalid parameters: json: cannot unmarshal string into Go struct field GetInclusionProofRequestV2.includeStatus of type bool\"},\"id\":16}\n"
+  }
+]
