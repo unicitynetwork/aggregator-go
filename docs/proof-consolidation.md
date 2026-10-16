@@ -34,6 +34,20 @@ One total deadline governs the attempt (`Timeout`, default 10 s) and context can
 **No retry, no chunking, no chasing of newer latest seals, and nothing is ever submitted**: the client only calls
 `get_inclusion_proofs.v1`.
 
+## Unsharded partitions (natural, no sidecar)
+
+A partition with one shard (empty shard ID, zero shard-tree siblings: its shard tree is one leaf) needs no partition view:
+its ordinary UC already commits to everything a one-leaf view would repeat. The batch server therefore serves *latest*
+without `partitionView` when the admitted UC is structurally unsharded (the field is omitted, as for exact roots), and the
+library/client use the authenticated master UC itself as the target: one `latest` request, no exact-root wave, no view
+bytes, no leaf index and no derived certificates (`Counters.ViewLeafVisits == UCDerivations == 0`). Everything else is
+unchanged: bound/lineage, policy and optional pins (which must then describe an unsharded partition), body path to the
+seal, seal quorum with the anchored authority and epoch interval, `R ≥ R_min`, and every per-proof check. There is no flag:
+a UC with a nonempty shard ID still requires its view (`partition_view_unavailable`), a malformed or unauthenticated UC
+is an integrity error, a sidecar sent beside an unsharded UC goes through the existing view validation, and a direct
+master takes no peers. Deployment: standalone mode with real BFT and an empty shard ID is served from the retained-view
+catalog like `bft-shard` (parent/child and BFT-disabled stay `unsupported_configuration`).
+
 ## Outcomes
 
 `client.Error.Kind` (with `Retryable`, always "as a new attempt"; nothing is retried automatically):

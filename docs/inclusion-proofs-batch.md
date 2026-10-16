@@ -14,7 +14,9 @@ whose finalization publishes retained views; parent/child aggregation answers `-
 - `proofs` has exactly the request's count and order; each element is byte-identical to a `get_inclusion_proof.v2` result.
   All elements come from one pinned finalized view. Any absent state fails the whole call.
 - `partitionView` is present only for latest requests (hex CBOR, identical to the accepted transport sidecar); exact-root
-  results omit the field.
+  results omit the field. A latest response also omits it when the admitted UC is that of an unsharded partition (empty shard
+  ID, zero shard-tree siblings): that UC is complete by itself and needs no view. For a sharded UC the view is required
+  (`partition_view_unavailable`); there is no option to relax this.
 - Limits: params 32 KiB, request 64 KiB, JSON-RPC id 128 encoded bytes, response 8 MiB (serialized JSON-RPC), 8 concurrent
   batches / pins, 5 s execution.
 

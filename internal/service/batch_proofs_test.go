@@ -152,7 +152,10 @@ func (e *batchEnv) addRecords(n int, refTime uint64) []api.StateID {
 }
 
 // finalize publishes the current tree as the next block, with an optional partition view.
-func (e *batchEnv) finalize(view []byte) []byte {
+func (e *batchEnv) finalize(view []byte) []byte { return e.finalizeUC(view, nil) }
+
+// finalizeUC is finalize with a hook shaping the certified UC (components and shard path).
+func (e *batchEnv) finalizeUC(view []byte, shape func(uc *types.UnicityCertificate)) []byte {
 	e.blocks++
 	var prevSeq uint64
 	if e.prev != nil {
@@ -162,6 +165,9 @@ func (e *batchEnv) finalize(view []byte) []byte {
 	e.prev = rv
 	root := rv.RootHashRaw()
 	uc := types.UnicityCertificate{Version: 1, InputRecord: &types.InputRecord{Version: 1, RoundNumber: e.blocks, Hash: root, SummaryValue: []byte{}}}
+	if shape != nil {
+		shape(&uc)
+	}
 	ucBytes, err := types.Cbor.Marshal(&uc)
 	require.NoError(e.t, err)
 	require.NoError(e.t, e.catalog.Publish(context.Background(), proofview.PublishInput{
@@ -597,4 +603,65 @@ func TestBatch_RequestOrderAndAllOrNoneWithBatchedLookups(t *testing.T) {
 	e.recs.mu.Lock()
 	require.Equal(t, 1, e.recs.calls)
 	e.recs.mu.Unlock()
+}
+
+// shapeUC gives the UC the components of a certified UC; shard is its shard ID and siblings its shard path.
+func shapeUC(shard types.ShardID, siblings [][]byte) func(*types.UnicityCertificate) {
+	return func(uc *types.UnicityCertificate) {
+		uc.TRHash = bytes.Repeat([]byte{1}, 32)
+		uc.ShardConfHash = bytes.Repeat([]byte{2}, 32)
+		uc.ShardTreeCertificate = types.ShardTreeCertificate{Shard: shard, SiblingHashes: siblings}
+		uc.UnicityTreeCertificate = &types.UnicityTreeCertificate{Version: 1, Partition: 7}
+		uc.UnicitySeal = &types.UnicitySeal{Version: 1, RootChainRoundNumber: 5, Hash: bytes.Repeat([]byte{3}, 32)}
+	}
+}
+
+// An unsharded partition's UC is complete by itself: the batch is served without a partition
+// view (the field is omitted), exactly like an exact-root response.
+func TestBatch_UnshardedLatestNeedsNoPartitionView(t *testing.T) {
+	e := newBatchEnv(t, proofview.DefaultLimits())
+	ids := e.addRecords(3, 1000)
+	root := e.finalizeUC(nil, shapeUC(types.ShardID{}, nil))
+
+	resp, err := e.svc.GetInclusionProofsV1(context.Background(), e.request(ids, nil))
+	require.Nil(t, err)
+	require.Len(t, resp.Proofs, 3)
+	require.Empty(t, resp.PartitionView)
+	raw, jerr := json.Marshal(resp)
+	require.NoError(t, jerr)
+	require.NotContains(t, string(raw), "partitionView")
+	var uc types.UnicityCertificate
+	require.NoError(t, types.Cbor.Unmarshal(resp.Proofs[0].InclusionProof.UnicityCertificate, &uc))
+	require.Equal(t, root, []byte(uc.InputRecord.Hash))
+
+	// a legacy sidecar of an unsharded UC is still served as it is (validated by the existing path client side)
+	e.addRecords(1, 1001)
+	e.finalizeUC([]byte{0xA1, 0x01}, shapeUC(types.ShardID{}, nil))
+	resp, err = e.svc.GetInclusionProofsV1(context.Background(), e.request(ids, nil))
+	require.Nil(t, err)
+	require.Equal(t, api.HexBytes{0xA1, 0x01}, resp.PartitionView)
+}
+
+// The view stays required for a sharded UC and for anything malformed: no downgrade, no flag.
+func TestBatch_MissingViewStaysRefusedUnlessStructurallyUnsharded(t *testing.T) {
+	zero := bytes.Repeat([]byte{9}, 32)
+	sharded, _ := types.ShardID{}.Split()
+	for name, shape := range map[string]func(*types.UnicityCertificate){
+		"sharded UC (nonempty shard ID)":              shapeUC(sharded, [][]byte{zero}),
+		"nonempty shard ID, zero siblings":            shapeUC(sharded, nil),
+		"empty shard ID with a nonempty shard path":   shapeUC(types.ShardID{}, [][]byte{zero}),
+		"no unicity tree certificate":                 func(uc *types.UnicityCertificate) { shapeUC(types.ShardID{}, nil)(uc); uc.UnicityTreeCertificate = nil },
+		"no seal":                                     func(uc *types.UnicityCertificate) { shapeUC(types.ShardID{}, nil)(uc); uc.UnicitySeal = nil },
+		"bare UC without components (test publisher)": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newBatchEnv(t, proofview.DefaultLimits())
+			ids := e.addRecords(1, 1000)
+			e.finalizeUC(nil, shape)
+			_, err := e.svc.GetInclusionProofsV1(context.Background(), e.request(ids, nil))
+			requireBatchErr(t, err, jsonrpc.ProofUnavailableCode, "proof_unavailable", "partition_view_unavailable")
+		})
+	}
+	require.False(t, isUnshardedUC(nil))
+	require.False(t, isUnshardedUC([]byte{0xff, 0x00}))
 }
