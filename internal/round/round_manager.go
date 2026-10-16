@@ -146,6 +146,9 @@ type RoundManager struct {
 	// statusTracker backs the unauthenticated proof status hints (pending/expired/unknown).
 	statusTracker *proofstatus.Tracker
 
+	// waitNotify wakes long-poll waiters (see SetWaitNotifier); nil when long-poll is not wired.
+	waitNotify atomic.Pointer[func()]
+
 	// Streaming support
 	commitmentStream chan *models.CertificationRequest
 	streamMutex      sync.RWMutex
@@ -1440,8 +1443,33 @@ func (rm *RoundManager) setReferenceTime(referenceTime uint64) {
 			return
 		}
 		if rm.referenceTime.CompareAndSwap(current, referenceTime) {
+			// A queued request whose deadline this passes expires now, not at the next lookup:
+			// a long-poll waiter learns about it without any client poll (in-round entries
+			// are exempt, see proofstatus.Tracker.Sweep).
+			rm.statusTracker.Sweep()
 			return
 		}
+	}
+}
+
+// SetWaitNotifier registers the long-poll wake-up: f is called, without any round manager lock
+// held, after a finalization attempt has completed every serving boundary (legacy and retained
+// publication, proof-ready cache, pending-hint clearing), and by the status tracker for drops,
+// sweeps and resets. It must not block. Call before Start.
+func (rm *RoundManager) SetWaitNotifier(f func()) {
+	if f == nil {
+		rm.waitNotify.Store(nil)
+		rm.statusTracker.SetNotify(nil)
+		return
+	}
+	rm.waitNotify.Store(&f)
+	rm.statusTracker.SetNotify(f)
+}
+
+// notifyWaiters is called after the serving boundary of a finalization path.
+func (rm *RoundManager) notifyWaiters() {
+	if f := rm.waitNotify.Load(); f != nil {
+		(*f)()
 	}
 }
 
@@ -1855,6 +1883,7 @@ func (rm *RoundManager) initProofViews(cfg *config.Config, client *bft.BFTClient
 		return nil
 	}
 	rm.proofPub.SetSealVerifier(client.SealVerifier)
+	rm.proofPub.SetNotify(rm.notifyWaiters)
 	client.SetProofMaterialSink(rm.proofPub)
 	return nil
 }
@@ -1880,6 +1909,7 @@ func (rm *RoundManager) publishStartupView(ctx context.Context) {
 		return
 	}
 	rm.proofPub.EnsurePublishedAtStartup(ctx, latest)
+	rm.notifyWaiters()
 }
 
 // publishRecoveredBlock publishes a block finalized by recovery once the backend and
@@ -1894,9 +1924,12 @@ func (rm *RoundManager) publishRecoveredBlock(ctx context.Context, blockNumber *
 		rm.logger.WithContext(ctx).Warn("Recovered block cannot be loaded for proof view publication",
 			"blockNumber", blockNumber.String())
 		rm.proofPub.InvalidateLatest()
+		rm.notifyWaiters()
 		return
 	}
 	rm.proofPub.PublishFinalized(ctx, block)
+	// Only marks and signals (takes no round manager lock), so it is safe under finalizationMu.
+	rm.notifyWaiters()
 }
 
 // newStatusTracker creates the proof status tracker with the default bounds.

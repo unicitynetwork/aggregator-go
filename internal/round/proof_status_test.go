@@ -251,3 +251,45 @@ func TestProofStatus_DeactivationResetsAdmissionsButClearProofPendingDoesNot(t *
 	rm.statusTracker.Reset() // what Deactivate does after clearProofPending
 	require.Equal(t, api.ProofStatusUnknown, rm.ProofStatus(c.StateID))
 }
+
+// --- long-poll wake sources (A2) ---
+
+// A reference-time advance sweeps queued requests whose deadline it passes and wakes waiters
+// without any lookup; in-round requests are exempt.
+func TestWaitNotify_ReferenceTimeAdvanceSweepsAndWakes(t *testing.T) {
+	rm := newStatusRM(t)
+	var n int
+	rm.SetWaitNotifier(func() { n++ })
+	queued := testutil.CreateTestCertificationRequest(t, "notify_queued")
+	inRound := testutil.CreateTestCertificationRequest(t, "notify_inround")
+	require.True(t, admit(rm, queued, 1500))
+	require.True(t, admit(rm, inRound, 1500))
+	rm.startStatusRound(t, 1, 1000)
+	process(t, rm, inRound)
+
+	rm.setReferenceTime(1200) // deadline not reached
+	require.Zero(t, n)
+	rm.setReferenceTime(1100) // never moves backwards: no sweep, no wake
+	require.Zero(t, n)
+	rm.setReferenceTime(2000)
+	require.Equal(t, 1, n, "the queued request expired by the advance, nobody polled")
+	require.Equal(t, api.ProofStatusExpired, rm.ProofStatus(queued.StateID))
+	require.Equal(t, api.ProofStatusPending, rm.ProofStatus(inRound.StateID), "in-round entries never expire by a later reference time")
+}
+
+func TestWaitNotify_UnsetIsANoOpAndSetWiresTheTracker(t *testing.T) {
+	rm := newStatusRM(t)
+	rm.notifyWaiters() // nil notifier: nothing
+	c := testutil.CreateTestCertificationRequest(t, "notify_wired")
+	admit(rm, c, 5000)
+	rm.statusTracker.Reset()
+
+	var n int
+	rm.SetWaitNotifier(func() { n++ })
+	rm.notifyWaiters()
+	rm.statusTracker.Reset() // demotion path
+	require.Equal(t, 2, n)
+	rm.SetWaitNotifier(nil)
+	rm.notifyWaiters()
+	require.Equal(t, 2, n)
+}

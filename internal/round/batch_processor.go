@@ -668,6 +668,10 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		record.ProposalID = existingBlock.ProposalID
 	}
 	block.ProposalID = existingBlock.ProposalID
+	// Runs after every return below, so after finalizationMu is released and after publication,
+	// the proof-ready update and the clearing of the pending hints; on failure it lets waiters
+	// observe the (unavailable) outcome instead of sleeping on a missed wake.
+	defer rm.notifyWaiters()
 	if existingBlock.Finalized {
 		localRoot, err := rm.smtBackend.RootHashRaw(ctx)
 		if err != nil {
