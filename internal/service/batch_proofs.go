@@ -262,9 +262,13 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 
 	var view []byte
 	if latest {
-		if view = lease.PartitionView(); len(view) == 0 {
-			// latest is the current certification; never fall back to an older one
-			return nil, unavailable("partition_view_unavailable")
+		// The decision is made on the admitted UC first: the UC of an unsharded partition is complete
+		// by itself and is served without a partition view even if the catalog holds one (a sharded UC
+		// always needs its view; latest is the current certification, never an older one).
+		if !isUnshardedUC(lease.UC()) {
+			if view = lease.PartitionView(); len(view) == 0 {
+				return nil, unavailable("partition_view_unavailable")
+			}
 		}
 	}
 	blk := lease.Block()
@@ -433,6 +437,21 @@ func (s *BatchProofService) absentError(req *api.GetInclusionProofsRequestV1, la
 	}
 	e.Indexes = classes
 	return e
+}
+
+// isUnshardedUC reports whether the (admitted: the catalog publishes only authenticated
+// certifications) UC is structurally that of an unsharded partition: empty shard ID and zero
+// shard-tree siblings, so its shard tree is a single leaf and there are no peers whose roots a
+// partition view would have to carry. Anything malformed or sharded is not (the view stays required).
+func isUnshardedUC(raw []byte) bool {
+	var uc types.UnicityCertificate
+	if len(raw) == 0 || types.Cbor.Unmarshal(raw, &uc) != nil {
+		return false
+	}
+	if uc.InputRecord == nil || uc.UnicitySeal == nil || uc.UnicityTreeCertificate == nil {
+		return false
+	}
+	return uc.ShardTreeCertificate.Shard.Length() == 0 && len(uc.ShardTreeCertificate.SiblingHashes) == 0
 }
 
 func dbError(ctx context.Context, err error) *BatchError {

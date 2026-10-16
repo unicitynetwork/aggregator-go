@@ -34,6 +34,8 @@ func run(n, perShard int) error {
 		return err
 	}
 	defer sim.Close()
+	// an unsharded partition needs no partition view: the UC alone is the target
+	sim.OmitView = n == 1
 
 	var items []client.Item
 	var reqs [][]*api.CertificationRequest

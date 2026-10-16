@@ -304,9 +304,6 @@ func (c *Client) Consolidate(ctx context.Context, items []Item) (*Result, error)
 	if err != nil {
 		return nil, err
 	}
-	if len(mres.view) == 0 {
-		return nil, &Error{Kind: KindUnavailable, Shard: mg.ep.ShardID, Detail: "partition_view_unavailable", Err: errors.New("master response carries no partition view")}
-	}
 	stats.PartitionViewBytes = len(mres.view)
 	stats.Waves = 1
 	if err := ctxFail(); err != nil {
@@ -314,9 +311,21 @@ func (c *Client) Consolidate(ctx context.Context, items []Item) (*Result, error)
 	}
 
 	// authenticate the master (view/UC binding, trusted seal, R >= R_min) before any peer is contacted
+	// Without a view the library decides: a structurally unsharded UC is the target by itself
+	// (one request in total), anything else keeps the partition_view_unavailable outcome.
 	am, err := session.AuthenticateMaster(bound, shardResult(mg, items, mres), mres.view)
 	if err != nil {
+		if len(mres.view) == 0 {
+			if oc, ok := consolidation.OutcomeOf(err); ok && oc == consolidation.OutcomeUnavailable {
+				return nil, &Error{Kind: KindUnavailable, Shard: mg.ep.ShardID, Detail: "partition_view_unavailable", Outcome: oc, Err: err}
+			}
+		}
 		return nil, libFail(err)
+	}
+	if am.Direct() && len(groups) != 1 {
+		// an unsharded UC cannot serve items routed to several shards: no speculative peer requests
+		return nil, &Error{Kind: KindVerification, Outcome: consolidation.OutcomeIncompatibleLineage, Shard: mg.ep.ShardID,
+			Err: fmt.Errorf("the master UC is of an unsharded partition but the items are routed to %d endpoint groups", len(groups))}
 	}
 	if err := ctxFail(); err != nil {
 		return nil, err

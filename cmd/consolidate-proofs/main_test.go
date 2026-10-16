@@ -312,3 +312,24 @@ func TestCLI_EpochEndFromInstalledHistory(t *testing.T) {
 	code, msg = runWith()
 	require.Equal(t, exitInput, code, msg)
 }
+
+func TestCLI_UnshardedHasNoViewAndOneRequest(t *testing.T) {
+	e := setup(t, 1)
+	e.sim.OmitView = true
+	var stdout, stderr bytes.Buffer
+	require.Equal(t, exitOK, run([]string{"-config", e.cfg, "-in", e.in}, &stdout, &stderr), stderr.String())
+	var b Bundle
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &b))
+	require.Equal(t, 1, b.Stats.Requests)
+	require.Equal(t, 1, b.Stats.Waves)
+	require.Zero(t, b.Stats.PartitionViewBytes)
+	require.Zero(t, b.Counters.UCDerivations)
+	require.Zero(t, b.Counters.ViewLeafVisits)
+
+	// a sharded partition still needs its view: refused with the unavailable exit code
+	e = setup(t, 4)
+	e.sim.OmitView = true
+	stderr.Reset()
+	require.Equal(t, exitUnavailable, run([]string{"-config", e.cfg, "-in", e.in}, &stdout, &stderr), stderr.String())
+	require.Contains(t, stderr.String(), "partition_view_unavailable")
+}
