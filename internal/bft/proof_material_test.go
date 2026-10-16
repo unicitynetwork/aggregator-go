@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/proofpub"
 	"github.com/unicitynetwork/aggregator-go/internal/proofview"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
@@ -424,4 +426,31 @@ type wrongEpochStore struct{ tb *types.RootTrustBaseV1 }
 
 func (s wrongEpochStore) GetByEpoch(context.Context, uint64) (*types.RootTrustBaseV1, error) {
 	return s.tb, nil
+}
+
+// A sidecar for the UC of an unsharded partition is never validated, staged, persisted or published:
+// the UC alone is the target (no sidecar machinery in the natural unsharded deployment).
+func Test_ProofMaterial_UnshardedUCNeverCarriesASidecar(t *testing.T) {
+	root := prooftest.Hash("root-u")
+	f := prooftest.New(t, 0, 7, root, 80) // one-leaf partition: empty shard ID, zero siblings
+	require.True(t, proofmaterial.IsUnshardedUC(f.UC))
+	rm := &stubRoundManager{}
+	c, sink := newProofClient(t, rm, f)
+	proposeBlock(c, 7, root)
+	before := testutil.ToFloat64(metrics.BFTPartitionViewTotal.WithLabelValues("ok"))
+	skipped := testutil.ToFloat64(metrics.BFTPartitionViewTotal.WithLabelValues("unsharded_skipped"))
+
+	c.stagePartitionView(t.Context(), response(f, f.Raw)) // the root delivers the sidecar of the one-leaf partition
+	require.NoError(t, c.handleUnicityCertificate(t.Context(), f.UC, &certification.TechnicalRecord{Round: 8, Epoch: 1}))
+
+	require.Len(t, rm.finalizedBlocks, 1)
+	require.Nil(t, rm.finalizedBlocks[0].PartitionView, "nothing is persisted with the block")
+	require.Len(t, sink.got, 1)
+	require.Nil(t, sink.got[0].PartitionView, "nothing is published")
+	require.Equal(t, before, testutil.ToFloat64(metrics.BFTPartitionViewTotal.WithLabelValues("ok")), "the sidecar is not even validated")
+	require.Equal(t, skipped+1, testutil.ToFloat64(metrics.BFTPartitionViewTotal.WithLabelValues("unsharded_skipped")))
+
+	// a sharded UC still stages its view (unchanged)
+	g := prooftest.New(t, 2, 9, prooftest.Hash("root-s"), 81)
+	require.False(t, proofmaterial.IsUnshardedUC(g.UC))
 }

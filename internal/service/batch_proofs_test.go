@@ -634,12 +634,24 @@ func TestBatch_UnshardedLatestNeedsNoPartitionView(t *testing.T) {
 	require.NoError(t, types.Cbor.Unmarshal(resp.Proofs[0].InclusionProof.UnicityCertificate, &uc))
 	require.Equal(t, root, []byte(uc.InputRecord.Hash))
 
-	// a legacy sidecar of an unsharded UC is still served as it is (validated by the existing path client side)
+	// a sidecar the catalog may still hold for an unsharded UC (older publication, recovered block) is not served:
+	// the decision is made on the admitted UC first
 	e.addRecords(1, 1001)
 	e.finalizeUC([]byte{0xA1, 0x01}, shapeUC(types.ShardID{}, nil))
 	resp, err = e.svc.GetInclusionProofsV1(context.Background(), e.request(ids, nil))
 	require.Nil(t, err)
-	require.Equal(t, api.HexBytes{0xA1, 0x01}, resp.PartitionView)
+	require.Empty(t, resp.PartitionView)
+	raw, jerr = json.Marshal(resp)
+	require.NoError(t, jerr)
+	require.NotContains(t, string(raw), "partitionView")
+
+	// a sharded UC still carries and requires its view
+	sharded, _ := types.ShardID{}.Split()
+	e.addRecords(1, 1002)
+	e.finalizeUC([]byte{0xA1, 0x02}, shapeUC(sharded, [][]byte{bytes.Repeat([]byte{9}, 32)}))
+	resp, err = e.svc.GetInclusionProofsV1(context.Background(), e.request(ids, nil))
+	require.Nil(t, err)
+	require.Equal(t, api.HexBytes{0xA1, 0x02}, resp.PartitionView)
 }
 
 // The view stays required for a sharded UC and for anything malformed: no downgrade, no flag.

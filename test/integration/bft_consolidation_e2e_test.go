@@ -158,8 +158,13 @@ type e2eShard struct {
 
 func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost string, redisPort int) {
 	ctx := t.Context()
-	bits := map[int]int{4: 2, 8: 3}[n]
-	require.NotZero(t, bits, "4 or 8 shards")
+	bitsOf := map[int]int{1: 0, 4: 2, 8: 3}
+	bits, ok := bitsOf[n]
+	require.True(t, ok, "1 (unsharded, standalone), 4 or 8 shards")
+	// n == 1 is the natural unsharded deployment: standalone mode, empty BFT shard ID, no sidecar needed
+	unsharded := n == 1
+	partitionViewOK := promtest.ToFloat64(metrics.BFTPartitionViewTotal.WithLabelValues("ok"))
+	partitionViewSkipped := promtest.ToFloat64(metrics.BFTPartitionViewTotal.WithLabelValues("unsharded_skipped"))
 	basePort := 9300 + n*20
 
 	root := startHostRoot(t, ubft, basePort, basePort+1)
@@ -206,13 +211,15 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 		loaded = nil
 	}
 
+	aggOpts := make([]consolidationAggOpts, n)
 	for i, s := range shards {
-		s.stop = startConsolidationAggregator(ctx, t, consolidationAggOpts{
+		aggOpts[i] = consolidationAggOpts{
 			name: fmt.Sprintf("c%d-%d", n, i), port: strconv.Itoa(basePort + 10 + i), bftListen: fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", basePort+40+i),
 			mongoURI: mongoURI, redisHost: redisHost, redisPort: redisPort, stream: fmt.Sprintf("commitments:cons:%d:%d", n, i),
-			conf: s.conf, keys: keys[i], root: root, topology: loaded, shardIDLength: bits,
-		})
-		t.Cleanup(s.stop)
+			conf: s.conf, keys: keys[i], root: root, topology: loaded, shardIDLength: bits, standalone: unsharded,
+		}
+		s.stop = startConsolidationAggregator(ctx, t, aggOpts[i])
+		t.Cleanup(func() { s.stop() })
 	}
 	for _, s := range shards {
 		waitForBlock(t, s.url, 1, 90*time.Second)
@@ -463,10 +470,21 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 	// ---- verify every bundle with the reference verifier ----
 	for bi, bundle := range bundles {
 		require.Equal(t, 1, bundle.Counters.QuorumChecks)
-		require.Equal(t, n, bundle.Counters.BodyChecks)
+		if unsharded {
+			require.Equal(t, 1, bundle.Counters.BodyChecks)
+			require.Zero(t, bundle.Counters.ViewLeafVisits)
+			require.Zero(t, bundle.Counters.UCDerivations)
+			require.Zero(t, bundle.Stats.PartitionViewBytes, "no sidecar on the wire")
+		} else {
+			require.Equal(t, n, bundle.Counters.BodyChecks)
+		}
 		require.Equal(t, len(items), bundle.Counters.LeafChecks)
 		require.Equal(t, n, bundle.Stats.Requests)
-		require.Equal(t, 2, bundle.Stats.Waves)
+		if unsharded {
+			require.Equal(t, 1, bundle.Stats.Waves, "one latest request, no exact-root wave")
+		} else {
+			require.Equal(t, 2, bundle.Stats.Waves)
+		}
 		require.Len(t, bundle.Proofs, len(items))
 
 		var sealBytes []byte
@@ -506,9 +524,38 @@ func runConsolidationE2E(t *testing.T, n int, ubft, cli, mongoURI, redisHost str
 		require.Greater(t, len(seals), 1, "original proofs carry different seals")
 		_ = consolidation.OutcomeStale
 	}
+	if unsharded {
+		// restart leg: the aggregator recovers from its storage and publishes the validated current state
+		// (startup publication); consolidation keeps working without any sidecar
+		shards[0].stop()
+		shards[0].stop = startConsolidationAggregator(ctx, t, aggOpts[0])
+		waitForBlock(t, shards[0].url, 1, 90*time.Second)
+		var after consolidationBundle
+		require.Eventually(t, func() bool {
+			out := filepath.Join(dir, "bundle-after-restart.json")
+			code, stderr := runCLI(t, cli, cfgFile, inFile, out)
+			if code == 0 {
+				after = readBundle(t, out)
+				return true
+			}
+			t.Logf("after restart: exit %d %s", code, strings.TrimSpace(stderr))
+			return false
+		}, 120*time.Second, 2*time.Second)
+		require.Equal(t, 1, after.Stats.Requests)
+		require.Equal(t, 1, after.Stats.Waves)
+		require.Zero(t, after.Stats.PartitionViewBytes)
+		require.Zero(t, after.Counters.UCDerivations)
+		require.Len(t, after.Proofs, len(items))
+		t.Logf("restart leg: consolidated at root round %d with no sidecar", after.RootRound)
+	}
 	last := bundles[len(bundles)-1]
 	t.Logf("RESULT shards=%d items=%d attempts=%d success=%d unavailable=%d masterRound=%d requests=%d waves=%d viewBytes=%d responseBytes=%d",
 		n, len(items), attempts, len(bundles), unavailable, last.RootRound, last.Stats.Requests, last.Stats.Waves, last.Stats.PartitionViewBytes, last.Stats.ResponseBytes)
+	if unsharded {
+		// the root delivered sidecars of the one-leaf partition; none was validated, stored or served
+		require.Equal(t, partitionViewOK, promtest.ToFloat64(metrics.BFTPartitionViewTotal.WithLabelValues("ok")), "no sidecar was validated")
+		t.Logf("unsharded: sidecars skipped=%.0f", promtest.ToFloat64(metrics.BFTPartitionViewTotal.WithLabelValues("unsharded_skipped"))-partitionViewSkipped)
+	}
 	t.Logf("sidecar results: ok=%.0f missing=%.0f", promtest.ToFloat64(metrics.BFTPartitionViewTotal.WithLabelValues("ok")), promtest.ToFloat64(metrics.BFTPartitionViewTotal.WithLabelValues("missing")))
 }
 
@@ -521,9 +568,11 @@ type consolidationBundle struct {
 		ResponseBytes      int `json:"ResponseBytes"`
 	} `json:"stats"`
 	Counters struct {
-		QuorumChecks int `json:"QuorumChecks"`
-		BodyChecks   int `json:"BodyChecks"`
-		LeafChecks   int `json:"LeafChecks"`
+		QuorumChecks   int `json:"QuorumChecks"`
+		BodyChecks     int `json:"BodyChecks"`
+		LeafChecks     int `json:"LeafChecks"`
+		ViewLeafVisits int `json:"ViewLeafVisits"`
+		UCDerivations  int `json:"UCDerivations"`
 	} `json:"counters"`
 	Proofs []struct {
 		Input int    `json:"input"`
@@ -609,6 +658,7 @@ func rootRound(t *testing.T, root *bftRootInfo) uint64 {
 }
 
 type consolidationAggOpts struct {
+	standalone                                         bool // unsharded: standalone mode with an empty BFT shard ID
 	name, port, bftListen, mongoURI, redisHost, stream string
 	redisPort, shardIDLength                           int
 	conf                                               *bfttypes.PartitionDescriptionRecord
@@ -647,6 +697,10 @@ func startConsolidationAggregator(ctx context.Context, t *testing.T, o consolida
 		SigKey:  cmdbft.Key{Algorithm: cmdbft.KeyAlgorithmSecp256k1, PrivateKey: o.keys.sigPriv},
 		AuthKey: cmdbft.Key{Algorithm: cmdbft.KeyAlgorithmSecp256k1, PrivateKey: o.keys.authPriv},
 	}
+	mode := config.ShardingModeBFTShard
+	if o.standalone {
+		mode = config.ShardingModeStandalone
+	}
 	cfg := &config.Config{
 		Server: config.ServerConfig{Host: "127.0.0.1", Port: o.port, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second,
 			IdleTimeout: 60 * time.Second, ConcurrencyLimit: 100, HTTP2MaxConcurrentStreams: 1024},
@@ -667,7 +721,7 @@ func startConsolidationAggregator(ctx context.Context, t *testing.T, o consolida
 			CollectPhaseDuration: 200 * time.Millisecond, CollectMiniBatchSize: 500, SkipDuplicateCheck: true},
 		Storage: config.StorageConfig{UseRedisForCommitments: true, RedisStreamName: o.stream, RedisFlushInterval: 100 * time.Millisecond,
 			RedisMaxBatchSize: 1000, RedisCleanupInterval: time.Minute, RedisMaxStreamLength: 100000},
-		Sharding: config.ShardingConfig{Mode: config.ShardingModeBFTShard, ShardIDLength: o.shardIDLength},
+		Sharding: config.ShardingConfig{Mode: mode, ShardIDLength: max(o.shardIDLength, 1)},
 	}
 	if o.smt != nil {
 		cfg.SMT = *o.smt

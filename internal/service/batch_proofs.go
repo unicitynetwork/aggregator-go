@@ -262,10 +262,13 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 
 	var view []byte
 	if latest {
-		if view = lease.PartitionView(); len(view) == 0 && !isUnshardedUC(lease.UC()) {
-			// latest is the current certification; never fall back to an older one. A sharded UC
-			// needs its partition view; only the UC of an unsharded partition is complete by itself.
-			return nil, unavailable("partition_view_unavailable")
+		// The decision is made on the admitted UC first: the UC of an unsharded partition is complete
+		// by itself and is served without a partition view even if the catalog holds one (a sharded UC
+		// always needs its view; latest is the current certification, never an older one).
+		if !isUnshardedUC(lease.UC()) {
+			if view = lease.PartitionView(); len(view) == 0 {
+				return nil, unavailable("partition_view_unavailable")
+			}
 		}
 	}
 	blk := lease.Block()

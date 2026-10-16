@@ -37,8 +37,8 @@ One total deadline governs the attempt (`Timeout`, default 10 s) and context can
 ## Unsharded partitions (natural, no sidecar)
 
 A partition with one shard (empty shard ID, zero shard-tree siblings: its shard tree is one leaf) needs no partition view:
-its ordinary UC already commits to everything a one-leaf view would repeat. The batch server therefore serves *latest*
-without `partitionView` when the admitted UC is structurally unsharded (the field is omitted, as for exact roots), and the
+its ordinary UC already commits to everything a one-leaf view would repeat. The BFT client therefore neither validates, stages nor persists a sidecar the root delivers for such a UC (`aggregator_bft_partition_view_total{result="unsharded_skipped"}`), and the batch server serves *latest*
+without `partitionView` when the admitted UC is structurally unsharded (decided on the UC first; the field is omitted, as for exact roots), and the
 library/client use the authenticated master UC itself as the target: one `latest` request, no exact-root wave, no view
 bytes, no leaf index and no derived certificates (`Counters.ViewLeafVisits == UCDerivations == 0`). Everything else is
 unchanged: bound/lineage, policy and optional pins (which must then describe an unsharded partition), body path to the
