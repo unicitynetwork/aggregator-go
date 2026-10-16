@@ -125,7 +125,9 @@ func ParseGetNonInclusionProofRequestV1(params json.RawMessage) (*GetNonInclusio
 		if err := dec.Decode(&s); err != nil {
 			return nil, errors.New("stateId must be a string")
 		}
-		s = strings.TrimPrefix(strings.TrimPrefix(s, "0x"), "0X")
+		if len(s) >= 2 && (s[:2] == "0x" || s[:2] == "0X") {
+			s = s[2:] // one optional prefix only
+		}
 		if len(s) != 2*StateTreeKeyLengthBytes {
 			return nil, errors.New("stateId must be 32 bytes")
 		}

@@ -55,6 +55,10 @@ func VerdictOf(err error) string {
 	return ""
 }
 
+// ErrEmptyRootEncoding: the input record hash is the empty byte string. The certified empty tree is the
+// native null hash only (the corpus SPEC); an empty byte string is a different encoding and is not it.
+var ErrEmptyRootEncoding = errors.New("the input record hash is an empty byte string, not the native null of the empty tree")
+
 func fail(verdict string, err error) error { return &Error{Verdict: verdict, Err: err} }
 
 // Context is the trusted verification context.
@@ -187,6 +191,9 @@ func (v *Verifier) decodeUC(raw []byte) (*types.UnicityCertificate, error) {
 func (v *Verifier) checkBody(uc *types.UnicityCertificate) error {
 	if uc.InputRecord == nil || uc.UnicitySeal == nil || uc.UnicityTreeCertificate == nil {
 		return errors.New("unicity certificate lacks a component")
+	}
+	if uc.InputRecord.Hash != nil && len(uc.InputRecord.Hash) == 0 {
+		return ErrEmptyRootEncoding
 	}
 	for i, s := range uc.UnicityTreeCertificate.HashSteps {
 		if s == nil {

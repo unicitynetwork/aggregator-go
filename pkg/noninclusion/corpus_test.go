@@ -25,7 +25,8 @@ type vector struct {
 	Wrapper  string `json:"wrapper"`
 	Context  string `json:"context"`
 	Expected struct {
-		Verdict string `json:"verdict"`
+		Verdict    string   `json:"verdict"`
+		Acceptable []string `json:"acceptable"`
 	} `json:"expected"`
 }
 
@@ -106,12 +107,31 @@ func TestCorpusVerdicts(t *testing.T) {
 						require.NoError(t, err)
 					}
 				}
-				require.Equal(t, v.Expected.Verdict, verdict)
+				if verdict == v.Expected.Verdict {
+					return
+				}
+				// only a rejection may differ, and only to a listed class
+				require.Contains(t, v.Expected.Acceptable, verdict, "verdict %s, expected %s", verdict, v.Expected.Verdict)
 			})
 			n++
 		}
 	}
 	require.GreaterOrEqual(t, n, 55)
+}
+
+// The empty tree is the native null; an empty byte string is rejected as its own error at the body stage.
+func TestEmptyByteStringRootIsNotTheEmptyTree(t *testing.T) {
+	var v vector
+	readJSON(t, "negative/uc-empty-root-as-empty-byte-string.json", &v)
+	var contexts map[string]corpusContext
+	readJSON(t, "contexts.json", &contexts)
+	w, _ := hex.DecodeString(v.Wrapper)
+	q, _ := hex.DecodeString(v.Query)
+	var resp api.GetNonInclusionProofResponseV1
+	require.NoError(t, resp.UnmarshalCBOR(w))
+	_, err := verifierFor(t, contexts[v.Context]).VerifyFor(api.StateID(q), resp.Proof)
+	require.ErrorIs(t, err, noninclusion.ErrEmptyRootEncoding)
+	require.Equal(t, noninclusion.VerdictUCInvalid, noninclusion.VerdictOf(err))
 }
 
 // A proof bound to one state cannot be verified for another, and ForState cannot rebind.

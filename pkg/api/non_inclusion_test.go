@@ -168,6 +168,7 @@ func TestNonInclusionRequestParsing(t *testing.T) {
 		"missing":       `{}`,
 		"trailing":      `{"stateId":"` + id + `"} {}`,
 		"number":        `{"stateId":5}`,
+		"double prefix": `{"stateId":"0x0X` + id + `"}`,
 		"empty":         ``,
 		"null":          `null`,
 	} {
