@@ -62,10 +62,16 @@ func proofStatusFlow(t *testing.T, cfg config.Config) {
 	resp, err := svc.CertificationRequest(ctx, warm)
 	require.NoError(t, err)
 	require.Equal(t, "SUCCESS", resp.Status)
+	// Wait for the warm-up proof to be servable, not merely for its record to exist: the record
+	// becomes visible when the block is finalized in storage, but the disk backend publishes the
+	// proof view (the root proofs are served against) a moment later. Until then the published
+	// root is still the initial empty one, no block has it, and the service answers "no block
+	// found with root hash 00…0". That is the same before-the-first-block answer the memory
+	// backend gives; it is not what this test is about.
 	require.Eventually(t, func() bool {
-		r, err := storage.AggregatorRecordStorage().GetByStateID(ctx, warm.StateID)
-		return err == nil && r != nil
-	}, 10*time.Second, 25*time.Millisecond)
+		p, err := svc.GetInclusionProofV2(ctx, &api.GetInclusionProofRequestV2{StateID: warm.StateID})
+		return err == nil && proofIncluded(p)
+	}, 10*time.Second, 25*time.Millisecond, "warm-up proof servable")
 
 	req := testutil.CreateTestCertificationRequest(t, "status_flow").ToAPI()
 	require.Equal(t, api.ProofStatusUnknown, svc.ProofStatusHint(req.StateID), "never seen")
