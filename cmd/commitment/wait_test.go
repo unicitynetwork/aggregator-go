@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -255,3 +256,47 @@ func TestWait_ZeroIntervalNeverBusyLoops(t *testing.T) {
 }
 
 var _ = strings.TrimSpace
+
+func errorReply(w http.ResponseWriter, code int, data string) {
+	d := ""
+	if data != "" {
+		d = `,"data":` + data
+	}
+	_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"error":{"code":`+strconv.Itoa(code)+`,"message":"m"`+d+`}}`)
+}
+
+// Only method-level answers are capability evidence: a saturated or confused server must not make
+// the run give up long-polling.
+func TestWait_PreDispatchErrorsAreNotCapabilityEvidence(t *testing.T) {
+	for code, wantOmit := range map[int]bool{-32006: false, -32600: false, -32601: false, -32700: false, -32603: false, -32000: true, -32008: true} {
+		a := &aggregator{reply: func(i int, w http.ResponseWriter) {
+			if i == 0 {
+				errorReply(w, code, "")
+				return
+			}
+			result(w, `"`+proofHex(t)+`"`)
+		}}
+		srv := httptest.NewServer(a)
+		_, _, err := newWaiter(srv, nil).wait(t.Context(), req())
+		require.NoError(t, err, code)
+		c := a.snapshot()
+		require.Len(t, c, 2, code)
+		require.NotNil(t, c[0].waitMs)
+		require.Equal(t, wantOmit, c[1].waitMs == nil, "code %d", code)
+		srv.Close()
+	}
+}
+
+// The error data is checked as raw bytes: 5.0 and 1e3 are not integer tokens.
+func TestWait_MalformedEchoSpellingsInErrorDataAreRejected(t *testing.T) {
+	for _, bad := range []string{`5.0`, `1e3`, `-1`, `"5"`, `null`} {
+		a := &aggregator{reply: func(i int, w http.ResponseWriter) {
+			errorReply(w, -32008, `{"reason":"proof_unavailable","detail":"state_pending","retryable":true,"waitedMs":`+bad+`}`)
+		}}
+		srv := httptest.NewServer(a)
+		_, _, err := newWaiter(srv, nil).wait(t.Context(), req())
+		require.Error(t, err, bad)
+		require.Contains(t, err.Error(), "waitedMs", bad)
+		srv.Close()
+	}
+}

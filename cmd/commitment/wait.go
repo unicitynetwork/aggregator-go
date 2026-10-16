@@ -126,15 +126,18 @@ func (w *proofWaiter) wait(ctx context.Context, req *api.CertificationRequest) (
 
 		if proofResp.Error != nil {
 			w.logger.Printf("get_inclusion_proof.v2 attempt %d returned error: %s (code %d)", attempts, proofResp.Error.Message, proofResp.Error.Code)
-			if data, merr := json.Marshal(proofResp.Error.Data); merr == nil && proofResp.Error.Data != nil {
-				ms, present, eerr := api.FindEchoMs(data)
+			if len(proofResp.Error.Data) > 0 { // raw bytes: 5.0 or 1e3 stay detectable
+				ms, present, eerr := api.FindEchoMs(proofResp.Error.Data)
 				if eerr != nil {
 					return nil, attempts, fmt.Errorf("malformed waitedMs echo in the error data: %w", eerr)
 				}
 				echo, echoed = ms, present
 			}
-			if sent > 0 && !echoed {
-				w.noWait = true // a valid response without the echo: pace normally from now on
+			// Only an answer of the method itself is capability evidence. Pre-dispatch and
+			// infrastructure errors (-32006 saturation, -32600/-32601/-32700 envelope or routing,
+			// -32603 internal) say nothing about waitMs support.
+			if sent > 0 && !echoed && methodLevelError(proofResp.Error.Code) {
+				w.noWait = true // a method answer without the echo: pace normally from now on
 			}
 			if perr := w.pause(ctx, took, echo, echoed); perr != nil {
 				return nil, attempts, perr
@@ -190,4 +193,10 @@ func (w *proofWaiter) wait(ctx context.Context, req *api.CertificationRequest) (
 	}
 
 	return nil, attempts, fmt.Errorf("timed out waiting for inclusion proof for state ID %s", req.StateID)
+}
+
+// methodLevelError: the error codes get_inclusion_proof.v2 itself answers with after dispatch
+// (validation and the typed proof-unavailable error).
+func methodLevelError(code int) bool {
+	return code == -32000 || code == -32008
 }

@@ -650,7 +650,10 @@ func (c *Client) fetchOnce(ctx context.Context, g *shardGroup, items []Item, roo
 		if parseErr == nil && rr.JSONRPC == jsonrpc.Version && present(rr.Error) {
 			var eb rpcErrorBody
 			if json.Unmarshal(rr.Error, &eb) == nil {
-				return nil, wait != nil && api.IsParserNegotiation(eb.Code, eb.Data), rpcError(g.ep.ShardID, eb.Code, eb.Message, eb.Data)
+				// the retry decision needs the same envelope checks as a 2xx answer: a foreign or
+				// cached body (wrong id) is not capability evidence
+				ours := string(bytes.TrimSpace(rr.ID)) == strconv.Itoa(requestID)
+				return nil, ours && wait != nil && api.IsParserNegotiation(eb.Code, eb.Data), rpcError(g.ep.ShardID, eb.Code, eb.Message, eb.Data)
 			}
 		}
 		return nil, false, &Error{Kind: KindTransport, Shard: g.ep.ShardID, Detail: fmt.Sprintf("http_%d", resp.StatusCode),

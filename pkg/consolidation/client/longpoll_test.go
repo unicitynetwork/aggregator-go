@@ -314,3 +314,42 @@ func TestLongPoll_MissingOrZeroEchoIsAccepted(t *testing.T) {
 }
 
 var _ = strings.TrimSpace
+
+// A non-2xx answer carrying the generic rejection but another request's id (a proxy, a cached or
+// foreign body) is not capability evidence: no retry.
+func TestLongPoll_NoRetryOnNon2xxWithAForeignID(t *testing.T) {
+	for name, id := range map[string]string{"wrong id": "99", "string id": `"1"`, "null id": "null"} {
+		var n int
+		var mu sync.Mutex
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			n++
+			mu.Unlock()
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":`+id+`,"error":{"code":-32602,"message":"m","data":`+genericMalformed+`}}`)
+		}))
+		c, g, items := lpClient(srv, nil)
+		var st Stats
+		_, err := c.fetch(t.Context(), g, items, nil, &st)
+		require.Error(t, err, name)
+		require.Equal(t, 1, n, name)
+		require.Zero(t, st.ParserRetries, name)
+		srv.Close()
+	}
+	// the same body with our id (an HTTP 400 from a strict parser behind a proxy) does retry
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		if n == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"m","data":`+genericMalformed+`}}`)
+			return
+		}
+		_, _ = io.WriteString(w, successBody(""))
+	}))
+	defer srv.Close()
+	c, g, items := lpClient(srv, nil)
+	_, err := c.fetch(t.Context(), g, items, nil, &Stats{})
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+}
