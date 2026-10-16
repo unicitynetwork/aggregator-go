@@ -482,6 +482,17 @@ func (prm *ParentRoundManager) FinalizationReadLock() func() {
 	return func() {}
 }
 
+// MarkRequestAdmitted implements Manager (parent aggregation keeps no status hints).
+func (prm *ParentRoundManager) MarkRequestAdmitted(api.StateID, uint64) bool { return false }
+
+// ClearRequestAdmitted implements Manager.
+func (prm *ParentRoundManager) ClearRequestAdmitted(api.StateID) {}
+
+// ProofStatus implements Manager: parent mode has no per-state pending knowledge.
+func (prm *ParentRoundManager) ProofStatus(api.StateID) api.ProofStatus {
+	return api.ProofStatusUnknown
+}
+
 func (prm *ParentRoundManager) GetKnownNotReadyBlock(stateID api.StateID) (*models.Block, bool) {
 	return nil, false
 }

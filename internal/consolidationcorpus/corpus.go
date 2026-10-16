@@ -143,6 +143,10 @@ type RPCErrorData struct {
 	Detail    string  `json:"detail"`
 	Retryable bool    `json:"retryable"`
 	Limit     *uint64 `json:"limit,omitempty"`
+	// Indexes lists the offending request indexes per class of a state status error
+	// (state_pending/state_expired/state_unknown/state_not_in_root). Consumers may ignore it:
+	// the classified outcome does not depend on it.
+	Indexes map[string][]int `json:"indexes,omitempty"`
 }
 
 // RPCError is the error object of a JSON-RPC failure. Data is absent on bare

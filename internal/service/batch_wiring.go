@@ -42,6 +42,15 @@ func NewBatchProofHandler(cfg *config.Config, rm any, storage interfaces.Storage
 	batch := NewBatchProofService(CatalogViewSource(provider.ProofViewCatalog()), records, routed.ShardValidator(), BatchProofConfig{
 		MaxConcurrent: cfg.SMT.MaxConcurrentBatches,
 		MaxExecution:  cfg.SMT.BatchTimeout,
+		Status:        statusSource(rm),
 	})
 	return batch.HandleRPC, ""
+}
+
+// statusSource returns the in-memory proof status source of the round manager, if it has one.
+func statusSource(rm any) BatchStatusSource {
+	if st, ok := rm.(BatchStatusSource); ok {
+		return st
+	}
+	return nil
 }

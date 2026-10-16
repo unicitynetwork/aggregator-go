@@ -389,6 +389,10 @@ The `stateId` must be exactly 64 hex characters (32 raw bytes).
 }
 ```
 
+Optional `"includeStatus": true` returns `{"proof": "<the same hex string>", "status": "included|pending|expired|unknown"}`
+(an unauthenticated hint, see [docs/proof-status.md](docs/proof-status.md)); without it the result is exactly the
+string below, and a server without the feature answers with the plain string.
+
 The `result` field is a hex-encoded CBOR array whose proof is tagged. Every inclusion proof carries
 the reference time at which its leaf was created, independently of request-deadline policy:
 ```

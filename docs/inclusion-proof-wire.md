@@ -21,6 +21,10 @@ correct -- it does not present an implementation gap as a specification.
 
 ## RPC response
 
+Optional `includeStatus: true` in the request params wraps the result as
+`{"proof": <the string below, unchanged>, "status": "included|pending|expired|unknown"}`; see
+[proof-status.md](proof-status.md). Without it the result is exactly the string described here.
+
 The `result` field of `get_inclusion_proof.v2` is a hex-encoded CBOR array:
 
 ```
