@@ -328,7 +328,7 @@ func TestResume_FIFOWithinQuotaAndHeadroom(t *testing.T) {
 			g.Done()
 			permits[i].Release() // the request ended: the response was written, the token goes back
 		}()
-		require.Eventually(t, func() bool { return reg.Stats().Queued+reg.Stats().Running > i }, time.Second, time.Millisecond)
+		require.Eventually(t, func() bool { return reg.Stats().Enqueued > uint64(i) }, time.Second, time.Millisecond)
 	}
 	wg.Wait()
 	require.Equal(t, []int{0, 1, 2, 3}, order, "FIFO")

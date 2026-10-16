@@ -93,6 +93,7 @@ type Registry struct {
 	shedDraining atomic.Uint64
 	wakes        atomic.Uint64
 	notifies     atomic.Uint64
+	enqueued     atomic.Uint64
 
 	// testHookArm runs in Wait before the arm check; tests use it as a barrier.
 	testHookArm func()
@@ -216,13 +217,14 @@ type Stats struct {
 	ShedDraining uint64
 	Wakes        uint64
 	Notifies     uint64
+	Enqueued     uint64 // resumptions ever queued
 }
 
 func (r *Registry) Stats() Stats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return Stats{Reserved: len(r.waiters), Queued: len(r.queue), Running: r.running, Generation: r.gen,
-		ShedCapacity: r.shedCapacity.Load(), ShedDraining: r.shedDraining.Load(), Wakes: r.wakes.Load(), Notifies: r.notifies.Load()}
+		ShedCapacity: r.shedCapacity.Load(), ShedDraining: r.shedDraining.Load(), Wakes: r.wakes.Load(), Notifies: r.notifies.Load(), Enqueued: r.enqueued.Load()}
 }
 
 // Waiter is one admitted wait.
@@ -418,6 +420,7 @@ func (w *Waiter) Resume(ctx context.Context, p *jsonrpc.Permit, until time.Time)
 	t := &ticket{w: w, permit: p, ctx: ctx, until: until, granted: make(chan struct{})}
 	w.ticket = t
 	r.queue = append(r.queue, t)
+	r.enqueued.Add(1)
 	r.queueLen.Store(int32(len(r.queue)))
 	r.mu.Unlock()
 	r.Schedule()
