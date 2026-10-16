@@ -78,7 +78,15 @@ type AuthenticatedMaster struct {
 	// leafIdx indexes the authenticated view's leaves by shard (built once, O(S))
 	leafIdx map[string]int
 	round   uint64
+
+	// direct is set for an unsharded partition: the master UC itself (canonical bytes) is the
+	// target, there is no view, no index and no derivation.
+	direct []byte
 }
+
+// Direct reports whether the master is an authenticated unsharded UC used as the target itself
+// (no partition view, no peers).
+func (m *AuthenticatedMaster) Direct() bool { return m.direct != nil }
 
 // certificate derives the ordinary UC of the shard at leaf index i from the authenticated view
 // (no tree rebuild and no scheme re-validation: the dependency keeps the tree built at
@@ -106,6 +114,9 @@ func (m *AuthenticatedMaster) Round() uint64 { return m.round }
 // PeerRoot returns the target state root the authenticated view commits to for
 // a shard (the exact root to request from that shard's aggregator).
 func (m *AuthenticatedMaster) PeerRoot(shard types.ShardID) ([]byte, error) {
+	if m.Direct() {
+		return nil, fail(OutcomeInvalidInput, -1, nil, "an unsharded master UC has no peers")
+	}
 	idx, ok := m.leaf(shard)
 	if !ok || m.view.Leaves[idx].InputRecord == nil {
 		return nil, fail(OutcomeBindingMismatch, -1, nil, "shard %q is not in the master view", shard)
@@ -125,14 +136,15 @@ func (s *Session) AuthenticateMaster(bound *RootRoundBound, master ShardResult, 
 	if bound.session != s || !bytes.Equal(bound.lineage, s.policyID) {
 		return nil, fail(OutcomeIncompatibleLineage, -1, nil, "root round bound was not issued by this verification session")
 	}
-	if len(partitionView) == 0 {
-		return nil, fail(OutcomeUnavailable, -1, nil, "master response carries no partition view")
-	}
 	if err := s.checkBatches([]ShardResult{master}); err != nil {
 		return nil, err
 	}
 	if err := bound.covers([]ShardResult{master}); err != nil {
 		return nil, err
+	}
+	if len(partitionView) == 0 {
+		// no view: only a structurally unsharded master UC is a complete target by itself
+		return s.authenticateDirect(bound, master)
 	}
 	view, err := types.DecodePartitionViewV1(partitionView)
 	if err != nil {
@@ -178,11 +190,67 @@ func (s *Session) AuthenticateMaster(bound *RootRoundBound, master ShardResult, 
 	return &AuthenticatedMaster{session: s, master: master, bound: bound, view: av.View(), av: av, enclosing: enclosing, leafIdx: leafIdx, round: round}, nil
 }
 
+// authenticateDirect authenticates a master response without a partition view. A UC of an
+// unsharded partition (empty shard ID, zero shard-tree siblings: its shard tree is one leaf)
+// already commits to everything a one-leaf view would repeat, so it is the target itself.
+// Anything else keeps the existing outcome: the view is unavailable. There is no permissive
+// switch: the same bound, policy, pins, body checks and seal quorum as the view path apply.
+func (s *Session) authenticateDirect(bound *RootRoundBound, master ShardResult) (*AuthenticatedMaster, error) {
+	s.count(func(c *Counters) { c.UCDecodes++ })
+	uc, err := decodeCommonUC(master.Proofs, 0)
+	if err != nil {
+		return nil, err
+	}
+	shard := uc.ShardTreeCertificate.Shard
+	if shard.Length() != 0 || len(uc.ShardTreeCertificate.SiblingHashes) != 0 {
+		if shard.Length() == 0 { // an empty shard ID with a nonempty shard path is malformed
+			return nil, fail(OutcomeInvalidInput, 0, nil, "unsharded master UC carries a nonempty shard path")
+		}
+		return nil, fail(OutcomeUnavailable, -1, nil, "master response carries no partition view")
+	}
+	if !master.ShardID.Equal(shard) {
+		return nil, fail(OutcomeBindingMismatch, 0, nil, "master UC is of shard %q, not %q", shard, master.ShardID)
+	}
+	// configured pins may only restrict: they must describe exactly this unsharded partition
+	var conf []byte
+	if s.policy.pinned() {
+		if _, ok := s.pinnedShards[shard.Key()]; !ok || len(s.pinnedShards) != 1 {
+			return nil, fail(OutcomeIncompatibleLineage, 0, nil, "the configured topology pins are not an unsharded partition")
+		}
+		conf = s.policy.Topology.ShardConfHashes[shard.Key()]
+	}
+	raw := master.Proofs[0].InclusionProof.UnicityCertificate
+	if err := checkPathSteps(0, uc); err != nil {
+		return nil, err
+	}
+	if err := s.checkBody(0, shard, uc, raw, conf); err != nil {
+		return nil, err
+	}
+	// 1 quorum check (memoized per complete seal)
+	if err := s.VerifySeal(uc.UnicitySeal); err != nil {
+		return nil, fail(OutcomeUnauthenticated, -1, err, "master seal")
+	}
+	if uc.UnicitySeal.NetworkID != bound.network {
+		return nil, fail(OutcomeIncompatibleLineage, -1, nil, "master seal is of network %d, bound of network %d", uc.UnicitySeal.NetworkID, bound.network)
+	}
+	round := uc.UnicitySeal.RootChainRoundNumber
+	if round < bound.round {
+		return nil, fail(OutcomeStale, -1, nil, "master seal root round %d is below required %d", round, bound.round)
+	}
+	if err := bound.coversShard(0, master); err != nil {
+		return nil, err
+	}
+	return &AuthenticatedMaster{session: s, master: master, bound: bound, round: round, direct: bytes.Clone(raw)}, nil
+}
+
 // Complete verifies the peers' exact-root batches against the authenticated
 // master and rebuilds every shard's proofs.
 func (s *Session) Complete(m *AuthenticatedMaster, peers []ShardResult) (*Output, error) {
 	if m == nil || m.session != s {
 		return nil, fail(OutcomeInvalidInput, -1, nil, "master was not authenticated by this session")
+	}
+	if m.Direct() && len(peers) != 0 {
+		return nil, fail(OutcomeInvalidInput, 1, nil, "an unsharded master UC takes no peer batches")
 	}
 	batches := append([]ShardResult{m.master}, peers...)
 	if err := s.checkBatches(batches); err != nil {
@@ -192,6 +260,22 @@ func (s *Session) Complete(m *AuthenticatedMaster, peers []ShardResult) (*Output
 		return nil, err
 	}
 	out := &Output{MasterShard: m.master.ShardID, RootRound: m.round}
+	if m.Direct() {
+		// the authenticated UC is the target of the single group: private copy, no view, no derivation
+		var target types.UnicityCertificate
+		if err := types.Cbor.Unmarshal(m.direct, &target); err != nil {
+			return nil, fail(OutcomeInvalidInput, 0, err, "copying the authenticated unicity certificate")
+		}
+		if err := m.bound.coversShard(0, m.master); err != nil {
+			return nil, err
+		}
+		so, err := s.consolidateShard(0, m.master, &target, target.ShardConfHash)
+		if err != nil {
+			return nil, err
+		}
+		out.Shards = append(out.Shards, *so)
+		return out, nil
+	}
 	for bi, b := range batches {
 		idx, ok := m.leaf(b.ShardID)
 		if !ok {
@@ -270,11 +354,12 @@ func decodeCommonUC(proofs []*api.GetInclusionProofResponseV2, bi int) (*types.U
 	if err := types.Cbor.Unmarshal(raw, &uc); err != nil {
 		return nil, fail(OutcomeInvalidInput, bi, err, "decoding unicity certificate")
 	}
+	// every component is checked before any of them is dereferenced (also by the re-encoding)
+	if uc.UnicitySeal == nil || uc.InputRecord == nil || uc.UnicityTreeCertificate == nil {
+		return nil, fail(OutcomeInvalidInput, bi, nil, "unicity certificate lacks seal, input record or tree certificate")
+	}
 	if re, err := uc.MarshalCBOR(); err != nil || !bytes.Equal(re, raw) {
 		return nil, fail(OutcomeUnsupported, bi, err, "unicity certificate is not in the canonical encoding")
-	}
-	if uc.UnicitySeal == nil || uc.InputRecord == nil {
-		return nil, fail(OutcomeInvalidInput, bi, nil, "unicity certificate lacks seal or input record")
 	}
 	return &uc, nil
 }

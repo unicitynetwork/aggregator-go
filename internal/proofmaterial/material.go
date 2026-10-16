@@ -28,6 +28,17 @@ func DigestOfUC(uc *types.UnicityCertificate) (Digest, []byte, error) {
 	return sha256.Sum256(b), b, nil
 }
 
+// IsUnshardedUC reports whether the UC is structurally that of an unsharded partition: empty shard
+// ID and zero shard-tree siblings (its shard tree is a single leaf). Such a UC already commits to
+// everything a one-leaf partition view would repeat, so no sidecar is needed, staged or served for it.
+// Components are checked before they are dereferenced.
+func IsUnshardedUC(uc *types.UnicityCertificate) bool {
+	if uc == nil || uc.InputRecord == nil || uc.UnicitySeal == nil || uc.UnicityTreeCertificate == nil {
+		return false
+	}
+	return uc.ShardTreeCertificate.Shard.Length() == 0 && len(uc.ShardTreeCertificate.SiblingHashes) == 0
+}
+
 // Kind tells why material is published.
 type Kind int
 

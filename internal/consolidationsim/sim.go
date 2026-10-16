@@ -92,6 +92,9 @@ type Sim struct {
 	RefTime uint64
 	// Retain bounds how many finalizations exact-root requests can still address (0 = all).
 	Retain int
+	// OmitView makes "latest" responses carry no partition view (an unsharded deployment needs none;
+	// on a sharded partition it simulates a stripped sidecar).
+	OmitView bool
 	// latestOverride makes "latest" requests serve this finalization (1-based; 0 = newest).
 	latestOverride int
 
@@ -475,7 +478,7 @@ func (sh *Shard) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		res.Proofs = append(res.Proofs, p)
 	}
-	if pr.Root == nil {
+	if pr.Root == nil && !sh.sim.OmitView {
 		res.PartitionView = f.viewBytes
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "result": res, "id": req.ID})
