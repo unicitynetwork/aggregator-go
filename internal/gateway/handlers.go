@@ -59,6 +59,13 @@ func (s *Server) handleGetInclusionProofV2(ctx context.Context, params json.RawM
 		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
 	}
 
+	// waitMs is reserved: validated here, ignored until the long-poll handlers land.
+	wait, err := api.ScanWaitMs(params)
+	if err != nil {
+		return nil, jsonrpc.NewValidationError("Invalid parameters: " + err.Error())
+	}
+	req.WaitMs = wait
+
 	// Validate required fields
 	if req.StateID == nil {
 		return nil, jsonrpc.NewValidationError("stateId is required")

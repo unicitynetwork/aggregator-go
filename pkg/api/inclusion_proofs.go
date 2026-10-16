@@ -36,6 +36,10 @@ type GetInclusionProofsRequestV1 struct {
 
 	// Root is the decoded exact root; nil selects the latest view.
 	Root HexBytes `json:"-"`
+
+	// WaitMs is the optional long-poll wait, valid only for latest requests. Reserved: it is
+	// validated but not yet acted upon.
+	WaitMs WaitMs `json:"-"`
 }
 
 // GetInclusionProofsResponseV1 is the result of get_inclusion_proofs.v1. Each
@@ -224,6 +228,19 @@ func ParseGetInclusionProofsRequestV1(params []byte) (*GetInclusionProofsRequest
 			if err := decodeStateRoot(raw, req); err != nil {
 				return nil, err
 			}
+		case "waitMs":
+			if req.WaitMs.Present {
+				return nil, paramsErr(DetailMalformedParams, errDuplicateWaitMs)
+			}
+			var raw json.RawMessage
+			if err := dec.Decode(&raw); err != nil {
+				return nil, paramsErr(DetailMalformedParams, err)
+			}
+			v, err := ParseWaitMs(raw)
+			if err != nil {
+				return nil, paramsErr(DetailMalformedParams, err)
+			}
+			req.WaitMs = WaitMs{Present: true, Value: v}
 		default:
 			return nil, paramsErr(DetailMalformedParams, fmt.Errorf("unknown field %q", key))
 		}
@@ -233,6 +250,9 @@ func ParseGetInclusionProofsRequestV1(params []byte) (*GetInclusionProofsRequest
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, paramsErr(DetailMalformedParams, errors.New("trailing data after params"))
+	}
+	if req.WaitMs.Present && req.Root != nil {
+		return nil, paramsErr(DetailMalformedParams, errors.New("waitMs is not allowed with an exact stateRoot"))
 	}
 	if len(req.StateIDs) == 0 {
 		return nil, paramsErr(DetailMalformedParams, errors.New("stateIds must contain 1.."+fmt.Sprint(InclusionProofsMaxStateIDs)+" IDs"))
