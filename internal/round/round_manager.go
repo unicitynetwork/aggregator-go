@@ -1351,6 +1351,7 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 			rm.finalizationMu.Lock()
 			rm.publishRecoveredBlock(activeCtx, recoveryResult.BlockNumber)
 			rm.finalizationMu.Unlock()
+			rm.notifyWaiters()
 		}
 	}
 
@@ -1914,7 +1915,9 @@ func (rm *RoundManager) publishStartupView(ctx context.Context) {
 
 // publishRecoveredBlock publishes a block finalized by recovery once the backend and
 // storage agree on it. The caller holds finalizationMu (commit ordering). If the block
-// cannot be published, latest is invalidated rather than left at an older block.
+// cannot be published, latest is invalidated rather than left at an older block. It does not
+// signal long-poll waiters: the callers do, after their own completion (clearing the pending
+// markers, releasing finalizationMu), also when there is no retained publisher.
 func (rm *RoundManager) publishRecoveredBlock(ctx context.Context, blockNumber *api.BigInt) {
 	if rm.proofPub == nil || blockNumber == nil {
 		return
@@ -1924,12 +1927,9 @@ func (rm *RoundManager) publishRecoveredBlock(ctx context.Context, blockNumber *
 		rm.logger.WithContext(ctx).Warn("Recovered block cannot be loaded for proof view publication",
 			"blockNumber", blockNumber.String())
 		rm.proofPub.InvalidateLatest()
-		rm.notifyWaiters()
 		return
 	}
 	rm.proofPub.PublishFinalized(ctx, block)
-	// Only marks and signals (takes no round manager lock), so it is safe under finalizationMu.
-	rm.notifyWaiters()
 }
 
 // newStatusTracker creates the proof status tracker with the default bounds.

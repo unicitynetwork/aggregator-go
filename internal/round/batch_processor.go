@@ -550,6 +550,9 @@ func (rm *RoundManager) reconcileRecoveredFinalization(ctx context.Context, reco
 	}
 	rm.roundMutex.RUnlock()
 
+	// Runs after the deferred unlock below, i.e. after publication AND the clearing of the
+	// pending markers (ClearFinalized does not signal), also without a retained publisher.
+	defer rm.notifyWaiters()
 	rm.finalizationMu.Lock()
 	defer rm.finalizationMu.Unlock()
 

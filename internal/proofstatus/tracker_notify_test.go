@@ -77,10 +77,11 @@ func TestNotify_InRoundEntryIsNotSweptAndStaysPending(t *testing.T) {
 	require.Equal(t, api.ProofStatusPending, tr.Status(sid(1)))
 	require.Zero(t, n.Load())
 
-	// it returns to the sweep once the round abandons it
+	// it returns to the sweep once the round abandons it: the overdue entry expires AT that
+	// boundary and the waiters are woken, no further Sweep or lookup is needed
 	tr.ReturnToQueue(sid(1))
-	require.Equal(t, 1, tr.Sweep())
 	require.EqualValues(t, 1, n.Load())
+	require.Equal(t, 0, tr.Sweep(), "nothing left for a later sweep")
 }
 
 // A lookup or admission which sweeps tells the other waiters too.
@@ -134,4 +135,33 @@ func TestNotify_ParkedWaiterWakesOnDueSweepWithoutAPoll(t *testing.T) {
 	tr.Sweep()
 	require.Contains(t, []longpoll.Wake{longpoll.WakeSignal, longpoll.WakeChanged}, <-woke)
 	require.Equal(t, api.ProofStatusExpired, status())
+}
+
+func TestNotify_AbandonedRoundReturnsOverdueEntriesWithAWake(t *testing.T) {
+	for name, back := range map[string]func(*Tracker){
+		"ReturnToQueue":    func(tr *Tracker) { tr.ReturnToQueue(sid(1)) },
+		"ReturnAllToQueue": func(tr *Tracker) { tr.ReturnAllToQueue() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			tr, c, n := notifyTracker(t)
+			tr.MarkPending(sid(1), 200)
+			tr.MarkInRound(sid(1), 200)
+			c.advance(time.Second, 300) // reference time passes the deadline while in the round
+			require.Equal(t, 0, tr.Sweep(), "the in-round exemption holds")
+			require.Zero(t, n.Load())
+
+			back(tr)
+			require.EqualValues(t, 1, n.Load(), "returned overdue: expired and signalled without a lookup")
+			require.Equal(t, api.ProofStatusExpired, tr.Status(sid(1)))
+
+			// a not yet overdue entry returns quietly
+			tr.MarkPending(sid(2), 10_000)
+			tr.MarkInRound(sid(2), 10_000)
+			before := n.Load()
+			back2 := back
+			back2(tr)
+			require.Equal(t, before, n.Load())
+			require.Equal(t, api.ProofStatusPending, tr.Status(sid(2)))
+		})
+	}
 }

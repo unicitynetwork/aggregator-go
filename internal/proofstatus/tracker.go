@@ -279,16 +279,21 @@ func (t *Tracker) ClearPending(ids ...api.StateID) {
 }
 
 // ReturnToQueue marks requests which a round pulled but did not keep (an abandoned round) as
-// queued again, so the deadline sweep covers them once more.
+// queued again, so the deadline sweep covers them once more. An entry whose deadline passed while
+// it was in the round (exempt from the sweep until now) expires at this boundary and waiters are
+// woken: there is no later event for it.
 func (t *Tracker) ReturnToQueue(ids ...api.StateID) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	for _, id := range ids {
 		if e, ok := t.pending[id.String()]; ok && e.inRound {
 			e.inRound = false
 			t.pushLocked(e)
 		}
 	}
+	swept := t.sweepLocked()
+	cb := t.notify
+	t.mu.Unlock()
+	fire(cb, swept > 0)
 }
 
 // ReturnAllToQueue is ReturnToQueue for every pulled request: the node abandoned its rounds
@@ -296,13 +301,16 @@ func (t *Tracker) ReturnToQueue(ids ...api.StateID) {
 // again, so they stay pending (and are swept by deadline again) rather than becoming unknown.
 func (t *Tracker) ReturnAllToQueue() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	for _, e := range t.pending {
 		if e.inRound {
 			e.inRound = false
 			t.pushLocked(e)
 		}
 	}
+	swept := t.sweepLocked()
+	cb := t.notify
+	t.mu.Unlock()
+	fire(cb, swept > 0)
 }
 
 // ClearFinalized removes the pending marks of states which were certified and forgets any
