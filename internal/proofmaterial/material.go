@@ -40,6 +40,11 @@ const (
 	// KindSidecarFill: a duplicate delivery of an already published UC added a
 	// previously missing valid partition view.
 	KindSidecarFill
+	// KindInitial: the UC the client was initialized with (startup or first UC). It
+	// certifies the state the node already holds; the only state it can publish is the
+	// certified EMPTY tree of a node without any committed block. Consumers ignore it
+	// for any other root (published by the normal startup/finalization paths).
+	KindInitial
 )
 
 func (k Kind) String() string {
@@ -50,6 +55,8 @@ func (k Kind) String() string {
 		return "repeat"
 	case KindSidecarFill:
 		return "sidecar_fill"
+	case KindInitial:
+		return "initial"
 	}
 	return "unknown"
 }

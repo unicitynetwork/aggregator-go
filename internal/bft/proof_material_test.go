@@ -16,6 +16,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/nifixture"
 	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial"
 	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial/prooftest"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
@@ -424,4 +425,42 @@ type wrongEpochStore struct{ tb *types.RootTrustBaseV1 }
 
 func (s wrongEpochStore) GetByEpoch(context.Context, uint64) (*types.RootTrustBaseV1, error) {
 	return s.tb, nil
+}
+
+// The UC the client initializes with certifies the state the node holds. For the genesis/empty state
+// (empty input record hash) the sink receives it as KindInitial, so a node without committed blocks can
+// serve the certified empty tree; for a nonempty state nothing is delivered at initialization.
+func Test_ProofMaterial_InitialEmptyState(t *testing.T) {
+	newClient := func(auth *nifixture.Authority) (*BFTClientImpl, *recordingSink) {
+		log, err := logger.New("warn", "json", "", false)
+		require.NoError(t, err)
+		c := &BFTClientImpl{logger: log, roundManager: &stubRoundManager{}, partitionID: nifixture.Partition,
+			proofStaging: proofmaterial.NewStaging(8), published: map[proofmaterial.Digest]bool{}}
+		sink := &recordingSink{}
+		c.SetProofMaterialSink(sink)
+		c.status.Store(initializing)
+		return c, sink
+	}
+	auth, err := nifixture.NewAuthority()
+	require.NoError(t, err)
+	empty, _, err := auth.CertifyRepeat()
+	require.NoError(t, err)
+	require.Empty(t, empty.InputRecord.Hash)
+	c, sink := newClient(auth)
+	require.NoError(t, c.handleUnicityCertificate(t.Context(), empty, &certification.TechnicalRecord{Round: 1, Epoch: 1}))
+	require.Len(t, sink.got, 1)
+	m := sink.got[0]
+	require.Equal(t, proofmaterial.KindInitial, m.Kind)
+	require.False(t, m.HasBlock)
+	require.Empty(t, m.UC.InputRecord.Hash)
+
+	auth2, err := nifixture.NewAuthority()
+	require.NoError(t, err)
+	state, _, err := auth2.CertifyRoot(prooftest.Hash("root-1"))
+	require.NoError(t, err)
+	c2, sink2 := newClient(auth2)
+	require.NoError(t, c2.handleUnicityCertificate(t.Context(), state, &certification.TechnicalRecord{Round: 8, Epoch: 1}))
+	for _, m := range sink2.got {
+		require.NotEqual(t, proofmaterial.KindInitial, m.Kind)
+	}
 }

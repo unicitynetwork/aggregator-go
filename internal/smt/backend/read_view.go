@@ -59,6 +59,20 @@ type NonInclusionReadView interface {
 	GetNonInclusionCert(ctx context.Context, key []byte) (*api.NonInclusionCert, error)
 }
 
+// EmptyStateReadView is the optional capability of a ReadView to state, explicitly, that the
+// retained state is the empty tree (no leaf). It is the fact a certified empty snapshot is
+// reconciled with; it is never inferred from the bytes of the root hash.
+type EmptyStateReadView interface {
+	IsEmptyState() bool
+}
+
+// IsEmptyState reports whether the view explicitly declares the empty tree. A view without the
+// capability is not empty as far as callers can tell.
+func IsEmptyState(rv ReadView) bool {
+	e, ok := rv.(EmptyStateReadView)
+	return ok && e.IsEmptyState()
+}
+
 // NonInclusionCert builds the non-inclusion certificate through the view's capability.
 func NonInclusionCert(ctx context.Context, rv ReadView, key []byte) (*api.NonInclusionCert, error) {
 	ni, ok := rv.(NonInclusionReadView)
@@ -258,6 +272,12 @@ func (v *memoryReadView) GetNonInclusionCert(ctx context.Context, key []byte) (*
 	return cert, err
 }
 
+func (v *memoryReadView) IsEmptyState() bool {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return !v.closed && v.view.IsEmpty()
+}
+
 func (v *memoryReadView) RetainedBytes() uint64 {
 	return v.lin.retained(v.entry)
 }
@@ -295,6 +315,7 @@ type AccountingRetirer interface {
 
 var (
 	_ NonInclusionReadView = (*memoryReadView)(nil)
+	_ EmptyStateReadView   = (*memoryReadView)(nil)
 	_ ReadView             = (*memoryReadView)(nil)
 	_ ReadViewRetainer     = (*MemoryBackend)(nil)
 	_ RetentionAccountant  = (*MemoryBackend)(nil)

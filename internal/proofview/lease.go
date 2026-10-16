@@ -63,6 +63,9 @@ func (l *Lease) Context() context.Context { return l.ctx }
 // Root returns the raw root of the leased state. The slice is immutable.
 func (l *Lease) Root() []byte { return l.v.root }
 
+// EmptyTree reports whether the leased state is the certified empty tree (Root is then empty).
+func (l *Lease) EmptyTree() bool { return l.v.empty }
+
 // Block returns a copy of the finalized local block identity.
 func (l *Lease) Block() BlockIdentity { return l.v.block.clone() }
 
