@@ -427,7 +427,7 @@
     "commit": "94f1947fe1fc40ce90d37f2370590eee5643b64f",
     "modules": {
       "github.com/unicitynetwork/bft-core": "v1.1.1-0.20261015121647-8b05d19f564f",
-      "github.com/unicitynetwork/bft-go-base": "v1.1.1-0.20261015113011-8e08f74f29fa"
+      "github.com/unicitynetwork/bft-go-base": "v1.1.1-0.20261016114947-eeedaa7a8843"
     }
   },
   "limits": {
