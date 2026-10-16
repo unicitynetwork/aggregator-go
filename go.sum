@@ -600,6 +600,8 @@ github.com/unicitynetwork/bft-go-base v1.1.1-0.20261016100656-7a1d36673dd6 h1:zP
 github.com/unicitynetwork/bft-go-base v1.1.1-0.20261016100656-7a1d36673dd6/go.mod h1:hBnOG52VRy/vpgIBUulTgk7PBTwODZ2xkVjCEu5yRcQ=
 github.com/unicitynetwork/bft-go-base v1.1.1-0.20261016111157-9816583d7b64 h1:wRGN5uOoRqSR46R639dqJrQ775Kp4RhT0AeN4mUAMz0=
 github.com/unicitynetwork/bft-go-base v1.1.1-0.20261016111157-9816583d7b64/go.mod h1:hBnOG52VRy/vpgIBUulTgk7PBTwODZ2xkVjCEu5yRcQ=
+github.com/unicitynetwork/bft-go-base v1.1.1-0.20261016114947-eeedaa7a8843 h1:cdmUkGmrPXoAnJoRmBFlKjzgjxaK6i+BFgx8rnrtGRQ=
+github.com/unicitynetwork/bft-go-base v1.1.1-0.20261016114947-eeedaa7a8843/go.mod h1:hBnOG52VRy/vpgIBUulTgk7PBTwODZ2xkVjCEu5yRcQ=
 github.com/urfave/cli v1.22.2/go.mod h1:Gos4lmkARVdJ6EkW0WaNv/tZAAMe9V7XWyB60NtXRu0=
 github.com/urfave/cli v1.22.10/go.mod h1:Gos4lmkARVdJ6EkW0WaNv/tZAAMe9V7XWyB60NtXRu0=
 github.com/viant/assertly v0.4.8/go.mod h1:aGifi++jvCrUaklKEKT0BU95igDNaqkvz+49uaYMPRU=
