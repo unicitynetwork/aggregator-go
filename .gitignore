@@ -15,3 +15,5 @@ bft-config
 # Environment files with secrets
 .env
 proxy/.env
+*.test
+*.prof

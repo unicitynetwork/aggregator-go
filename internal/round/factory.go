@@ -36,6 +36,11 @@ type Manager interface {
 	// CurrentReferenceTime reports the reference time a round starting now
 	// would pin, for fail-fast rejection of already-expired requests.
 	CurrentReferenceTime() uint64
+	// MarkRequestAdmitted/ClearRequestAdmitted maintain the pending mark of the proof status
+	// hints from admission; ProofStatus answers pending/expired/unknown in O(1) from memory.
+	MarkRequestAdmitted(stateID api.StateID, deadline uint64) (newlyMarked bool)
+	ClearRequestAdmitted(stateID api.StateID)
+	ProofStatus(stateID api.StateID) api.ProofStatus
 }
 
 // NewManager creates the appropriate round manager based on sharding mode

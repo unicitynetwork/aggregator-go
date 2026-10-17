@@ -32,6 +32,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/proofstatus"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
 	"github.com/unicitynetwork/aggregator-go/internal/sharding"
 	"github.com/unicitynetwork/aggregator-go/internal/signing"
@@ -1062,6 +1063,22 @@ type stubRoundManager struct {
 	cachedBlock   *models.Block
 	cachedRecord  *models.AggregatorRecord
 	referenceTime uint64
+	status        *proofstatus.Tracker
+}
+
+func (s *stubRoundManager) tracker() *proofstatus.Tracker {
+	if s.status == nil {
+		s.status = proofstatus.New(proofstatus.Config{})
+	}
+	return s.status
+}
+
+func (s *stubRoundManager) MarkRequestAdmitted(id api.StateID, deadline uint64) bool {
+	return s.tracker().MarkPending(id, deadline)
+}
+func (s *stubRoundManager) ClearRequestAdmitted(id api.StateID) { s.tracker().ClearPending(id) }
+func (s *stubRoundManager) ProofStatus(id api.StateID) api.ProofStatus {
+	return s.tracker().Status(id)
 }
 
 func (s *stubRoundManager) Start(context.Context) error    { return nil }

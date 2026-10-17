@@ -314,11 +314,10 @@ func (bs *BlockStorage) SetFinalizingWithCertificate(ctx context.Context, block 
 		return errors.New("block is nil")
 	}
 	filter := bson.M{"index": bigIntToDecimal128(block.Index)}
-	update := bson.M{"$set": bson.M{
-		"finalized":          false,
-		"status":             models.FinalityStatusFinalizing,
-		"unicityCertificate": block.UnicityCertificate.String(),
-	}}
+	update := certificateUpdate(block, bson.M{
+		"finalized": false,
+		"status":    models.FinalityStatusFinalizing,
+	})
 
 	result, err := bs.collection.UpdateOne(ctx, filter, update)
 	if err != nil {
@@ -338,11 +337,10 @@ func (bs *BlockStorage) SetFinalizedWithCertificate(ctx context.Context, block *
 	}
 	indexDecimal := bigIntToDecimal128(block.Index)
 	filter := bson.M{"index": indexDecimal}
-	update := bson.M{"$set": bson.M{
-		"finalized":          true,
-		"status":             models.FinalityStatusFinalized,
-		"unicityCertificate": block.UnicityCertificate.String(),
-	}}
+	update := certificateUpdate(block, bson.M{
+		"finalized": true,
+		"status":    models.FinalityStatusFinalized,
+	})
 
 	result, err := bs.collection.UpdateOne(ctx, filter, update)
 	if err != nil {
@@ -385,4 +383,19 @@ func (bs *BlockStorage) GetUnfinalized(ctx context.Context) ([]*models.Block, er
 	}
 
 	return blocks, nil
+}
+
+// certificateUpdate builds the update which persists the block's UC together with its
+// optional partition view. The view is always written or cleared in the same update as
+// the UC, so a stored view can only belong to the stored UC bytes.
+func certificateUpdate(block *models.Block, set bson.M) bson.M {
+	set["unicityCertificate"] = block.UnicityCertificate.String()
+	update := bson.M{}
+	if len(block.PartitionView) > 0 {
+		set["partitionView"] = block.PartitionView.String()
+	} else {
+		update["$unset"] = bson.M{"partitionView": ""}
+	}
+	update["$set"] = set
+	return update
 }

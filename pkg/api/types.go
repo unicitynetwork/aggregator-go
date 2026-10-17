@@ -111,6 +111,10 @@ func NewNoDeletionProof(proof HexBytes) *NoDeletionProof {
 // GetInclusionProofRequestV2 represents the get_inclusion_proof JSON-RPC request
 type GetInclusionProofRequestV2 struct {
 	StateID StateID `json:"stateId"`
+	// IncludeStatus opts in to {"proof": <unchanged result>, "status": <hint>} (see
+	// IncludedProofStatusResponse). Without it the result is exactly the v2 hex-CBOR string.
+	// Old servers ignore the field, so a string result means "status unsupported".
+	IncludeStatus bool `json:"includeStatus,omitempty"`
 }
 
 // GetInclusionProofResponseV2 represents the get_inclusion_proof JSON-RPC response
@@ -404,6 +408,53 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 	if vctx.TrustBase == nil {
 		return errors.New("nil trust base")
 	}
+	if err := p.CheckRequestBinding(v2); err != nil {
+		return err
+	}
+	rootRaw, err := p.UCInputRecordHashRaw()
+	if err != nil {
+		return err
+	}
+
+	if err := p.VerifyLeafPath(v2, rootRaw); err != nil {
+		return err
+	}
+
+	key, err := v2.StateID.GetTreeKey()
+	if err != nil {
+		return fmt.Errorf("failed to derive SMT key from stateId: %w", err)
+	}
+	var uc types.UnicityCertificate
+	if err := types.Cbor.Unmarshal(p.UnicityCertificate, &uc); err != nil {
+		return fmt.Errorf("failed to decode unicity certificate: %w", err)
+	}
+	if uc.ShardTreeCertificate.Shard.Length() > uint(len(key)*8) ||
+		!uc.ShardTreeCertificate.Shard.Comparator()(key) {
+		return errors.New("stateId does not belong to certified shard")
+	}
+	if uc.UnicitySeal == nil {
+		return errors.New("unicity certificate missing unicity seal")
+	}
+	if uc.UnicitySeal.NetworkID != vctx.TrustBase.GetNetworkID() {
+		return errors.New("unicity seal network does not match trust base")
+	}
+	if err := uc.Verify(vctx.TrustBase, crypto.SHA256, vctx.PartitionID, vctx.ExpectedShardID, vctx.ShardConfHash); err != nil {
+		return fmt.Errorf("unicity certificate verification failed: %w", err)
+	}
+
+	return nil
+}
+
+// CheckRequestBinding checks that the proof's original certification data is
+// the one of the certification request. It is the first stage of Verify and
+// is reusable by reference verifiers; it does not look at the certificate.
+func (p *InclusionProofV2) CheckRequestBinding(v2 *CertificationRequest) error {
+	if p == nil {
+		return errors.New("nil inclusion proof")
+	}
+	if v2 == nil {
+		return errors.New("nil certification request")
+	}
 	if p.CertificationData == nil {
 		return ErrExclusionNotImpl
 	}
@@ -430,12 +481,14 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 	if !bytes.Equal(p.CertificationData.Witness, v2.CertificationData.Witness) {
 		return errors.New("proof certification data witness does not match certification request witness")
 	}
+	return nil
+}
 
-	rootRaw, err := p.UCInputRecordHashRaw()
-	if err != nil {
-		return err
-	}
-
+// VerifyLeafPath checks the state ID binding, expiry and that the local SMT
+// path folds from the certified leaf to expectedRoot (the raw UC.IR.h). It is
+// the second stage of Verify and does not look at the embedded certificate.
+func (p *InclusionProofV2) VerifyLeafPath(v2 *CertificationRequest, expectedRoot []byte) error {
+	rootRaw := expectedRoot
 	var cert InclusionCert
 	if err := cert.UnmarshalBinary(p.CertificateBytes); err != nil {
 		return fmt.Errorf("failed to decode inclusion cert: %w", err)
@@ -463,25 +516,6 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 	if err := cert.Verify(key, value, rootRaw, InclusionProofV2HashAlgorithm); err != nil {
 		return err
 	}
-
-	var uc types.UnicityCertificate
-	if err := types.Cbor.Unmarshal(p.UnicityCertificate, &uc); err != nil {
-		return fmt.Errorf("failed to decode unicity certificate: %w", err)
-	}
-	if uc.ShardTreeCertificate.Shard.Length() > uint(len(key)*8) ||
-		!uc.ShardTreeCertificate.Shard.Comparator()(key) {
-		return errors.New("stateId does not belong to certified shard")
-	}
-	if uc.UnicitySeal == nil {
-		return errors.New("unicity certificate missing unicity seal")
-	}
-	if uc.UnicitySeal.NetworkID != vctx.TrustBase.GetNetworkID() {
-		return errors.New("unicity seal network does not match trust base")
-	}
-	if err := uc.Verify(vctx.TrustBase, crypto.SHA256, vctx.PartitionID, vctx.ExpectedShardID, vctx.ShardConfHash); err != nil {
-		return fmt.Errorf("unicity certificate verification failed: %w", err)
-	}
-
 	return nil
 }
 

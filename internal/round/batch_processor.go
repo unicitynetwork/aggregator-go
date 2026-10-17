@@ -55,6 +55,8 @@ func (rm *RoundManager) processMiniBatchForRound(ctx context.Context, round *Rou
 					"effectiveTimeout", commitment.EffectiveTimeout,
 					"referenceTime", round.ReferenceTime)
 				metrics.CommitmentsDroppedExpired.Inc()
+				// remembered (bounded) so status queries can say "expired", not "unknown"
+				rm.statusTracker.MarkExpired(commitment.StateID)
 				expired = append(expired, interfaces.CertificationRequestAck{
 					StateID:  commitment.StateID,
 					StreamID: commitment.StreamID,
@@ -82,6 +84,7 @@ func (rm *RoundManager) processMiniBatchForRound(ctx context.Context, round *Rou
 		round.PendingLeaves = append(round.PendingLeaves, addedLeaves...)
 		round.PendingCommitments = append(round.PendingCommitments, addedCommitments...)
 		rm.markProofsPending(addedCommitments)
+		rm.clearStaleAdmissionMarks(dropped)
 		return append(expired, dropped...), nil
 	}
 
@@ -570,6 +573,7 @@ func (rm *RoundManager) reconcileRecoveredFinalization(ctx context.Context, reco
 	}
 	rm.roundMutex.Unlock()
 
+	rm.publishRecoveredBlock(ctx, blockNumber)
 	rm.clearProofStateIDsPending(recoveryResult.StateIDs)
 	return nil
 }
@@ -677,6 +681,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 			}
 			block.Finalized = true
 			rm.markProofsReady(block, stateIDs, records)
+			rm.proofPub.EnsurePublished(ctx, block)
 			if snapshot != nil {
 				snapshot.Discard(ctx)
 			}
@@ -745,6 +750,10 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		if err != nil {
 			return err
 		}
+	} else {
+		// The state is committed and the block is finalized in storage; finalizationMu
+		// keeps the backend at exactly this state. Failures never fail finalization.
+		rm.proofPub.PublishFinalizedAdmitted(ctx, block)
 	}
 	metrics.SMTCommitDuration.Observe(smtCommitDuration.Seconds())
 
@@ -762,13 +771,23 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		}
 		precomputeProofDuration = time.Since(precomputeProofStart)
 	}
-	rm.markProofsReady(block, stateIDs, records)
 	if preparedProofView != nil {
+		if rm.testHookBeforeProofViewPublish != nil {
+			rm.testHookBeforeProofViewPublish()
+		}
 		if err := preparedProofView.Publish(ctx); err != nil {
 			return fmt.Errorf("failed to publish disk SMT proof view: %w", err)
 		}
 		proofViewPublished = true
+		// Disk: the committed state is now the published proof view and no later commit
+		// can start before this returns, so the retained snapshot is exactly this block.
+		// A backend without read-view support leaves the publisher nil (no-op).
+		rm.proofPub.PublishFinalizedAdmitted(ctx, block)
 	}
+	// Last: this clears the pending status hints. On the disk backend readers take no
+	// finalization lock, so a hint cleared before the proof view is published would let a
+	// state certified in storage be answered "unknown" with the previous (empty) proof.
+	rm.markProofsReady(block, stateIDs, records)
 	if !diskFinalize {
 		rm.finalizationMu.Unlock()
 	}
