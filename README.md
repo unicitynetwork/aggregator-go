@@ -757,23 +757,38 @@ The service implements a MongoDB-based leader election system:
 - **`parent-follower`** - Parent aggregator processing API requests, monitoring for leadership
 - **`parent-standalone`** - Single parent aggregator (HA disabled)
 
-## Upgrading: stop-all upgrade of BFT Core and aggregators
+## Upgrading: strict signature rule
 
-**The strict secp256k1 `VerifyHash` rule (bft-go-base `uc-consolidation`) requires a stop-all upgrade.**
-All BFT Core root validators and shard validators, and every aggregator, are stopped, upgraded and started together.
-Rolling upgrades and epoch-boundary activation are not supported.
+The release with the strict secp256k1 `VerifyHash` / `VerifyBytes` rule (and the stricter `ShardingScheme.IsValid`,
+which rejects incomplete shard schemes) is described in
+[bft-go-base `docs/UPGRADING.md`](https://github.com/unicitynetwork/bft-go-base/blob/uc-consolidation/docs/UPGRADING.md)
+and, for the root validators, in
+[bft-core `docs/upgrade.md`](https://github.com/unicitynetwork/bft-core/blob/uc-consolidation/docs/upgrade.md#strict-signature-rule-bft-go-base-uc-consolidation).
+This section gives the aggregator's part. Terms are the same as there: *root validators* are the BFT Core root chain nodes,
+aggregators are also the shard nodes in this stack, and *shard validators* are a separately deployed shard consensus
+cohort, if there is one.
 
-- **Why:** the rule changes which unicity seals and quorum certificates (QCs) are accepted, so nodes on different
-  versions can disagree on whether the same seal or QC has a quorum. While versions are mixed, rounds stall. The
-  network recovers once all nodes run the same version. Honest signers are unaffected.
-- **Aggregator-specific consequence:** an aggregator on the old bft-go-base can accept or reject unicity certificates
-  (UCs) differently from the root chain, so it can follow a different view of the chain than the BFT Core nodes.
-- **HA:** upgrade the leader and all followers together (stop every instance of the HA group, then start them on the
-  new binary). Do not upgrade followers first and fail over, and do not keep an old-version instance running as a
-  standby. The same applies to parent and child shard aggregators.
-- **Order of releases:** bft-go-base → bft-core → aggregator-go. The deployment itself is one stop-all step.
-
-See also `docs/upgrade.md` in bft-core.
+- **Baseline assumption:** the binaries have no activation gate, so the conservative baseline is a stop-all upgrade of
+  every process. This is an assumption about what is known to be safe, not a requirement; a gentler procedure is fine
+  where it is simple and safe.
+- **Gentler procedure:** a coordinated cutover of all root validators first, then the aggregators, rolling. Strict-valid
+  certificates pass the old verifier and aggregators already send strict-valid requests, so aggregators keep running
+  during the cutover. Do not reverse the order: a strict aggregator with legacy root validators can reject seals the
+  root chain finalized. This procedure has not been rehearsed in a deployment yet.
+- **What the aggregator verifies:** UC seals and the root trust base (including trust-base records of the next epoch),
+  not QCs. An old-version aggregator may accept a UC that upgraded nodes reject (or the reverse), so its certificate
+  acceptance can diverge from upgraded nodes until it is upgraded. Mixed rules can stall progress only when a
+  non-strict signature is present (a Byzantine signer, or anyone altering the recovery byte of a relayed signature);
+  honest signers are unaffected. This is a liveness issue, not a fork.
+- **HA:** in a stop-all upgrade stop and upgrade the leader and all followers together; do not keep an old-version
+  instance as standby. In the rolling procedure each aggregator (HA group) is upgraded after the root validators; an
+  upgraded follower can take over leadership safely because the root validators are already strict. The same applies
+  to parent and child shard aggregators.
+- **During the root cutover:** no new UCs arrive, so block finalization pauses and certification requests wait or are
+  retried. Recovery is confirmed when new UCs are received again and the block height advances (`get_block_height`).
+- **Rollback:** formats do not change, the old binary can open the new data; after new progress, roll back by a
+  coordinated plan, not by restarting isolated old instances.
+- **Order of releases:** bft-go-base → bft-core → aggregator-go.
 
 ## Sharding
 
