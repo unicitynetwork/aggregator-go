@@ -63,6 +63,9 @@ func (l *Lease) Context() context.Context { return l.ctx }
 // Root returns the raw root of the leased state. The slice is immutable.
 func (l *Lease) Root() []byte { return l.v.root }
 
+// EmptyTree reports whether the leased state is the certified empty tree (Root is then empty).
+func (l *Lease) EmptyTree() bool { return l.v.empty }
+
 // Block returns a copy of the finalized local block identity.
 func (l *Lease) Block() BlockIdentity { return l.v.block.clone() }
 
@@ -85,6 +88,19 @@ func (l *Lease) GetInclusionCert(key []byte) (*api.InclusionCert, error) {
 		return nil, err
 	}
 	return l.v.reader.GetInclusionCert(l.ctx, key)
+}
+
+// GetNonInclusionCert builds the non-inclusion certificate of the key from the leased state.
+// It returns an error wrapping api.ErrStateIncluded when the key is present at the leased
+// root and backend.ErrNonInclusionUnsupported when the backend cannot produce certificates.
+func (l *Lease) GetNonInclusionCert(key []byte) (*api.NonInclusionCert, error) {
+	if l.released.Load() {
+		return nil, ErrLeaseReleased
+	}
+	if err := l.ctx.Err(); err != nil {
+		return nil, err
+	}
+	return backend.NonInclusionCert(l.ctx, l.v.reader, key)
 }
 
 // GetInclusionCerts reads proofs for all keys from the leased state under the lease's

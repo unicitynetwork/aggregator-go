@@ -261,6 +261,13 @@ func main() {
 		log.WithComponent("main").Info("get_inclusion_proofs.v1 unsupported in this deployment", "reason", unsupportedReason)
 	}
 
+	// get_non_inclusion_proof.v1: absence at the latest certified snapshot, same retained views.
+	niHandler, niReason := service.NewNonInclusionHandler(cfg, roundManager, aggregatorService)
+	server.SetNonInclusionHandler(niHandler)
+	if niReason != "" {
+		log.WithComponent("main").Info("get_non_inclusion_proof.v1 unsupported in this deployment", "reason", niReason)
+	}
+
 	// Start server in a goroutine
 	go func() {
 		if err := server.Start(); err != nil {

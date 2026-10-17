@@ -202,6 +202,34 @@ func (v *diskReadView) GetInclusionCert(ctx context.Context, key []byte) (*api.I
 	return cert, nil
 }
 
+// IsEmptyState: the retained root is the tree's explicit empty root (no snapshot is held for it).
+func (v *diskReadView) IsEmptyState() bool {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return !v.closed && v.root == disk.EmptyRootHash()
+}
+
+// GetNonInclusionCert builds the non-inclusion certificate from this view's pinned snapshot only:
+// no live node is read, so later commits, tombstones and compactions cannot change it.
+func (v *diskReadView) GetNonInclusionCert(ctx context.Context, key []byte) (*api.NonInclusionCert, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	if v.closed {
+		return nil, ErrReadViewClosed
+	}
+	cert, err := persist.BuildNonInclusionCert(v.root, v.reader, key)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return cert, nil
+}
+
 // GetInclusionCerts builds all proofs from this view's pinned snapshot with one
 // union-path materialization and bulk frontier reads (see persist.BuildInclusionCerts).
 // Node reads and distinct nodes are reported separately.
@@ -283,9 +311,11 @@ func (v *diskReadView) Close() error {
 }
 
 var (
-	_ ReadView            = (*diskReadView)(nil)
-	_ BatchReadView       = (*diskReadView)(nil)
-	_ ReadViewRetainer    = (*DiskBackend)(nil)
-	_ RetentionAccountant = (*DiskBackend)(nil)
-	_ AccountingRetirer   = (*diskReadView)(nil)
+	_ NonInclusionReadView = (*diskReadView)(nil)
+	_ EmptyStateReadView   = (*diskReadView)(nil)
+	_ ReadView             = (*diskReadView)(nil)
+	_ BatchReadView        = (*diskReadView)(nil)
+	_ ReadViewRetainer     = (*DiskBackend)(nil)
+	_ RetentionAccountant  = (*DiskBackend)(nil)
+	_ AccountingRetirer    = (*diskReadView)(nil)
 )
