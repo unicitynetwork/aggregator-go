@@ -10,9 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
-	"runtime/debug"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+
+	"golang.org/x/mod/modfile"
 
 	"github.com/unicitynetwork/bft-core/rootchain/testutils/ucfixture"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
@@ -809,6 +812,10 @@ func manifest(files Files, commit string) ([]byte, error) {
 		h := sha256.Sum256(files[n])
 		sums[n] = hx(h[:])
 	}
+	modules, err := generatorModules()
+	if err != nil {
+		return nil, err
+	}
 	m := map[string]any{
 		"corpus": "non-inclusion", "version": Version,
 		"generator": map[string]any{
@@ -816,7 +823,7 @@ func manifest(files Files, commit string) ([]byte, error) {
 			// commit is the aggregator-go commit which CONTAINS cmd/gen-ni-fixtures and internal/nifixture as
 			// used to produce these files (not the commit which added the files)
 			"commit":  commit,
-			"modules": generatorModules(),
+			"modules": modules,
 		},
 		"limits": map[string]uint64{"maxCertificateBytes": MaxCertificateBytes, "maxRequestBytes": 64 << 10, "maxResponseBytes": 8 << 20},
 		"cases":  cases,
@@ -826,16 +833,48 @@ func manifest(files Files, commit string) ([]byte, error) {
 	return append(b, '\n'), err
 }
 
-// generatorModules are the module versions which determine every UC and signature byte.
-func generatorModules() map[string]string {
+// generatorModules are the module versions which determine every UC and signature byte. They are read from the
+// go.mod found by walking up from the working directory (the single source of truth), not from the build info,
+// which test binaries built by Go <= 1.26 do not carry.
+func generatorModules() (map[string]string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	var path string
+	for {
+		p := filepath.Join(dir, "go.mod")
+		if _, err := os.Stat(p); err == nil {
+			path = p
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil, errors.New("go.mod not found in any parent of the working directory")
+		}
+		dir = parent
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	f, err := modfile.ParseLax(path, data, nil)
+	if err != nil {
+		return nil, err
+	}
+	want := []string{"github.com/unicitynetwork/bft-core", "github.com/unicitynetwork/bft-go-base"}
 	out := map[string]string{}
-	if bi, ok := debug.ReadBuildInfo(); ok {
-		for _, d := range bi.Deps {
-			switch d.Path {
-			case "github.com/unicitynetwork/bft-core", "github.com/unicitynetwork/bft-go-base":
-				out[d.Path] = d.Version
+	for _, r := range f.Require {
+		for _, w := range want {
+			if r.Mod.Path == w {
+				out[w] = r.Mod.Version
 			}
 		}
 	}
-	return out
+	for _, w := range want {
+		if out[w] == "" {
+			return nil, fmt.Errorf("%s: no require for %s", path, w)
+		}
+	}
+	return out, nil
 }
