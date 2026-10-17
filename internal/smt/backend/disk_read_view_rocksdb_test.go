@@ -291,6 +291,8 @@ func TestDiskReadViewConsistentUnderConcurrentCommits(t *testing.T) {
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	var views []captured
+	var nCaptured atomic.Int64 // published by the reader after each capture
+	const maxViews = 60
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -300,7 +302,7 @@ func TestDiskReadViewConsistentUnderConcurrentCommits(t *testing.T) {
 				return
 			default:
 			}
-			if len(views) >= 60 {
+			if len(views) >= maxViews {
 				time.Sleep(time.Millisecond)
 				continue
 			}
@@ -313,9 +315,18 @@ func TestDiskReadViewConsistentUnderConcurrentCommits(t *testing.T) {
 			n, ok := rootToCount[string(v.RootHash())]
 			mu.Unlock()
 			views = append(views, captured{v, n})
+			nCaptured.Store(int64(len(views)))
 			_ = ok
 		}
 	}()
+	// The reader goroutine may be scheduled only after the commits are done. Require a capture
+	// before the first commit and one more after every commit (while the reader is under its cap),
+	// so views taken while the root moves are always exercised and the test cannot pass vacuously.
+	waitCaptures := func(atLeast int64) {
+		require.Eventually(t, func() bool { return nCaptured.Load() >= atLeast }, 30*time.Second, time.Millisecond,
+			"reader did not capture a view")
+	}
+	waitCaptures(1)
 	for i := 5; i < 65; i += 2 {
 		snap, err := f.backend.CreateSnapshot(f.ctx)
 		require.NoError(t, err)
@@ -327,6 +338,9 @@ func TestDiskReadViewConsistentUnderConcurrentCommits(t *testing.T) {
 		mu.Unlock()
 		f.block++
 		require.NoError(t, snap.Commit(f.ctx, CommitMetadata{BlockNumber: api.NewBigIntFromUint64(f.block), RootHash: res.CandidateRoot}))
+		if before := nCaptured.Load(); before < maxViews {
+			waitCaptures(before + 1)
+		}
 	}
 	close(stop)
 	wg.Wait()
