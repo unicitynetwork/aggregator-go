@@ -177,6 +177,8 @@ type Catalog struct {
 	retired     map[*view]struct{}
 	retiredAtts map[*attachment]struct{}
 	leases      map[*Lease]struct{}
+	// reservedPins are pins set aside by TryReservePin and not yet converted or released
+	reservedPins int
 
 	// maintained attachment totals (bytes)
 	liveAttBytes        uint64 // attachments of live views
@@ -246,6 +248,7 @@ type Stats struct {
 	Views         int
 	RetiredPinned int
 	ActivePins    int
+	ReservedPins  int // pins set aside by TryReservePin and not yet converted or released
 	RetainedBytes uint64
 	Evictions     uint64
 	PressureKills uint64
@@ -259,6 +262,7 @@ func (c *Catalog) Stats() Stats {
 		Views:         c.nViews,
 		RetiredPinned: len(c.retired),
 		ActivePins:    len(c.leases),
+		ReservedPins:  c.reservedPins,
 		RetainedBytes: c.retainedBytesLocked(),
 		Evictions:     c.evictions,
 		PressureKills: c.pressureKills,
@@ -865,7 +869,48 @@ func (c *Catalog) cancelViewLeasesLocked(v *view) {
 // newest certification could not be retained it fails with ErrViewNotRetained
 // rather than returning older material.
 func (c *Catalog) AcquireLatest(ctx context.Context) (*Lease, error) {
-	return c.acquire(ctx, nil)
+	return c.acquire(ctx, nil, nil)
+}
+
+// PinReservation is capacity for one lease, set aside by TryReservePin so that a request admitted
+// elsewhere (the long-poll resume scheduler) cannot lose the race for the pin to a fresh request.
+// It is either converted into a lease by AcquireLatestReserved or given back with Release; both
+// are idempotent together (only one of them takes effect).
+type PinReservation struct {
+	c    *Catalog
+	done bool // guarded by c.mu
+}
+
+// TryReservePin sets one pin aside without blocking, unless that would leave fewer than leave
+// units of pin capacity free for fresh acquisitions. Reserved pins count against
+// MaxConcurrentPins for every other acquisition until released or converted.
+func (c *Catalog) TryReservePin(leave int) (*PinReservation, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || len(c.leases)+c.reservedPins+1+leave > c.limits.MaxConcurrentPins {
+		return nil, false
+	}
+	c.reservedPins++
+	return &PinReservation{c: c}, true
+}
+
+// Release gives an unused reservation back.
+func (r *PinReservation) Release() {
+	if r == nil {
+		return
+	}
+	r.c.mu.Lock()
+	if !r.done {
+		r.done = true
+		r.c.reservedPins--
+	}
+	r.c.mu.Unlock()
+}
+
+// AcquireLatestReserved is AcquireLatest consuming a reservation: the pin limit is not checked
+// again (the capacity was set aside). A failure leaves the reservation to the caller's Release.
+func (c *Catalog) AcquireLatestReserved(ctx context.Context, r *PinReservation) (*Lease, error) {
+	return c.acquire(ctx, nil, r)
 }
 
 // AcquireRoot pins the newest retained view whose root equals root, with that
@@ -874,10 +919,10 @@ func (c *Catalog) AcquireRoot(ctx context.Context, root []byte) (*Lease, error) 
 	if len(root) == 0 {
 		return nil, ErrViewNotRetained
 	}
-	return c.acquire(ctx, root)
+	return c.acquire(ctx, root, nil)
 }
 
-func (c *Catalog) acquire(ctx context.Context, root []byte) (*Lease, error) {
+func (c *Catalog) acquire(ctx context.Context, root []byte, resv *PinReservation) (*Lease, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -904,11 +949,16 @@ func (c *Catalog) acquire(ctx context.Context, root []byte) (*Lease, error) {
 	if v.attN == 0 {
 		return nil, ErrViewNotRetained
 	}
-	if len(c.leases) >= c.limits.MaxConcurrentPins {
+	reserved := resv != nil && resv.c == c && !resv.done
+	if !reserved && len(c.leases)+c.reservedPins >= c.limits.MaxConcurrentPins {
 		return nil, ErrBusyPins
 	}
 	if c.retainedBytesLocked() > c.limits.RetentionBudgetBytes {
 		return nil, ErrBusyBudget
+	}
+	if reserved { // the reservation becomes this lease
+		resv.done = true
+		c.reservedPins--
 	}
 	att := v.attTail
 	lctx, cancel := context.WithTimeout(ctx, c.limits.MaxLeaseDuration)

@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/aggregator-go/internal/longpoll"
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/proofview"
@@ -48,6 +51,14 @@ type BatchViewSource interface {
 	AcquireRoot(ctx context.Context, root []byte) (BatchLease, error)
 }
 
+// pinReserver is implemented by view sources whose leases are limited (the catalog): the resume
+// scheduler sets a pin aside together with the batch slot, and the read converts it into its lease.
+type pinReserver interface {
+	TryReservePin(leave int) (*proofview.PinReservation, bool)
+	AcquireLatestReserved(ctx context.Context, r *proofview.PinReservation) (BatchLease, error)
+	PinLimit() int
+}
+
 // CatalogViewSource adapts a proofview.Catalog.
 func CatalogViewSource(c *proofview.Catalog) BatchViewSource { return catalogSource{c} }
 
@@ -60,6 +71,20 @@ func (s catalogSource) AcquireLatest(ctx context.Context) (BatchLease, error) {
 	}
 	return l, nil
 }
+
+func (s catalogSource) TryReservePin(leave int) (*proofview.PinReservation, bool) {
+	return s.c.TryReservePin(leave)
+}
+
+func (s catalogSource) AcquireLatestReserved(ctx context.Context, r *proofview.PinReservation) (BatchLease, error) {
+	l, err := s.c.AcquireLatestReserved(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	return l, nil
+}
+
+func (s catalogSource) PinLimit() int { return s.c.Limits().MaxConcurrentPins }
 
 func (s catalogSource) AcquireRoot(ctx context.Context, root []byte) (BatchLease, error) {
 	l, err := s.c.AcquireRoot(ctx, root)
@@ -171,6 +196,17 @@ type BatchProofService struct {
 	maxBytes int
 	mode     string
 	status   BatchStatusSource
+	longPoll *longpoll.Coordinator
+
+	// resume admission (see TryAdmit)
+	admitMu     sync.Mutex
+	classOnce   sync.Once
+	class       *longpoll.Class
+	releaseHook atomic.Pointer[func()]
+
+	// test hooks (nil in production)
+	testHookAdmitChecked func() // in TryAdmit after the headroom check, under admitMu
+	testHookFreshSlot    func() // in a fresh read right after it took its slot (outside admitMu), before its pin
 }
 
 // BatchProofConfig configures the service. Zero values take the plan defaults.
@@ -182,6 +218,9 @@ type BatchProofConfig struct {
 	// Status answers the unauthenticated pending/expired/unknown hint of a state ID from
 	// memory (the round manager). Nil answers unknown for every absent state.
 	Status BatchStatusSource
+	// LongPoll serves requests carrying waitMs; nil keeps the reservation-only behavior (waitMs is
+	// validated and ignored, no echo).
+	LongPoll *longpoll.Coordinator
 }
 
 // BatchStatusSource is the O(1) in-memory proof status lookup.
@@ -201,7 +240,7 @@ func NewBatchProofService(views BatchViewSource, records BatchRecordSource, shar
 		cfg.MaxResponseBytes = api.InclusionProofsMaxResponseBytes
 	}
 	return &BatchProofService{views: views, records: records, shard: shard, slots: make(chan struct{}, cfg.MaxConcurrent),
-		timeout: cfg.MaxExecution, maxBytes: cfg.MaxResponseBytes, status: cfg.Status}
+		timeout: cfg.MaxExecution, maxBytes: cfg.MaxResponseBytes, status: cfg.Status, longPoll: cfg.LongPoll}
 }
 
 // GetInclusionProofsV1 returns proofs for every state ID, in request order,
@@ -228,12 +267,26 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 		}
 	}
 
-	// bounded, nonblocking admission
-	select {
-	case s.slots <- struct{}{}:
+	// Whatever the read releases - slot, lease - may unblock a queued resumption: wake the
+	// scheduler last, after the resources are back (registered first, so it runs last).
+	defer s.fireRelease()
+
+	// bounded, nonblocking admission; a resumed read arrives with the slot and the pin the
+	// scheduler already set aside for it and does not go through a second admission
+	granted, _ := longpoll.ResourcesFromContext(ctx).(*batchResources)
+	if granted != nil && granted.svc != s {
+		granted = nil
+	}
+	if granted != nil && granted.takeSlot() {
 		defer func() { <-s.slots }()
-	default:
-		return nil, busy("active_requests")
+	} else {
+		if !s.acquireSlot() {
+			return nil, busy("active_requests")
+		}
+		defer func() { <-s.slots }()
+		if h := s.testHookFreshSlot; h != nil {
+			h()
+		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -242,7 +295,12 @@ func (s *BatchProofService) GetInclusionProofsV1(ctx context.Context, req *api.G
 	var lease BatchLease
 	var err error
 	if latest {
-		lease, err = s.views.AcquireLatest(ctx)
+		if pr := granted.takePin(); pr != nil {
+			defer pr.Release() // a no-op once converted into the lease
+			lease, err = s.views.(pinReserver).AcquireLatestReserved(ctx, pr)
+		} else {
+			lease, err = s.views.AcquireLatest(ctx)
+		}
 	} else {
 		lease, err = s.views.AcquireRoot(ctx, req.Root)
 	}
@@ -552,14 +610,178 @@ func (e *BatchError) nonRetryable() *BatchError { e.Retryable = false; return e 
 func (s *BatchProofService) HandleRPC(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
 	req, err := api.ParseGetInclusionProofsRequestV1(params)
 	if err != nil {
-		return nil, ParamsBatchError(err).RPCError()
+		rpcErr := ParamsBatchError(err).RPCError()
+		if s.longPoll != nil {
+			// A params object carrying a valid waitMs is a recognized wait-bearing request: its
+			// validation errors echo zero (and tell the client the server understands waitMs).
+			// An invalid or duplicate waitMs is not recognized: the same bytes as without support.
+			if w, serr := api.ScanWaitMs(params); serr == nil && w.Present {
+				rpcErr = rpcErr.WithWaited(0)
+			}
+		}
+		return nil, rpcErr
 	}
-	resp, berr := s.GetInclusionProofsV1(ctx, req)
-	if berr != nil {
-		return nil, berr.RPCError()
+	if !req.WaitMs.Present || s.longPoll == nil {
+		resp, berr := s.GetInclusionProofsV1(ctx, req)
+		if berr != nil {
+			return nil, berr.RPCError()
+		}
+		return resp, nil
 	}
+	resumeCap, canPark := s.resumeCapacity()
+	wait := req.WaitMs.Value
+	if !canPark {
+		wait = 0 // B or P below two: ordinary immediate read with a zero echo
+	} else {
+		s.classOnce.Do(func() {
+			s.class = s.longPoll.Reg.NewClass("batch", resumeCap, s)
+			s.SetReleaseHook(s.longPoll.Reg.Schedule)
+		})
+	}
+	res, waited := s.longPoll.RunClass(ctx, BatchProofsMethod, wait, s.class, func(ctx context.Context) longpoll.Result {
+		resp, berr := s.GetInclusionProofsV1(ctx, req)
+		if berr != nil {
+			// Wait only while every non-included state is pending (the batch is all-or-nothing and
+			// unknown/expired end the wait at once, the normal error precedence applies).
+			pending := berr.Reason == "proof_unavailable" && berr.Detail == detailStatePending
+			return longpoll.Result{Pending: pending, Err: berr.RPCError()}
+		}
+		return longpoll.Result{Value: resp}
+	})
+	if res.Err != nil {
+		return nil, res.Err.WithWaited(waited)
+	}
+	resp := res.Value.(*api.GetInclusionProofsResponseV1)
+	resp.WaitedMs = &waited
 	return resp, nil
 }
+
+// batchResources is the batch capacity granted to one resumed read: a slot and a pin, set aside
+// together by TryAdmit. The read consumes what it uses; Release returns what is left.
+type batchResources struct {
+	svc  *BatchProofService
+	mu   sync.Mutex
+	slot bool
+	pin  *proofview.PinReservation
+}
+
+func (b *batchResources) takeSlot() bool {
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.slot {
+		return false
+	}
+	b.slot = false
+	return true
+}
+
+func (b *batchResources) takePin() *proofview.PinReservation {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	p := b.pin
+	b.pin = nil
+	return p
+}
+
+// Release returns the unused slot and pin (idempotent).
+func (b *batchResources) Release() {
+	b.mu.Lock()
+	slot, pin := b.slot, b.pin
+	b.slot, b.pin = false, nil
+	b.mu.Unlock()
+	if slot {
+		<-b.svc.slots
+	}
+	pin.Release()
+	if slot || pin != nil {
+		b.svc.fireRelease()
+	}
+}
+
+// acquireSlot is the fresh requests' non-blocking slot acquisition. It takes admitMu - the same
+// short critical section in which TryAdmit checks the headroom and takes its slot - so that a
+// resumption's "two slots are free" observation cannot be invalidated by a fresh read between
+// the check and the take (the fresh read would then lose its guaranteed last slot).
+func (s *BatchProofService) acquireSlot() bool {
+	s.admitMu.Lock()
+	defer s.admitMu.Unlock()
+	select {
+	case s.slots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// TryAdmit grants the batch capacity of one resumed read without blocking: a batch slot and a
+// pin, together, leaving at least one of each free for fresh requests, or nothing (any partial
+// grant is rolled back). It implements longpoll.Admitter; the scheduler calls it under its lock,
+// so it takes no registry lock and never waits.
+func (s *BatchProofService) TryAdmit() (longpoll.Resources, bool) {
+	s.admitMu.Lock()
+	defer s.admitMu.Unlock()
+	if cap(s.slots)-len(s.slots) < 2 {
+		return nil, false
+	}
+	if h := s.testHookAdmitChecked; h != nil {
+		h() // tests: a fresh read started here must wait for this critical section
+	}
+	var pin *proofview.PinReservation
+	if pr, ok := s.views.(pinReserver); ok {
+		p, ok := pr.TryReservePin(1)
+		if !ok {
+			return nil, false
+		}
+		pin = p
+	}
+	select {
+	case s.slots <- struct{}{}:
+	default:
+		pin.Release()
+		return nil, false
+	}
+	return &batchResources{svc: s, slot: true, pin: pin}, true
+}
+
+// SetReleaseHook registers the function called after batch capacity (a slot, a pin) was
+// released, so that queued resumptions get scheduled; the long-poll wiring sets the registry's.
+func (s *BatchProofService) SetReleaseHook(f func()) {
+	if f == nil {
+		s.releaseHook.Store(nil)
+		return
+	}
+	s.releaseHook.Store(&f)
+}
+
+func (s *BatchProofService) fireRelease() {
+	if f := s.releaseHook.Load(); f != nil {
+		(*f)()
+	}
+}
+
+// resumeCapacity reports whether batch reads can be resumed at all and the cap of simultaneously
+// resumed batch reads inside the global quota: min(B-1, P-1) for batch concurrency B and pin
+// limit P (the global max(1, C/4) is applied by the registry). With B or P below two, parking is
+// disabled: a resumption could not leave capacity to fresh requests.
+func (s *BatchProofService) resumeCapacity() (n int, ok bool) {
+	b, p := cap(s.slots), 1<<30
+	if pr, isPR := s.views.(pinReserver); isPR {
+		p = pr.PinLimit()
+	}
+	if b < 2 || p < 2 {
+		return 0, false
+	}
+	return min(b-1, p-1), true
+}
+
+// BatchProofsMethod is the JSON-RPC method of the batch inclusion proof API.
+const BatchProofsMethod = "get_inclusion_proofs.v1"
 
 // UnsupportedRPC is the handler for deployments that cannot serve the method.
 func UnsupportedRPC(context.Context, json.RawMessage) (interface{}, *jsonrpc.Error) {

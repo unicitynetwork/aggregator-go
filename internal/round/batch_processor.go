@@ -550,6 +550,9 @@ func (rm *RoundManager) reconcileRecoveredFinalization(ctx context.Context, reco
 	}
 	rm.roundMutex.RUnlock()
 
+	// Runs after the deferred unlock below, i.e. after publication AND the clearing of the
+	// pending markers (ClearFinalized does not signal), also without a retained publisher.
+	defer rm.notifyWaiters()
 	rm.finalizationMu.Lock()
 	defer rm.finalizationMu.Unlock()
 
@@ -668,6 +671,18 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		record.ProposalID = existingBlock.ProposalID
 	}
 	block.ProposalID = existingBlock.ProposalID
+	// The wake follows publication, the proof-ready update, the clearing of the pending hints and
+	// the release of finalizationMu, and is raised right there on the success path - not after the
+	// Redis ACK below, which serving does not depend on. The deferred call covers the duplicate and
+	// failure paths (waiters then observe the outcome instead of sleeping on a missed wake).
+	notified := false
+	notifyOnce := func() {
+		if !notified {
+			notified = true
+			rm.notifyWaiters()
+		}
+	}
+	defer notifyOnce()
 	if existingBlock.Finalized {
 		localRoot, err := rm.smtBackend.RootHashRaw(ctx)
 		if err != nil {
@@ -791,6 +806,7 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	if !diskFinalize {
 		rm.finalizationMu.Unlock()
 	}
+	notifyOnce()
 
 	// Proofs are requestable only after the SMT snapshot is committed and the block is visible as finalized.
 	// Redis ACK is recovery bookkeeping.

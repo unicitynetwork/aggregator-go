@@ -140,3 +140,50 @@ func newPub(cat *proofview.Catalog, b smtbackend.Backend, f *prooftest.Fixture, 
 	p.SetSealVerifier(f.Verifier())
 	return p
 }
+
+// Long-poll: the completion of a runtime recovery is signalled once, after publication AND the
+// clearing of the pending markers (a resumed read before the clearing would still see the
+// known-not-ready shortcut and re-park on the only signal), also without a retained publisher.
+func Test_ReconcileRecoveredFinalizationNotifiesAfterClearingMarkers(t *testing.T) {
+	for name, withPublisher := range map[string]bool{"retained publisher": true, "legacy-only backend": false} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			e := newRecoveryEnv(t)
+			e.rm.statusTracker = newStatusTracker()
+			e.rm.proofPending = map[string]struct{}{}
+			if !withPublisher {
+				e.rm.proofPub = nil
+			}
+
+			b1, snap1 := e.commitBlock(t, 1, 1)
+			require.NoError(t, snap1.Commit(ctx, smtbackend.CommitMetadata{BlockNumber: b1.Index, RootHash: b1.RootHash}))
+			e.rm.proofPub.PublishFinalized(ctx, b1)
+			b2, snap2 := e.commitBlock(t, 2, 2)
+			e.bs.blocks[2] = b2
+			e.rm.currentRound = &Round{Number: b2.Index, Snapshot: snap2}
+
+			id := api.StateID(make([]byte, 32))
+			id[0] = 2
+			e.rm.statusTracker.MarkPending(id, 1<<62)
+			e.rm.statusTracker.MarkInRound(id, 1<<62)
+			require.Equal(t, api.ProofStatusPending, e.rm.ProofStatus(id))
+
+			var seen []api.ProofStatus
+			var lockFree []bool
+			e.rm.SetWaitNotifier(func() {
+				seen = append(seen, e.rm.ProofStatus(id))
+				ok := e.rm.finalizationMu.TryLock()
+				if ok {
+					e.rm.finalizationMu.Unlock()
+				}
+				lockFree = append(lockFree, ok)
+			})
+			require.NoError(t, e.rm.reconcileRecoveredFinalization(ctx, &RecoveryResult{
+				Recovered: true, BlockNumber: b2.Index, Block: b2, StateIDs: []api.StateID{id}}))
+
+			require.Len(t, seen, 1, "one signal for the completed recovery")
+			require.NotEqual(t, api.ProofStatusPending, seen[0], "the markers were cleared before the signal")
+			require.True(t, lockFree[0], "and finalizationMu was released")
+		})
+	}
+}

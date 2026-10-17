@@ -2,6 +2,7 @@ package service
 
 import (
 	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/longpoll"
 	"github.com/unicitynetwork/aggregator-go/internal/proofview"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
@@ -21,6 +22,12 @@ type ProofViewProvider interface {
 //   - a backend without retained read views, or a record storage without the bounded
 //     size projection.
 func NewBatchProofHandler(cfg *config.Config, rm any, storage interfaces.Storage, svc any) (jsonrpc.HandlerFunc, string) {
+	return NewBatchProofHandlerWithLongPoll(cfg, rm, storage, svc, nil)
+}
+
+// NewBatchProofHandlerWithLongPoll is NewBatchProofHandler with the long-poll coordinator serving
+// requests which carry waitMs (nil: waitMs is validated and ignored).
+func NewBatchProofHandlerWithLongPoll(cfg *config.Config, rm any, storage interfaces.Storage, svc any, lp *longpoll.Coordinator) (jsonrpc.HandlerFunc, string) {
 	if m := cfg.Sharding.Mode; m.IsParent() || m.IsChild() {
 		return UnsupportedRPC, "parent/child aggregation"
 	}
@@ -43,6 +50,7 @@ func NewBatchProofHandler(cfg *config.Config, rm any, storage interfaces.Storage
 		MaxConcurrent: cfg.SMT.MaxConcurrentBatches,
 		MaxExecution:  cfg.SMT.BatchTimeout,
 		Status:        statusSource(rm),
+		LongPoll:      lp,
 	})
 	return batch.HandleRPC, ""
 }

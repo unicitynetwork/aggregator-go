@@ -102,6 +102,41 @@ type Tracker struct {
 	// sweepCount counts deadline entries processed by the sweep (a hardware independent
 	// work metric for tests).
 	sweepCount uint64
+
+	// notify is called, outside the tracker lock, after a change which a long-poll waiter may
+	// be waiting for: an actual drop or sweep into the expired memory, a reset, a withdrawn
+	// admission mark. Finalization (ClearFinalized) does not call it: the finalizing path
+	// notifies once, after publication and the proof-ready update, so that a wake never
+	// precedes the serving boundary.
+	notify func()
+}
+
+// SetNotify registers the change callback (call before use). It must not block or call back
+// into the tracker.
+func (t *Tracker) SetNotify(f func()) {
+	t.mu.Lock()
+	t.notify = f
+	t.mu.Unlock()
+}
+
+// fire runs the callback captured under the lock, after it was released.
+func fire(n func(), changed bool) {
+	if changed && n != nil {
+		n()
+	}
+}
+
+// Sweep expires the queued requests whose deadline has passed without waiting for a lookup, and
+// reports how many were moved. The round manager calls it when the local reference time
+// advances, so a long-poll waiter learns about an expiry although no client polls. In-round
+// entries are never swept.
+func (t *Tracker) Sweep() int {
+	t.mu.Lock()
+	n := t.sweepLocked()
+	cb := t.notify
+	t.mu.Unlock()
+	fire(cb, n > 0)
+	return n
 }
 
 func (t *Tracker) sweepSteps() uint64 {
@@ -147,10 +182,17 @@ func (t *Tracker) SetReferenceTime(f func() uint64) {
 // pending; false also when the entry cap is reached (the request is then untracked).
 // An ID which was recently expired and is admitted again is pending again.
 func (t *Tracker) MarkPending(id api.StateID, deadline uint64) (added bool) {
-	key := id.String()
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.sweepLocked()
+	added, swept := t.markPendingLocked(id, deadline)
+	cb := t.notify
+	t.mu.Unlock()
+	fire(cb, swept > 0)
+	return added
+}
+
+func (t *Tracker) markPendingLocked(id api.StateID, deadline uint64) (added bool, swept int) {
+	key := id.String()
+	swept = t.sweepLocked()
 	delete(t.expired, key)
 	if e, ok := t.pending[key]; ok {
 		if deadline > e.deadline {
@@ -159,17 +201,17 @@ func (t *Tracker) MarkPending(id api.StateID, deadline uint64) (added bool) {
 				heap.Fix(&t.deadline, e.heapIdx)
 			}
 		}
-		return false
+		return false, swept
 	}
 	if len(t.pending) >= t.cfg.MaxPending {
 		metrics.ProofStatusPendingRejected.Inc()
-		return false
+		return false, swept
 	}
 	e := &pendEntry{id: key, deadline: deadline, heapIdx: -1}
 	t.pending[key] = e
 	t.pushLocked(e)
 	t.gaugesLocked()
-	return true
+	return true, swept
 }
 
 // MarkInRound records that a round pulled the request (also for requests replayed from the
@@ -222,24 +264,36 @@ func (t *Tracker) ClearPending(ids ...api.StateID) {
 		return
 	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	removed := false
 	for _, id := range ids {
-		t.deleteLocked(id.String())
+		key := id.String()
+		if _, ok := t.pending[key]; ok {
+			removed = true
+		}
+		t.deleteLocked(key)
 	}
 	t.gaugesLocked()
+	cb := t.notify
+	t.mu.Unlock()
+	fire(cb, removed) // a withdrawn admission: a waiter now sees unknown
 }
 
 // ReturnToQueue marks requests which a round pulled but did not keep (an abandoned round) as
-// queued again, so the deadline sweep covers them once more.
+// queued again, so the deadline sweep covers them once more. An entry whose deadline passed while
+// it was in the round (exempt from the sweep until now) expires at this boundary and waiters are
+// woken: there is no later event for it.
 func (t *Tracker) ReturnToQueue(ids ...api.StateID) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	for _, id := range ids {
 		if e, ok := t.pending[id.String()]; ok && e.inRound {
 			e.inRound = false
 			t.pushLocked(e)
 		}
 	}
+	swept := t.sweepLocked()
+	cb := t.notify
+	t.mu.Unlock()
+	fire(cb, swept > 0)
 }
 
 // ReturnAllToQueue is ReturnToQueue for every pulled request: the node abandoned its rounds
@@ -247,13 +301,16 @@ func (t *Tracker) ReturnToQueue(ids ...api.StateID) {
 // again, so they stay pending (and are swept by deadline again) rather than becoming unknown.
 func (t *Tracker) ReturnAllToQueue() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	for _, e := range t.pending {
 		if e.inRound {
 			e.inRound = false
 			t.pushLocked(e)
 		}
 	}
+	swept := t.sweepLocked()
+	cb := t.notify
+	t.mu.Unlock()
+	fire(cb, swept > 0)
 }
 
 // ClearFinalized removes the pending marks of states which were certified and forgets any
@@ -275,10 +332,12 @@ func (t *Tracker) ClearFinalized(ids ...api.StateID) {
 // Reset forgets all pending marks (the node stops being the one answering: deactivation).
 func (t *Tracker) Reset() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.pending = make(map[string]*pendEntry)
 	t.deadline = nil
 	t.gaugesLocked()
+	cb := t.notify
+	t.mu.Unlock()
+	fire(cb, true)
 }
 
 // HeapLen returns the size of the deadline heap (diagnostics, tests).
@@ -294,7 +353,6 @@ func (t *Tracker) MarkExpired(ids ...api.StateID) {
 		return
 	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	now := t.cfg.Now()
 	for _, id := range ids {
 		key := id.String()
@@ -302,6 +360,9 @@ func (t *Tracker) MarkExpired(ids ...api.StateID) {
 		t.addExpiredLocked(key, now)
 	}
 	t.gaugesLocked()
+	cb := t.notify
+	t.mu.Unlock()
+	fire(cb, true)
 }
 
 func (t *Tracker) addExpiredLocked(key string, now time.Time) {
@@ -338,19 +399,21 @@ func (t *Tracker) trimLocked(now time.Time) {
 // requests no round has pulled are swept: for those the next round pins a reference time that
 // is at least the current one, so the deadline guarantees the drop. Requests already in a
 // round are decided by the round.
-func (t *Tracker) sweepLocked() {
+func (t *Tracker) sweepLocked() (swept int) {
 	ref, ok := t.refTime()
 	if !ok {
-		return
+		return 0
 	}
 	now := t.cfg.Now()
 	for len(t.deadline) > 0 && t.deadline[0].deadline <= ref {
 		e := heap.Pop(&t.deadline).(*pendEntry)
 		t.sweepCount++
+		swept++
 		delete(t.pending, e.id)
 		t.addExpiredLocked(e.id, now)
 	}
 	t.trimLocked(now)
+	return swept
 }
 
 // Status returns the hint for a state ID which is not included: pending, expired or
@@ -358,8 +421,15 @@ func (t *Tracker) sweepLocked() {
 func (t *Tracker) Status(id api.StateID) api.ProofStatus {
 	key := id.String()
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.sweepLocked()
+	swept := t.sweepLocked()
+	st := t.statusLocked(key)
+	cb := t.notify
+	t.mu.Unlock()
+	fire(cb, swept > 0) // other waiters learn about the expiry this lookup found
+	return st
+}
+
+func (t *Tracker) statusLocked(key string) api.ProofStatus {
 	if _, ok := t.pending[key]; ok {
 		return api.ProofStatusPending
 	}

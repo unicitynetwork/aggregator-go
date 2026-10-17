@@ -56,6 +56,24 @@ type Publisher struct {
 	log       *logger.Logger
 	// sealVerifier authenticates stored views again (nil: stored views are not republished).
 	sealVerifier func(ctx context.Context) types.SealVerifier
+	// notify wakes long-poll waiters after a publication outcome which no finalization path
+	// reports itself: late certification material. Finalization publishes
+	// first and its caller notifies afterwards, once the proof-ready update is done (a wake
+	// from inside publish would precede markProofsReady). Called without publisher locks.
+	notify func()
+}
+
+// SetNotify registers the wake-up callback (call before use). It must not block.
+func (p *Publisher) SetNotify(f func()) {
+	if p != nil {
+		p.notify = f
+	}
+}
+
+func (p *Publisher) wake() {
+	if p != nil && p.notify != nil {
+		p.notify()
+	}
 }
 
 // New returns a publisher, or nil when the backend cannot retain read views
@@ -120,6 +138,8 @@ func (p *Publisher) EnsurePublishedAtStartup(ctx context.Context, latest *models
 func (p *Publisher) InvalidateLatest() {
 	if p != nil {
 		p.catalog.MarkLatestUnavailable()
+		// No wake here: its callers hold finalizationMu, and each of them signals after its own
+		// completion and unlock, so the waiter still observes the unavailable outcome.
 	}
 }
 
@@ -283,6 +303,7 @@ func (p *Publisher) PublishProofMaterial(ctx context.Context, m *proofmaterial.M
 	switch {
 	case err == nil:
 		metrics.ProofViewPublicationTotal.WithLabelValues(ResultAttached).Inc()
+		p.wake() // e.g. a late partition view turns partition_view_unavailable into a proof
 	case errors.Is(err, proofview.ErrViewNotRetained):
 		metrics.ProofViewPublicationTotal.WithLabelValues(ResultAttachMiss).Inc()
 	default:

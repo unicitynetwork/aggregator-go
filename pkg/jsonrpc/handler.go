@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,14 +21,16 @@ type HandlerFunc func(ctx context.Context, params json.RawMessage) (interface{},
 
 // Server represents a JSON-RPC server
 type Server struct {
-	handlers         map[string]HandlerFunc
-	limits           map[string]MethodLimits
-	middleware       []MiddlewareFunc
-	logger           *logger.Logger
-	concurrencyLimit int
-	activeSemaphore  chan struct{}
-	maxBodyBytes     int64
-	mutex            sync.RWMutex
+	handlers     map[string]HandlerFunc
+	limits       map[string]MethodLimits
+	middleware   []MiddlewareFunc
+	logger       *logger.Logger
+	pool         *slotPool
+	ownership    map[string]OwnershipPredicate
+	optIn        map[string]MethodLimits
+	workers      atomic.Int64 // method workers running, also after their response (see TimeoutMiddleware)
+	maxBodyBytes int64
+	mutex        sync.RWMutex
 }
 
 // DefaultMaxRequestBodyBytes is the outer ceiling on any JSON-RPC request body,
@@ -67,12 +70,11 @@ type MiddlewareFunc func(ctx context.Context, req *Request, next func(context.Co
 // NewServer creates a new JSON-RPC server
 func NewServer(logger *logger.Logger, concurrencyLimit int) *Server {
 	return &Server{
-		handlers:         make(map[string]HandlerFunc),
-		limits:           make(map[string]MethodLimits),
-		middleware:       make([]MiddlewareFunc, 0),
-		logger:           logger,
-		concurrencyLimit: concurrencyLimit,
-		activeSemaphore:  make(chan struct{}, concurrencyLimit),
+		handlers:   make(map[string]HandlerFunc),
+		limits:     make(map[string]MethodLimits),
+		middleware: make([]MiddlewareFunc, 0),
+		logger:     logger,
+		pool:       &slotPool{limit: concurrencyLimit},
 	}
 }
 
@@ -129,17 +131,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check concurrency limit
-	select {
-	case s.activeSemaphore <- struct{}{}:
-		defer func() { <-s.activeSemaphore }()
-	default:
+	permit, ok := s.newPermit()
+	if !ok {
 		recordMetrics("unknown", "error")
 		s.writeErrorResponse(w, ErrConcurrencyLimit, nil)
 		return
 	}
+	defer permit.Close()
 
 	// Add request ID to context
 	ctx := context.WithValue(r.Context(), logger.StateIDKey, uuid.New().String())
+	ctx = ContextWithPermit(ctx, permit)
+	ctx = context.WithValue(ctx, workerCountKey{}, &s.workers)
 
 	// Parse request. The ID is kept raw so that method-limited requests can
 	// validate its original encoding and echo it without number conversion.
@@ -180,6 +183,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, ErrInvalidRequest, req.ID)
 			return
 		}
+		// Requests which opt in to a long-poll wait are bounded like a method-limited request
+		// (the legacy requests of the method keep their unbounded legacy decoding).
+		if l, ok := s.optInLimitsFor(&req); ok {
+			if rpcErr := checkRequestBody(l, dec, r.Body); rpcErr != nil {
+				recordMetrics(metrics.NormalizeMethod(req.Method), "error")
+				s.writeErrorResponse(w, rpcErr, nil)
+				return
+			}
+			if !validRawID(env.ID, l.MaxIDBytes) {
+				recordMetrics(metrics.NormalizeMethod(req.Method), "error")
+				s.writeErrorResponse(w, NewDetailedError(InvalidParamsCode, "Invalid params", "invalid_request", "invalid_id", false, nil), nil)
+				return
+			}
+			if rpcErr := checkParamsLimit(l, &req); rpcErr != nil {
+				recordMetrics(metrics.NormalizeMethod(req.Method), "error")
+				s.writeErrorResponse(w, rpcErr, req.ID)
+				return
+			}
+		}
 	} else {
 		idOK := validRawID(env.ID, limits.MaxIDBytes)
 		var id interface{} // an invalid or oversized ID is never echoed
@@ -216,6 +238,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctxID = string(raw)
 	}
 	ctx = context.WithValue(ctx, logger.JSONRPCIDKey, ctxID)
+
+	s.markOwned(permit, &req)
 
 	// Process request
 	response := s.processRequest(ctx, &req)
@@ -308,8 +332,14 @@ func (s *Server) writeLimitedResponse(w http.ResponseWriter, response *Response,
 	data, err := encodeLimited(response, max)
 	if tooLarge(err) {
 		n := max
-		data, err = json.Marshal(NewErrorResponse(
-			NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "response_bytes", false, &n), response.ID))
+		e := NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "response_bytes", false, &n)
+		// the result that did not fit carried the wait echo: the replacement error keeps it
+		if w, ok := response.Result.(interface{ WaitedEcho() (uint64, bool) }); ok {
+			if ms, has := w.WaitedEcho(); has {
+				e = e.WithWaited(ms)
+			}
+		}
+		data, err = json.Marshal(NewErrorResponse(e, response.ID))
 	}
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to encode JSON response")
@@ -448,7 +478,26 @@ func TimeoutMiddleware(timeout time.Duration, log *logger.Logger) MiddlewareFunc
 
 		done := make(chan *Response, 1)
 
+		// The worker may outlive this middleware (it returns on the deadline without waiting).
+		// A request's permit must then stay held until the worker really stops (C07).
+		permit := PermitFromContext(ctx)
+		tracked := permit != nil && permit.Owned() && permit.AddWorker()
+		// Independently of any permit accounting (legacy requests release their token with the
+		// response), the server counts every method worker until it really stops, so shutdown
+		// can join workers that outlive their response. Response bytes and timing are unchanged.
+		var wc *atomic.Int64
+		if c, ok := ctx.Value(workerCountKey{}).(*atomic.Int64); ok {
+			c.Add(1)
+			wc = c
+		}
+
 		go func() {
+			if wc != nil {
+				defer wc.Add(-1)
+			}
+			if tracked {
+				defer permit.WorkerDone()
+			}
 			defer func() {
 				if r := recover(); r != nil {
 					log.WithContext(ctx).Error("panic in JSON-RPC handler", "panic", r, "method", req.Method)
@@ -471,7 +520,11 @@ func TimeoutMiddleware(timeout time.Duration, log *logger.Logger) MiddlewareFunc
 		case response := <-done:
 			return response
 		case <-ctx.Done():
-			return NewErrorResponse(NewError(InternalErrorCode, "Request timeout", nil), req.ID)
+			e := NewError(InternalErrorCode, "Request timeout", nil)
+			if permit != nil && permit.Owned() { // an opt-in request: the echo is part of every handled error
+				e = e.WithWaited(permit.Waited())
+			}
+			return NewErrorResponse(e, req.ID)
 		}
 	}
 }

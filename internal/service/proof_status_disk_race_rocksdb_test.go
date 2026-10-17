@@ -100,3 +100,87 @@ func TestProofStatusDiskNeverUnknownWithoutProofWhileViewUnpublished(t *testing.
 		return proofIncluded(p)
 	}, 15*time.Second, 5*time.Millisecond, "included after the publish")
 }
+
+// #220 and long-poll (T4): a wake raised while the finalized block's proof view is still
+// unpublished would send the waiter into the very gap above. The notifier therefore must not
+// fire while the hook holds the round, and must fire only once the view is published and the
+// pending hint is cleared.
+func TestLongPollNotifyNotBeforeDiskProofViewPublish(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := testDiskBFTShardServiceConfig(t)
+	cfg.Database.Database = "test_longpoll_notify_disk"
+	storage := testutil.SetupTestStorage(t, cfg)
+	log, err := logger.New("info", "text", "stdout", false)
+	require.NoError(t, err)
+	rm, err := round.NewRoundManager(ctx, &cfg, log, storage.CommitmentQueue(), storage, nil, state.NewSyncStateTracker(), nil,
+		events.NewEventBus(log), smt.NewThreadSafeSMT(smt.NewSparseMerkleTree(api.SHA256, api.StateTreeKeyLengthBits)), nil)
+	require.NoError(t, err)
+	svc := NewAggregatorService(&cfg, log, rm, storage.CommitmentQueue(), storage, nil)
+
+	var holdArmed, checkArmed atomic.Bool
+	var notifies atomic.Int32
+	var notifiedWithoutProof atomic.Int32
+	req := testutil.CreateTestCertificationRequest(t, "notify_target").ToAPI()
+	rm.SetWaitNotifier(func() {
+		notifies.Add(1)
+		if !checkArmed.Load() {
+			return
+		}
+		p, err := svc.GetInclusionProofV2(ctx, &api.GetInclusionProofRequestV2{StateID: req.StateID})
+		if err != nil || !proofIncluded(p) || svc.ProofStatusHint(req.StateID) == api.ProofStatusPending {
+			notifiedWithoutProof.Add(1)
+		}
+	})
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	rm.SetTestHookBeforeProofViewPublish(func() {
+		if holdArmed.Load() {
+			entered <- struct{}{}
+			<-release
+		}
+	})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		c, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		_ = rm.Stop(c)
+	})
+	require.NoError(t, rm.Start(ctx))
+	require.NoError(t, rm.Activate(ctx))
+
+	warm := testutil.CreateTestCertificationRequest(t, "notify_warm").ToAPI()
+	_, err = svc.CertificationRequest(ctx, warm)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		p, err := svc.GetInclusionProofV2(ctx, &api.GetInclusionProofRequestV2{StateID: warm.StateID})
+		return err == nil && proofIncluded(p)
+	}, 15*time.Second, 25*time.Millisecond)
+
+	holdArmed.Store(true)
+	checkArmed.Store(true)
+	_, err = svc.CertificationRequest(ctx, req)
+	require.NoError(t, err)
+	select {
+	case <-entered:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the round never reached the publish hook")
+	}
+	// Rounds (also empty ones) notify when they complete; the held round has not completed, and
+	// no other round can run. Count from the moment the hold engaged.
+	before := notifies.Load()
+	time.Sleep(300 * time.Millisecond)
+	require.Equal(t, before, notifies.Load(), "no wake while the finalized block's view is unpublished")
+
+	holdArmed.Store(false)
+	close(release)
+	require.Eventually(t, func() bool { return notifies.Load() > before }, 15*time.Second, 5*time.Millisecond, "woken after the publish")
+	p, err := svc.GetInclusionProofV2(ctx, &api.GetInclusionProofRequestV2{StateID: req.StateID})
+	require.NoError(t, err)
+	require.True(t, proofIncluded(p))
+	require.Zero(t, notifiedWithoutProof.Load())
+}

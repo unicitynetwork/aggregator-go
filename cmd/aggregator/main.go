@@ -18,6 +18,8 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/ha"
 	"github.com/unicitynetwork/aggregator-go/internal/ha/state"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/longpoll"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/proofpub"
 	"github.com/unicitynetwork/aggregator-go/internal/round"
@@ -200,6 +202,18 @@ func main() {
 		gracefulExit(asyncLogger, 1)
 	}
 
+	// Optional long-poll on inclusion-proof reads: the registry is woken by the publication,
+	// expiry and role-change sources and bounds the waits by LONG_POLL_MAX_WAITERS.
+	waitRegistry := longpoll.New(longpoll.Config{MaxWaiters: cfg.Server.LongPollMaxWaiters, Concurrency: cfg.Server.ConcurrencyLimit})
+	longPoll := &longpoll.Coordinator{Reg: waitRegistry, MaxWait: cfg.Server.LongPollMaxWait, Budget: config.LongPollMethodBudget}
+	metrics.SetLongPollGaugeSource(func() metrics.LongPollGauges {
+		st := waitRegistry.Stats()
+		return metrics.LongPollGauges{Reserved: st.Reserved, Queued: st.Queued, Running: st.Running}
+	})
+	if n, ok := roundManager.(interface{ SetWaitNotifier(func()) }); ok {
+		n.SetWaitNotifier(waitRegistry.Notify)
+	}
+
 	// Initialize round manager (SMT restoration, etc.)
 	if err := roundManager.Start(ctx); err != nil {
 		log.WithComponent("main").Error("Failed to start round manager", "error", err.Error())
@@ -225,13 +239,14 @@ func main() {
 				// followers retain the state they replay so they can serve it after promotion
 				syncer.SetViewPublisher(pv.ProofViewPublisher())
 			}
+			syncer.SetNotify(waitRegistry.Notify)
 			bs = syncer
 			bs.Start(ctx)
 		}
 
 		// In HA mode, listen for leadership changes to activate/deactivate the round manager
 		go func() {
-			if err := startLeaderChangedEventListener(ctx, log, cfg, roundManager, bs, ls, eventBus); err != nil {
+			if err := startLeaderChangedEventListener(ctx, log, cfg, roundManager, bs, ls, eventBus, waitRegistry); err != nil {
 				log.WithComponent("ha-listener").Error("Fatal error on leader changed event listener", "error", err.Error())
 			}
 		}()
@@ -252,10 +267,11 @@ func main() {
 
 	// Initialize gateway server
 	server := gateway.NewServer(cfg, log, aggregatorService)
+	server.SetLongPoll(longPoll)
 
 	// get_inclusion_proofs.v1: served from the retained-view catalog, or explicitly
 	// unsupported (unsupported_configuration) when this deployment cannot serve it.
-	batchHandler, unsupportedReason := service.NewBatchProofHandler(cfg, roundManager, storageInstance, aggregatorService)
+	batchHandler, unsupportedReason := service.NewBatchProofHandlerWithLongPoll(cfg, roundManager, storageInstance, aggregatorService, longPoll)
 	server.SetBatchProofHandler(batchHandler)
 	if unsupportedReason != "" {
 		log.WithComponent("main").Info("get_inclusion_proofs.v1 unsupported in this deployment", "reason", unsupportedReason)
@@ -288,8 +304,20 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
-	// Stop server
-	if err := server.Stop(shutdownCtx); err != nil {
+	// Stop server: it drains the handlers (h2c included) and the workers of long-poll requests
+	// while storage is open. It gets a share of the shutdown time; the rest remains for the later
+	// steps. If work is still running afterwards, storage must not be closed beneath it.
+	serverCtx, serverCancel := context.WithTimeout(shutdownCtx, 20*time.Second)
+	err = server.Stop(serverCtx)
+	serverCancel()
+	if errors.Is(err, gateway.ErrShutdownIncomplete) {
+		log.WithComponent("main").Error("Handlers still running after the shutdown deadline; not closing storage", "error", err.Error())
+		if asyncLogger != nil {
+			asyncLogger.Stop()
+		}
+		os.Exit(1)
+	}
+	if err != nil {
 		log.WithComponent("main").Error("Failed to stop server gracefully", "error", err.Error())
 	}
 
@@ -362,7 +390,13 @@ func startFatalErrorListener(ctx context.Context, log *logger.Logger, eventBus *
 	}()
 }
 
-func startLeaderChangedEventListener(ctx context.Context, log *logger.Logger, cfg *config.Config, roundManager round.Manager, bs blockSyncer, leader leaderSelector, eventBus *events.EventBus) error {
+// waitDrainer ends the long-poll waits of this node around a local role transition.
+type waitDrainer interface {
+	Drain(permanent bool)
+	Reopen()
+}
+
+func startLeaderChangedEventListener(ctx context.Context, log *logger.Logger, cfg *config.Config, roundManager round.Manager, bs blockSyncer, leader leaderSelector, eventBus *events.EventBus, waits waitDrainer) error {
 	log.WithComponent("ha-listener").Info("Subscribing to TopicLeaderChanged")
 	leaderChangedCh := eventBus.Subscribe(events.TopicLeaderChanged)
 	defer func() {
@@ -376,49 +410,61 @@ func startLeaderChangedEventListener(ctx context.Context, log *logger.Logger, cf
 		case <-ctx.Done():
 			return nil
 		case e := <-leaderChangedCh:
-			evt := e.(*events.LeaderChangedEvent)
-			log.WithComponent("ha-listener").Info("Received LeaderChangedEvent", "isLeader", evt.IsLeader)
-			if evt.IsLeader {
-				// In child and standalone mode, we must sync SMT state before starting to produce blocks
-				// In parent mode, the Activate call handles SMT reconstruction, no block sync needed.
-				if cfg.Sharding.Mode != config.ShardingModeParent {
-					if bs == nil {
-						log.WithComponent("ha-listener").Error("Cannot activate leader without block syncer")
-						resignLeadership(ctx, log, leader)
-						continue
-					}
-					if err := syncBeforeActivation(ctx, log, bs, leader, eventBus); err != nil {
-						log.WithComponent("ha-listener").Error("failed to sync to latest block on leadership change", "error", err)
-						if errors.Is(err, ha.ErrDiskSMTDiverged) {
-							resignLeadership(ctx, log, leader)
-							publishFatalPromotionError(eventBus, err)
-							continue
-						}
-						if ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, errLeadershipLost) {
-							resignLeadership(ctx, log, leader)
-						}
-						continue
-					}
-				}
-				isStillLeader, err := leader.VerifyLeadership(ctx)
-				if err != nil {
-					log.WithComponent("ha-listener").Error("Failed to verify leadership before activation", "error", err)
-					resignLeadership(ctx, log, leader)
-					continue
-				}
-				if !isStillLeader {
-					log.WithComponent("ha-listener").Warn("Leadership was lost before activation")
-					continue
-				}
-				if err := roundManager.Activate(ctx); err != nil {
-					log.WithComponent("ha-listener").Error("Failed to activate round manager", "error", err)
-					resignLeadership(ctx, log, leader)
-				}
-			} else {
-				if err := roundManager.Deactivate(ctx); err != nil {
-					log.WithComponent("ha-listener").Error("Failed to deactivate round manager", "error", err)
-				}
+			// Waits are drained on either role transition and admitted again once it settles
+			// (Activate/Deactivate returned, or the transition failed); the waiters observe the
+			// resulting local state.
+			if waits != nil {
+				waits.Drain(false)
 			}
+			func() {
+				if waits != nil {
+					defer waits.Reopen()
+				}
+				evt := e.(*events.LeaderChangedEvent)
+				log.WithComponent("ha-listener").Info("Received LeaderChangedEvent", "isLeader", evt.IsLeader)
+				if evt.IsLeader {
+					// In child and standalone mode, we must sync SMT state before starting to produce blocks
+					// In parent mode, the Activate call handles SMT reconstruction, no block sync needed.
+					if cfg.Sharding.Mode != config.ShardingModeParent {
+						if bs == nil {
+							log.WithComponent("ha-listener").Error("Cannot activate leader without block syncer")
+							resignLeadership(ctx, log, leader)
+							return
+						}
+						if err := syncBeforeActivation(ctx, log, bs, leader, eventBus); err != nil {
+							log.WithComponent("ha-listener").Error("failed to sync to latest block on leadership change", "error", err)
+							if errors.Is(err, ha.ErrDiskSMTDiverged) {
+								resignLeadership(ctx, log, leader)
+								publishFatalPromotionError(eventBus, err)
+								return
+							}
+							if ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, errLeadershipLost) {
+								resignLeadership(ctx, log, leader)
+							}
+							return
+						}
+					}
+					isStillLeader, err := leader.VerifyLeadership(ctx)
+					if err != nil {
+						log.WithComponent("ha-listener").Error("Failed to verify leadership before activation", "error", err)
+						resignLeadership(ctx, log, leader)
+						return
+					}
+					if !isStillLeader {
+						log.WithComponent("ha-listener").Warn("Leadership was lost before activation")
+						return
+					}
+					if err := roundManager.Activate(ctx); err != nil {
+						log.WithComponent("ha-listener").Error("Failed to activate round manager", "error", err)
+						resignLeadership(ctx, log, leader)
+					}
+				} else {
+					if err := roundManager.Deactivate(ctx); err != nil {
+						log.WithComponent("ha-listener").Error("Failed to deactivate round manager", "error", err)
+					}
+				}
+
+			}()
 		}
 	}
 }

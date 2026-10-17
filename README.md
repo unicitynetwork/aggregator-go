@@ -117,6 +117,8 @@ The service is configured via environment variables:
 | `IDLE_TIMEOUT` | HTTP idle timeout | `120s` |
 | `DEFAULT_REQUEST_TTL` | Lifetime assigned to requests that omit `expiresAt` | `1h` |
 | `CONCURRENCY_LIMIT` | Max concurrent requests | `1000` |
+| `LONG_POLL_MAX_WAIT` | Upper bound of the optional `waitMs` long-poll on proof reads (see [docs/long-poll.md](docs/long-poll.md)) | `20s` |
+| `LONG_POLL_MAX_WAITERS` | Global cap on admitted long-poll waits (`0` = immediate reads with a zero echo) | `1024` |
 | `ENABLE_DOCS` | Enable /docs endpoint | `true` |
 | `ENABLE_CORS` | Enable CORS headers | `true` |
 | `ENABLE_TLS` | Enable HTTPS/TLS | `false` |

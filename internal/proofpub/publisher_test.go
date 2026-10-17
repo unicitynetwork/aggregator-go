@@ -434,3 +434,34 @@ func Test_AdmittedViewIsNotReauthenticatedButStoredViewIs(t *testing.T) {
 	require.Positive(t, calls, "stored view is re-authenticated")
 	require.Equal(t, f2.Raw, latest(t, e.cat).PartitionView())
 }
+
+// Long-poll wake-ups: finalization publication does not signal itself (its caller signals once
+// the proof-ready update is done, otherwise a waiter would be woken before the serving boundary);
+// invalidation and late certification material do.
+func Test_Notify_OnlyForInvalidationAndLateMaterial(t *testing.T) {
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("x"), 80))
+	var n int
+	e.pub.SetNotify(func() { n++ })
+	root := commit(t, e.b, 1, 0, 20)
+	block, f := finalizedBlock(t, 1, root, 80, false)
+
+	e.pub.PublishFinalized(t.Context(), block)
+	e.pub.EnsurePublished(t.Context(), block)
+	require.Zero(t, n, "publication outcomes are reported by the finalizing caller")
+
+	// a rejected attachment does not wake; an accepted one does
+	unknown := prooftest.New(t, 2, 5, prooftest.Hash("unknown"), 95)
+	require.Error(t, e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindRepeat, unknown, nil, 0, false)))
+	require.Zero(t, n)
+	require.NoError(t, e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindFinalized, f, f.Raw, 1, true)))
+	require.Equal(t, 1, n, "a late view turns partition_view_unavailable into a proof")
+
+	e.pub.InvalidateLatest()
+	require.Equal(t, 1, n, "no wake from inside the caller's lock: the finalizing caller signals after unlocking")
+	_, err := e.cat.AcquireLatest(t.Context())
+	require.Error(t, err)
+
+	var nilPub *proofpub.Publisher
+	nilPub.SetNotify(func() { t.Fatal("nil publisher") })
+	nilPub.InvalidateLatest()
+}
