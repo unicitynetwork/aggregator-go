@@ -757,6 +757,24 @@ The service implements a MongoDB-based leader election system:
 - **`parent-follower`** - Parent aggregator processing API requests, monitoring for leadership
 - **`parent-standalone`** - Single parent aggregator (HA disabled)
 
+## Upgrading: stop-all upgrade of BFT Core and aggregators
+
+**The strict secp256k1 `VerifyHash` rule (bft-go-base `uc-consolidation`) requires a stop-all upgrade.**
+All BFT Core root validators and shard validators, and every aggregator, are stopped, upgraded and started together.
+Rolling upgrades and epoch-boundary activation are not supported.
+
+- **Why:** the rule changes which unicity seals and quorum certificates (QCs) are accepted, so nodes on different
+  versions can disagree on whether the same seal or QC has a quorum. While versions are mixed, rounds stall. The
+  network recovers once all nodes run the same version. Honest signers are unaffected.
+- **Aggregator-specific consequence:** an aggregator on the old bft-go-base can accept or reject unicity certificates
+  (UCs) differently from the root chain, so it can follow a different view of the chain than the BFT Core nodes.
+- **HA:** upgrade the leader and all followers together (stop every instance of the HA group, then start them on the
+  new binary). Do not upgrade followers first and fail over, and do not keep an old-version instance running as a
+  standby. The same applies to parent and child shard aggregators.
+- **Order of releases:** bft-go-base → bft-core → aggregator-go. The deployment itself is one stop-all step.
+
+See also `docs/upgrade.md` in bft-core.
+
 ## Sharding
 
 The aggregator supports two orthogonal sharding strategies, selected by `SHARDING_MODE`:
