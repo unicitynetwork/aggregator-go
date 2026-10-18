@@ -157,6 +157,21 @@ func (s *NonInclusionService) GetNonInclusionProofV1(ctx context.Context, req *a
 	defer cancelWork()
 	stop := context.AfterFunc(lease.Context(), cancelWork)
 	defer stop()
+	// cancelled reports the cancellation of the request, its deadline or the lease. The lease's own
+	// context is consulted directly because AfterFunc propagates it to work asynchronously, and the
+	// context error returned by the backend is a cancellation whichever of them noticed first.
+	cancelled := func(backendErr error) error {
+		if err := work.Err(); err != nil {
+			return err
+		}
+		if err := lease.Context().Err(); err != nil {
+			return err
+		}
+		if errors.Is(backendErr, context.Canceled) || errors.Is(backendErr, context.DeadlineExceeded) {
+			return backendErr
+		}
+		return nil
+	}
 	if err := work.Err(); err != nil {
 		return nil, niCtx(err)
 	}
@@ -173,12 +188,12 @@ func (s *NonInclusionService) GetNonInclusionProofV1(ctx context.Context, req *a
 	case errors.Is(err, backend.ErrNonInclusionUnsupported):
 		return nil, niUnavailable("unsupported_configuration", false)
 	default:
-		if cerr := work.Err(); cerr != nil {
+		if cerr := cancelled(err); cerr != nil {
 			return nil, niCtx(cerr)
 		}
 		return nil, niInternal(fmt.Errorf("non-inclusion certificate: %w", err))
 	}
-	if err := work.Err(); err != nil {
+	if err := cancelled(nil); err != nil {
 		return nil, niCtx(err)
 	}
 	// the certificate must authenticate the root of the very UC returned with it

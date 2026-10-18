@@ -15,14 +15,15 @@ import (
 // Any method name not in this set is normalized to "unknown" to prevent
 // unbounded label cardinality from arbitrary client input.
 var knownMethods = map[string]struct{}{
-	"certification_request":  {},
-	"get_inclusion_proof.v2": {},
-	"get_no_deletion_proof":  {},
-	"get_block_height":       {},
-	"get_block":              {},
-	"get_block_records":      {},
-	"submit_shard_root":      {},
-	"get_shard_proof":        {},
+	"certification_request":   {},
+	"get_inclusion_proof.v2":  {},
+	"get_inclusion_proofs.v1": {},
+	"get_no_deletion_proof":   {},
+	"get_block_height":        {},
+	"get_block":               {},
+	"get_block_records":       {},
+	"submit_shard_root":       {},
+	"get_shard_proof":         {},
 }
 
 // NormalizeMethod returns the method name if it is a known RPC method,
@@ -253,6 +254,25 @@ var (
 			Help: "Partition view sidecars received with certification responses by outcome (ok, missing, malformed, invalid, too_large, ...).",
 		},
 		[]string{"result"},
+	)
+
+	// PartitionViewPruneTotal counts the cleanups of superseded partition view sidecars in block
+	// documents by outcome (ok, error). A cleanup failure never fails finalization; it is retried by the
+	// next finalization or startup.
+	PartitionViewPruneTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_partition_view_prune_total",
+			Help: "Cleanups of superseded partition views stored in block documents, by outcome (ok, error).",
+		},
+		[]string{"result"},
+	)
+
+	// PartitionViewPrunedBlocksTotal counts the block documents whose superseded view was removed.
+	PartitionViewPrunedBlocksTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_partition_view_pruned_blocks_total",
+			Help: "Block documents whose superseded partition view was removed.",
+		},
 	)
 
 	ProofViewPublicationTotal = promauto.NewCounterVec(

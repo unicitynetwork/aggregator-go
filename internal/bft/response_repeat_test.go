@@ -5,7 +5,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
-	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
@@ -18,9 +17,9 @@ func TestNoteResponseRound_CountsNonProgressOnly(t *testing.T) {
 		return testutil.ToFloat64(metrics.BFTCertificationResponseNonProgressTotal.WithLabelValues(shard))
 	}
 	deliver := func(shardRound, rootRound uint64) {
-		c.noteResponseRound(&certification.CertificationResponse{UC: types.UnicityCertificate{
+		c.noteResponseRound(&types.UnicityCertificate{
 			InputRecord: &types.InputRecord{RoundNumber: shardRound},
-			UnicitySeal: &types.UnicitySeal{RootChainRoundNumber: rootRound}}})
+			UnicitySeal: &types.UnicitySeal{RootChainRoundNumber: rootRound}})
 	}
 	before := count()
 	for i := uint64(5); i < 9; i++ { // new shard blocks (and new root rounds)

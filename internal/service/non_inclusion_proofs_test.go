@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -214,6 +215,7 @@ type niFakeLease struct {
 	err      error
 	root, uc []byte
 	released bool
+	onCert   func() error // runs inside GetNonInclusionCert, its error replaces err
 }
 
 func (l *niFakeLease) Context() context.Context { return l.ctx }
@@ -224,6 +226,9 @@ func (l *niFakeLease) Block() proofview.BlockIdentity {
 }
 func (l *niFakeLease) UC() []byte { return l.uc }
 func (l *niFakeLease) GetNonInclusionCert([]byte) (*api.NonInclusionCert, error) {
+	if l.onCert != nil {
+		return l.cert, l.onCert()
+	}
 	return l.cert, l.err
 }
 func (l *niFakeLease) Release() {
@@ -288,6 +293,34 @@ func TestNonInclusionErrorMappingAndLeaseRelease(t *testing.T) {
 			if tc.release {
 				require.True(t, tc.src.lease.released, "the lease is released on every exit")
 			}
+		})
+	}
+}
+
+// A lease cancelled (pressure, lease deadline) while the certificate is built is the retryable
+// deadline answer, not an internal error: work is cancelled only asynchronously, so the
+// classification must not depend on that propagation having happened.
+func TestNonInclusionLeaseCancelledDuringCertificateIsRetryable(t *testing.T) {
+	root := make([]byte, 32)
+	for name, returned := range map[string]func(ctx context.Context) error{
+		"context error returned":   func(ctx context.Context) error { return ctx.Err() },
+		"wrapped context error":    func(ctx context.Context) error { return fmt.Errorf("walk: %w", ctx.Err()) },
+		"other error after cancel": func(context.Context) error { return errors.New("reader closed") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			counts := map[int]int{}
+			for i := 0; i < 500; i++ {
+				leaseCtx, cancel := context.WithCancel(context.Background())
+				lease := &niFakeLease{ctx: leaseCtx, root: root, uc: []byte{1}}
+				lease.onCert = func() error { cancel(); return returned(leaseCtx) }
+				svc := NewNonInclusionService(&niFakeSource{lease: lease}, niShard{}, NonInclusionConfig{})
+				params, _ := json.Marshal(map[string]string{"stateId": hex.EncodeToString(niKey(1))})
+				_, rerr := svc.HandleRPC(context.Background(), params)
+				require.NotNil(t, rerr)
+				counts[rerr.Code]++
+				cancel()
+			}
+			require.Equal(t, map[int]int{api.NonInclusionCodeBusy: 500}, counts)
 		})
 	}
 }

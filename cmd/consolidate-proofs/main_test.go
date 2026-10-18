@@ -313,6 +313,30 @@ func TestCLI_EpochEndFromInstalledHistory(t *testing.T) {
 	require.Equal(t, exitInput, code, msg)
 }
 
+// An epoch gap leaves the epochs above it unverified: epoch 1 with a forged epoch 3 (epoch 2 missing)
+// must be refused, not served as the authority of epoch 3 seals.
+func TestCLI_TrustBaseEpochGapIsRefused(t *testing.T) {
+	e := setup(t, 2)
+	round := e.sim.LatestRound()
+	var cfg Config
+	raw, _ := os.ReadFile(e.cfg)
+	require.NoError(t, json.Unmarshal(raw, &cfg))
+	cfg.TrustBases = []string{"tb.json", "trust-base-3.json"}
+
+	tb1 := e.sim.TB.(*types.RootTrustBaseV1)
+	forged, err := types.NewTrustBase(tb1.GetNetworkID(), tb1.GetRootNodes(), types.WithEpoch(3), types.WithEpochStart(round+1))
+	require.NoError(t, err) // not signed by anybody
+	b, err := json.Marshal(forged)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(e.dir, "trust-base-3.json"), b, 0o600))
+	e.cfg = writeJSON(t, e.dir, "config-gap.json", cfg)
+
+	var out, errb bytes.Buffer
+	code := run([]string{"-config", e.cfg, "-in", e.in}, &out, &errb)
+	require.Equal(t, exitInput, code, errb.String())
+	require.Contains(t, errb.String(), "no installed predecessor")
+}
+
 func TestCLI_UnshardedHasNoViewAndOneRequest(t *testing.T) {
 	e := setup(t, 1)
 	e.sim.OmitView = true

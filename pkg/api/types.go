@@ -493,6 +493,15 @@ func (p *InclusionProofV2) CheckRequestBinding(v2 *CertificationRequest) error {
 // path folds from the certified leaf to expectedRoot (the raw UC.IR.h). It is
 // the second stage of Verify and does not look at the embedded certificate.
 func (p *InclusionProofV2) VerifyLeafPath(v2 *CertificationRequest, expectedRoot []byte) error {
+	if p == nil {
+		return errors.New("nil inclusion proof")
+	}
+	if v2 == nil {
+		return errors.New("nil certification request")
+	}
+	if p.CertificationData == nil {
+		return ErrExclusionNotImpl
+	}
 	rootRaw := expectedRoot
 	var cert InclusionCert
 	if err := cert.UnmarshalBinary(p.CertificateBytes); err != nil {
