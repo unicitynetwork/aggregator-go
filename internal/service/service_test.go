@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1382,3 +1383,69 @@ func testChildProofUC(t *testing.T, roundNumber uint64, rootHash []byte) api.Hex
 
 // ptr returns a pointer to v, for the optional request deadline.
 func ptr(v uint64) *uint64 { return &v }
+
+// firstStoreRaceQueue makes the first Store wait until the second one has completed, then fail
+// with the error the given store reports: the interleaving of two identical submissions in
+// which the first copy's insert loses to the second.
+type firstStoreRaceQueue struct {
+	recordingCommitmentQueue
+	mu       sync.Mutex
+	calls    int
+	entered  chan struct{}
+	release  chan struct{}
+	firstErr error
+}
+
+func (q *firstStoreRaceQueue) Store(ctx context.Context, r *models.CertificationRequest) error {
+	q.mu.Lock()
+	q.calls++
+	first := q.calls == 1
+	q.mu.Unlock()
+	if first {
+		close(q.entered)
+		<-q.release
+		return q.firstErr
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.recordingCommitmentQueue.Store(ctx, r)
+}
+
+// A store failure which means "the request is (or will be) queued" must not clear the pending
+// mark: the first of two identical submissions loses its insert to the second, and the request
+// stays queued, so the hint has to stay pending until a round pulls it.
+func TestCertificationRequestKeepsPendingMarkWhenAnotherCopyIsQueued(t *testing.T) {
+	for name, storeErr := range map[string]error{
+		"duplicate key":       fmt.Errorf("failed to store commitment: %w", interfaces.ErrDuplicateKey),
+		"caller gave up late": fmt.Errorf("%w: %w", interfaces.ErrStoreInFlight, context.Canceled),
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			log, err := logger.New("error", "text", "stdout", false)
+			require.NoError(t, err)
+			queue := &firstStoreRaceQueue{entered: make(chan struct{}), release: make(chan struct{}), firstErr: storeErr}
+			shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+			rm := &stubRoundManager{referenceTime: 1}
+			service := &AggregatorService{
+				config:                        &config.Config{Processing: config.ProcessingConfig{SkipDuplicateCheck: true}, Sharding: shardingCfg},
+				logger:                        log,
+				commitmentQueue:               queue,
+				roundManager:                  rm,
+				certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+			}
+			req := createTestCertificationRequests(t, 1)[0]
+
+			firstDone := make(chan error, 1)
+			go func() { _, err := service.CertificationRequest(ctx, req); firstDone <- err }()
+			<-queue.entered // the first copy marked the state and is inside Store
+			resp, err := service.CertificationRequest(ctx, req)
+			require.NoError(t, err)
+			require.Equal(t, "SUCCESS", resp.Status)
+			close(queue.release)
+			require.ErrorIs(t, <-firstDone, storeErr, "the failure is still reported to the first caller")
+
+			require.Len(t, queue.stored, 1)
+			require.Equal(t, api.ProofStatusPending, rm.ProofStatus(req.StateID), "the request is queued, the hint must stay pending")
+		})
+	}
+}

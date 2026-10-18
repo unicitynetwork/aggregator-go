@@ -262,12 +262,14 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 	// it before the mark exists), idempotently: resubmitting a still-pending request only
 	// reaches the queue again, where the leaf deduplication drops the second copy. A
 	// request that could not be queued must not stay marked, but only a mark made here is
-	// removed, never the original's.
+	// removed, never the original's. A duplicate key means the request is already queued (by a
+	// concurrent copy), and a store the caller abandoned after the handoff may still complete:
+	// both keep the mark.
 	newlyMarked := as.roundManager.MarkRequestAdmitted(req.StateID, effectiveTimeout)
 
 	// Store certificationRequest
 	if err := as.commitmentQueue.Store(ctx, certificationRequest); err != nil {
-		if newlyMarked {
+		if newlyMarked && !errors.Is(err, interfaces.ErrDuplicateKey) && !errors.Is(err, interfaces.ErrStoreInFlight) {
 			as.roundManager.ClearRequestAdmitted(req.StateID)
 		}
 		return nil, fmt.Errorf("failed to store certificationRequest: %w", err)
