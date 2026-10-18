@@ -1,8 +1,8 @@
 {
   "base": "shards-4",
-  "description": "policy partition differs from the evidence",
-  "stage": "evidence",
-  "outcome": "incompatible_lineage",
+  "description": "the context asserts a partition other than the fixed aggregation partition 7: the field is only an equality assertion and never selects the partition",
+  "stage": "policy",
+  "outcome": "invalid_input",
   "changedFiles": [
     "context.json"
   ]

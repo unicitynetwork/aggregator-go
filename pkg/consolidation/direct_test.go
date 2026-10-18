@@ -30,7 +30,11 @@ type unsharded struct {
 	conf   []byte
 }
 
-func newUnsharded(t *testing.T) *unsharded {
+func newUnsharded(t *testing.T) *unsharded { return newUnshardedOf(t, testPartition) }
+
+// newUnshardedOf builds the fixture for any partition (authentic, signed by the trusted authority); only
+// testPartition is the aggregation partition.
+func newUnshardedOf(t *testing.T, partition types.PartitionID) *unsharded {
 	u := &unsharded{t: t, ref: 1000}
 	signer, verifier := testsig.CreateSignerAndVerifier(t)
 	u.signer = signer
@@ -62,9 +66,9 @@ func newUnsharded(t *testing.T) *unsharded {
 	u.tree, err = types.CreateShardTree(types.ShardingScheme{}, []types.ShardTreeInput{u.input}, crypto.SHA256)
 	require.NoError(t, err)
 	u.ut, err = types.NewUnicityTree(crypto.SHA256, []*types.UnicityTreeData{
-		{Partition: testPartition, ShardTreeRoot: u.tree.RootHash()}, {Partition: 0x01010101, ShardTreeRoot: h32("other")}})
+		{Partition: partition, ShardTreeRoot: u.tree.RootHash()}, {Partition: 0x01010101, ShardTreeRoot: h32("other")}})
 	require.NoError(t, err)
-	u.utc, err = u.ut.Certificate(testPartition)
+	u.utc, err = u.ut.Certificate(partition)
 	require.NoError(t, err)
 	u.round = u.tb.GetEpochStart() + 50
 	u.policy = Policy{}
@@ -291,4 +295,21 @@ func TestDirect_MalformedSidecarIsNotIgnored(t *testing.T) {
 	s := u.session(t)
 	_, err := s.AuthenticateMaster(u.bound(s), u.result(u.uc(u.round, nil)), []byte{0x83, 0x01, 0x02})
 	requireOutcome(t, err, OutcomeInvalidInput)
+}
+
+// The direct (unsharded) path enforces the fixed aggregation partition on an authentic UC of another partition:
+// no session setting selects it, the evidence path and the master path both refuse it.
+func TestDirect_RefusesAnAuthenticUCOfAnotherPartition(t *testing.T) {
+	good := newUnsharded(t)
+	gs := good.session(t)
+	_, err := gs.AuthenticateMaster(good.bound(gs), good.result(good.uc(good.round, nil)), nil)
+	require.NoError(t, err, "control: the same construction for partition 7 is accepted")
+
+	u := newUnshardedOf(t, testPartition+1)
+	s := u.session(t)
+	_, err = s.AuthenticateMaster(u.bound(s), u.result(u.uc(u.round, nil)), nil)
+	require.Error(t, err)
+	got, ok := OutcomeOf(err)
+	require.True(t, ok, "untyped error: %v", err)
+	require.Contains(t, []Outcome{OutcomeInvalidInput, OutcomeBindingMismatch, OutcomeIncompatibleLineage}, got, err.Error())
 }

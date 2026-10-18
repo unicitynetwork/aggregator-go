@@ -268,7 +268,7 @@ func buildSignedSingleLeafProof(t *testing.T, ownerShard types.ShardID, sealNetw
 	// Two-shard partition via a 1-bit split of the empty ShardID.
 	sid0, sid1 := types.ShardID{}.Split()
 
-	const partitionID types.PartitionID = 0x0f0f0f0f
+	const partitionID types.PartitionID = AggregationPartitionID
 	ir0Hash := test.RandomBytes(32)
 	ir1Hash := test.RandomBytes(32)
 	if ownerShard.Equal(sid0) {
@@ -567,4 +567,18 @@ func TestInclusionProofV2Verify_ExpiryPresenceMustMatch(t *testing.T) {
 			require.ErrorContains(t, err, "expiry")
 		})
 	}
+}
+
+// The partition is the fixed aggregation partition: VerifierContext.PartitionID is only an equality assertion.
+func TestInclusionProofV2Verify_PartitionIsFixed(t *testing.T) {
+	sid0, _ := types.ShardID{}.Split()
+	proof, req, partitionID, tb := buildSignedSingleLeafProof(t, sid0, types.NetworkMainNet)
+	require.Equal(t, AggregationPartitionID, partitionID)
+	vctx := &VerifierContext{TrustBase: tb, ExpectedShardID: sid0} // the selector may be left out
+	require.NoError(t, proof.Verify(req, vctx))
+	vctx.PartitionID = AggregationPartitionID
+	require.NoError(t, proof.Verify(req, vctx))
+	vctx.PartitionID = AggregationPartitionID + 1 // never selects another partition, not even a matching one
+	err := proof.Verify(req, vctx)
+	require.ErrorContains(t, err, "not the aggregation partition")
 }
