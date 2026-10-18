@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -27,6 +28,9 @@ type (
 		ReceivedChannelCapacity   uint
 		BlockCertificationTimeout time.Duration
 		HandshakeTimeout          time.Duration
+		// AdmitPeer, when set, decides per authenticated sender (before a frame is read) whether
+		// certification responses (V1 and V2) are accepted.
+		AdmitPeer func(peer.ID) bool
 	}
 
 	BftNetwork struct {
@@ -86,11 +90,13 @@ func NewLibP2PNetwork(ctx context.Context, peer *network.Peer, logger *logger.Lo
 		{
 			ProtocolID: network.ProtocolUnicityCertificates,
 			TypeFn:     func() any { return &certification.CertificationResponse{} },
+			AdmitPeer:  opts.AdmitPeer,
 		},
 		{
 			ProtocolID:   network.ProtocolUnicityCertificatesV2,
 			MaxFrameSize: certification.MaxCertificationResponseV2Frame,
 			TypeFn:       func() any { return &certification.CertificationResponseV2{} },
+			AdmitPeer:    opts.AdmitPeer,
 		},
 	}
 	if err = n.RegisterReceiveProtocols(receiveProtocolDescriptions); err != nil {

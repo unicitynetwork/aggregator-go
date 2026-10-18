@@ -84,6 +84,18 @@ type (
 
 		trustBaseStore TrustBaseStore
 
+		// Trust base history for the certification intake (local reads only on the message path),
+		// the admitted root peer set, and the single background catch-up worker.
+		intakeOnce sync.Once
+		history    IntakeTrustBases
+		members    *Membership
+		catchup    *catchUp
+		// highest root round of an authenticated, sequence-checked UC; only an advance refreshes
+		// lastCertResponseTime
+		lastAuthRootRound atomic.Uint64
+		// admitted trust base head as last seen, to decide whether an epoch is merely unknown
+		admittedHead atomic.Uint64
+
 		// Optional proof material (partition view sidecar) intake. Staged views are
 		// keyed by complete UC digest and published only once that exact UC is accepted.
 		proofStaging  *proofmaterial.Staging
@@ -168,6 +180,8 @@ func NewBFTClient(
 	bftClient.status.Store(idle)
 	bftClient.luc.Store(luc)
 	bftClient.lastCertResponseTime.Store(time.Now().UnixMilli())
+	bftClient.lastAuthRootRound.Store(luc.GetRootRoundNumber())
+	bftClient.ensureIntake()
 	return bftClient, nil
 }
 
@@ -183,6 +197,61 @@ func (c *BFTClientImpl) Peer() *network.Peer {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.peer
+}
+
+// ensureIntake wires (once) the trust base history, the peer membership and the catch-up worker.
+func (c *BFTClientImpl) ensureIntake() {
+	c.intakeOnce.Do(c.initIntake)
+}
+
+func (c *BFTClientImpl) initIntake() {
+	liveEpoch := c.luc.Load().GetRootEpoch()
+	if h, ok := c.trustBaseStore.(IntakeTrustBases); ok {
+		c.history = h
+	} else {
+		c.history = localHistory{c.trustBaseStore}
+	}
+	c.members = newMembership(c.history, liveEpoch)
+	c.catchup = newCatchUp(c.history, c.logger)
+	c.catchup.onAdmitted = func(ctx context.Context, epoch uint64) {
+		for cur := c.admittedHead.Load(); epoch > cur && !c.admittedHead.CompareAndSwap(cur, epoch); cur = c.admittedHead.Load() {
+		}
+		if err := c.members.Refresh(ctx); err != nil {
+			c.logger.WithContext(ctx).Warn("failed to refresh the admitted root peers", "error", err.Error())
+		}
+	}
+	c.catchup.onHead = func(ctx context.Context, head uint64) bool {
+		// the head moved without this worker (for example another HA node admitted an epoch)
+		for {
+			cur := c.admittedHead.Load()
+			if head <= cur {
+				return false
+			}
+			if c.admittedHead.CompareAndSwap(cur, head) {
+				break
+			}
+		}
+		if err := c.members.Refresh(ctx); err != nil {
+			c.logger.WithContext(ctx).Warn("failed to refresh the admitted root peers", "error", err.Error())
+		}
+		return true
+	}
+	c.catchup.onCaughtUp = func(ctx context.Context) {
+		// the responses that triggered the catch-up were dropped; ask the root again through the
+		// existing handshake path
+		c.mu.Lock()
+		n, id := c.network, ""
+		if c.peer != nil {
+			id = c.peer.ID().String()
+		}
+		c.mu.Unlock()
+		if n == nil {
+			return
+		}
+		if err := c.sendHandshake(ctx, n, id); err != nil {
+			c.logger.WithContext(ctx).Warn("handshake after catch-up failed", "error", err.Error())
+		}
+	}
 }
 
 func (c *BFTClientImpl) IsValidator() bool {
@@ -202,6 +271,7 @@ func (c *BFTClientImpl) Start(ctx context.Context) error {
 		c.logger.WithContext(ctx).Warn("BFT Client is not idle, skipping start")
 		return nil
 	}
+	c.ensureIntake()
 	c.status.Store(initializing)
 	started := false
 	var self *network.Peer
@@ -233,7 +303,17 @@ func (c *BFTClientImpl) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to create signer: %w", err)
 	}
 
-	networkP2P, err := NewLibP2PNetwork(ctx, self, c.logger, DefaultNetworkOptions)
+	// Only admitted root peers may send certification responses. Fail closed: without a membership
+	// the network is not started.
+	if err := c.members.Refresh(ctx); err != nil {
+		return fmt.Errorf("failed to determine the admitted root peers: %w", err)
+	}
+	if head, err := c.history.Head(ctx); err == nil {
+		c.admittedHead.Store(head)
+	}
+	opts := DefaultNetworkOptions
+	opts.AdmitPeer = c.members.Admit
+	networkP2P, err := NewLibP2PNetwork(ctx, self, c.logger, opts)
 	if err != nil {
 		return fmt.Errorf("failed to create libp2p network: %w", err)
 	}
@@ -251,6 +331,10 @@ func (c *BFTClientImpl) Start(ctx context.Context) error {
 	msgLoopDone := make(chan struct{})
 	c.msgLoopDone = msgLoopDone
 	nodeID := self.ID().String()
+	// startup recovery: extend the admitted history even if no traffic is admitted (a complete
+	// root key replacement while this node was down must not deadlock behind the peer filter)
+	c.catchup.Signal()
+	go c.catchup.Run(msgLoopCtx)
 	go func() {
 		defer close(msgLoopDone)
 		c.logger.WithContext(ctx).Info("BFT client event loop started")
@@ -334,8 +418,12 @@ func (c *BFTClientImpl) sendHandshake(ctx context.Context, bftNetwork *BftNetwor
 		return errors.New("BFT network is not initialized")
 	}
 
-	// load trust base
+	// load trust base: the newest admitted epoch, so that after a catch-up the new roots are asked
+	c.ensureIntake()
 	rootEpoch := c.luc.Load().GetRootEpoch()
+	if head := c.admittedHead.Load(); head > rootEpoch {
+		rootEpoch = head
+	}
 	tb, err := c.authn.trustBase(ctx, rootEpoch)
 	if err != nil {
 		return err
@@ -385,6 +473,7 @@ func (c *BFTClientImpl) loop(ctx context.Context, bftNetwork *BftNetwork, nodeID
 			lastCertTime := time.UnixMilli(lastCertMillis)
 			if time.Since(lastCertTime) > c.conf.InactivityTimeout {
 				c.logger.Warn("BFT client inactivity timeout exceeded, sending new handshake")
+				c.catchup.Signal()
 				if err := c.sendHandshake(ctx, bftNetwork, nodeID); err != nil {
 					c.logger.Error("failed to send handshake on inactivity timeout", "error", err.Error())
 				}
@@ -413,9 +502,10 @@ func (c *BFTClientImpl) handleMessage(ctx context.Context, msg any) {
 }
 
 func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *certification.CertificationResponse) error {
+	c.ensureIntake()
+	// raw reception is counted, but it is not liveness and not progress: only an authenticated,
+	// sequence-checked UC with an advancing root round refreshes the recovery timer (noteAuthenticated)
 	metrics.BFTCertificationResponsesTotal.WithLabelValues(c.shardID.String()).Inc()
-	c.noteResponseRound(cr)
-	c.lastCertResponseTime.Store(time.Now().UnixMilli())
 
 	// malformed nested shapes (null path elements) are rejected before anything evaluates them
 	if err := validateUCShape(&cr.UC); err != nil {
@@ -424,21 +514,29 @@ func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *cer
 	if err := cr.IsValid(); err != nil {
 		return fmt.Errorf("invalid CertificationResponse: %w", err)
 	}
+	if cr.Partition != c.PartitionID() || !cr.Shard.Equal(c.ShardID()) {
+		return fmt.Errorf("got CertificationResponse for a wrong shard %s - %s", cr.Partition, cr.Shard)
+	}
+	if epoch, head := cr.UC.GetRootEpoch(), c.admittedHead.Load(); head > 0 && epoch > head {
+		// beyond the admitted history: no store read, no REST; only wake the worker (coalesced).
+		// "Not admitted yet" is not "invalid": nothing is accepted, nothing is cached as invalid.
+		c.catchup.Signal()
+		return fmt.Errorf("%w: epoch %d", ErrEpochNotAdmitted, epoch)
+	}
 
 	// verify UC: configured network, exact root epoch, epoch start and quorum; the partition
 	// view of the same response is authenticated within the same operation (one resolution of
 	// the authority and history, one judgment of the shared seal)
-	op := c.authn.begin(ctx)
+	op := c.authn.beginIntake(ctx)
 	if err := op.verifyUC(&cr.UC, c.partitionID, c.shardID); err != nil {
+		if errors.Is(err, ErrEpochNotAdmitted) {
+			c.catchup.Signal()
+		}
 		return fmt.Errorf("failed to verify UC: %w", err)
 	}
 
 	c.logger.WithContext(ctx).Info(fmt.Sprintf("handleCertificationResponse: UC round %d, next round %d, next leader %s",
 		cr.UC.GetRoundNumber(), cr.Technical.Round, cr.Technical.Leader))
-
-	if cr.Partition != c.PartitionID() || !cr.Shard.Equal(c.ShardID()) {
-		return fmt.Errorf("got CertificationResponse for a wrong shard %s - %s", cr.Partition, cr.Shard)
-	}
 
 	// Only the response's own UC is processed; the view's other leaves are never dispatched.
 	c.stagePartitionViewOp(ctx, op, cr)
@@ -502,6 +600,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 	if err != nil {
 		return fmt.Errorf("failed to check repeat UC: %w", err)
 	}
+	c.noteAuthenticated(ctx, uc)
 	if isRepeat {
 		c.logger.WithContext(ctx).Warn("Received repeat UC - root chain timed out waiting for certification",
 			"partitionRound", uc.GetRoundNumber(),
@@ -855,12 +954,13 @@ func proofTopologyFromConfig(conf *config.BFTConfig) (proofmaterial.TopologyProv
 // noteResponseRound counts responses which certify no new shard block: the shard input
 // record round must advance beyond the newest one already received for the response to
 // carry new work (new finalized block). Re-deliveries, timeout repeats and extra traffic
-// with an advancing root round all count as non-progress.
-func (c *BFTClientImpl) noteResponseRound(cr *certification.CertificationResponse) {
-	if cr == nil || cr.UC.InputRecord == nil {
+// with an advancing root round all count as non-progress. Only authenticated, sequence-checked
+// certificates are counted (noteAuthenticated).
+func (c *BFTClientImpl) noteResponseRound(uc *types.UnicityCertificate) {
+	if uc == nil || uc.InputRecord == nil {
 		return
 	}
-	round := cr.UC.InputRecord.RoundNumber
+	round := uc.InputRecord.RoundNumber
 	for {
 		last := c.lastResponseRound.Load()
 		if round > last {
@@ -871,6 +971,29 @@ func (c *BFTClientImpl) noteResponseRound(cr *certification.CertificationRespons
 		}
 		metrics.BFTCertificationResponseNonProgressTotal.WithLabelValues(c.shardID.String()).Inc()
 		return
+	}
+}
+
+// noteAuthenticated records that an authenticated, sequence-checked UC arrived. Only an advance of the
+// authenticated root round refreshes the recovery timer, so an old valid UC replayed by a peer can not
+// suppress recovery; legitimate timeout/repeat UCs advance the root round even when the shard round
+// does not. A newer live epoch republishes the admitted peer set.
+func (c *BFTClientImpl) noteAuthenticated(ctx context.Context, uc *types.UnicityCertificate) {
+	c.ensureIntake()
+	c.noteResponseRound(uc)
+	r := uc.GetRootRoundNumber()
+	for {
+		cur := c.lastAuthRootRound.Load()
+		if r <= cur {
+			break
+		}
+		if c.lastAuthRootRound.CompareAndSwap(cur, r) {
+			c.lastCertResponseTime.Store(time.Now().UnixMilli())
+			break
+		}
+	}
+	if err := c.members.Advance(ctx, uc.GetRootEpoch()); err != nil {
+		c.logger.WithContext(ctx).Warn("failed to republish the admitted root peers", "error", err.Error())
 	}
 }
 
