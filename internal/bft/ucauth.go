@@ -66,9 +66,14 @@ func newUCAuthenticator(network types.NetworkID, store TrustBaseStore) *ucAuthen
 	}
 }
 
+// ErrEpochNotAdmitted: the epoch is not in the locally admitted trust base history (yet). It is not
+// "invalid": the certificate is dropped and the single catch-up worker extends the history.
+var ErrEpochNotAdmitted = errors.New("root epoch is not admitted yet")
+
 // authority resolves the trust base of exactly the requested epoch of the configured network,
-// from the cache once it has been validated.
-func (a *ucAuthenticator) authority(ctx context.Context, epoch uint64) (*authorityEntry, error) {
+// from the cache once it has been validated. With localOnly the history is read from the local
+// store only (never the BFT node): used on the per-message intake path.
+func (a *ucAuthenticator) authority(ctx context.Context, epoch uint64, localOnly bool) (*authorityEntry, error) {
 	a.mu.Lock()
 	e := a.authorities[epoch]
 	a.mu.Unlock()
@@ -76,7 +81,17 @@ func (a *ucAuthenticator) authority(ctx context.Context, epoch uint64) (*authori
 		return e, nil
 	}
 	a.authorityLoads.Add(1)
-	tb, err := a.store.GetByEpoch(ctx, epoch)
+	var tb *types.RootTrustBaseV1
+	var err error
+	if h, ok := a.store.(AdmittedTrustBases); ok && localOnly {
+		var known bool
+		tb, known, err = h.GetAdmitted(ctx, epoch)
+		if err == nil && !known {
+			return nil, fmt.Errorf("%w: epoch %d", ErrEpochNotAdmitted, epoch)
+		}
+	} else {
+		tb, err = a.store.GetByEpoch(ctx, epoch)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to load trust base for epoch %d: %w", epoch, err)
 	}
@@ -106,7 +121,7 @@ func (a *ucAuthenticator) authority(ctx context.Context, epoch uint64) (*authori
 
 // trustBase resolves the trust base of exactly the requested epoch of the configured network.
 func (a *ucAuthenticator) trustBase(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
-	e, err := a.authority(ctx, epoch)
+	e, err := a.authority(ctx, epoch, false)
 	if err != nil {
 		return nil, err
 	}
@@ -118,10 +133,12 @@ func (a *ucAuthenticator) trustBase(ctx context.Context, epoch uint64) (*types.R
 // the UC and the view do not resolve them (or encode the same seal) twice. It must not
 // outlive the operation: the history snapshot is consistent only for it.
 type authOp struct {
-	a      *ucAuthenticator
-	ctx    context.Context
-	epochs map[uint64]*opEpoch
-	seals  map[*types.UnicitySeal]error
+	a   *ucAuthenticator
+	ctx context.Context
+	// localOnly: authorities come from the local admitted history only (the intake path)
+	localOnly bool
+	epochs    map[uint64]*opEpoch
+	seals     map[*types.UnicitySeal]error
 }
 
 type opEpoch struct {
@@ -137,6 +154,14 @@ func (a *ucAuthenticator) begin(ctx context.Context) *authOp {
 	return &authOp{a: a, ctx: ctx, epochs: map[uint64]*opEpoch{}, seals: map[*types.UnicitySeal]error{}}
 }
 
+// beginIntake starts an intake operation for a received, still untrusted message: it never asks
+// the BFT node for history.
+func (a *ucAuthenticator) beginIntake(ctx context.Context) *authOp {
+	op := a.begin(ctx)
+	op.localOnly = true
+	return op
+}
+
 // epoch resolves the authority and the known end of the epoch once per operation.
 func (o *authOp) epoch(epoch uint64) *opEpoch {
 	if e, ok := o.epochs[epoch]; ok {
@@ -144,7 +169,7 @@ func (o *authOp) epoch(epoch uint64) *opEpoch {
 	}
 	e := &opEpoch{}
 	o.epochs[epoch] = e
-	e.auth, e.err = o.a.authority(o.ctx, epoch)
+	e.auth, e.err = o.a.authority(o.ctx, epoch, o.localOnly)
 	if e.err != nil {
 		return e
 	}

@@ -25,6 +25,19 @@ func (m *memStore) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrust
 	return nil, interfaces.ErrTrustBaseNotFound
 }
 
+func (m *memStore) GetLatest(_ context.Context) (*types.RootTrustBaseV1, error) {
+	var best *types.RootTrustBaseV1
+	for _, tb := range m.tbs {
+		if best == nil || tb.GetEpoch() > best.GetEpoch() {
+			best = tb
+		}
+	}
+	if best == nil {
+		return nil, interfaces.ErrTrustBaseNotFound
+	}
+	return best, nil
+}
+
 func (m *memStore) Store(_ context.Context, tb types.RootTrustBase) error {
 	if _, ok := m.tbs[tb.GetEpoch()]; ok {
 		return interfaces.ErrTrustBaseAlreadyExists
