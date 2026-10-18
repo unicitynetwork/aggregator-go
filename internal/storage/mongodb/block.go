@@ -249,6 +249,12 @@ func (bs *BlockStorage) GetNextFinalizedAfter(ctx context.Context, afterBlock, t
 // partitionViewIndexName names the partial index over the blocks which carry a partition view.
 const partitionViewIndexName = "index_with_partition_view"
 
+// partitionViewIndexKey is {index: -1} on purpose. The key pattern {index: 1} belongs to the unique index_1, and
+// MongoDB 4.4 refuses a second index which differs from it only in options (IndexOptionsConflict; 5.0+ accepts it),
+// which aborted the startup of 4.4 deployments. The descending key serves the ascending scans of the pruning as a
+// backward scan.
+var partitionViewIndexKey = bson.D{{Key: "index", Value: -1}}
+
 // PrunePartitionViews unsets the partition view of up to limit blocks whose number is below the
 // given one, oldest first, and returns how many blocks it changed. Only the latest finalized block
 // (and an in-flight finalizing candidate above it) needs its view, so the caller passes the number
@@ -312,6 +318,72 @@ func (bs *BlockStorage) PruneRecentPartitionViews(ctx context.Context, below *ap
 	return int(res.ModifiedCount), nil
 }
 
+// EnsurePartitionViewIndex makes sure the partial index over the blocks which carry a partition view exists with the
+// current key pattern. It is a performance index only (the pruning is correct without it, it just has to look at more
+// documents) and building it scans the whole collection once, so it is not part of the fatal startup indexes:
+// the storage builds it in the background (Storage.startPartitionViewIndexBuild). An index of that name with another
+// key pattern (the one {index: 1} an earlier version of this branch created, where the server accepted it) is dropped
+// and recreated, so upgraded databases converge.
+func (bs *BlockStorage) EnsurePartitionViewIndex(ctx context.Context) error {
+	cursor, err := bs.collection.Indexes().List(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list block indexes: %w", err)
+	}
+	var specs []struct {
+		Name string `bson:"name"`
+		Key  bson.D `bson:"key"`
+	}
+	if err := cursor.All(ctx, &specs); err != nil {
+		return fmt.Errorf("failed to read block indexes: %w", err)
+	}
+	for _, spec := range specs {
+		if spec.Name != partitionViewIndexName {
+			continue
+		}
+		if sameIndexKey(spec.Key, partitionViewIndexKey) {
+			return nil
+		}
+		if _, err := bs.collection.Indexes().DropOne(ctx, partitionViewIndexName); err != nil {
+			return fmt.Errorf("failed to drop the partition view index with the old key pattern: %w", err)
+		}
+	}
+	_, err = bs.collection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: partitionViewIndexKey,
+		Options: options.Index().SetName(partitionViewIndexName).
+			SetPartialFilterExpression(bson.M{"partitionView": bson.M{"$exists": true}}),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create the partition view index: %w", err)
+	}
+	return nil
+}
+
+// sameIndexKey compares key patterns whatever numeric type the server reports the directions in.
+func sameIndexKey(a, b bson.D) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	dir := func(v any) int {
+		switch n := v.(type) {
+		case int:
+			return n
+		case int32:
+			return int(n)
+		case int64:
+			return int(n)
+		case float64:
+			return int(n)
+		}
+		return 0
+	}
+	for i := range a {
+		if a[i].Key != b[i].Key || dir(a[i].Value) != dir(b[i].Value) {
+			return false
+		}
+	}
+	return true
+}
+
 // CreateIndexes creates necessary indexes for the block collection
 func (bs *BlockStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
@@ -330,13 +402,6 @@ func (bs *BlockStorage) CreateIndexes(ctx context.Context) error {
 		},
 		{
 			Keys: bson.D{{Key: "finalized", Value: 1}, {Key: "index", Value: -1}},
-		},
-		{
-			// holds only the few blocks which carry a partition view: finds the views to prune without
-			// scanning the history
-			Keys: bson.D{{Key: "index", Value: 1}},
-			Options: options.Index().SetName(partitionViewIndexName).
-				SetPartialFilterExpression(bson.M{"partitionView": bson.M{"$exists": true}}),
 		},
 	}
 
