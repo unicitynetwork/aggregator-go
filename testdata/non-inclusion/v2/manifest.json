@@ -639,7 +639,7 @@
   "corpus": "non-inclusion",
   "generator": {
     "command": "UC_FIXTURE_AGGREGATOR_COMMIT=\u003ccommit\u003e go run ./cmd/gen-ni-fixtures -out testdata/non-inclusion/v2",
-    "commit": "dd52a67ae77d4984f632b8dc9ad23925ee6541a4",
+    "commit": "b25dd916fba88b18066bf239b6130b386d3347dd",
     "modules": {
       "github.com/unicitynetwork/bft-core": "v1.1.1-0.20261018092615-df371b701a99",
       "github.com/unicitynetwork/bft-go-base": "v1.1.1-0.20261017115848-8c62c75b950c"
@@ -721,7 +721,7 @@
     "negative/shard-config-pin-other.json": "68eb34becce92f82ed55e91167340e1624eb24ee76b5bd4bfb58e5ee34443a98",
     "negative/shard-context-of-another-shard.json": "dd814fa06d5053bca6ca5c83629b808c74a0c7365cee53bf27c88ea2e3d0eecd",
     "negative/shard-id-claims-another-shard.json": "73e1b93144439b1b11fc845d98d669cfb5c1748778c2d17c4822e3f95c3ddffd",
-    "negative/shard-path-missing.json": "800f598ad283839dd447c79567340dad8f9e43c6e5d3fc39f7d91b425a2c2cde",
+    "negative/shard-path-missing.json": "1b1d7d6e77eca1dd2b43dce5c2c600cb8e720875c3c8b8ff56ea93b5a79d24d9",
     "negative/shard-path-short.json": "facadac2529943273d5658061e8f52c3639af810960604bb2782c48423397607",
     "negative/shard-path-sibling-altered.json": "5ca132e0cb30e5bbb333c72f5c5cb721484270d9e16eb6dd4163ead214ba69ec",
     "negative/shard-same-seal-other-shard-reversed.json": "c846e06085af45c4b9f41dbdf286f52126e0477673825b2fac01bd9039910620",

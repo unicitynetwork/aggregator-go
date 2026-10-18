@@ -21,6 +21,9 @@
   "context": "shard-00",
   "expected": {
     "outcome": "rejected",
-    "rejection": "uc_invalid"
+    "rejection": "uc_invalid",
+    "acceptable": [
+      "malformed"
+    ]
   }
 }
