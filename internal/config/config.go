@@ -674,6 +674,12 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	// The aggregation layer is the fixed partition: a node configured for another one would produce
+	// no verifiable proof material (every verifier requires the partition constant).
+	if c.BFT.Enabled && c.BFT.ShardConf != nil && c.BFT.ShardConf.PartitionID != api.AggregationPartitionID {
+		return fmt.Errorf("BFT shard conf is of partition %d, the aggregation partition is %d", c.BFT.ShardConf.PartitionID, api.AggregationPartitionID)
+	}
+
 	if c.Sharding.Mode == ShardingModeBFTShard {
 		if !c.BFT.Enabled {
 			return errors.New("bft-shard mode requires BFT_ENABLED=true")

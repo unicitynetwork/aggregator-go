@@ -65,7 +65,7 @@ func newCaptureEnv(t *testing.T, name string, mutate func(*models.Block) *models
 	catalog, err := proofview.NewCatalog(proofview.DefaultLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { catalog.Close() })
-	pub := proofpub.New(catalog, backend, prooftest.Partition, nil, log)
+	pub := proofpub.New(catalog, backend, nil, log)
 	pub.SetSealVerifier(prooftest.New(t, 2, 1, prooftest.Hash("x"), 80).Verifier())
 
 	root := createBlock(t, storage, 1)

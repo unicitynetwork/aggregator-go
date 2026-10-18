@@ -10,6 +10,8 @@ import (
 	"sync"
 
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // TrustBaseResolver resolves the trusted authority (root trust base of the
@@ -236,9 +238,9 @@ func authorityIdentity(tb types.RootTrustBase) ([]byte, error) {
 
 // Policy is the trusted verification context. Everything in it comes from the
 // verifier's own configuration, never from a response.
+//
+// The consolidated partition is always api.AggregationPartitionID; the policy cannot select another.
 type Policy struct {
-	// PartitionID of the consolidated partition.
-	PartitionID types.PartitionID
 	// Topology OPTIONALLY pins the admitted shard scheme and the configuration
 	// hash of every shard. Without it the topology comes from the partition view
 	// itself, authenticated by the seal (types.AuthenticateView): the root quorum
@@ -272,9 +274,6 @@ func (p Policy) clone() Policy {
 // analyze validates the policy and returns the canonical shard order of a pinned
 // topology; it is the only place the topology is validated and sorted (once per Session).
 func (p Policy) analyze(ops *int) ([]types.ShardID, error) {
-	if p.PartitionID == 0 {
-		return nil, fail(OutcomeInvalidInput, -1, nil, "policy partition ID is zero")
-	}
 	if !p.pinned() {
 		return nil, nil
 	}
@@ -295,7 +294,7 @@ func (p Policy) analyze(ops *int) ([]types.ShardID, error) {
 func (p Policy) idFor(order []types.ShardID) []byte {
 	var b []byte
 	b = appendLP(b, p.ID)
-	b = binary.BigEndian.AppendUint64(b, uint64(p.PartitionID))
+	b = binary.BigEndian.AppendUint64(b, uint64(api.AggregationPartitionID))
 	if !p.pinned() {
 		b = append(b, 0) // authenticated topology: no pins
 		h := sha256.Sum256(b)

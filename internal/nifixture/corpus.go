@@ -22,59 +22,92 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-// Version of the corpus layout.
-const Version = 1
+// Version of the corpus layout (schema 2: snapshot results, fixed partition, no freshness verdict).
+const Version = 2
 
 // Corpus constants.
 const (
-	// Partition is the application partition of every UC of the corpus (a single,
-	// unsharded partition: empty shard ID).
-	Partition types.PartitionID = 0xA1
+	// Partition is the application partition of every accepted UC of the corpus: the fixed aggregation
+	// partition (api.AggregationPartitionID, asserted equal in the tests; this model shares no code with pkg/api).
+	Partition types.PartitionID = 7
+	// OtherPartition is the partition of the validly signed wrong-partition vectors.
+	OtherPartition types.PartitionID = 8
 	// ProofTag and ProofVersion identify the non-inclusion proof wrapper.
 	ProofTag     = 39034
 	ProofVersion = 1
 )
 
-// Verdicts: the shared, language independent classification of the outcome of
-// verifying one wrapper under one context (checked in this order).
+// Classification of the outcome of verifying one wrapper under one context (checked in this order). The first
+// two are the successful outcomes and carry the authenticated snapshot; the others are rejections, which never
+// carry snapshot metadata. VerdictAbsent and VerdictStateInclude are the internal names of the two outcomes
+// OutcomeAbsent and OutcomeIncluded.
 const (
-	VerdictAbsent       = "absent"              // verified: the state is absent at the certified root
+	VerdictAbsent       = "absent"              // verified: the state is absent at the certified snapshot
 	VerdictMalformed    = "malformed"           // wrapper or certificate does not decode in the exact profile
-	VerdictUCInvalid    = "uc_invalid"          // the UC body is invalid: structure, paths to the seal, partition, configuration pin
+	VerdictUCInvalid    = "uc_invalid"          // the UC body is invalid: structure, paths to the seal, partition, shard, configuration pin
 	VerdictAuthority    = "authority_rejected"  // the seal is not authenticated by the trusted authority/history
-	VerdictStale        = "stale"               // authenticated, but older than the required minimum root round
 	VerdictCertInvalid  = "certificate_invalid" // the certificate does not authenticate a terminal leaf under the UC root for this query
-	VerdictStateInclude = "state_included"      // authenticated terminal is the query itself: the state is present
+	VerdictStateInclude = "state_included"      // the authenticated terminal is the query itself: the state is present at the snapshot
+)
+
+// Outcomes of the expectations in the corpus files.
+const (
+	OutcomeAbsent   = "absent_at_snapshot"
+	OutcomeIncluded = "included_at_snapshot"
+	OutcomeRejected = "rejected"
 )
 
 // File is the content of one corpus file by relative path.
 type Files map[string][]byte
 
-// Context is a named verification context: everything the verifier trusts.
+// Context is a named verification context: everything the verifier trusts. The partition is not part of it: it is
+// the fixed Partition.
 type Context struct {
 	Description string `json:"description"`
 	// TrustBase is the corpus path of the CBOR encoded trust base (authority); TrustBaseJSON is the
 	// same authority in the JSON form the SDKs read (RootTrustBase.from_json / fromJSON).
 	TrustBase     string `json:"trustBase"`
 	TrustBaseJSON string `json:"trustBaseJson"`
-	// Partition is the expected application partition.
-	Partition uint32 `json:"partition"`
+	// Shard is the expected shard of the partition as a bit string ("" is the unsharded partition, "01" the
+	// shard whose keys start with the bits 01).
+	Shard string `json:"shard"`
 	// NextEpochStart is the authenticated end boundary of the epoch (first round of
 	// the next epoch); "0" when the history does not provide it.
 	NextEpochStart string `json:"nextEpochStart"`
-	// MinRootRound is the minimum certified root chain round the caller requires
-	// ("0": none).
-	MinRootRound string `json:"minRootRound"`
 	// ShardConfHash optionally pins the shard configuration hash (hex, "" none).
 	ShardConfHash string `json:"shardConfHash"`
 }
 
-// Expected is the expected verdict of a vector.
+// Snapshot is the authenticated certified state a successful verification returns. Every field comes from the
+// authenticated unicity certificate (seal and input record), never from RPC metadata. The uint64 fields are
+// decimal strings (JS bigint safe); StateRoot is null for the certified empty tree.
+type Snapshot struct {
+	NetworkID            uint32  `json:"networkId"`
+	PartitionID          uint32  `json:"partitionId"`
+	ShardID              string  `json:"shardId"`
+	RootRound            string  `json:"rootRound"`
+	SealTimestampSeconds string  `json:"sealTimestampSeconds"`
+	RootEpoch            string  `json:"rootEpoch"`
+	ShardRound           string  `json:"shardRound"`
+	ShardEpoch           string  `json:"shardEpoch"`
+	StateRoot            *string `json:"stateRoot"`
+}
+
+// Expected is the expected result of a vector: an outcome with the queried state and the snapshot, or a
+// rejection class without any snapshot.
 type Expected struct {
-	Verdict string `json:"verdict"`
-	// Acceptable lists other REJECTION verdicts a conformant strict implementation may report
-	// for this vector (decoders of different strictness stop at different stages). Verdicts
-	// absent and state_included must always match exactly.
+	// Verdict is the internal classification the generator intends (not written to the files).
+	Verdict string `json:"-"`
+	// Outcome is absent_at_snapshot, included_at_snapshot or rejected.
+	Outcome string `json:"outcome"`
+	// StateID and Snapshot are present exactly for the two successful outcomes.
+	StateID  string    `json:"stateId,omitempty"`
+	Snapshot *Snapshot `json:"snapshot,omitempty"`
+	// Rejection is the class of a rejection.
+	Rejection string `json:"rejection,omitempty"`
+	// Acceptable lists other REJECTION classes a conformant strict implementation may report
+	// for this vector (decoders of different strictness stop at different stages). The two
+	// successful outcomes must always match exactly.
 	Acceptable []string `json:"acceptable,omitempty"`
 	Note       string   `json:"note,omitempty"`
 }
@@ -113,26 +146,75 @@ type Vector struct {
 
 // ---- reference verification of the whole wrapper -----------------------------------------------
 
+// ShardFromBits builds the shard ID of a bit string ("" is the unsharded partition).
+func ShardFromBits(bits string) (types.ShardID, error) {
+	id := types.ShardID{}
+	for _, c := range bits {
+		a, b := id.Split()
+		switch c {
+		case '0':
+			id = a
+		case '1':
+			id = b
+		default:
+			return types.ShardID{}, fmt.Errorf("shard bit string %q", bits)
+		}
+	}
+	return id, nil
+}
+
+// inShard reports whether the key belongs to the shard of the bit string (independent of the library comparator).
+func inShard(shardBits string, key []byte) bool {
+	for i, c := range shardBits {
+		if bit(key, i) != int(c-'0') {
+			return false
+		}
+	}
+	return true
+}
+
+func dec(n uint64) string { return fmt.Sprint(n) }
+
+// SnapshotOf is the snapshot of an authenticated UC.
+func SnapshotOf(uc *types.UnicityCertificate) *Snapshot {
+	s := &Snapshot{
+		NetworkID:            uint32(uc.UnicitySeal.NetworkID),
+		PartitionID:          uint32(uc.UnicityTreeCertificate.Partition),
+		ShardID:              uc.ShardTreeCertificate.Shard.String(),
+		RootRound:            dec(uc.UnicitySeal.RootChainRoundNumber),
+		SealTimestampSeconds: dec(uc.UnicitySeal.Timestamp),
+		RootEpoch:            dec(uc.UnicitySeal.Epoch),
+		ShardRound:           dec(uc.InputRecord.RoundNumber),
+		ShardEpoch:           dec(uc.InputRecord.Epoch),
+	}
+	if len(uc.InputRecord.Hash) != 0 {
+		h := hx(uc.InputRecord.Hash)
+		s.StateRoot = &h
+	}
+	return s
+}
+
 // Verdict is the reference classification of wrapper under ctx for query. It is the
 // executable specification of SPEC.md "Verification order"; production verifiers must agree.
-func Verdict(wrapper []byte, query [KeySize]byte, ctx Context, trustBase types.RootTrustBase) string {
+// The snapshot is returned for the two successful verdicts only, after everything is authenticated.
+func Verdict(wrapper []byte, query [KeySize]byte, ctx Context, trustBase types.RootTrustBase) (string, *Snapshot) {
 	_, cert, ucRaw, err := DecodeWrapper(wrapper)
 	if err != nil {
-		return VerdictMalformed
+		return VerdictMalformed, nil
 	}
 	if len(cert) > MaxCertificateBytes {
-		return VerdictMalformed
+		return VerdictMalformed, nil
 	}
 	var uc types.UnicityCertificate
 	if err := types.Cbor.Unmarshal(ucRaw, &uc); err != nil {
-		return VerdictMalformed
+		return VerdictMalformed, nil
 	}
 	if re, err := uc.MarshalCBOR(); err != nil || !bytes.Equal(re, ucRaw) {
-		return VerdictMalformed
+		return VerdictMalformed, nil
 	}
 	if len(cert) > 0 {
 		if len(cert) < 32+KeySize+ValueSize || (len(cert)-32-KeySize-ValueSize)%32 != 0 {
-			return VerdictMalformed
+			return VerdictMalformed, nil
 		}
 		pop := 0
 		for _, b := range cert[:32] {
@@ -141,11 +223,11 @@ func Verdict(wrapper []byte, query [KeySize]byte, ctx Context, trustBase types.R
 			}
 		}
 		if len(cert) != 32+32*pop+KeySize+ValueSize {
-			return VerdictMalformed
+			return VerdictMalformed, nil
 		}
 	}
 	if err := refUCBody(&uc, ctx); err != nil {
-		return VerdictUCInvalid
+		return VerdictUCInvalid, nil
 	}
 	var next uint64
 	fmt.Sscan(ctx.NextEpochStart, &next)
@@ -154,12 +236,7 @@ func Verdict(wrapper []byte, query [KeySize]byte, ctx Context, trustBase types.R
 		verifier = types.TrustBaseSealVerifierUntil(trustBase, next)
 	}
 	if err := verifier.VerifySeal(uc.UnicitySeal); err != nil {
-		return VerdictAuthority
-	}
-	var min uint64
-	fmt.Sscan(ctx.MinRootRound, &min)
-	if uc.UnicitySeal.RootChainRoundNumber < min {
-		return VerdictStale
+		return VerdictAuthority, nil
 	}
 	var root *[HashSize]byte
 	switch h := uc.InputRecord.Hash; {
@@ -168,23 +245,49 @@ func Verdict(wrapper []byte, query [KeySize]byte, ctx Context, trustBase types.R
 		r := [HashSize]byte(h)
 		root = &r
 	default:
-		return VerdictCertInvalid
+		return VerdictCertInvalid, nil
+	}
+	if ctx.Shard != "" {
+		// the query and the authenticated terminal leaf must belong to the certified shard
+		if !inShard(ctx.Shard, query[:]) {
+			return VerdictCertInvalid, nil
+		}
+		if len(cert) > 0 {
+			tk := cert[len(cert)-KeySize-ValueSize : len(cert)-ValueSize]
+			if !inShard(ctx.Shard, tk) {
+				return VerdictCertInvalid, nil
+			}
+		}
 	}
 	switch err := Verify(cert, query, root); {
 	case err == nil:
-		return VerdictAbsent
+		return VerdictAbsent, SnapshotOf(&uc)
 	case errors.Is(err, ErrStateIncluded):
-		return VerdictStateInclude
+		return VerdictStateInclude, SnapshotOf(&uc)
 	case errors.Is(err, ErrMalformed):
-		return VerdictMalformed
+		return VerdictMalformed, nil
 	default:
-		return VerdictCertInvalid
+		return VerdictCertInvalid, nil
 	}
 }
 
-// refUCBody is the body check of a UC: components present, structure valid, shard and
-// partition paths reach the seal hash. The empty shard ID with an empty shard path is the
-// unsharded case; the partition path may be nonempty.
+// expectedOf is the Expected of a verdict (and snapshot) for the query.
+func expectedOf(verdict string, snap *Snapshot, query string, acceptable []string) Expected {
+	e := Expected{Verdict: verdict, Acceptable: acceptable}
+	switch verdict {
+	case VerdictAbsent:
+		e.Outcome, e.StateID, e.Snapshot = OutcomeAbsent, query, snap
+	case VerdictStateInclude:
+		e.Outcome, e.StateID, e.Snapshot = OutcomeIncluded, query, snap
+	default:
+		e.Outcome, e.Rejection = OutcomeRejected, verdict
+	}
+	return e
+}
+
+// refUCBody is the body check of a UC: components present, structure valid for the fixed partition and the
+// context's shard, shard and partition paths reach the seal hash. The empty shard ID with an empty shard path is
+// the unsharded case; the partition path may be nonempty.
 func refUCBody(uc *types.UnicityCertificate, ctx Context) error {
 	if uc.InputRecord == nil || uc.UnicitySeal == nil {
 		return errors.New("missing component")
@@ -204,11 +307,18 @@ func refUCBody(uc *types.UnicityCertificate, ctx Context) error {
 	if ctx.ShardConfHash != "" {
 		pin, _ = hex.DecodeString(ctx.ShardConfHash)
 	}
-	if err := uc.IsValid(types.PartitionID(ctx.Partition), types.ShardID{}, pin); err != nil {
+	shard, err := ShardFromBits(ctx.Shard)
+	if err != nil {
 		return err
 	}
-	if uc.ShardTreeCertificate.Shard.Length() != 0 || len(uc.ShardTreeCertificate.SiblingHashes) != 0 {
-		return errors.New("not an unsharded certificate")
+	if err := uc.IsValid(Partition, shard, pin); err != nil {
+		return err
+	}
+	if !uc.ShardTreeCertificate.Shard.Equal(shard) {
+		return errors.New("a certificate of another shard")
+	}
+	if shard.Length() == 0 && len(uc.ShardTreeCertificate.SiblingHashes) != 0 {
+		return errors.New("the empty shard ID carries a shard path")
 	}
 	shardRoot, err := uc.ShardTreeCertificate.ComputeCertificateHash(uc.InputRecord, uc.TRHash, uc.ShardConfHash, crypto.SHA256)
 	if err != nil {
@@ -379,6 +489,27 @@ type caseSpec struct {
 	zeroRoot bool
 	// signers overrides the signing quorum
 	signers []int
+	// shard is the index (canonical order) of the shard of the 4-shard partition which certifies the state;
+	// sharded selects that partition (the others use the unsharded one)
+	sharded bool
+	shard   int
+	// ctx is the verification context ("" is default)
+	ctx string
+	// negative places the vector under negative/ (a rejection built from a tree)
+	negative bool
+}
+
+// shardKey is a key of the shard with the given index (2 prefix bits): the top byte carries the bits, the rest is
+// free to vary.
+func shardKey(shard int, rest ...byte) (k [KeySize]byte) {
+	k[0] = byte(shard) << 6
+	if len(rest) > 0 {
+		k[0] |= rest[0] & 0x3f
+	}
+	if len(rest) > 1 {
+		copy(k[1:], rest[1:])
+	}
+	return k
 }
 
 func k32(prefix ...byte) (k [KeySize]byte) { copy(k[:], prefix); return }
@@ -481,6 +612,58 @@ func caseSpecs() []caseSpec {
 		specs = append(specs, caseSpec{name: fmt.Sprintf("random-%d", size), verdict: VerdictAbsent, leaves: leaves, query: q,
 			desc: fmt.Sprintf("seeded random tree of %d leaves, random absent query (math/rand seed 20261016)", size)})
 	}
+	// historical snapshots: absence at an old snapshot is a valid, authenticated statement even if the state is
+	// included later. The caller decides with its own policy which snapshots it accepts (policy.json).
+	histLeaves := []Leaf{{Key: hashKey("hist", 1), Value: v32(21)}, {Key: hashKey("hist", 2), Value: v32(22)}}
+	histQuery := hashKey("hist", "query")
+	specs = append(specs, caseSpec{name: "historical-snapshot-absent", verdict: VerdictAbsent, leaves: histLeaves, query: histQuery,
+		desc: "an older snapshot in which the queried state is absent; verifies, and its snapshot says how old it is"})
+	specs = append(specs, caseSpec{name: "later-snapshot-included", verdict: VerdictStateInclude, leaves: append(append([]Leaf(nil), histLeaves...), Leaf{Key: histQuery, Value: v32(23)}), query: histQuery,
+		desc: "a later snapshot of the same lineage in which the queried state of historical-snapshot-absent is included"})
+	// sharded partition of four shards (prefix bits 00, 01, 10, 11)
+	sh := func(i int, rest ...byte) [KeySize]byte { return shardKey(i, rest...) }
+	specs = append(specs,
+		caseSpec{name: "sharded-absent", verdict: VerdictAbsent, sharded: true, shard: 0, ctx: "shard-00",
+			leaves: []Leaf{{Key: sh(0, 0x10, 0x00), Value: v32(31)}, {Key: sh(0, 0x10, 0x80), Value: v32(32)}}, query: sh(0, 0x10, 0x01),
+			desc: "shard 00 of a four shard partition: two leaves which differ well below the shard prefix; the shard path of the UC has two siblings"},
+		caseSpec{name: "sharded-included", verdict: VerdictStateInclude, sharded: true, shard: 0, ctx: "shard-00",
+			leaves: []Leaf{{Key: sh(0, 0x10, 0x00), Value: v32(31)}, {Key: sh(0, 0x10, 0x80), Value: v32(32)}}, query: sh(0, 0x10, 0x80),
+			desc: "shard 00: the query is a leaf of the shard tree"},
+		caseSpec{name: "sharded-empty-tree", verdict: VerdictAbsent, sharded: true, shard: 1, ctx: "shard-01", empty: true, query: sh(1, 0x11),
+			desc: "shard 01 certified as the empty tree (timeout repeat of its initial record): the state root is null and the shard path is still present"},
+		caseSpec{name: "sharded-shard-01-absent", verdict: VerdictAbsent, sharded: true, shard: 1, ctx: "shard-01",
+			leaves: []Leaf{{Key: sh(1, 0x05, 0x00), Value: v32(33)}, {Key: sh(1, 0x05, 0xc0), Value: v32(34)}, {Key: sh(1, 0x2a), Value: v32(35)}}, query: sh(1, 0x05, 0x40),
+			desc: "shard 01: a three leaf tree whose junctions lie below the shard prefix"},
+		caseSpec{name: "sharded-shard-11-singleton", verdict: VerdictAbsent, sharded: true, shard: 3, ctx: "shard-11",
+			leaves: []Leaf{{Key: sh(3, 0x3f, 0xff), Value: v32(36)}}, query: sh(3, 0x01),
+			desc: "shard 11: one leaf, the certificate is the bare terminal"},
+		caseSpec{name: "sharded-query-outside-shard", verdict: VerdictCertInvalid, sharded: true, shard: 0, ctx: "shard-00", negative: true,
+			leaves: []Leaf{{Key: sh(0, 0x10, 0x00), Value: v32(31)}, {Key: sh(0, 0x10, 0x80), Value: v32(32)}}, query: sh(3, 0x10, 0x01),
+			desc: "the query belongs to shard 11, the certificate and UC are of shard 00: the junction bits fold exactly like an in-shard query, only the shard membership rule rejects it"},
+		caseSpec{name: "sharded-terminal-outside-shard", verdict: VerdictCertInvalid, sharded: true, shard: 0, ctx: "shard-00", negative: true,
+			leaves: []Leaf{{Key: sh(3, 0x10, 0x00), Value: v32(37)}, {Key: sh(3, 0x10, 0x80), Value: v32(38)}}, query: sh(0, 0x10, 0x01),
+			desc: "the shard 00 tree holds foreign leaves: the in-shard query reaches a terminal of shard 11 which the shard does not own"},
+	)
+	rngS := rand.New(rand.NewSource(20261018))
+	{
+		var leaves []Leaf
+		seen := map[[KeySize]byte]bool{}
+		for len(leaves) < 16 {
+			var l Leaf
+			rngS.Read(l.Key[:])
+			rngS.Read(l.Value[:])
+			l.Key[0] = l.Key[0]&0x3f | 2<<6 // shard 10
+			if !seen[l.Key] {
+				seen[l.Key] = true
+				leaves = append(leaves, l)
+			}
+		}
+		var q [KeySize]byte
+		rngS.Read(q[:])
+		q[0] = q[0]&0x3f | 2<<6
+		specs = append(specs, caseSpec{name: "sharded-random-16", verdict: VerdictAbsent, sharded: true, shard: 2, ctx: "shard-10", leaves: leaves, query: q,
+			desc: "seeded random tree of 16 leaves in shard 10, random absent query of the shard (math/rand seed 20261018)"})
+	}
 	specs = append(specs,
 		caseSpec{name: "zero-root", verdict: VerdictCertInvalid, zeroRoot: true, query: hashKey("q-zero"),
 			desc: "the UC certifies the 32 byte all-zero hash: it is NOT an empty tree, the empty certificate does not verify against it"},
@@ -492,10 +675,27 @@ func caseSpecs() []caseSpec {
 
 func hx(b []byte) string { return hex.EncodeToString(b) }
 
+type clock struct{ round, ts uint64 }
+
 // Generate builds the complete corpus. commit is recorded in the manifest.
 func Generate(aggregatorCommit string) (Files, error) {
 	files := Files{}
-	prod, err := ucfixture.New(ucfixture.Config{Partition: Partition, ShardBits: 0})
+	newProd := func(partition types.PartitionID, bits int) (*ucfixture.Producer, error) {
+		return ucfixture.New(ucfixture.Config{Partition: partition, ShardBits: bits})
+	}
+	prod, err := newProd(Partition, 0)
+	if err != nil {
+		return nil, err
+	}
+	prodS, err := newProd(Partition, 2)
+	if err != nil {
+		return nil, err
+	}
+	prodOther, err := newProd(OtherPartition, 0)
+	if err != nil {
+		return nil, err
+	}
+	prodOtherS, err := newProd(OtherPartition, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -504,6 +704,23 @@ func Generate(aggregatorCommit string) (Files, error) {
 	if err != nil {
 		return nil, err
 	}
+	for _, p := range []*ucfixture.Producer{prodS, prodOther, prodOtherS} {
+		b, err := p.TrustBaseCBOR()
+		if err != nil || !bytes.Equal(b, tbBytes) {
+			return nil, errors.New("the fixture producers do not share one authority")
+		}
+	}
+	clocks := map[*ucfixture.Producer]*clock{}
+	for _, p := range []*ucfixture.Producer{prod, prodS, prodOther, prodOtherS} {
+		clocks[p] = &clock{round: 1, ts: ucfixture.GenesisTimestamp}
+	}
+	nextBlock := func(p *ucfixture.Producer, signers []int, changes ...ucfixture.Change) (*ucfixture.Block, error) {
+		c := clocks[p]
+		c.round++
+		c.ts += 10
+		return p.Next(ucfixture.BlockSpec{Round: c.round, Timestamp: c.ts, Changes: changes, Signers: signers})
+	}
+
 	files["authority/trust-base.cbor"] = tbBytes
 	jsonOf := func(file string, t *types.RootTrustBaseV1) error {
 		b, err := json.MarshalIndent(t, "", "  ")
@@ -548,10 +765,6 @@ func Generate(aggregatorCommit string) (Files, error) {
 		s, _ := abcrypto.NewInMemorySecp256K1SignerFromKey(k[:])
 		return s
 	}
-	type tbSpec struct {
-		file string
-		tb   types.RootTrustBase
-	}
 	tbs := map[string]types.RootTrustBase{"authority/trust-base.cbor": tb}
 	addTB := func(file string, network types.NetworkID, keys func(int) abcrypto.Signer, opts ...types.Option) error {
 		t, b, err := mkTB(network, keys, opts...)
@@ -574,9 +787,11 @@ func Generate(aggregatorCommit string) (Files, error) {
 	if err := addTB("authority/untrusted-keys.cbor", ucfixture.NetworkID, otherKey, types.WithEpochStart(1)); err != nil {
 		return nil, err
 	}
+	if err := addTB("authority/big-epoch.cbor", ucfixture.NetworkID, fixtureKey, types.WithEpoch(bigRootEpoch), types.WithEpochStart(1)); err != nil {
+		return nil, err
+	}
 
 	// ---- positive cases and the UC chain
-	round, ts := uint64(1), ucfixture.GenesisTimestamp
 	var cases []Vector
 	type built struct {
 		spec   caseSpec
@@ -586,42 +801,28 @@ func Generate(aggregatorCommit string) (Files, error) {
 		ucByte []byte
 	}
 	byName := map[string]*built{}
-	for i, spec := range caseSpecs() {
-		tree, err := Build(spec.leaves)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", spec.name, err)
-		}
-		round++
-		ts += 10
-		bs := ucfixture.BlockSpec{Round: round, Timestamp: ts, Signers: spec.signers}
+	vectorOf := func(spec caseSpec, i int, tree *Tree, uc *types.UnicityCertificate, ucBytes []byte) (Vector, []byte) {
 		var rootHex string
 		var cert []byte
 		switch {
 		case spec.empty:
-			bs.Changes = []ucfixture.Change{{Shard: 0, Timeout: true}}
 			cert = []byte{}
 		case spec.zeroRoot:
-			bs.Changes = []ucfixture.Change{{Shard: 0, Hash: make([]byte, 32)}}
 			rootHex = hx(make([]byte, 32))
 			cert = []byte{}
 		default:
 			r, _ := tree.Root()
-			bs.Changes = []ucfixture.Change{{Shard: 0, Hash: r[:]}}
 			rootHex = hx(r[:])
 			cert = tree.Certificate(spec.query)
 		}
-		blk, err := prod.Next(bs)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", spec.name, err)
-		}
-		uc := blk.Shards[0].UC
-		if spec.empty && len(uc.InputRecord.Hash) != 0 {
-			return nil, fmt.Errorf("%s: empty record has hash %x", spec.name, uc.InputRecord.Hash)
+		ctx := spec.ctx
+		if ctx == "" {
+			ctx = "default"
 		}
 		v := Vector{
 			Name: spec.name, Description: spec.desc, Query: hx(spec.query[:]), Root: rootHex,
-			Block: fmt.Sprint(100 + i), Certificate: hx(cert), UC: hx(blk.Shards[0].UCBytes),
-			Context: "default", Expected: Expected{Verdict: spec.verdict},
+			Block: fmt.Sprint(100 + i), Certificate: hx(cert), UC: hx(ucBytes),
+			Context: ctx, Expected: Expected{Verdict: spec.verdict},
 		}
 		for _, l := range spec.leaves {
 			v.Leaves = append(v.Leaves, LeafJSON{Key: hx(l.Key[:]), Value: hx(l.Value[:])})
@@ -629,80 +830,168 @@ func Generate(aggregatorCommit string) (Files, error) {
 		if v.Leaves == nil {
 			v.Leaves = []LeafJSON{}
 		}
-		v.Wrapper = hx(EncodeWrapper(uint64(100+i), cert, blk.Shards[0].UCBytes))
-		byName[spec.name] = &built{spec: spec, vec: v, uc: uc, tree: tree, ucByte: blk.Shards[0].UCBytes}
+		v.Wrapper = hx(EncodeWrapper(uint64(100+i), cert, ucBytes))
+		return v, cert
+	}
+	var negSpecs []Vector
+	nSpecs := 0
+	for i, spec := range caseSpecs() {
+		nSpecs++
+		tree, err := Build(spec.leaves)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", spec.name, err)
+		}
+		p, idx := prod, 0
+		if spec.sharded {
+			p, idx = prodS, spec.shard
+		}
+		var ch ucfixture.Change
+		switch {
+		case spec.empty:
+			ch = ucfixture.Change{Shard: idx, Timeout: true}
+		case spec.zeroRoot:
+			ch = ucfixture.Change{Shard: idx, Hash: make([]byte, 32)}
+		default:
+			r, _ := tree.Root()
+			ch = ucfixture.Change{Shard: idx, Hash: r[:]}
+		}
+		blk, err := nextBlock(p, spec.signers, ch)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", spec.name, err)
+		}
+		uc := blk.Shards[idx].UC
+		if spec.empty && len(uc.InputRecord.Hash) != 0 {
+			return nil, fmt.Errorf("%s: empty record has hash %x", spec.name, uc.InputRecord.Hash)
+		}
+		v, _ := vectorOf(spec, i, tree, uc, blk.Shards[idx].UCBytes)
+		byName[spec.name] = &built{spec: spec, vec: v, uc: uc, tree: tree, ucByte: blk.Shards[idx].UCBytes}
+		if spec.negative {
+			negSpecs = append(negSpecs, v)
+		} else {
+			cases = append(cases, v)
+		}
+	}
+
+	// two shards certified by one block share a seal: verifying one must never vouch for the other
+	{
+		la := []Leaf{{Key: shardKey(0, 0x20, 0x00), Value: v32(41)}, {Key: shardKey(0, 0x20, 0x80), Value: v32(42)}}
+		lb := []Leaf{{Key: shardKey(1, 0x20, 0x00), Value: v32(43)}, {Key: shardKey(1, 0x20, 0x80), Value: v32(44)}}
+		ta, err := Build(la)
+		if err != nil {
+			return nil, err
+		}
+		tbb, err := Build(lb)
+		if err != nil {
+			return nil, err
+		}
+		ra, _ := ta.Root()
+		rb, _ := tbb.Root()
+		blk, err := nextBlock(prodS, nil, ucfixture.Change{Shard: 0, Hash: ra[:]}, ucfixture.Change{Shard: 1, Hash: rb[:]})
+		if err != nil {
+			return nil, err
+		}
+		for k, sp := range []caseSpec{
+			{name: "sharded-same-seal-00", verdict: VerdictAbsent, sharded: true, shard: 0, ctx: "shard-00", leaves: la, query: shardKey(0, 0x20, 0x01),
+				desc: "shard 00, certified in the same block (same seal) as sharded-same-seal-01"},
+			{name: "sharded-same-seal-01", verdict: VerdictAbsent, sharded: true, shard: 1, ctx: "shard-01", leaves: lb, query: shardKey(1, 0x20, 0x01),
+				desc: "shard 01, certified in the same block (same seal) as sharded-same-seal-00"},
+		} {
+			tr := ta
+			if k == 1 {
+				tr = tbb
+			}
+			v, _ := vectorOf(sp, nSpecs+k, tr, blk.Shards[k].UC, blk.Shards[k].UCBytes)
+			byName[sp.name] = &built{spec: sp, vec: v, uc: blk.Shards[k].UC, tree: tr, ucByte: blk.Shards[k].UCBytes}
+			cases = append(cases, v)
+		}
+		nSpecs += 2
+	}
+
+	// every field of the snapshot at a large uint64 value (the seal re-signed by the fixture authority of epoch
+	// bigRootEpoch; nothing is patched without re-deriving the paths and the signatures)
+	{
+		g := byName["shared-prefix"]
+		uc, ucb, err := resignWith(g.uc, func(uc *types.UnicityCertificate) {
+			uc.UnicitySeal.RootChainRoundNumber = bigRootRound
+			uc.UnicitySeal.Timestamp = bigTimestamp
+			uc.UnicitySeal.Epoch = bigRootEpoch
+			uc.InputRecord.RoundNumber = bigShardRound
+			uc.InputRecord.Epoch = bigShardEpoch
+		}, fixtureKey)
+		if err != nil {
+			return nil, err
+		}
+		sp := g.spec
+		sp.name, sp.ctx, sp.verdict = "large-uint64-fields", "big-epoch-authority", VerdictAbsent
+		sp.desc = "shared-prefix re-certified with root round, seal timestamp, root epoch, shard round and shard epoch at large uint64 values (2^53+1 and near 2^64): decimal strings, no float or int64 narrowing"
+		v, _ := vectorOf(sp, nSpecs, g.tree, uc, ucb)
+		nSpecs++
+		byName[sp.name] = &built{spec: sp, vec: v, uc: uc, tree: g.tree, ucByte: ucb}
 		cases = append(cases, v)
 	}
 
 	// contexts
-	last := cases[len(cases)-1]
-	_ = last
 	confHash := byName["golden-two-leaf"].uc.ShardConfHash
+	shardConf := byName["sharded-absent"].uc.ShardConfHash
+	mk := func(desc, tbFile, shard, next, pin string) Context {
+		return Context{Description: desc, TrustBase: tbFile, Shard: shard, NextEpochStart: next, ShardConfHash: pin}
+	}
 	contexts := map[string]Context{
-		"default": {Description: "trusted authority of the fixture network, the corpus partition, no end boundary, no freshness requirement",
-			TrustBase: "authority/trust-base.cbor", Partition: uint32(Partition), NextEpochStart: "0", MinRootRound: "0"},
-		"wrong-network": {Description: "authority of another network with the same keys and node IDs",
-			TrustBase: "authority/other-network.cbor", Partition: uint32(Partition), NextEpochStart: "0", MinRootRound: "0"},
-		"wrong-epoch": {Description: "authority of the next epoch with the same keys: seals of epoch 1 must not verify",
-			TrustBase: "authority/other-epoch.cbor", Partition: uint32(Partition), NextEpochStart: "0", MinRootRound: "0"},
-		"before-epoch-start": {Description: "authority whose epoch starts after the certified round",
-			TrustBase: "authority/late-epoch-start.cbor", Partition: uint32(Partition), NextEpochStart: "0", MinRootRound: "0"},
-		"untrusted-authority": {Description: "a different authority (other keys, same network and node IDs)",
-			TrustBase: "authority/untrusted-keys.cbor", Partition: uint32(Partition), NextEpochStart: "0", MinRootRound: "0"},
-		"wrong-partition": {Description: "expects another application partition",
-			TrustBase: "authority/trust-base.cbor", Partition: uint32(Partition) + 1, NextEpochStart: "0", MinRootRound: "0"},
-		"config-pin-ok": {Description: "pins the shard configuration hash of the corpus partition",
-			TrustBase: "authority/trust-base.cbor", Partition: uint32(Partition), NextEpochStart: "0", MinRootRound: "0", ShardConfHash: hx(confHash)},
-		"config-pin-other": {Description: "pins another shard configuration hash",
-			TrustBase: "authority/trust-base.cbor", Partition: uint32(Partition), NextEpochStart: "0", MinRootRound: "0", ShardConfHash: hx(bytes.Repeat([]byte{0xcc}, 32))},
+		"default":                   mk("trusted authority of the fixture network, the aggregation partition (7), unsharded, no end boundary", "authority/trust-base.cbor", "", "0", ""),
+		"wrong-network":             mk("authority of another network with the same keys and node IDs", "authority/other-network.cbor", "", "0", ""),
+		"wrong-epoch":               mk("authority of the next epoch with the same keys: seals of epoch 1 must not verify", "authority/other-epoch.cbor", "", "0", ""),
+		"before-epoch-start":        mk("authority whose epoch starts after the certified round", "authority/late-epoch-start.cbor", "", "0", ""),
+		"untrusted-authority":       mk("a different authority (other keys, same network and node IDs)", "authority/untrusted-keys.cbor", "", "0", ""),
+		"big-epoch-authority":       mk("the authority of root epoch 2^64-3 (same keys): for the vector with large uint64 fields", "authority/big-epoch.cbor", "", "0", ""),
+		"config-pin-ok":             mk("pins the shard configuration hash of the corpus partition", "authority/trust-base.cbor", "", "0", hx(confHash)),
+		"config-pin-other":          mk("pins another shard configuration hash", "authority/trust-base.cbor", "", "0", hx(bytes.Repeat([]byte{0xcc}, 32))),
+		"shard-00":                  mk("shard 00 of the four shard partition", "authority/trust-base.cbor", "00", "0", ""),
+		"shard-01":                  mk("shard 01 of the four shard partition", "authority/trust-base.cbor", "01", "0", ""),
+		"shard-10":                  mk("shard 10 of the four shard partition", "authority/trust-base.cbor", "10", "0", ""),
+		"shard-11":                  mk("shard 11 of the four shard partition", "authority/trust-base.cbor", "11", "0", ""),
+		"shard-00-config-pin-ok":    mk("shard 00 pinning its own configuration hash", "authority/trust-base.cbor", "00", "0", hx(shardConf)),
+		"shard-00-config-pin-other": mk("shard 00 pinning another configuration hash", "authority/trust-base.cbor", "00", "0", hx(bytes.Repeat([]byte{0xcc}, 32))),
 	}
 	// retirement boundary relative to the base case round
 	g := byName["shared-prefix"]
 	gr := g.uc.UnicitySeal.RootChainRoundNumber
-	contexts["epoch-end-after"] = Context{Description: "authenticated end of the epoch is after the certified round (still valid)",
-		TrustBase: "authority/trust-base.cbor", Partition: uint32(Partition), NextEpochStart: fmt.Sprint(gr + 1), MinRootRound: "0"}
-	contexts["epoch-end-at-round"] = Context{Description: "the next epoch starts at the certified round: the seal is at the retirement boundary and not valid",
-		TrustBase: "authority/trust-base.cbor", Partition: uint32(Partition), NextEpochStart: fmt.Sprint(gr), MinRootRound: "0"}
-	contexts["fresh-enough"] = Context{Description: "requires a root round not above the certified one",
-		TrustBase: "authority/trust-base.cbor", Partition: uint32(Partition), NextEpochStart: "0", MinRootRound: fmt.Sprint(gr)}
-	contexts["too-stale"] = Context{Description: "requires a root round above the certified one",
-		TrustBase: "authority/trust-base.cbor", Partition: uint32(Partition), NextEpochStart: "0", MinRootRound: fmt.Sprint(gr + 1)}
+	contexts["epoch-end-after"] = mk("authenticated end of the epoch is after the certified round (still valid)", "authority/trust-base.cbor", "", fmt.Sprint(gr+1), "")
+	contexts["epoch-end-at-round"] = mk("the next epoch starts at the certified round: the seal is at the retirement boundary and not valid", "authority/trust-base.cbor", "", fmt.Sprint(gr), "")
 
 	for n, c := range contexts {
 		c.TrustBaseJSON = strings.TrimSuffix(c.TrustBase, ".cbor") + ".json"
 		contexts[n] = c
 	}
-	ctxNames := make([]string, 0, len(contexts))
-	for n := range contexts {
-		ctxNames = append(ctxNames, n)
-	}
-	sort.Strings(ctxNames)
 	cb, err := json.MarshalIndent(contexts, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 	files["contexts.json"] = append(cb, '\n')
 
-	verdictOf := func(v Vector) (string, error) {
+	evaluate := func(v Vector, ctxName string) (string, *Snapshot, error) {
 		w, err := hex.DecodeString(v.Wrapper)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		q, err := hex.DecodeString(v.Query)
 		if err != nil || len(q) != KeySize {
-			return "", errors.New("bad query")
+			return "", nil, errors.New("bad query")
 		}
-		c := contexts[v.Context]
-		return Verdict(w, [KeySize]byte(q), c, tbs[c.TrustBase]), nil
+		c := contexts[ctxName]
+		verdict, snap := Verdict(w, [KeySize]byte(q), c, tbs[c.TrustBase])
+		return verdict, snap, nil
 	}
+	byPath := map[string]Vector{}
 	put := func(dir string, v Vector) error {
-		got, err := verdictOf(v)
+		got, snap, err := evaluate(v, v.Context)
 		if err != nil {
 			return fmt.Errorf("%s: %w", v.Name, err)
 		}
 		if got != v.Expected.Verdict {
 			return fmt.Errorf("%s: reference verdict %s, intended %s", v.Name, got, v.Expected.Verdict)
 		}
+		v.Expected = expectedOf(got, snap, v.Query, v.Expected.Acceptable)
+		byPath[dir+"/"+v.Name] = v
 		b, err := json.MarshalIndent(v, "", "  ")
 		if err != nil {
 			return err
@@ -712,6 +1001,11 @@ func Generate(aggregatorCommit string) (Files, error) {
 	}
 	for _, c := range cases {
 		if err := put("cases", c); err != nil {
+			return nil, err
+		}
+	}
+	for _, c := range negSpecs {
+		if err := put("negative", c); err != nil {
 			return nil, err
 		}
 	}
@@ -732,13 +1026,11 @@ func Generate(aggregatorCommit string) (Files, error) {
 		{"wrong-epoch", VerdictAuthority, "the authority is of another epoch (reused keys): exact epoch is required"},
 		{"before-epoch-start", VerdictAuthority, "the certified round precedes the epoch start of the trusted authority"},
 		{"untrusted-authority", VerdictAuthority, "a self-consistent but untrusted authority: not an anchor"},
-		{"wrong-partition", VerdictUCInvalid, "the UC is of another partition than the application expects"},
 		{"config-pin-other", VerdictUCInvalid, "the shard configuration hash differs from the pinned one"},
 		{"config-pin-ok", VerdictAbsent, "the shard configuration hash equals the pinned one"},
 		{"epoch-end-at-round", VerdictAuthority, "the seal round is at the authenticated end of its epoch (retirement boundary)"},
 		{"epoch-end-after", VerdictAbsent, "the authenticated end of the epoch is after the seal round"},
-		{"too-stale", VerdictStale, "authenticated but older than the minimum root round the caller requires: unavailable/stale, never accepted as current"},
-		{"fresh-enough", VerdictAbsent, "the certified round equals the required minimum"},
+		{"shard-00", VerdictUCInvalid, "an unsharded UC presented to a verifier of shard 00"},
 	} {
 		v := g.vec
 		v.Name = "ctx-" + cv.ctx
@@ -760,9 +1052,56 @@ func Generate(aggregatorCommit string) (Files, error) {
 			return nil, err
 		}
 	}
+	// partition and shard negatives
+	sa := byName["sharded-absent"]
+	shNegs, err := shardNegatives(sa.vec, byName["sharded-same-seal-00"].vec, byName["sharded-same-seal-01"].vec)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range shNegs {
+		if err := put("negative", n); err != nil {
+			return nil, err
+		}
+	}
+	// validly signed UCs of another partition (same authority, same keys): only the partition check rejects them
+	{
+		r, _ := g.tree.Root()
+		blk, err := nextBlock(prodOther, nil, ucfixture.Change{Shard: 0, Hash: r[:]})
+		if err != nil {
+			return nil, err
+		}
+		v := derive(g.vec, "uc-wrong-partition-validly-signed", "the same tree certified by partition 8 under the same trusted authority: the UC is authentic but not of the aggregation partition 7", VerdictUCInvalid,
+			func(v *Vector) {
+				v.UC = hx(blk.Shards[0].UCBytes)
+				v.Wrapper = hx(EncodeWrapper(100, unhex(g.vec.Certificate), blk.Shards[0].UCBytes))
+				v.Block = "100"
+			})
+		if err := put("negative", v); err != nil {
+			return nil, err
+		}
+		tr, _ := Build(sa.spec.leaves)
+		rs, _ := tr.Root()
+		blk, err = nextBlock(prodOtherS, nil, ucfixture.Change{Shard: 0, Hash: rs[:]})
+		if err != nil {
+			return nil, err
+		}
+		v = derive(sa.vec, "uc-wrong-partition-sharded-validly-signed", "shard 00 of the four shard partition 8, validly signed by the trusted authority: not the aggregation partition", VerdictUCInvalid,
+			func(v *Vector) {
+				v.UC = hx(blk.Shards[0].UCBytes)
+				v.Wrapper = hx(EncodeWrapper(100, unhex(sa.vec.Certificate), blk.Shards[0].UCBytes))
+				v.Block = "100"
+			})
+		if err := put("negative", v); err != nil {
+			return nil, err
+		}
+	}
 
 	// direct-unsharded: tree, UC and raw inclusion certificates for consolidation fixtures (no sidecar)
 	if err := directUnsharded(files, byName["random-16"].tree, byName["random-16"].spec.leaves, byName["random-16"].vec); err != nil {
+		return nil, err
+	}
+	// policy examples and verifier sequences
+	if err := policyAndSequences(files, byPath, evaluate); err != nil {
 		return nil, err
 	}
 	files["rpc-errors.json"] = rpcErrors()
@@ -779,11 +1118,12 @@ func Generate(aggregatorCommit string) (Files, error) {
 
 func manifest(files Files, commit string) ([]byte, error) {
 	type entry struct {
-		Name     string `json:"name"`
-		Kind     string `json:"kind"`
-		Verdict  string `json:"verdict,omitempty"`
-		Context  string `json:"context,omitempty"`
-		Describe string `json:"description,omitempty"`
+		Name      string `json:"name"`
+		Kind      string `json:"kind"`
+		Outcome   string `json:"outcome,omitempty"`
+		Rejection string `json:"rejection,omitempty"`
+		Context   string `json:"context,omitempty"`
+		Describe  string `json:"description,omitempty"`
 	}
 	var cases []entry
 	names := make([]string, 0, len(files))
@@ -805,7 +1145,7 @@ func manifest(files Files, commit string) ([]byte, error) {
 		if err := json.Unmarshal(files[n], &v); err != nil {
 			return nil, err
 		}
-		cases = append(cases, entry{Name: strings.TrimSuffix(strings.SplitN(n, "/", 2)[1], ".json"), Kind: kind, Verdict: v.Expected.Verdict, Context: v.Context, Describe: v.Description})
+		cases = append(cases, entry{Name: strings.TrimSuffix(strings.SplitN(n, "/", 2)[1], ".json"), Kind: kind, Outcome: v.Expected.Outcome, Rejection: v.Expected.Rejection, Context: v.Context, Describe: v.Description})
 	}
 	sums := map[string]string{}
 	for _, n := range names {
@@ -817,9 +1157,9 @@ func manifest(files Files, commit string) ([]byte, error) {
 		return nil, err
 	}
 	m := map[string]any{
-		"corpus": "non-inclusion", "version": Version,
+		"corpus": "non-inclusion", "version": Version, "schema": "outcomes: absent_at_snapshot | included_at_snapshot (stateId + snapshot) | rejected (rejection class, no snapshot); uint64 fields are decimal strings",
 		"generator": map[string]any{
-			"command": "UC_FIXTURE_AGGREGATOR_COMMIT=<commit> go run ./cmd/gen-ni-fixtures -out testdata/non-inclusion/v1",
+			"command": "UC_FIXTURE_AGGREGATOR_COMMIT=<commit> go run ./cmd/gen-ni-fixtures -out testdata/non-inclusion/v2",
 			// commit is the aggregator-go commit which CONTAINS cmd/gen-ni-fixtures and internal/nifixture as
 			// used to produce these files (not the commit which added the files)
 			"commit":  commit,

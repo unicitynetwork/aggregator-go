@@ -461,10 +461,6 @@ func TestNewSession_Validation(t *testing.T) {
 	_, err := NewSession(f.policy, nil)
 	requireOutcome(t, err, OutcomeInvalidInput)
 	p := f.policy
-	p.PartitionID = 0
-	_, err = NewSession(p, f.resolver())
-	requireOutcome(t, err, OutcomeInvalidInput)
-	p = f.policy
 	p.Topology.ShardConfHashes = map[string][]byte{}
 	_, err = NewSession(p, f.resolver())
 	requireOutcome(t, err, OutcomeInvalidInput)
