@@ -159,8 +159,8 @@ func TestCorpusPositiveCases(t *testing.T) {
 				id, err := consolidationcorpus.ParseShard(b.Shard)
 				require.NoError(t, err)
 				confHash := l.Policy.Topology.ShardConfHashes[id.Key()]
-				require.NoError(t, uc.Verify(l.TrustBase, 5, l.Policy.PartitionID, id, confHash))
-				vctx := &api.VerifierContext{TrustBase: l.TrustBase, PartitionID: l.Policy.PartitionID, ExpectedShardID: id, ShardConfHash: confHash}
+				require.NoError(t, uc.Verify(l.TrustBase, 5, api.AggregationPartitionID, id, confHash))
+				vctx := &api.VerifierContext{TrustBase: l.TrustBase, PartitionID: api.AggregationPartitionID, ExpectedShardID: id, ShardConfHash: confHash}
 				var reqs []*api.CertificationRequest
 				if b.Shard == l.Input.Master.ShardID.String() {
 					reqs = l.Input.Master.Requests

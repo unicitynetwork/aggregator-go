@@ -386,9 +386,26 @@ func negatives(b *builtCase) []negative {
 				}
 			})
 		}})
-	add(negative{name: "context-wrong-partition", desc: "policy partition differs from the evidence", stage: stEv, outcome: lineage,
+	add(negative{name: "context-wrong-partition", desc: "the context asserts a partition other than the fixed aggregation partition 7: the field is only an equality assertion and never selects the partition", stage: stPol, outcome: invalid,
 		mutate: func(_ *builtCase, f consolidationcorpus.Files) error {
 			return mutContext(f, func(c *consolidationcorpus.Context) { c.PartitionID++ })
+		}})
+	add(negative{name: "validly-signed-other-partition", desc: "every UC, the view and the proofs are authentic (signed by the trusted authority) but of partition 8: only the fixed partition check refuses them", stage: stEv, outcome: lineage,
+		mutate: func(b *builtCase, f consolidationcorpus.Files) error {
+			spec := b.spec
+			spec.partition = fixturePartition + 1
+			other, err := buildCase(spec)
+			if err != nil {
+				return err
+			}
+			for k := range f {
+				delete(f, k)
+			}
+			for k, v := range other.files {
+				f[k] = v
+			}
+			// the trusted context still asserts the aggregation partition
+			return mutContext(f, func(c *consolidationcorpus.Context) { c.PartitionID = uint32(fixturePartition) })
 		}})
 	add(negative{name: "trust-base-other-authority", desc: "trusted authority of other keys", stage: stEv, outcome: unauth,
 		mutate: func(_ *builtCase, f consolidationcorpus.Files) error {

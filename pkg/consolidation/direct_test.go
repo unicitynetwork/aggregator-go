@@ -67,7 +67,7 @@ func newUnsharded(t *testing.T) *unsharded {
 	u.utc, err = u.ut.Certificate(testPartition)
 	require.NoError(t, err)
 	u.round = u.tb.GetEpochStart() + 50
-	u.policy = Policy{PartitionID: testPartition}
+	u.policy = Policy{}
 	return u
 }
 
@@ -256,7 +256,7 @@ func TestDirect_StaleBoundAndMixedUCsAndPeers(t *testing.T) {
 func TestDirect_PinsOnlyRestrict(t *testing.T) {
 	u := newUnsharded(t)
 	emptyKey := types.ShardID{}.Key()
-	good := Policy{PartitionID: testPartition, Topology: types.PartitionViewTopology{ShardConfHashes: map[string][]byte{emptyKey: u.conf}}}
+	good := Policy{Topology: types.PartitionViewTopology{ShardConfHashes: map[string][]byte{emptyKey: u.conf}}}
 	s := u.session(t, good)
 	m, err := s.AuthenticateMaster(u.bound(s), u.result(u.uc(u.round, nil)), nil)
 	require.NoError(t, err)
@@ -264,7 +264,7 @@ func TestDirect_PinsOnlyRestrict(t *testing.T) {
 	require.NoError(t, err)
 
 	// a pin for another configuration rejects the UC
-	bad := Policy{PartitionID: testPartition, Topology: types.PartitionViewTopology{ShardConfHashes: map[string][]byte{emptyKey: h32("another configuration")}}}
+	bad := Policy{Topology: types.PartitionViewTopology{ShardConfHashes: map[string][]byte{emptyKey: h32("another configuration")}}}
 	s = u.session(t, bad)
 	// (the same pins already refuse the original evidence)
 	_, err = s.AuthenticateEvidence([]Evidence{{Request: u.req, Proof: u.result(u.uc(u.round-10, nil)).Proofs[0].InclusionProof}})
@@ -276,7 +276,7 @@ func TestDirect_PinsOnlyRestrict(t *testing.T) {
 
 	// pins describing a sharded partition are incompatible with an unsharded master UC
 	a, b := types.ShardID{}.Split()
-	sharded := Policy{PartitionID: testPartition, Topology: types.PartitionViewTopology{
+	sharded := Policy{Topology: types.PartitionViewTopology{
 		Scheme: types.ShardingScheme{a, b}, ShardConfHashes: map[string][]byte{a.Key(): u.conf, b.Key(): u.conf}}}
 	s = u.session(t, sharded)
 	// evidence in the sharded policy cannot even be authenticated (its shard is not in the pins)
