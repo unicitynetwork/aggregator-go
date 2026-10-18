@@ -33,6 +33,9 @@ type IntakeTrustBases interface {
 	AdmitNext(ctx context.Context) (uint64, error)
 }
 
+// errHeadUnsupported: the history can not report its head; the live epoch is then the head.
+var errHeadUnsupported = errors.New("the trust base store does not report its head")
+
 // localHistory adapts a plain trust base store, which has no head and no way to fetch more.
 type localHistory struct{ store TrustBaseStore }
 
@@ -41,7 +44,7 @@ func (l localHistory) GetByEpochLocal(ctx context.Context, epoch uint64) (*types
 }
 
 func (localHistory) Head(context.Context) (uint64, error) {
-	return 0, errors.New("the trust base store does not report its head")
+	return 0, errHeadUnsupported
 }
 
 func (localHistory) AdmitNext(context.Context) (uint64, error) {
@@ -64,8 +67,13 @@ type Membership struct {
 	live atomic.Uint64 // E
 	head atomic.Uint64 // H as of the last refresh
 
+	// mu serializes Refresh (recompute and publish are one step, so an older computation can not
+	// overwrite a newer one) and guards quotas.
 	mu     sync.Mutex
 	quotas map[peer.ID]*bucket
+	// dirty: the last Refresh failed, so the published set may be stale. Cleared only by a
+	// successful publication; retried by the catch-up worker whatever the head and live epoch are.
+	dirty atomic.Bool
 }
 
 type bucket struct {
@@ -81,11 +89,34 @@ func newMembership(history IntakeTrustBases, liveEpoch uint64) *Membership {
 	return m
 }
 
-// Refresh recomputes and publishes the set. It fails closed: on error the previous set stays.
+// Refresh recomputes and publishes the set from the current live epoch and head, both read
+// inside the lock. It fails closed: on any error the previous set stays published, the failure is
+// returned and Dirty reports true until a later Refresh succeeds.
 func (m *Membership) Refresh(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.refreshLocked(ctx); err != nil {
+		m.dirty.Store(true)
+		return err
+	}
+	m.dirty.Store(false)
+	return nil
+}
+
+// Dirty reports whether the last publication failed (or never happened).
+func (m *Membership) Dirty() bool { return m.dirty.Load() }
+
+func (m *Membership) refreshLocked(ctx context.Context) error {
 	live := m.live.Load()
 	head, err := m.history.Head(ctx)
-	if err != nil || head < live {
+	switch {
+	case errors.Is(err, errHeadUnsupported):
+		head = live
+	case err != nil:
+		// a failed head read must not shrink the set to the live epoch
+		return fmt.Errorf("failed to read the admitted head: %w", err)
+	}
+	if head < live {
 		head = live
 	}
 	if live == 0 {
@@ -131,13 +162,11 @@ func (m *Membership) Refresh(ctx context.Context) error {
 	}
 	m.head.Store(head)
 	m.set.Store(&next)
-	m.mu.Lock()
 	for id := range m.quotas {
 		if _, ok := next[id]; !ok {
 			delete(m.quotas, id)
 		}
 	}
-	m.mu.Unlock()
 	return nil
 }
 

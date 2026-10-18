@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial"
 	"math/big"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -86,10 +88,12 @@ type (
 
 		// Trust base history for the certification intake (local reads only on the message path),
 		// the admitted root peer set, and the single background catch-up worker.
-		intakeOnce sync.Once
-		history    IntakeTrustBases
-		members    *Membership
-		catchup    *catchUp
+		// last inactivity recovery attempt (unix milli), to pace handshakes while the root is stalled
+		lastRecovery atomic.Int64
+		intakeOnce   sync.Once
+		history      IntakeTrustBases
+		members      *Membership
+		catchup      *catchUp
 		// highest root round of an authenticated, sequence-checked UC; only an advance refreshes
 		// lastCertResponseTime
 		lastAuthRootRound atomic.Uint64
@@ -213,12 +217,16 @@ func (c *BFTClientImpl) initIntake() {
 	}
 	c.members = newMembership(c.history, liveEpoch)
 	c.catchup = newCatchUp(c.history, c.logger)
+	c.catchup.onRun = func(ctx context.Context) {
+		// retry a failed publication whatever the head and the live epoch are
+		if c.members.Dirty() {
+			c.refreshMembership(ctx)
+		}
+	}
 	c.catchup.onAdmitted = func(ctx context.Context, epoch uint64) {
 		for cur := c.admittedHead.Load(); epoch > cur && !c.admittedHead.CompareAndSwap(cur, epoch); cur = c.admittedHead.Load() {
 		}
-		if err := c.members.Refresh(ctx); err != nil {
-			c.logger.WithContext(ctx).Warn("failed to refresh the admitted root peers", "error", err.Error())
-		}
+		c.refreshMembership(ctx)
 	}
 	c.catchup.onHead = func(ctx context.Context, head uint64) bool {
 		// the head moved without this worker (for example another HA node admitted an epoch)
@@ -231,9 +239,7 @@ func (c *BFTClientImpl) initIntake() {
 				break
 			}
 		}
-		if err := c.members.Refresh(ctx); err != nil {
-			c.logger.WithContext(ctx).Warn("failed to refresh the admitted root peers", "error", err.Error())
-		}
+		c.refreshMembership(ctx)
 		return true
 	}
 	c.catchup.onCaughtUp = func(ctx context.Context) {
@@ -251,6 +257,16 @@ func (c *BFTClientImpl) initIntake() {
 		if err := c.sendHandshake(ctx, n, id); err != nil {
 			c.logger.WithContext(ctx).Warn("handshake after catch-up failed", "error", err.Error())
 		}
+	}
+}
+
+// refreshMembership republishes the admitted root peers. A failure keeps the previous set, leaves
+// the membership dirty and schedules a retry by the catch-up worker, so a transient local error can
+// not strand newly admitted roots.
+func (c *BFTClientImpl) refreshMembership(ctx context.Context) {
+	if err := c.members.Refresh(ctx); err != nil {
+		c.logger.WithContext(ctx).Warn("failed to refresh the admitted root peers, will retry", "error", err.Error())
+		c.catchup.RetryLater(time.Second)
 	}
 }
 
@@ -313,6 +329,7 @@ func (c *BFTClientImpl) Start(ctx context.Context) error {
 	}
 	opts := DefaultNetworkOptions
 	opts.AdmitPeer = c.members.Admit
+	opts.RevalidatePeer = c.members.Contains
 	networkP2P, err := NewLibP2PNetwork(ctx, self, c.logger, opts)
 	if err != nil {
 		return fmt.Errorf("failed to create libp2p network: %w", err)
@@ -433,6 +450,14 @@ func (c *BFTClientImpl) sendHandshake(ctx context.Context, bftNetwork *BftNetwor
 	if err != nil {
 		return fmt.Errorf("failed to select root nodes for handshake: %w", err)
 	}
+	// A newly admitted epoch may not be active yet: also ask some roots of the live epoch.
+	if liveEpoch := c.luc.Load().GetRootEpoch(); liveEpoch != rootEpoch {
+		if liveTB, lerr := c.authn.trustBase(ctx, liveEpoch); lerr == nil {
+			if liveIDs, serr := randomNodeSelector(liveTB, defaultHandshakeNodes); serr == nil {
+				rootIDs = mergePeerIDs(rootIDs, liveIDs)
+			}
+		}
+	}
 	if err = bftNetwork.Send(ctx,
 		handshake.Handshake{
 			PartitionID: c.PartitionID(),
@@ -469,9 +494,7 @@ func (c *BFTClientImpl) loop(ctx context.Context, bftNetwork *BftNetwork, nodeID
 			c.logger.WithContext(ctx).Debug("received message", "type", fmt.Sprintf("%T", m))
 			c.handleMessage(ctx, m)
 		case <-heartbeat.C:
-			lastCertMillis := c.lastCertResponseTime.Load()
-			lastCertTime := time.UnixMilli(lastCertMillis)
-			if time.Since(lastCertTime) > c.conf.InactivityTimeout {
+			if c.recoveryDue(time.Now()) {
 				c.logger.Warn("BFT client inactivity timeout exceeded, sending new handshake")
 				c.catchup.Signal()
 				if err := c.sendHandshake(ctx, bftNetwork, nodeID); err != nil {
@@ -480,6 +503,23 @@ func (c *BFTClientImpl) loop(ctx context.Context, bftNetwork *BftNetwork, nodeID
 			}
 		}
 	}
+}
+
+// recoveryDue reports whether an inactivity recovery (handshake and catch-up wake) should run now:
+// no authenticated advancing UC for InactivityTimeout, and the previous recovery attempt at least
+// InactivityTimeout ago. A handshake reply that does not advance the root round does not refresh the
+// timer, so without pacing a stalled root chain would see a handshake and a REST probe every
+// heartbeat instead of one per InactivityTimeout.
+func (c *BFTClientImpl) recoveryDue(now time.Time) bool {
+	timeout := c.conf.InactivityTimeout
+	if now.Sub(time.UnixMilli(c.lastCertResponseTime.Load())) <= timeout {
+		return false
+	}
+	if last := c.lastRecovery.Load(); last != 0 && now.Sub(time.UnixMilli(last)) < timeout {
+		return false
+	}
+	c.lastRecovery.Store(now.UnixMilli())
+	return true
 }
 
 func (c *BFTClientImpl) handleMessage(ctx context.Context, msg any) {
@@ -993,7 +1033,8 @@ func (c *BFTClientImpl) noteAuthenticated(ctx context.Context, uc *types.Unicity
 		}
 	}
 	if err := c.members.Advance(ctx, uc.GetRootEpoch()); err != nil {
-		c.logger.WithContext(ctx).Warn("failed to republish the admitted root peers", "error", err.Error())
+		c.logger.WithContext(ctx).Warn("failed to republish the admitted root peers, will retry", "error", err.Error())
+		c.catchup.RetryLater(time.Second)
 	}
 }
 
@@ -1501,4 +1542,15 @@ func (c *BFTClientImpl) WaitForInitialized(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// mergePeerIDs appends the IDs of b that are not in a.
+func mergePeerIDs(a, b peer.IDSlice) peer.IDSlice {
+	out := append(peer.IDSlice(nil), a...)
+	for _, id := range b {
+		if !slices.Contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	return out
 }

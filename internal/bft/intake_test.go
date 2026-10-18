@@ -170,6 +170,11 @@ type harness struct {
 	clock  *fakeClock
 	// handshakes counts catch-up triggered handshakes
 	handshakes atomic.Int64
+	// optional hook of response(): override the seal (before signing)
+	sealMut func(*types.UnicitySeal)
+	// realCaughtUp is the production post-catch-up action (the recovery handshake)
+	realCaughtUp     func(context.Context)
+	useRealHandshake bool
 }
 
 type fakeClock struct {
@@ -210,7 +215,13 @@ func newHarness(t *testing.T, epochs, admitted, available int) *harness {
 	h := &harness{t: t, chain: chain, store: store, rest: rest, client: c, rm: rm, clock: &fakeClock{t: time.Unix(1_900_000_000, 0)}}
 	c.ensureIntake()
 	c.catchup.now = h.clock.now
-	c.catchup.onCaughtUp = func(context.Context) { h.handshakes.Add(1) }
+	h.realCaughtUp = c.catchup.onCaughtUp
+	c.catchup.onCaughtUp = func(ctx context.Context) {
+		h.handshakes.Add(1)
+		if h.useRealHandshake {
+			h.realCaughtUp(ctx)
+		}
+	}
 	require.NoError(t, c.members.Refresh(t.Context()))
 	head, err := manager.Head(t.Context())
 	require.NoError(t, err)
@@ -256,6 +267,9 @@ func (h *harness) response(n uint64, epoch uint64, signWith map[string]cryptobft
 		Timestamp:            fakeRoundTime + n,
 		PreviousHash:         hash(n + 200),
 		Hash:                 ut.RootHash(),
+	}
+	if h.sealMut != nil {
+		h.sealMut(seal)
 	}
 	if signWith == nil {
 		seal.Signatures = types.SignatureMap{"junk": []byte{1, 2, 3}}

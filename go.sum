@@ -594,6 +594,8 @@ github.com/unicitynetwork/bft-core v1.1.1-0.20261017134757-d5316e99cdb3 h1:f159g
 github.com/unicitynetwork/bft-core v1.1.1-0.20261017134757-d5316e99cdb3/go.mod h1:4uYgcZ5QDVAGIpzq3T6fkHzYYnbiXqsurnGkmtrGX0M=
 github.com/unicitynetwork/bft-core v1.1.1-0.20261018084946-62554ff627a6 h1:HDqkVfz5d1qTgrHpIzvQpBklPK+RwZUg3heKAoaO2A0=
 github.com/unicitynetwork/bft-core v1.1.1-0.20261018084946-62554ff627a6/go.mod h1:4uYgcZ5QDVAGIpzq3T6fkHzYYnbiXqsurnGkmtrGX0M=
+github.com/unicitynetwork/bft-core v1.1.1-0.20261018092615-df371b701a99 h1:WeiT0HYN8TUCpqvxrvx1viO8Xm/4Od2moixxQOO3QfE=
+github.com/unicitynetwork/bft-core v1.1.1-0.20261018092615-df371b701a99/go.mod h1:4uYgcZ5QDVAGIpzq3T6fkHzYYnbiXqsurnGkmtrGX0M=
 github.com/unicitynetwork/bft-go-base v1.1.1-0.20261017115848-8c62c75b950c h1:A6xNCNyhZniYGmgh0jpKDFjgCUt7GWFnigpSm2OQZgo=
 github.com/unicitynetwork/bft-go-base v1.1.1-0.20261017115848-8c62c75b950c/go.mod h1:hBnOG52VRy/vpgIBUulTgk7PBTwODZ2xkVjCEu5yRcQ=
 github.com/urfave/cli v1.22.2/go.mod h1:Gos4lmkARVdJ6EkW0WaNv/tZAAMe9V7XWyB60NtXRu0=
