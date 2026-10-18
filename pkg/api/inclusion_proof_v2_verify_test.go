@@ -214,6 +214,18 @@ func buildSignedSingleLeafProof(t *testing.T, ownerShard types.ShardID, sealNetw
 	types.RootTrustBase,
 ) {
 	t.Helper()
+	return buildSignedSingleLeafProofOfPartition(t, ownerShard, sealNetwork, AggregationPartitionID)
+}
+
+// buildSignedSingleLeafProofOfPartition is buildSignedSingleLeafProof for any partition: the proof is authentic
+// (signed by the returned trust base) whatever the partition, only partition 7 is the aggregation partition.
+func buildSignedSingleLeafProofOfPartition(t *testing.T, ownerShard types.ShardID, sealNetwork types.NetworkID, partitionID types.PartitionID) (
+	*InclusionProofV2,
+	*CertificationRequest,
+	types.PartitionID,
+	types.RootTrustBase,
+) {
+	t.Helper()
 
 	txHash := RequireNewImprintV2("2222222222222222222222222222222222222222222222222222222222222222")
 	certData := CertificationData{
@@ -268,7 +280,6 @@ func buildSignedSingleLeafProof(t *testing.T, ownerShard types.ShardID, sealNetw
 	// Two-shard partition via a 1-bit split of the empty ShardID.
 	sid0, sid1 := types.ShardID{}.Split()
 
-	const partitionID types.PartitionID = AggregationPartitionID
 	ir0Hash := test.RandomBytes(32)
 	ir1Hash := test.RandomBytes(32)
 	if ownerShard.Equal(sid0) {
@@ -581,4 +592,30 @@ func TestInclusionProofV2Verify_PartitionIsFixed(t *testing.T) {
 	vctx.PartitionID = AggregationPartitionID + 1 // never selects another partition, not even a matching one
 	err := proof.Verify(req, vctx)
 	require.ErrorContains(t, err, "not the aggregation partition")
+}
+
+// The ordinary inclusion verification requires the aggregation partition itself: a proof whose UC is authentic
+// (signed by the trusted authority) but of another partition is refused, whatever the verifier context asserts.
+// Verifying against the UC's own partition instead of the constant would accept it.
+func TestInclusionProofV2Verify_RefusesAnAuthenticProofOfAnotherPartition(t *testing.T) {
+	sid0, _ := types.ShardID{}.Split()
+	for _, other := range []types.PartitionID{AggregationPartitionID + 1, AggregationPartitionID - 1, 0x0a0b0c0d} {
+		proof, req, partitionID, tb := buildSignedSingleLeafProofOfPartition(t, sid0, types.NetworkMainNet, other)
+		require.Equal(t, other, partitionID)
+		// the selector left out, or asserting the proof's own partition, or the aggregation partition: all refused
+		for _, vctx := range []*VerifierContext{
+			{TrustBase: tb, ExpectedShardID: sid0},
+			{TrustBase: tb, ExpectedShardID: sid0, PartitionID: other},
+			{TrustBase: tb, ExpectedShardID: sid0, PartitionID: AggregationPartitionID},
+		} {
+			err := proof.Verify(req, vctx)
+			require.Error(t, err, "partition %d", other)
+		}
+		// UC-level message of the unselectable case
+		err := proof.Verify(req, &VerifierContext{TrustBase: tb, ExpectedShardID: sid0})
+		require.ErrorContains(t, err, "invalid partition identifier")
+	}
+	// control: the same construction for partition 7 verifies
+	proof, req, _, tb := buildSignedSingleLeafProofOfPartition(t, sid0, types.NetworkMainNet, AggregationPartitionID)
+	require.NoError(t, proof.Verify(req, &VerifierContext{TrustBase: tb, ExpectedShardID: sid0}))
 }
