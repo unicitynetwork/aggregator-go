@@ -255,6 +255,25 @@ var (
 		[]string{"result"},
 	)
 
+	// PartitionViewPruneTotal counts the cleanups of superseded partition view sidecars in block
+	// documents by outcome (ok, error). A cleanup failure never fails finalization; it is retried by the
+	// next finalization or startup.
+	PartitionViewPruneTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_partition_view_prune_total",
+			Help: "Cleanups of superseded partition views stored in block documents, by outcome (ok, error).",
+		},
+		[]string{"result"},
+	)
+
+	// PartitionViewPrunedBlocksTotal counts the block documents whose superseded view was removed.
+	PartitionViewPrunedBlocksTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_partition_view_pruned_blocks_total",
+			Help: "Block documents whose superseded partition view was removed.",
+		},
+	)
+
 	ProofViewPublicationTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aggregator_proofview_publication_total",
