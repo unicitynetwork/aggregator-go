@@ -194,7 +194,7 @@ func NewVerifier(ctx Context) (*Verifier, error) {
 	if ctx.EpochEnd != nil {
 		opts = append(opts, consolidation.WithEpochEnd(ctx.EpochEnd))
 	}
-	s, err := consolidation.NewSession(consolidation.Policy{PartitionID: api.AggregationPartitionID}, ctx.Resolver, opts...)
+	s, err := consolidation.NewSession(consolidation.Policy{}, ctx.Resolver, opts...)
 	if err != nil {
 		return nil, err
 	}

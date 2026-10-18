@@ -15,6 +15,22 @@ Non-inclusion verification returns a snapshot result (owner decisions C/D, schem
 - testdata/non-inclusion/v2 replaces v1 (new expectation schema, sharded positives, partition 7, policy.json,
   sequences.json); regenerate with cmd/gen-ni-fixtures.
 
+CHANGELOG ENTRY - 18 Oct 2026
+
+Fixed aggregation partition 7 (owner decision C1/C2).
+
+- api.AggregationPartitionID (types.PartitionID, value 7) is the protocol constant; there is no runtime, environment or
+  constructor override. Mainnet (network 1), testnet2 (network 4) and local setups all run partition 7.
+- consolidation.Policy.PartitionID is removed. consolidate-proofs config `partitionId` and the corpus context field
+  `partitionId` stay as optional equality assertions: absent/0 or 7 are accepted, anything else is refused.
+  api.VerifierContext.PartitionID (inclusion proofs) is likewise a deprecated assertion; the check always uses 7.
+- proofmaterial.ValidateView, NewStaticTopology, SingleShardTopology and proofpub.New lose their partition argument; stored
+  and received partition views are authenticated for partition 7 only (also on memo hits). BFT_SHARD_CONF_FILE with another
+  partition is refused at startup when BFT is enabled.
+- testdata/uc-consolidation/v1 is regenerated for partition 7 (was 0x0a0b0c0d), with new negatives (the context asserts
+  another partition; every UC/view/proof is authentic but of partition 8). The producer subset copied into bft-core must be
+  regenerated with -producer-subset.
+
 CHANGELOG ENTRY - 04 May 2026 at 17:50 CET
 
 Add Redis Sentinel (HA) support for the commitment queue (#148).

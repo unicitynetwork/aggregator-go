@@ -16,7 +16,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-const testPartition types.PartitionID = 0x0f0f0f0f
+const testPartition types.PartitionID = api.AggregationPartitionID
 
 func h32(label string) []byte {
 	h := sha256.Sum256([]byte(label))
@@ -95,7 +95,7 @@ func newFixture(t *testing.T, o fixtureOpts) *fixture {
 	}
 
 	f.view = &types.PartitionViewV1{Version: 1, PartitionID: testPartition}
-	f.policy = Policy{PartitionID: testPartition, Topology: types.PartitionViewTopology{Scheme: f.scheme, ShardConfHashes: map[string][]byte{}}}
+	f.policy = Policy{Topology: types.PartitionViewTopology{Scheme: f.scheme, ShardConfHashes: map[string][]byte{}}}
 	var inputs []types.ShardTreeInput
 	for i, sid := range sids {
 		ir := &types.InputRecord{

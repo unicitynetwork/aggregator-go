@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -30,6 +31,10 @@ type Storage struct {
 	smtStorage              *SmtStorage
 	leadershipStorage       *LeadershipStorage
 	cachedTrustBaseStorage  *CachedTrustBaseStorage
+
+	// background build of the partition view index (see startPartitionViewIndexBuild)
+	indexBuildCancel context.CancelFunc
+	indexBuildReady  chan struct{}
 }
 
 // NewStorage creates a new MongoDB storage instance
@@ -105,8 +110,55 @@ func NewStorage(ctx context.Context, config config.Config) (*Storage, error) {
 		_ = client.Disconnect(context.Background())
 		return nil, fmt.Errorf("failed to create indexes: %w", err)
 	}
+	storage.startPartitionViewIndexBuild()
 
 	return storage, nil
+}
+
+// Timing of the background build of the partition view index. Variables so that tests can shorten them.
+var (
+	// partitionViewIndexBuildTimeout bounds one attempt. It is deliberately far above the startup budget
+	// (MONGODB_CONNECT_TIMEOUT): on a mainnet sized collection the build is a full scan.
+	partitionViewIndexBuildTimeout = 30 * time.Minute
+	// partitionViewIndexRetryDelays are the waits after a failed attempt; the last one repeats.
+	partitionViewIndexRetryDelays = []time.Duration{5 * time.Second, 30 * time.Second, 5 * time.Minute}
+	// ensurePartitionViewIndex is the attempt itself.
+	ensurePartitionViewIndex = func(ctx context.Context, bs *BlockStorage) error { return bs.EnsurePartitionViewIndex(ctx) }
+)
+
+// startPartitionViewIndexBuild builds the partition view index outside the fatal startup path. The index only speeds
+// up the pruning of superseded partition views, which is correct without it, so a slow or failed build never keeps
+// the aggregator from starting: it runs in the background with its own context (not the startup budget), is logged
+// and retried until it succeeds or the storage is closed. A restart during the build simply starts it again (the
+// server may even have finished it meanwhile, then the attempt is a no-op).
+func (s *Storage) startPartitionViewIndexBuild() {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.indexBuildCancel = cancel
+	s.indexBuildReady = make(chan struct{})
+	go func() {
+		started := time.Now()
+		for attempt := 0; ; attempt++ {
+			attemptCtx, attemptCancel := context.WithTimeout(ctx, partitionViewIndexBuildTimeout)
+			err := ensurePartitionViewIndex(attemptCtx, s.blockStorage)
+			attemptCancel()
+			if err == nil {
+				slog.Info("Partition view index is ready", "index", partitionViewIndexName, "attempts", attempt+1, "elapsed", time.Since(started).String())
+				close(s.indexBuildReady)
+				return
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			delay := partitionViewIndexRetryDelays[min(attempt, len(partitionViewIndexRetryDelays)-1)]
+			slog.Warn("Building the partition view index failed; pruning works without it and the build is retried",
+				"index", partitionViewIndexName, "attempt", attempt+1, "retryIn", delay.String(), "error", err.Error())
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+		}
+	}()
 }
 
 func mongoWriteConcern(cfg config.DatabaseConfig) *writeconcern.WriteConcern {
@@ -281,6 +333,9 @@ func (s *Storage) Ping(ctx context.Context) error {
 
 // Close closes the database connection
 func (s *Storage) Close(ctx context.Context) error {
+	if s.indexBuildCancel != nil {
+		s.indexBuildCancel()
+	}
 	return s.client.Disconnect(ctx)
 }
 

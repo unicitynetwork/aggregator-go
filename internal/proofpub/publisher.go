@@ -49,11 +49,10 @@ type Publisher struct {
 	catalog  *proofview.Catalog
 	retainer smtbackend.ReadViewRetainer
 	backend  smtbackend.Backend
-	// partition is used to re-validate stored partition views against their UC
-	// before publication (restored material is never trusted blindly).
-	partition types.PartitionID
-	topology  proofmaterial.TopologyProvider
-	log       *logger.Logger
+	// stored partition views are re-validated against their UC (for the fixed aggregation
+	// partition) before publication: restored material is never trusted blindly.
+	topology proofmaterial.TopologyProvider
+	log      *logger.Logger
 	// sealVerifier authenticates stored views again (nil: stored views are not republished).
 	sealVerifier func(ctx context.Context) types.SealVerifier
 }
@@ -61,12 +60,12 @@ type Publisher struct {
 // New returns a publisher, or nil when the backend cannot retain read views
 // (the batch API is then unavailable for this deployment). A nil *Publisher is
 // valid and does nothing.
-func New(catalog *proofview.Catalog, backend smtbackend.Backend, partition types.PartitionID, topology proofmaterial.TopologyProvider, log *logger.Logger) *Publisher {
+func New(catalog *proofview.Catalog, backend smtbackend.Backend, topology proofmaterial.TopologyProvider, log *logger.Logger) *Publisher {
 	retainer, ok := backend.(smtbackend.ReadViewRetainer)
 	if !ok || catalog == nil {
 		return nil
 	}
-	return &Publisher{catalog: catalog, retainer: retainer, backend: backend, partition: partition, topology: topology, log: log}
+	return &Publisher{catalog: catalog, retainer: retainer, backend: backend, topology: topology, log: log}
 }
 
 // SetSealVerifier sets the trusted seal verifier used to re-authenticate stored
@@ -221,8 +220,8 @@ func (p *Publisher) revalidatedView(ctx context.Context, block *models.Block, uc
 	if p.sealVerifier != nil {
 		verifier = p.sealVerifier(ctx)
 	}
-	if p.partition != 0 && verifier != nil {
-		if _, view, err := proofmaterial.ValidateView(block.PartitionView, uc, p.partition, verifier, p.topology); err == nil {
+	if verifier != nil {
+		if _, view, err := proofmaterial.ValidateView(block.PartitionView, uc, verifier, p.topology); err == nil {
 			return view
 		} else {
 			p.log.WithContext(ctx).Warn("Dropping stored partition view which does not validate against its UC",

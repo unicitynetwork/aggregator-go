@@ -1,7 +1,7 @@
 {
   "corpusVersion": 1,
   "networkId": 2,
-  "partitionId": 168496141,
+  "partitionId": 7,
   "shards": [
     ""
   ],
@@ -9,7 +9,7 @@
     {
       "shard": "",
       "file": "shard-configs/root.cbor",
-      "hash": "095c96ce597132d746178c22286192f70315477c24b09f34f9a5695a89856319"
+      "hash": "7243d3acc12f960fdb69ae385b588878b82f29ed49baba8718698ffbb9e5b8f1"
     }
   ],
   "master": "",

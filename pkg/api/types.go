@@ -377,12 +377,16 @@ func (c *GetInclusionProofResponseV2) UnmarshalJSON(data []byte) error {
 // requires a format version bump.
 const InclusionProofV2HashAlgorithm = SHA256
 
-// VerifierContext carries the trust base and expected partition/shard
-// identity a verifier needs to certify a v2 inclusion proof. TrustBase,
-// PartitionID, and ExpectedShardID are required; ShardConfHash is optional
-// (nil skips the cross-check against UC.ShardConfHash).
+// VerifierContext carries the trust base and expected shard identity a
+// verifier needs to certify a v2 inclusion proof. TrustBase and
+// ExpectedShardID are required; ShardConfHash is optional (nil skips the
+// cross-check against UC.ShardConfHash). The partition is always
+// AggregationPartitionID.
 type VerifierContext struct {
-	TrustBase       types.RootTrustBase
+	TrustBase types.RootTrustBase
+	// PartitionID is deprecated and only an equality assertion: zero or
+	// AggregationPartitionID are accepted, any other value is rejected. It never
+	// selects the partition.
 	PartitionID     types.PartitionID
 	ExpectedShardID types.ShardID
 	ShardConfHash   []byte
@@ -407,6 +411,9 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 	}
 	if vctx.TrustBase == nil {
 		return errors.New("nil trust base")
+	}
+	if vctx.PartitionID != 0 && vctx.PartitionID != AggregationPartitionID {
+		return fmt.Errorf("verifier context partition %d is not the aggregation partition %d", vctx.PartitionID, AggregationPartitionID)
 	}
 	if err := p.CheckRequestBinding(v2); err != nil {
 		return err
@@ -438,7 +445,7 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 	if uc.UnicitySeal.NetworkID != vctx.TrustBase.GetNetworkID() {
 		return errors.New("unicity seal network does not match trust base")
 	}
-	if err := uc.Verify(vctx.TrustBase, crypto.SHA256, vctx.PartitionID, vctx.ExpectedShardID, vctx.ShardConfHash); err != nil {
+	if err := uc.Verify(vctx.TrustBase, crypto.SHA256, AggregationPartitionID, vctx.ExpectedShardID, vctx.ShardConfHash); err != nil {
 		return fmt.Errorf("unicity certificate verification failed: %w", err)
 	}
 

@@ -54,7 +54,7 @@ func newNIEnv(t *testing.T, cfg NonInclusionConfig) *niEnv {
 	t.Cleanup(func() { _ = cat.Close() })
 	log, err := logger.New("error", "json", "", false)
 	require.NoError(t, err)
-	pub := proofpub.New(cat, be, nifixture.Partition, nil, log)
+	pub := proofpub.New(cat, be, nil, log)
 	pub.SetSealVerifier(func(context.Context) types.SealVerifier { return types.TrustBaseSealVerifier(auth.TrustBase()) })
 	return &niEnv{auth: auth, be: be, cat: cat, pub: pub, svc: NewNonInclusionService(NonInclusionCatalogSource(cat), niShard{}, cfg)}
 }

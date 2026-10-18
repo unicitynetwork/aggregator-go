@@ -312,6 +312,23 @@ func (bs *BlockStorage) PruneRecentPartitionViews(ctx context.Context, below *ap
 	return int(res.ModifiedCount), nil
 }
 
+// EnsurePartitionViewIndex creates the partial index over the blocks which carry a partition view if it does not
+// exist. It is a performance index only (the pruning is correct without it, it just has to look at more documents)
+// and building it scans the whole collection once, so it is not part of the fatal startup indexes: the storage
+// builds it in the background (Storage.startPartitionViewIndexBuild). It shares the key pattern {index: 1} with the
+// unique index_1, which MongoDB accepts from 5.0 on (the documented minimum).
+func (bs *BlockStorage) EnsurePartitionViewIndex(ctx context.Context) error {
+	_, err := bs.collection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "index", Value: 1}},
+		Options: options.Index().SetName(partitionViewIndexName).
+			SetPartialFilterExpression(bson.M{"partitionView": bson.M{"$exists": true}}),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create the partition view index: %w", err)
+	}
+	return nil
+}
+
 // CreateIndexes creates necessary indexes for the block collection
 func (bs *BlockStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
@@ -330,13 +347,6 @@ func (bs *BlockStorage) CreateIndexes(ctx context.Context) error {
 		},
 		{
 			Keys: bson.D{{Key: "finalized", Value: 1}, {Key: "index", Value: -1}},
-		},
-		{
-			// holds only the few blocks which carry a partition view: finds the views to prune without
-			// scanning the history
-			Keys: bson.D{{Key: "index", Value: 1}},
-			Options: options.Index().SetName(partitionViewIndexName).
-				SetPartialFilterExpression(bson.M{"partitionView": bson.M{"$exists": true}}),
 		},
 	}
 

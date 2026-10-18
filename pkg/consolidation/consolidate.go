@@ -164,7 +164,7 @@ func (s *Session) AuthenticateMaster(bound *RootRoundBound, master ShardResult, 
 	if s.policy.pinned() {
 		opts = append(opts, types.WithPinnedTopology(s.policy.Topology))
 	}
-	av, err := types.AuthenticateView(view, enclosing, s.policy.PartitionID, s, crypto.SHA256, opts...)
+	av, err := types.AuthenticateView(view, enclosing, api.AggregationPartitionID, s, crypto.SHA256, opts...)
 	if err != nil {
 		var se *sealError
 		if errors.As(err, &se) {
@@ -375,7 +375,7 @@ func (s *Session) consolidateShard(bi int, b ShardResult, target *types.UnicityC
 		return nil, fail(OutcomeBindingMismatch, bi, nil, "source root %X differs from the master view root %X", local.InputRecord.Hash, target.InputRecord.Hash)
 	}
 	if !local.ShardTreeCertificate.Shard.Equal(b.ShardID) || local.UnicityTreeCertificate == nil ||
-		local.UnicityTreeCertificate.Partition != s.policy.PartitionID {
+		local.UnicityTreeCertificate.Partition != api.AggregationPartitionID {
 		return nil, fail(OutcomeBindingMismatch, bi, nil, "source unicity certificate identity differs from shard %q", b.ShardID)
 	}
 	targetBytes, err := target.MarshalCBOR()
@@ -419,7 +419,7 @@ func (s *Session) checkBody(bi int, shard types.ShardID, uc *types.UnicityCertif
 	if err := checkPathSteps(bi, uc); err != nil {
 		return err
 	}
-	if err := uc.IsValid(s.policy.PartitionID, shard, conf); err != nil {
+	if err := uc.IsValid(api.AggregationPartitionID, shard, conf); err != nil {
 		return fail(OutcomeInvalidInput, bi, err, "assembled unicity certificate")
 	}
 	shardRoot, err := uc.ShardTreeCertificate.ComputeCertificateHash(uc.InputRecord, uc.TRHash, uc.ShardConfHash, crypto.SHA256)
