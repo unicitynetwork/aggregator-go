@@ -159,6 +159,10 @@ func EvaluateWith(files Files, opts Options) (*Result, error) {
 	res := &Result{Master: l.Context.Master}
 
 	runPipeline := func() (stage, outcome string, err error) {
+		// the context's partition is only an equality assertion: the partition is the fixed aggregation partition
+		if types.PartitionID(l.Context.PartitionID) != api.AggregationPartitionID {
+			return StagePolicy, string(consolidation.OutcomeInvalidInput), nil
+		}
 		// the trusted context must be consistent with the installed authority
 		if l.Context.NetworkID != uint32(l.TrustBase.GetNetworkID()) {
 			return StagePolicy, string(consolidation.OutcomeIncompatibleLineage), nil
@@ -285,7 +289,7 @@ func (l *Loaded) NewSession() (*consolidation.Session, error) {
 }
 
 func policyOf(ctx *Context) (consolidation.Policy, error) {
-	p := consolidation.Policy{PartitionID: types.PartitionID(ctx.PartitionID)}
+	p := consolidation.Policy{}
 	p.Topology.ShardConfHashes = map[string][]byte{}
 	for _, s := range ctx.Shards {
 		if s == "" {

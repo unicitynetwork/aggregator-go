@@ -58,7 +58,7 @@ func (s *proofPubBase) newRM() (*RoundManager, *proofview.Catalog) {
 	cat, err := newProofViewCatalog(proofview.DefaultLimits(), rm.smtBackend)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = cat.Close() })
-	rm.proofPub = proofpub.New(cat, rm.smtBackend, prooftest.Partition, nil, s.log)
+	rm.proofPub = proofpub.New(cat, rm.smtBackend, nil, s.log)
 	rm.proofPub.SetSealVerifier(prooftest.New(s.T(), 2, 1, prooftest.Hash("x"), 80).Verifier())
 	s.Require().NotNil(rm.proofPub)
 	return rm, cat

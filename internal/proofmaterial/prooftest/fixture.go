@@ -15,9 +15,11 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-const Partition types.PartitionID = 0x0a0b0c0d
+const Partition types.PartitionID = api.AggregationPartitionID
 
 func Hash(label string) []byte {
 	h := sha256.Sum256([]byte(label))
@@ -60,13 +62,19 @@ const NetworkID types.NetworkID = 3
 // New builds a view over 2^bits shards. The enclosing UC belongs to the first shard,
 // whose IR has the given round and state hash.
 func New(t testing.TB, bits int, round uint64, stateHash []byte, rootRound uint64) *Fixture {
+	return NewForPartition(t, Partition, bits, round, stateHash, rootRound)
+}
+
+// NewForPartition is New for an arbitrary partition (validly signed by the same authority): the fixture of a
+// partition which is not the aggregation partition must be refused by every application verifier.
+func NewForPartition(t testing.TB, partition types.PartitionID, bits int, round uint64, stateHash []byte, rootRound uint64) *Fixture {
 	scheme := Scheme(bits)
 	order, err := types.CanonicalShardOrder(scheme)
 	require.NoError(t, err)
 	tr := certification.TechnicalRecord{Round: round + 1, Epoch: 1, Leader: "leader", FeeHash: Hash("fees"), StatHash: Hash("stat")}
 	trHash, err := tr.Hash()
 	require.NoError(t, err)
-	v := &types.PartitionViewV1{Version: 1, PartitionID: Partition}
+	v := &types.PartitionViewV1{Version: 1, PartitionID: partition}
 	var inputs []types.ShardTreeInput
 	confHashes := map[string][]byte{}
 	for i, id := range order {
@@ -89,11 +97,11 @@ func New(t testing.TB, bits int, round uint64, stateHash []byte, rootRound uint6
 	tree, err := types.CreateShardTree(scheme, inputs, crypto.SHA256)
 	require.NoError(t, err)
 	ut, err := types.NewUnicityTree(crypto.SHA256, []*types.UnicityTreeData{
-		{Partition: Partition, ShardTreeRoot: tree.RootHash()},
+		{Partition: partition, ShardTreeRoot: tree.RootHash()},
 		{Partition: 0x01010101, ShardTreeRoot: Hash("other partition")},
 	})
 	require.NoError(t, err)
-	utc, err := ut.Certificate(Partition)
+	utc, err := ut.Certificate(partition)
 	require.NoError(t, err)
 	stc, err := tree.Certificate(order[0])
 	require.NoError(t, err)
@@ -121,7 +129,7 @@ func New(t testing.TB, bits int, round uint64, stateHash []byte, rootRound uint6
 
 // Provider returns the trusted topology provider matching the fixture.
 func (f *Fixture) Provider(t testing.TB) *proofmaterial.StaticTopology {
-	p, err := proofmaterial.NewStaticTopology(Partition, f.Topo.Scheme, f.Topo.ShardConfHashes)
+	p, err := proofmaterial.NewStaticTopology(f.Topo.Scheme, f.Topo.ShardConfHashes)
 	require.NoError(t, err)
 	return p
 }

@@ -181,7 +181,7 @@ func (s *Session) evidenceUC(i int, raw []byte) (*types.UnicityCertificate, erro
 		}
 		pinnedConf = s.policy.Topology.ShardConfHashes[shard.Key()]
 	}
-	if err := uc.IsValid(s.policy.PartitionID, shard, pinnedConf); err != nil {
+	if err := uc.IsValid(api.AggregationPartitionID, shard, pinnedConf); err != nil {
 		return nil, fail(OutcomeIncompatibleLineage, i, err, "evidence unicity certificate")
 	}
 	shardRoot, err := uc.ShardTreeCertificate.ComputeCertificateHash(uc.InputRecord, uc.TRHash, uc.ShardConfHash, crypto.SHA256)

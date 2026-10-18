@@ -277,7 +277,7 @@ func Test_ProofMaterial_PinsOnlyRestrict(t *testing.T) {
 	for k := range f.Topo.ShardConfHashes {
 		wrong[k] = prooftest.Hash("pinned elsewhere")
 	}
-	pins, err := proofmaterial.NewStaticTopology(prooftest.Partition, f.Topo.Scheme, wrong)
+	pins, err := proofmaterial.NewStaticTopology(f.Topo.Scheme, wrong)
 	require.NoError(t, err)
 	c.proofTopology = pins
 	proposeBlock(c, 7, root)
@@ -371,7 +371,7 @@ func Test_ProofMaterial_FillRetriedUntilViewRetained(t *testing.T) {
 	defer catalog.Close()
 	log, err := logger.New("error", "json", "", false)
 	require.NoError(t, err)
-	pub := proofpub.New(catalog, backend, prooftest.Partition, nil, log)
+	pub := proofpub.New(catalog, backend, nil, log)
 	require.NotNil(t, pub)
 	pub.SetSealVerifier(f.Verifier())
 

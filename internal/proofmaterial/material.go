@@ -11,6 +11,8 @@ import (
 	"fmt"
 
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // Digest identifies a complete unicity certificate (SHA-256 of its CBOR encoding).
@@ -133,7 +135,7 @@ const ConfHashSize = 32
 // "pins" is an OPTIONAL independently admitted topology: when it resolves the
 // partition the view must also match it (stricter). Returns the outcome label and, on
 // success, a private copy of the bytes. Any failure only means "no proof material".
-func ValidateView(raw []byte, uc *types.UnicityCertificate, partition types.PartitionID, verifier types.SealVerifier, pins TopologyProvider) (string, []byte, error) {
+func ValidateView(raw []byte, uc *types.UnicityCertificate, verifier types.SealVerifier, pins TopologyProvider) (string, []byte, error) {
 	if len(raw) == 0 {
 		return ResultMissing, nil, nil
 	}
@@ -145,13 +147,13 @@ func ValidateView(raw []byte, uc *types.UnicityCertificate, partition types.Part
 		return ResultMalformed, nil, err
 	}
 	var opts []types.AuthOption
-	if topo, ok := topologyFor(pins, partition); ok {
+	if topo, ok := topologyFor(pins, api.AggregationPartitionID); ok {
 		if err := checkTopology(topo); err != nil {
 			return ResultNoTopology, nil, err
 		}
 		opts = append(opts, types.WithPinnedTopology(topo))
 	}
-	if _, err := types.AuthenticateView(view, uc, partition, verifier, crypto.SHA256, opts...); err != nil {
+	if _, err := types.AuthenticateView(view, uc, api.AggregationPartitionID, verifier, crypto.SHA256, opts...); err != nil {
 		return ResultInvalid, nil, err
 	}
 	return ResultOK, append([]byte(nil), raw...), nil
@@ -171,15 +173,14 @@ func checkTopology(topo types.PartitionViewTopology) error {
 	return nil
 }
 
-// StaticTopology is a fixed trusted topology for one partition.
+// StaticTopology is a fixed trusted topology of the aggregation partition (api.AggregationPartitionID).
 type StaticTopology struct {
-	partition types.PartitionID
-	topo      types.PartitionViewTopology
+	topo types.PartitionViewTopology
 }
 
 // NewStaticTopology builds and checks a trusted topology: scheme must be complete and
 // every shard needs a 32-byte configuration hash (keyed by ShardID.Key()).
-func NewStaticTopology(partition types.PartitionID, scheme types.ShardingScheme, confHashes map[string][]byte) (*StaticTopology, error) {
+func NewStaticTopology(scheme types.ShardingScheme, confHashes map[string][]byte) (*StaticTopology, error) {
 	topo := types.PartitionViewTopology{Scheme: scheme, ShardConfHashes: map[string][]byte{}}
 	for k, v := range confHashes {
 		topo.ShardConfHashes[k] = append([]byte(nil), v...)
@@ -187,17 +188,17 @@ func NewStaticTopology(partition types.PartitionID, scheme types.ShardingScheme,
 	if err := checkTopology(topo); err != nil {
 		return nil, err
 	}
-	return &StaticTopology{partition: partition, topo: topo}, nil
+	return &StaticTopology{topo: topo}, nil
 }
 
 // SingleShardTopology is the trusted topology of an unsharded partition: the empty
 // scheme with the deployment's own shard configuration hash.
-func SingleShardTopology(partition types.PartitionID, shardConfHash []byte) (*StaticTopology, error) {
-	return NewStaticTopology(partition, types.ShardingScheme{}, map[string][]byte{types.ShardID{}.Key(): shardConfHash})
+func SingleShardTopology(shardConfHash []byte) (*StaticTopology, error) {
+	return NewStaticTopology(types.ShardingScheme{}, map[string][]byte{types.ShardID{}.Key(): shardConfHash})
 }
 
 func (s *StaticTopology) Topology(partition types.PartitionID) (types.PartitionViewTopology, bool) {
-	if s == nil || partition != s.partition {
+	if s == nil || partition != api.AggregationPartitionID {
 		return types.PartitionViewTopology{}, false
 	}
 	return s.topo, true

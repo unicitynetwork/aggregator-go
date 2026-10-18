@@ -1850,7 +1850,7 @@ func (rm *RoundManager) initProofViews(cfg *config.Config, client *bft.BFTClient
 	if err != nil {
 		return fmt.Errorf("failed to create proof view catalog: %w", err)
 	}
-	rm.proofPub = proofpub.New(catalog, rm.smtBackend, cfg.BFT.ShardConf.PartitionID, client.ProofTopology(), rm.logger)
+	rm.proofPub = proofpub.New(catalog, rm.smtBackend, client.ProofTopology(), rm.logger)
 	if rm.proofPub == nil {
 		_ = catalog.Close()
 		return nil

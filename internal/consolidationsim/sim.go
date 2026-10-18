@@ -28,7 +28,7 @@ import (
 )
 
 // PartitionID of the simulated partition.
-const PartitionID types.PartitionID = 0x0a0b0c0d
+const PartitionID types.PartitionID = api.AggregationPartitionID
 
 // snapshot is one finalized state of a shard.
 type snapshot struct {
@@ -151,7 +151,7 @@ func NewWithSeed(n int, seed string) (*Sim, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.Policy = consolidation.Policy{PartitionID: PartitionID, Topology: types.PartitionViewTopology{Scheme: scheme, ShardConfHashes: map[string][]byte{}}}
+	s.Policy = consolidation.Policy{Topology: types.PartitionViewTopology{Scheme: scheme, ShardConfHashes: map[string][]byte{}}}
 	for _, id := range order {
 		h := sha256.Sum256([]byte("shard-conf-" + id.String()))
 		s.Policy.Topology.ShardConfHashes[id.Key()] = h[:]

@@ -35,7 +35,7 @@ func newEmptyEnv(t *testing.T) *emptyEnv {
 	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cat.Close() })
-	pub := proofpub.New(cat, b, nifixture.Partition, nil, log)
+	pub := proofpub.New(cat, b, nil, log)
 	require.NotNil(t, pub)
 	pub.SetSealVerifier(func(context.Context) types.SealVerifier { return types.TrustBaseSealVerifier(auth.TrustBase()) })
 	return &emptyEnv{auth: auth, b: b, cat: cat, pub: pub}
