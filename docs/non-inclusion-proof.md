@@ -63,6 +63,9 @@ read from the authenticated unicity certificate.
 
 * `Verifier.VerifyFor` is replaced by `Verifier.Verify`, which returns `(*Result, error)`; a state that is present at the
   proof's snapshot is now the successful outcome `included_at_snapshot`, not an error (`VerdictStateIncluded` is gone).
+* **`err == nil` no longer means "absent".** `included_at_snapshot` is a successful verification too. A port of `VerifyFor` that keeps
+  "no error ⇒ the state is unspent" gets the meaning inverted for a state that is present at the snapshot. Always switch on
+  `Result.Outcome()` (see `ExampleVerifier_Verify_outcome` in `pkg/noninclusion`) and only then apply your snapshot policy.
 * `Context.MinRootRound` and the `stale` verdict are removed: freshness is the caller's decision after verification.
 * `Context.Partition` is removed: the partition is the constant `api.AggregationPartitionID` (7). `Verdict*` constants are renamed
   `Rejection*`, `VerdictOf` is `RejectionOf`, `Result.UC`, `Result.RootRound` and `Result.EmptyTree` are replaced by the immutable `Snapshot`.

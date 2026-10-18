@@ -151,8 +151,9 @@ func TestNonInclusionIsASnapshotStatement(t *testing.T) {
 	require.NotNil(t, rerr)
 	require.Equal(t, api.NonInclusionCodeStateIncluded, rerr.Code)
 	// the earlier response is a historical fact: still verifies against its own UC
-	_, err := e.verifier(t).Verify(niKey(900), respA.Proof)
+	resA, err := e.verifier(t).Verify(niKey(900), respA.Proof)
 	require.NoError(t, err)
+	require.Equal(t, noninclusion.OutcomeAbsentAtSnapshot, resA.Outcome())
 	// and the retained older snapshot still proves it
 	l, err := e.cat.AcquireRoot(context.Background(), rootA)
 	require.NoError(t, err)
@@ -183,6 +184,7 @@ func TestNonInclusionOfTheCertifiedEmptyTree(t *testing.T) {
 	require.True(t, resp.Proof.Certificate.IsEmptyTree())
 	res, err := e.verifier(t).Verify(niKey(7), resp.Proof)
 	require.NoError(t, err)
+	require.Equal(t, noninclusion.OutcomeAbsentAtSnapshot, res.Outcome())
 	require.True(t, res.Snapshot().EmptyTree())
 	// the first real block supersedes it as latest
 	e.commit(t, 0, 5)

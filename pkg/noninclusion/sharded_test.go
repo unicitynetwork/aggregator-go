@@ -67,8 +67,10 @@ func TestShardedAbsenceAndMembership(t *testing.T) {
 
 	// a valid sharded absence: the query is in the shard
 	q := key(0x10, 0x01)
-	_, err := e.verifier(t, e.shard).Verify(q, e.proof(t, 0, inShard, q, nil))
+	res, err := e.verifier(t, e.shard).Verify(q, e.proof(t, 0, inShard, q, nil))
 	require.NoError(t, err)
+	require.Equal(t, noninclusion.OutcomeAbsentAtSnapshot, res.Outcome(), "err == nil is not absence: the outcome says it")
+	require.Equal(t, "00", res.Snapshot().ShardID().String())
 
 	// a query OUTSIDE the shard follows the same junction bits, so the certificate still folds: only
 	// the membership rule rejects it

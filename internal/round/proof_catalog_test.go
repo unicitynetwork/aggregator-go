@@ -236,6 +236,7 @@ func runCertifiedEmptyThenBlock(t *testing.T, be smtbackend.Backend) {
 	require.True(t, p.Certificate.IsEmptyTree())
 	res, err := verifier().Verify(key, p)
 	require.NoError(t, err)
+	require.Equal(t, noninclusion.OutcomeAbsentAtSnapshot, res.Outcome())
 	require.True(t, res.Snapshot().EmptyTree())
 
 	// the first block: committed, certified, published; latest is the block, the proof is not an empty-tree one
@@ -250,6 +251,7 @@ func runCertifiedEmptyThenBlock(t *testing.T, be smtbackend.Backend) {
 	require.False(t, p.Certificate.IsEmptyTree())
 	res, err = verifier().Verify(key, p)
 	require.NoError(t, err)
+	require.Equal(t, noninclusion.OutcomeAbsentAtSnapshot, res.Outcome())
 	require.False(t, res.Snapshot().EmptyTree())
 	// the committed key (n=1 of commitLeaf) is included at that root
 	inc := make([]byte, 32)
