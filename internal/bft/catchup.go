@@ -35,6 +35,9 @@ type catchUp struct {
 	// onHead is called with the head read from the store; it reports whether the head had moved
 	// without this worker (for example another HA node admitted an epoch).
 	onHead func(ctx context.Context, head uint64) bool
+	// onRun is called at the start of every run: it retries a failed membership publication whatever
+	// the head and the live epoch are (the set is recomputed from the local history).
+	onRun func(ctx context.Context)
 	// onCaughtUp is called after a run that admitted at least one epoch (re-request the latest UC).
 	onCaughtUp func(ctx context.Context)
 	now        func() time.Time
@@ -125,12 +128,23 @@ func (c *catchUp) fail(head uint64) {
 	c.mu.Unlock()
 }
 
-func (c *catchUp) runOnce(ctx context.Context) {
+// RetryLater wakes the worker after d (coalesced with other scheduled retries): used when a local
+// step (membership publication) failed and must be retried although nothing else will signal.
+func (c *catchUp) RetryLater(d time.Duration) {
+	c.mu.Lock()
+	c.scheduleLocked(d)
+	c.mu.Unlock()
+}
+
+func (c *catchUp) runOnce(parent context.Context) {
 	if !c.startAllowed() {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, runDeadline)
+	ctx, cancel := context.WithTimeout(parent, runDeadline)
 	defer cancel()
+	if c.onRun != nil {
+		c.onRun(ctx)
+	}
 	admitted := 0
 	advancedElsewhere := false
 	for admitted < maxAdmissionsPerRun {
@@ -167,6 +181,8 @@ func (c *catchUp) runOnce(ctx context.Context) {
 		c.Signal()
 	}
 	if (admitted > 0 || advancedElsewhere) && c.onCaughtUp != nil {
-		c.onCaughtUp(ctx)
+		// the parent (client lifetime) context, not the run's: the handshake send is asynchronous and
+		// returns before the dial and write complete, which a cancelled run context would abort
+		c.onCaughtUp(parent)
 	}
 }

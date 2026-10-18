@@ -17,6 +17,11 @@ import (
 	tnoop "go.opentelemetry.io/otel/trace/noop"
 )
 
+// MaxCertificationResponseFrame bounds the CBOR payload of a legacy (V1) certification response,
+// checked against the declared length before anything is allocated or decoded. A valid response
+// is a certificate with one signature per root node: a few KiB.
+const MaxCertificationResponseFrame = 256 << 10
+
 var DefaultNetworkOptions = NetworkOptions{
 	ReceivedChannelCapacity:   1000,
 	BlockCertificationTimeout: 300 * time.Millisecond,
@@ -31,6 +36,9 @@ type (
 		// AdmitPeer, when set, decides per authenticated sender (before a frame is read) whether
 		// certification responses are accepted.
 		AdmitPeer func(peer.ID) bool
+		// RevalidatePeer, when set, is the quota-free membership test repeated after a frame was
+		// read and before it is enqueued (revocation while waiting for the frame).
+		RevalidatePeer func(peer.ID) bool
 	}
 
 	BftNetwork struct {
@@ -91,6 +99,9 @@ func NewLibP2PNetwork(ctx context.Context, peer *network.Peer, logger *logger.Lo
 			ProtocolID: network.ProtocolUnicityCertificates,
 			TypeFn:     func() any { return &certification.CertificationResponse{} },
 			AdmitPeer:  opts.AdmitPeer,
+			// a finite byte limit for the legacy protocol too: a valid response is a few KiB
+			MaxFrameSize:   MaxCertificationResponseFrame,
+			RevalidatePeer: opts.RevalidatePeer,
 		},
 	}
 	if err = n.RegisterReceiveProtocols(receiveProtocolDescriptions); err != nil {

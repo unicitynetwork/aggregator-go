@@ -167,6 +167,11 @@ type harness struct {
 	clock  *fakeClock
 	// handshakes counts catch-up triggered handshakes
 	handshakes atomic.Int64
+	// optional hooks of response(): override the seal (before signing) and the root round
+	sealMut func(*types.UnicitySeal)
+	// realCaughtUp is the production post-catch-up action (the recovery handshake)
+	realCaughtUp     func(context.Context)
+	useRealHandshake bool
 }
 
 type fakeClock struct {
@@ -199,12 +204,19 @@ func newHarness(t *testing.T, epochs, admitted, available int) *harness {
 		shardID:        types.ShardID{},
 		roundManager:   rm,
 		trustBaseStore: manager,
+		sealNetwork:    types.NetworkLocal,
 	}
 	c.status.Store(normal)
 	h := &harness{t: t, chain: chain, store: store, rest: rest, client: c, rm: rm, clock: &fakeClock{t: time.Unix(1_900_000_000, 0)}}
 	c.ensureIntake()
 	c.catchup.now = h.clock.now
-	c.catchup.onCaughtUp = func(context.Context) { h.handshakes.Add(1) }
+	h.realCaughtUp = c.catchup.onCaughtUp
+	c.catchup.onCaughtUp = func(ctx context.Context) {
+		h.handshakes.Add(1)
+		if h.useRealHandshake {
+			h.realCaughtUp(ctx)
+		}
+	}
 	require.NoError(t, c.members.Refresh(t.Context()))
 	head, err := manager.Head(t.Context())
 	require.NoError(t, err)
@@ -251,6 +263,9 @@ func (h *harness) response(n uint64, epoch uint64, signWith map[string]cryptobft
 		PreviousHash:         hash(n + 200),
 		Hash:                 ut.RootHash(),
 	}
+	if h.sealMut != nil {
+		h.sealMut(seal)
+	}
 	if signWith == nil {
 		seal.Signatures = types.SignatureMap{"junk": []byte{1, 2, 3}}
 	} else {
@@ -292,7 +307,7 @@ func TestIntake_SteadyStateAddsNoNetworkExchange(t *testing.T) {
 	require.EqualValues(t, 0, h.store.headRead.Load()-heads0, "no head read")
 	require.EqualValues(t, 0, h.client.catchup.attempts.Load(), "no catch-up attempt")
 	require.EqualValues(t, 0, h.handshakes.Load(), "no handshake")
-	require.LessOrEqual(t, h.store.getReads.Load()-reads0, int64(n), "at most one local trust base lookup per message")
+	require.EqualValues(t, n, h.store.getReads.Load()-reads0, "exactly one local trust base lookup per message: the seal context check adds none")
 	require.Len(t, h.rm.startedRounds, n+1)
 	require.EqualValues(t, n+1, h.client.receivedResponses.Load())
 }
