@@ -310,7 +310,8 @@ func (cs *CommitmentStorage) Store(ctx context.Context, commitment *models.Certi
 		case err := <-pending.resultChan:
 			return err
 		case <-ctx.Done():
-			return ctx.Err()
+			// the batch writer owns the request now and may still queue it
+			return fmt.Errorf("%w: %w", interfaces.ErrStoreInFlight, ctx.Err())
 		}
 	case <-ctx.Done():
 		return ctx.Err()

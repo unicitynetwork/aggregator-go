@@ -278,13 +278,21 @@ func loadConfig(path, master string, timeout time.Duration) (*client.Config, err
 		}
 		byEpoch[tb.GetEpoch()][tb.GetNetworkID()] = tb
 	}
+	// the lowest installed epoch of a network is the configured anchor, every higher one must verify against
+	// its installed predecessor: a gap would leave the epochs above it unverified (as in TrustBaseManager)
+	lowest := map[types.NetworkID]uint64{}
 	for _, tb := range tbs {
-		if tb.GetEpoch() <= 1 {
+		if l, ok := lowest[tb.GetNetworkID()]; !ok || tb.GetEpoch() < l {
+			lowest[tb.GetNetworkID()] = tb.GetEpoch()
+		}
+	}
+	for _, tb := range tbs {
+		if tb.GetEpoch() == lowest[tb.GetNetworkID()] {
 			continue
 		}
 		prev := byEpoch[tb.GetEpoch()-1][tb.GetNetworkID()]
 		if prev == nil {
-			continue // only the installed part of the history is known
+			return nil, fmt.Errorf("trust base epoch %d of network %d has no installed predecessor (epoch %d is missing)", tb.GetEpoch(), tb.GetNetworkID(), tb.GetEpoch()-1)
 		}
 		if err := tb.Verify(prev); err != nil {
 			return nil, fmt.Errorf("trust base epoch %d does not verify against epoch %d: %w", tb.GetEpoch(), prev.GetEpoch(), err)

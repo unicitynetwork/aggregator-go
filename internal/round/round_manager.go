@@ -140,8 +140,9 @@ type RoundManager struct {
 	latestProofReadyBlock *models.Block
 
 	// testHookBeforeProofViewPublish runs between disk finalization in storage and the proof-view
-	// publication (tests only).
-	testHookBeforeProofViewPublish func()
+	// publication (tests only: nil in production, installed per instance, atomically as the
+	// round goroutine may be running).
+	testHookBeforeProofViewPublish atomic.Pointer[func()]
 	proofMetadataCache             *proofMetadataCache
 	// statusTracker backs the unauthenticated proof status hints (pending/expired/unknown).
 	statusTracker *proofstatus.Tracker
@@ -1955,5 +1956,9 @@ func (rm *RoundManager) clearStaleAdmissionMarks(dropped []interfaces.Certificat
 // SetTestHookBeforeProofViewPublish installs a function run between disk finalization in storage
 // and proof-view publication. For tests only.
 func (rm *RoundManager) SetTestHookBeforeProofViewPublish(f func()) {
-	rm.testHookBeforeProofViewPublish = f
+	if f == nil {
+		rm.testHookBeforeProofViewPublish.Store(nil)
+		return
+	}
+	rm.testHookBeforeProofViewPublish.Store(&f)
 }
