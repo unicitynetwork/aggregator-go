@@ -1,6 +1,6 @@
-// Command gen-ni-fixtures generates the shared non-inclusion corpus (testdata/non-inclusion/v1).
+// Command gen-ni-fixtures generates the shared non-inclusion corpus (testdata/non-inclusion/v2).
 //
-//	UC_FIXTURE_AGGREGATOR_COMMIT=$(git rev-parse HEAD) go run ./cmd/gen-ni-fixtures -out testdata/non-inclusion/v1
+//	UC_FIXTURE_AGGREGATOR_COMMIT=$(git rev-parse HEAD) go run ./cmd/gen-ni-fixtures -out testdata/non-inclusion/v2
 package main
 
 import (
@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	out := flag.String("out", "testdata/non-inclusion/v1", "output directory (replaced)")
+	out := flag.String("out", "testdata/non-inclusion/v2", "output directory (replaced)")
 	flag.Parse()
 	files, err := nifixture.Generate(os.Getenv("UC_FIXTURE_AGGREGATOR_COMMIT"))
 	if err != nil {

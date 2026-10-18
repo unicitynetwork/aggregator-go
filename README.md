@@ -2,6 +2,15 @@
 
 High-performance aggregator service for the Unicity blockchain platform. Provides JSON-RPC 2.0 API endpoints for state transition aggregation with MongoDB persistence, BFT consensus integration, and high availability support.
 
+## Non-inclusion proofs
+
+> Non-inclusion proves absence only at the authenticated snapshot returned by verification. It does not prove absence now, continuous absence, or that a token can be spent. Compare the snapshot’s network and root round (or its certified seal timestamp under your application’s time policy) with an independently trusted requirement. The seal timestamp is a consensus-certified time, not proof of real-time freshness. Do not use unverified response metadata for this check.
+
+`pkg/noninclusion` verifies `get_non_inclusion_proof.v1` and returns `absent_at_snapshot` or `included_at_snapshot` with the
+authenticated snapshot (network, partition 7, shard, root round, seal timestamp, root epoch, shard round and epoch, state
+root), or a rejection without snapshot metadata. There is no freshness option: apply your policy to the snapshot. See
+[docs/non-inclusion-proof.md](docs/non-inclusion-proof.md) (usage, migration) and `testdata/non-inclusion/v2/SPEC.md`.
+
 ## Overview
 
 The Unicity Aggregator implements a decentralized Agent-Aggregator communication layer that enables:

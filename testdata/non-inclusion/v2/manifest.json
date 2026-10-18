@@ -1,0 +1,759 @@
+{
+  "cases": [
+    {
+      "name": "depth-0",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "default",
+      "description": "junction at depth 0 (bit 0 of the bitmap)"
+    },
+    {
+      "name": "depth-255",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "default",
+      "description": "junction at depth 255, the last bit (bit 7 of bitmap byte 31); the query shares 254 bits with both leaves and leaves the compressed edge at bit 254"
+    },
+    {
+      "name": "diverges-in-compressed-edge",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "default",
+      "description": "the query leaves the key set inside the compressed edge below the root junction: the terminal is the first leaf of its side and the certificate still authenticates"
+    },
+    {
+      "name": "empty-tree",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "default",
+      "description": "certified empty tree: empty certificate, UC with the empty input record hash"
+    },
+    {
+      "name": "full-depth-chain-included",
+      "kind": "positive",
+      "outcome": "included_at_snapshot",
+      "context": "default",
+      "description": "the same tree queried at its deepest leaf: all 256 bitmap bits set, 256 siblings, the 8288 byte maximum certificate (the terminal is the query)"
+    },
+    {
+      "name": "full-depth-chain",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "default",
+      "description": "257 leaves diverging from one path at every depth 0..255; the absent query leaves that path at depth 254: 255 junctions, 8256 byte certificate (the longest absent one)"
+    },
+    {
+      "name": "golden-two-leaf",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "default",
+      "description": "rugregator/Rust golden vector: leaves 00..00-\u003e01..01 and 80 00..00-\u003e02..02, query 01 00..00, root 5158a5f4...7a53"
+    },
+    {
+      "name": "historical-snapshot-absent",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "default",
+      "description": "an older snapshot in which the queried state is absent; verifies, and its snapshot says how old it is"
+    },
+    {
+      "name": "large-uint64-fields",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "big-epoch-authority",
+      "description": "shared-prefix re-certified with root round, seal timestamp, root epoch, shard round and shard epoch at large uint64 values (2^53+1 and near 2^64): decimal strings, no float or int64 narrowing"
+    },
+    {
+      "name": "later-snapshot-included",
+      "kind": "positive",
+      "outcome": "included_at_snapshot",
+      "context": "default",
+      "description": "a later snapshot of the same lineage in which the queried state of historical-snapshot-absent is included"
+    },
+    {
+      "name": "random-16",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "default",
+      "description": "seeded random tree of 16 leaves, random absent query (math/rand seed 20261016)"
+    },
+    {
+      "name": "random-5",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "default",
+      "description": "seeded random tree of 5 leaves, random absent query (math/rand seed 20261016)"
+    },
+    {
+      "name": "random-64",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "default",
+      "description": "seeded random tree of 64 leaves, random absent query (math/rand seed 20261016)"
+    },
+    {
+      "name": "sharded-absent",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "shard-00",
+      "description": "shard 00 of a four shard partition: two leaves which differ well below the shard prefix; the shard path of the UC has two siblings"
+    },
+    {
+      "name": "sharded-empty-tree",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "shard-01",
+      "description": "shard 01 certified as the empty tree (timeout repeat of its initial record): the state root is null and the shard path is still present"
+    },
+    {
+      "name": "sharded-included",
+      "kind": "positive",
+      "outcome": "included_at_snapshot",
+      "context": "shard-00",
+      "description": "shard 00: the query is a leaf of the shard tree"
+    },
+    {
+      "name": "sharded-random-16",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "shard-10",
+      "description": "seeded random tree of 16 leaves in shard 10, random absent query of the shard (math/rand seed 20261018)"
+    },
+    {
+      "name": "sharded-same-seal-00",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "shard-00",
+      "description": "shard 00, certified in the same block (same seal) as sharded-same-seal-01"
+    },
+    {
+      "name": "sharded-same-seal-01",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "shard-01",
+      "description": "shard 01, certified in the same block (same seal) as sharded-same-seal-00"
+    },
+    {
+      "name": "sharded-shard-01-absent",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "shard-01",
+      "description": "shard 01: a three leaf tree whose junctions lie below the shard prefix"
+    },
+    {
+      "name": "sharded-shard-11-singleton",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "shard-11",
+      "description": "shard 11: one leaf, the certificate is the bare terminal"
+    },
+    {
+      "name": "shared-prefix-included",
+      "kind": "positive",
+      "outcome": "included_at_snapshot",
+      "context": "default",
+      "description": "the query is a leaf of the shared prefix tree"
+    },
+    {
+      "name": "shared-prefix",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "default",
+      "description": "keys sharing prefixes (junctions at depth 0 and 4): query follows the left subtree"
+    },
+    {
+      "name": "singleton-included",
+      "kind": "positive",
+      "outcome": "included_at_snapshot",
+      "context": "default",
+      "description": "the query is the only leaf: the terminal is the query, state included"
+    },
+    {
+      "name": "singleton",
+      "kind": "positive",
+      "outcome": "absent_at_snapshot",
+      "context": "default",
+      "description": "one leaf: the certificate is the bare terminal (zero bitmap)"
+    },
+    {
+      "name": "under-quorum",
+      "kind": "positive",
+      "outcome": "rejected",
+      "rejection": "authority_rejected",
+      "context": "default",
+      "description": "valid structure, but the seal carries fewer signatures than the quorum"
+    },
+    {
+      "name": "zero-root",
+      "kind": "positive",
+      "outcome": "rejected",
+      "rejection": "certificate_invalid",
+      "context": "default",
+      "description": "the UC certifies the 32 byte all-zero hash: it is NOT an empty tree, the empty certificate does not verify against it"
+    },
+    {
+      "name": "cert-bitmap-bit-moved",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "certificate_invalid",
+      "context": "default",
+      "description": "a junction bit moved to another depth (same popcount): the fold uses the wrong depth"
+    },
+    {
+      "name": "cert-bitmap-extra-bit",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "malformed",
+      "context": "default",
+      "description": "one more bitmap bit than siblings: length does not match the popcount"
+    },
+    {
+      "name": "cert-empty-against-nonempty-root",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "certificate_invalid",
+      "context": "default",
+      "description": "the empty-tree certificate against a UC with a nonempty root"
+    },
+    {
+      "name": "cert-nonempty-against-empty-root",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "certificate_invalid",
+      "context": "default",
+      "description": "a singleton certificate against the certified empty tree"
+    },
+    {
+      "name": "cert-oversized",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "malformed",
+      "context": "default",
+      "description": "8289 bytes: above the 8288 byte maximum"
+    },
+    {
+      "name": "cert-sibling-flipped",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "certificate_invalid",
+      "context": "default",
+      "description": "first sibling hash altered"
+    },
+    {
+      "name": "cert-terminal-key-flipped",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "certificate_invalid",
+      "context": "default",
+      "description": "terminal key altered below all junction depths"
+    },
+    {
+      "name": "cert-terminal-value-31-bytes",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "malformed",
+      "context": "default",
+      "description": "terminal value one byte short (the profile fixes 32 bytes)"
+    },
+    {
+      "name": "cert-terminal-value-flipped",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "certificate_invalid",
+      "context": "default",
+      "description": "terminal value altered"
+    },
+    {
+      "name": "cert-trailing-byte",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "malformed",
+      "context": "default",
+      "description": "one byte after the terminal value"
+    },
+    {
+      "name": "cert-truncated",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "malformed",
+      "context": "default",
+      "description": "last byte missing"
+    },
+    {
+      "name": "ctx-before-epoch-start",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "authority_rejected",
+      "context": "before-epoch-start",
+      "description": "the certified round precedes the epoch start of the trusted authority"
+    },
+    {
+      "name": "ctx-config-pin-ok",
+      "kind": "negative",
+      "outcome": "absent_at_snapshot",
+      "context": "config-pin-ok",
+      "description": "the shard configuration hash equals the pinned one"
+    },
+    {
+      "name": "ctx-config-pin-other",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "config-pin-other",
+      "description": "the shard configuration hash differs from the pinned one"
+    },
+    {
+      "name": "ctx-epoch-end-after",
+      "kind": "negative",
+      "outcome": "absent_at_snapshot",
+      "context": "epoch-end-after",
+      "description": "the authenticated end of the epoch is after the seal round"
+    },
+    {
+      "name": "ctx-epoch-end-at-round",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "authority_rejected",
+      "context": "epoch-end-at-round",
+      "description": "the seal round is at the authenticated end of its epoch (retirement boundary)"
+    },
+    {
+      "name": "ctx-shard-00",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "shard-00",
+      "description": "an unsharded UC presented to a verifier of shard 00"
+    },
+    {
+      "name": "ctx-untrusted-authority",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "authority_rejected",
+      "context": "untrusted-authority",
+      "description": "a self-consistent but untrusted authority: not an anchor"
+    },
+    {
+      "name": "ctx-wrong-epoch",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "authority_rejected",
+      "context": "wrong-epoch",
+      "description": "the authority is of another epoch (reused keys): exact epoch is required"
+    },
+    {
+      "name": "ctx-wrong-network",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "authority_rejected",
+      "context": "wrong-network",
+      "description": "the authority is of another network (reused keys and node IDs)"
+    },
+    {
+      "name": "query-diverges-at-last-junction",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "certificate_invalid",
+      "context": "default",
+      "description": "full depth chain, query follows the path to a different terminal leaf than the certificate's"
+    },
+    {
+      "name": "query-is-terminal",
+      "kind": "negative",
+      "outcome": "included_at_snapshot",
+      "context": "default",
+      "description": "the query equals the authenticated terminal key: the state is included"
+    },
+    {
+      "name": "query-other-branch",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "certificate_invalid",
+      "context": "default",
+      "description": "the query chooses the other branch at the root junction; the certificate is for the left side"
+    },
+    {
+      "name": "shard-config-pin-ok",
+      "kind": "negative",
+      "outcome": "absent_at_snapshot",
+      "context": "shard-00-config-pin-ok",
+      "description": "shard 00 pinning its own configuration hash"
+    },
+    {
+      "name": "shard-config-pin-other",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "shard-00-config-pin-other",
+      "description": "shard 00 pinning another configuration hash"
+    },
+    {
+      "name": "shard-context-of-another-shard",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "shard-01",
+      "description": "the shard 00 UC presented to a verifier of shard 01"
+    },
+    {
+      "name": "shard-id-claims-another-shard",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "shard-00",
+      "description": "the UC claims shard 01 with the shard 00 path"
+    },
+    {
+      "name": "shard-path-missing",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "shard-00",
+      "description": "no shard path at all for a shard of two bits"
+    },
+    {
+      "name": "shard-path-short",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "shard-00",
+      "description": "the shard path lacks its last sibling"
+    },
+    {
+      "name": "shard-path-sibling-altered",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "shard-00",
+      "description": "a shard path sibling altered: the path no longer reaches the seal hash"
+    },
+    {
+      "name": "shard-same-seal-other-shard-reversed",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "shard-01",
+      "description": "the shard 00 UC (same seal as shard 01) presented to a verifier of shard 01"
+    },
+    {
+      "name": "shard-same-seal-other-shard",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "shard-00",
+      "description": "the shard 01 UC (same seal as shard 00) presented to a verifier of shard 00"
+    },
+    {
+      "name": "shard-unsharded-context",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "default",
+      "description": "a shard UC never satisfies an unsharded verifier"
+    },
+    {
+      "name": "sharded-query-outside-shard",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "certificate_invalid",
+      "context": "shard-00",
+      "description": "the query belongs to shard 11, the certificate and UC are of shard 00: the junction bits fold exactly like an in-shard query, only the shard membership rule rejects it"
+    },
+    {
+      "name": "sharded-terminal-outside-shard",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "certificate_invalid",
+      "context": "shard-00",
+      "description": "the shard 00 tree holds foreign leaves: the in-shard query reaches a terminal of shard 11 which the shard does not own"
+    },
+    {
+      "name": "uc-empty-root-as-empty-byte-string",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "default",
+      "description": "the input record hash is the empty byte string (40) instead of native null (f6): not the empty-tree root; the signed shard path no longer holds either"
+    },
+    {
+      "name": "uc-empty-shard-id-with-sibling",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "default",
+      "description": "an empty shard ID with a sibling hash"
+    },
+    {
+      "name": "uc-input-record-altered",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "default",
+      "description": "state hash of the input record replaced: the shard path no longer reaches the seal hash"
+    },
+    {
+      "name": "uc-no-unicity-tree-certificate",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "default",
+      "description": "unicity tree certificate absent"
+    },
+    {
+      "name": "uc-nonempty-shard-id-without-path",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "default",
+      "description": "a nonempty shard ID with no sibling hashes (not the unsharded form)"
+    },
+    {
+      "name": "uc-null-partition-path-step",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "default",
+      "description": "null entry in the partition path"
+    },
+    {
+      "name": "uc-self-signed",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "authority_rejected",
+      "context": "default",
+      "description": "the seal content re-signed by an authority which is not the trusted one"
+    },
+    {
+      "name": "uc-signature-altered",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "authority_rejected",
+      "context": "default",
+      "description": "one root signature of the seal altered (witness bytes)"
+    },
+    {
+      "name": "uc-signatures-removed-below-quorum",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "authority_rejected",
+      "context": "default",
+      "description": "signatures removed from a valid seal until fewer than the quorum remain"
+    },
+    {
+      "name": "uc-wrong-partition-sharded-validly-signed",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "shard-00",
+      "description": "shard 00 of the four shard partition 8, validly signed by the trusted authority: not the aggregation partition"
+    },
+    {
+      "name": "uc-wrong-partition-validly-signed",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "uc_invalid",
+      "context": "default",
+      "description": "the same tree certified by partition 8 under the same trusted authority: the UC is authentic but not of the aggregation partition 7"
+    },
+    {
+      "name": "wrapper-block-noncanonical-integer",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "malformed",
+      "context": "default",
+      "description": "block number encoded in a longer form than needed"
+    },
+    {
+      "name": "wrapper-certificate-as-text",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "malformed",
+      "context": "default",
+      "description": "certificate is a text string"
+    },
+    {
+      "name": "wrapper-empty",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "malformed",
+      "context": "default",
+      "description": "no bytes"
+    },
+    {
+      "name": "wrapper-legacy-uc-tag",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "malformed",
+      "context": "default",
+      "description": "an empty array under the legacy tag 1007 instead of a native UC"
+    },
+    {
+      "name": "wrapper-proof-two-elements",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "malformed",
+      "context": "default",
+      "description": "proof without the unicity certificate"
+    },
+    {
+      "name": "wrapper-three-elements",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "malformed",
+      "context": "default",
+      "description": "outer array of three elements"
+    },
+    {
+      "name": "wrapper-trailing-bytes",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "malformed",
+      "context": "default",
+      "description": "a byte after the wrapper"
+    },
+    {
+      "name": "wrapper-uc-as-byte-string",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "malformed",
+      "context": "default",
+      "description": "the UC is a byte string holding its CBOR, not the native value"
+    },
+    {
+      "name": "wrapper-wrong-tag",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "malformed",
+      "context": "default",
+      "description": "tag 39035"
+    },
+    {
+      "name": "wrapper-wrong-version",
+      "kind": "negative",
+      "outcome": "rejected",
+      "rejection": "malformed",
+      "context": "default",
+      "description": "version 2"
+    }
+  ],
+  "corpus": "non-inclusion",
+  "generator": {
+    "command": "UC_FIXTURE_AGGREGATOR_COMMIT=\u003ccommit\u003e go run ./cmd/gen-ni-fixtures -out testdata/non-inclusion/v2",
+    "commit": "b25dd916fba88b18066bf239b6130b386d3347dd",
+    "modules": {
+      "github.com/unicitynetwork/bft-core": "v1.1.1-0.20261018092615-df371b701a99",
+      "github.com/unicitynetwork/bft-go-base": "v1.1.1-0.20261017115848-8c62c75b950c"
+    }
+  },
+  "limits": {
+    "maxCertificateBytes": 8288,
+    "maxRequestBytes": 65536,
+    "maxResponseBytes": 8388608
+  },
+  "schema": "outcomes: absent_at_snapshot | included_at_snapshot (stateId + snapshot) | rejected (rejection class, no snapshot); uint64 fields are decimal strings",
+  "sha256": {
+    "SPEC.md": "672f904b13e621a6add5d701a1ddb1b786c1a942a11ac192296210b418ae0b46",
+    "authority/big-epoch.cbor": "00de35dbfa7c25a64c971fa4e5356949106e5fd334ef946c617b54f65c301b8e",
+    "authority/big-epoch.json": "d97f20257b080c66ef68995693d1cad31fa94299941da4cbdf85160f0d329893",
+    "authority/late-epoch-start.cbor": "e719e8f39f61e4061d54906cc78cffb577b7d2afcf6a3149657477cb7f7f710a",
+    "authority/late-epoch-start.json": "7dc46736c57dd09f8c17716338bf97fd0a8dd0f2753a36d4f7ed66fe12505a32",
+    "authority/other-epoch.cbor": "40d8223f44a3d0adccda98a75d372265cd45a7a1e20bf0f8e8d589829919b691",
+    "authority/other-epoch.json": "21fc10cfdb30bd4c234fa0cdf2a3ded3371f53d4f29efe926ee73cb87ac94863",
+    "authority/other-network.cbor": "177c2161af86f3709d5c46394099f1018acc0b5ac842deddc27d2e2252e6c7e4",
+    "authority/other-network.json": "e16bb842e9f060de42c8a604d204afc4472edf80df5006a1a1800b5a07ed0232",
+    "authority/trust-base.cbor": "a2909914b7a076efbeb839650f273ade6802f236970461c5dcb19dcbdd204446",
+    "authority/trust-base.json": "28c18ee8af0e1d49b90f4db860b9b7be3c796de681b915a9136942b178017775",
+    "authority/untrusted-keys.cbor": "c0f98a05708723a22621cdf421f39a03998ae7b37270a0cf30ecb2b26e210d92",
+    "authority/untrusted-keys.json": "7d992dd3ba0592b080c08a409a80594fcc48a0308940a80fed99fcc7f99fc65b",
+    "cases/depth-0.json": "9f55864476c74079412c2d11ab9ba6a476349668235294e22dc5ff4daa8f117c",
+    "cases/depth-255.json": "c3ee9b948cc78ebb63350fe6a477c4abe9867413be521b451896ca7063e29301",
+    "cases/diverges-in-compressed-edge.json": "2af20475c771fead59ef05134f4d2826744785c364a8c17ee54d1335df94bb04",
+    "cases/empty-tree.json": "29b6e8f5926f80a042be1ea9c25d2c1c2509e456b98ea6b2b37aef71593c7b4f",
+    "cases/full-depth-chain-included.json": "c1fdaca83552b1e298bb03de0842e343ac99351a4b20d19ef44038a7c7ec3c21",
+    "cases/full-depth-chain.json": "8c9437df54b4551f420cc8736d9ae727ba99f7503476e498815b409ce75e20ac",
+    "cases/golden-two-leaf.json": "f33a8d8d7abd4f8995285882de57acf51a51364fcba4725a2efd3df5b569fa6f",
+    "cases/historical-snapshot-absent.json": "58b4bf03055639261c767eb79b20f36502d57b4c32651c0caa2266d75c01c9ae",
+    "cases/large-uint64-fields.json": "986961ede5310261701745be1ab1e1fa72f6db57f1f59e90ec42d2ca577a612e",
+    "cases/later-snapshot-included.json": "0895cc59da73ef82f12f346784a3716c2f4a9425be7d95b8c43b6fa1adfa19d1",
+    "cases/random-16.json": "f2017016221dc26e68dbf842c10f3e2c333b5402a091d0c08ec029b19f7fb9d1",
+    "cases/random-5.json": "89838fa7b2d3e662d8ebc3bb39d14c98e436601e62d591f9e38092df2be33ff2",
+    "cases/random-64.json": "f3d4dfb0149fe499e5c1ecd09aa817bf0a5229f43428110bc2ae7aaab85fb94f",
+    "cases/sharded-absent.json": "f484fced82a30fd926f7ffa802d0d50927b7a06a86d80c626e2cf3cdd4d90d46",
+    "cases/sharded-empty-tree.json": "529236252305dc0d6d4eb7e27d6e54bb71d6af346b87a3db47adcdf3e6dcffc6",
+    "cases/sharded-included.json": "d0daed3b4a4477c034a53413992a3acec465a45c06903c3547a519115f6ee117",
+    "cases/sharded-random-16.json": "69e208c0cdd9254bd8174bd5f380541bfa72286817c08ddcb8995fbdd8b69ce5",
+    "cases/sharded-same-seal-00.json": "aedec1deacb29a042d04f15c7db28c4a264882c29071b9609c1512d6c805b3af",
+    "cases/sharded-same-seal-01.json": "3647f9c1e6cb6de18df8be5a571d4dec894a3cb7ad49c9a1681fda6da295eb87",
+    "cases/sharded-shard-01-absent.json": "186526c64232c2ef26766206454104c725c920e1d4d849e41d4dffb93a98e2b2",
+    "cases/sharded-shard-11-singleton.json": "1799cfd670a66aad25f3132f1524b2d619ac2bb35bdc3350649ff76ae4ea249c",
+    "cases/shared-prefix-included.json": "2064f6824e6a0fa87bd37463859c69a377f46903ac876eca008d918839deb5bf",
+    "cases/shared-prefix.json": "c418503e282915e71c4583120b239ca096f05a441567bde782479c4495e6c942",
+    "cases/singleton-included.json": "f3e87f64a7787096f0469396a94bac5a532308b9f790d7ef780a17d1bf63da8c",
+    "cases/singleton.json": "6338ace5cfb846d770a0d5ca02cb124f6dff4224cd9ef28866527615215bf143",
+    "cases/under-quorum.json": "f139b7d2307da7f5281796387bc52c26e6268d0b78f3a63bee3d3181c4dbdbc9",
+    "cases/zero-root.json": "8426ecf4c47226898f3012987cfde8fb9a9b91f7a5d9acedd0ff0ddd67c6f7ed",
+    "contexts.json": "9a0fb40bfe2c01936b2c016a9aa0ad6352d71655739747f7c0c10b6c5d05c466",
+    "direct-unsharded/latest.json": "3a54213083d1885b2acf8b3af04357956cab2e4b68327aba39744e9565bc0f3a",
+    "negative/cert-bitmap-bit-moved.json": "608191f8953d8177c928514f634a5bc76977f4000cf6fefae415ed1b18863125",
+    "negative/cert-bitmap-extra-bit.json": "99cf2a97dae40a3626b5581748a3ed8bb021c97d88ad5aa2401832b3cd4b5b6e",
+    "negative/cert-empty-against-nonempty-root.json": "af61d3c7beb2667539c092c959772975de180a1977781069d9650cfe82fadf3c",
+    "negative/cert-nonempty-against-empty-root.json": "d5d4409918d66782a6e0d26440f80fcfe6da6b1b19eeb5202d437b4496c07ddb",
+    "negative/cert-oversized.json": "034f288695095eba84e2f4a1a68781882f4123aa813e1d2ebe7d4a1f581d8d15",
+    "negative/cert-sibling-flipped.json": "d3d827bc56fef4ab6d1fc17fc42ea74724ca2cd7c13e98d8507bfcfa91be4a4a",
+    "negative/cert-terminal-key-flipped.json": "e10ed78fbea3418582feb711db05aab63fb0464adbddfac2f8dea602fff89c11",
+    "negative/cert-terminal-value-31-bytes.json": "d5ca81a5567e9d939a6d85a3578efb32e50015044ca2d61c785bc41edcaf7373",
+    "negative/cert-terminal-value-flipped.json": "a6b149e1f0bb9a50a161604613bbb9479343d6aa30393e68c8e39adfe544c5b8",
+    "negative/cert-trailing-byte.json": "f516b3b8b9d99b785ab1eabf193b69df00b907a72023344bc053c597f03db4b9",
+    "negative/cert-truncated.json": "a8291df828f8f9ddcae3df3bf2f63cb56c016d04f8e160666d859f6fab0a16d1",
+    "negative/ctx-before-epoch-start.json": "5032d301c210d1afe672f62040fa48bf48174266824b71d5e5403786b01e62c6",
+    "negative/ctx-config-pin-ok.json": "ca9e3f4ba9417167f794a985140cb43ca91e3e59f70a4e003da8a5f89deea635",
+    "negative/ctx-config-pin-other.json": "3529c52b172ea0a94cc7730b116995d5f4fc4cac20b015327760347860e7fcc0",
+    "negative/ctx-epoch-end-after.json": "ff2564d187340b4dc7a3c4cbc7dca5797914642800b97f42e668118ce6396a09",
+    "negative/ctx-epoch-end-at-round.json": "5d9b6ff84a927d5c93af1174f16a6df7ea6f671b3645e8c03a6b359c080139b8",
+    "negative/ctx-shard-00.json": "8cab4fb917f5b943273a1ed8a85953ecfcb15b270dd075616b3083e405874e6e",
+    "negative/ctx-untrusted-authority.json": "60f4810dedeb487bde466f489ae993bb0db75c927c537f26e4c2101039a63fcf",
+    "negative/ctx-wrong-epoch.json": "d9d1c701aa2f5e541efab4b0e19f8c47be07a22810366df4c1d77448bf0b12fa",
+    "negative/ctx-wrong-network.json": "80b7c5446c6d96253cfc88d416e3f5e3e5297881eb8abdcd0a724b98aa8f48a4",
+    "negative/query-diverges-at-last-junction.json": "9b6623024597c2fef297634bd147007c77cfecbd48ea2d68a2b26441dc7c7275",
+    "negative/query-is-terminal.json": "b7dda1327dcb212773a54d98946ce68c4985df88067ea4642062ebfde14d1f8a",
+    "negative/query-other-branch.json": "23fca5b047ee10e42e5bc8c61a09500715dcd9f33e75bac234dd1636733fef47",
+    "negative/shard-config-pin-ok.json": "9cd3ac16ed4c81da64e5c0963fab8f8e5c72c84a267132c5a68699357f69a95d",
+    "negative/shard-config-pin-other.json": "68eb34becce92f82ed55e91167340e1624eb24ee76b5bd4bfb58e5ee34443a98",
+    "negative/shard-context-of-another-shard.json": "dd814fa06d5053bca6ca5c83629b808c74a0c7365cee53bf27c88ea2e3d0eecd",
+    "negative/shard-id-claims-another-shard.json": "73e1b93144439b1b11fc845d98d669cfb5c1748778c2d17c4822e3f95c3ddffd",
+    "negative/shard-path-missing.json": "1b1d7d6e77eca1dd2b43dce5c2c600cb8e720875c3c8b8ff56ea93b5a79d24d9",
+    "negative/shard-path-short.json": "facadac2529943273d5658061e8f52c3639af810960604bb2782c48423397607",
+    "negative/shard-path-sibling-altered.json": "5ca132e0cb30e5bbb333c72f5c5cb721484270d9e16eb6dd4163ead214ba69ec",
+    "negative/shard-same-seal-other-shard-reversed.json": "c846e06085af45c4b9f41dbdf286f52126e0477673825b2fac01bd9039910620",
+    "negative/shard-same-seal-other-shard.json": "7da7aac8d73866da05062d1dc7df6037f3b6f75b48fa37747461c89b154a4283",
+    "negative/shard-unsharded-context.json": "7533b3752329feac0c38e7ef28551302c1ccb7d78fe2ebc28f806eeb23c4d1df",
+    "negative/sharded-query-outside-shard.json": "03c7c6700d876419010882de2896a64a5614d6ea040a2659f9021ffff3347838",
+    "negative/sharded-terminal-outside-shard.json": "2affa5b769f7eef084e4c3a050d403a033b9df3c781dc1e15f666bf7b246dd73",
+    "negative/uc-empty-root-as-empty-byte-string.json": "e10e8553dc0081514ba042c632fb3d72218fc0527c76349e90fcddbe08b97057",
+    "negative/uc-empty-shard-id-with-sibling.json": "e41cfb3a94f02c8e73e122061bd7e36beb93085fedfd4ea16232e76aec4a8ca9",
+    "negative/uc-input-record-altered.json": "009688cba6928ab8bd1a1221d0e9d15b31d27f973cc3f15a1ac4f4b435642c3e",
+    "negative/uc-no-unicity-tree-certificate.json": "89a9f1c1903acd1db2668ac49faa473bcab036ad570c1fda12045259ed58c5c2",
+    "negative/uc-nonempty-shard-id-without-path.json": "b1c716a120770d9e5f992d3418efabdad2b5684627ea21daefd01801c8476efd",
+    "negative/uc-null-partition-path-step.json": "440bb0bd917f2cb0f7a7c21a212c5218e22ba9d48bf8cc5cb921ad1d8a7ecfeb",
+    "negative/uc-self-signed.json": "c137eb0b2f8d3b1f801e22d253033dc6d5ab633238239af72571d9d4ff7015e7",
+    "negative/uc-signature-altered.json": "dde112186285b31c24a296b10dbac33e4a2e4dc8c4c87a2ecafe4ba24ccac457",
+    "negative/uc-signatures-removed-below-quorum.json": "3498d9aa27ee2d5b1fab23777b7bd1210588e2847a010596e6039611a629f3ec",
+    "negative/uc-wrong-partition-sharded-validly-signed.json": "0c9e02b2b97c32edf2b629ced0a144511cc17b84e34a414ad70ceaaf21c663a0",
+    "negative/uc-wrong-partition-validly-signed.json": "613c7fca75a4c441678dcb79b16bb1b9bead5a2b8a4304446268a55ba12eb4bc",
+    "negative/wrapper-block-noncanonical-integer.json": "a2b539e33bcbacfa4643bd6bade16581fe1f040b1eebcddb97d4ec01d6879b0d",
+    "negative/wrapper-certificate-as-text.json": "0a13c5e1b9dbca1a9abb2f6ec6f544a749f18f7fd97438b79a5070eee9c0b1be",
+    "negative/wrapper-empty.json": "788012e348254d589f8228a161877bbfa54f53c1a0f679a0c7c27019db241cf6",
+    "negative/wrapper-legacy-uc-tag.json": "bdd03e75172e4d3d5e4ac9cbfa1b2b8cea2574bab7721ab48ec001842bde6d73",
+    "negative/wrapper-proof-two-elements.json": "91b6e5f6edc05fdc1a1b611e32da26742e0398b623a28c8f912d26613cb43ceb",
+    "negative/wrapper-three-elements.json": "66c6567a26d8f2b495bb90481ae4597246a3c73b5d69955d13601cf7853b6dbd",
+    "negative/wrapper-trailing-bytes.json": "6b86aa538f281d1ecc9bafda507d882f513ada5c5012a37756e01ebb63e42767",
+    "negative/wrapper-uc-as-byte-string.json": "6e93386a7fd6fa023e2203a3de7144b1053d1f914ff61bc65f442b8f1bfdf44e",
+    "negative/wrapper-wrong-tag.json": "44abd114596a172be98579e41485270340f15f238e18429e41e79764dd94a39b",
+    "negative/wrapper-wrong-version.json": "f479fb560d0bfded488541d1bac3a36a250d08b549ff346e93bb855e7cc26788",
+    "policy.json": "b2556172354b49a4be0aecdd384b83c9d087d19895c1f400a3e2f684a621c9cd",
+    "rpc-errors.json": "acb9053e141a94f4f7b4dae3d8274687565b163d7176c9263da0ef31f661d0f5",
+    "sequences.json": "4ecd535aa5e81925e534b48c0f609833c8126c7646cd126b0177bc8a38f3e5d4",
+    "status-hints.json": "a585e5b96093f69d85a440b4fc8b9ad5a746556c67422c39ad8a4ccb7ec913f6"
+  },
+  "version": 2
+}
