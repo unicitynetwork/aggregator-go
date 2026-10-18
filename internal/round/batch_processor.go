@@ -787,8 +787,8 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		precomputeProofDuration = time.Since(precomputeProofStart)
 	}
 	if preparedProofView != nil {
-		if rm.testHookBeforeProofViewPublish != nil {
-			rm.testHookBeforeProofViewPublish()
+		if hook := rm.testHookBeforeProofViewPublish.Load(); hook != nil {
+			(*hook)()
 		}
 		if err := preparedProofView.Publish(ctx); err != nil {
 			return fmt.Errorf("failed to publish disk SMT proof view: %w", err)
@@ -807,6 +807,8 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		rm.finalizationMu.Unlock()
 	}
 	notifyOnce()
+	// The block is durably finalized: its predecessors' views are superseded.
+	rm.pruneRecentViews(ctx, block)
 
 	// Proofs are requestable only after the SMT snapshot is committed and the block is visible as finalized.
 	// Redis ACK is recovery bookkeeping.

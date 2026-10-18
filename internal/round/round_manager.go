@@ -140,8 +140,9 @@ type RoundManager struct {
 	latestProofReadyBlock *models.Block
 
 	// testHookBeforeProofViewPublish runs between disk finalization in storage and the proof-view
-	// publication (tests only).
-	testHookBeforeProofViewPublish func()
+	// publication (tests only: nil in production, installed per instance, atomically as the
+	// round goroutine may be running).
+	testHookBeforeProofViewPublish atomic.Pointer[func()]
 	proofMetadataCache             *proofMetadataCache
 	// statusTracker backs the unauthenticated proof status hints (pending/expired/unknown).
 	statusTracker *proofstatus.Tracker
@@ -1911,6 +1912,76 @@ func (rm *RoundManager) publishStartupView(ctx context.Context) {
 	}
 	rm.proofPub.EnsurePublishedAtStartup(ctx, latest)
 	rm.notifyWaiters()
+	// crash leftovers and views of the history written by earlier versions
+	rm.pruneSupersededViews(ctx, latest, partitionViewPruneBatchesOnStartup)
+}
+
+const (
+	// partitionViewPruneBatch is the number of block documents cleaned per storage call.
+	partitionViewPruneBatch = 64
+	// partitionViewPruneWindow is the number of heights behind a finalized block which its
+	// finalization cleans with one update.
+	partitionViewPruneWindow = 256
+	// partitionViewPruneBatchesOnStartup bounds the startup sweep of crash leftovers and of the
+	// history written before views were pruned; what remains is cleaned by the following runs.
+	partitionViewPruneBatchesOnStartup = 256
+	partitionViewPruneTimeout          = 10 * time.Second
+)
+
+// pruneSupersededViews removes the partition views stored with blocks below the given durably
+// finalized block: only the latest finalized block keeps its attachment (an in-flight finalizing
+// candidate is above it and untouched). It runs only after the new finalized state is durable, also
+// when that block has no view of its own, and uses the finalized height as the cutoff. A failure is
+// counted and logged but never fails the caller; the next run starts from the same cutoff rule and
+// retries. Extra copies left by a crash are harmless.
+func (rm *RoundManager) pruneSupersededViews(ctx context.Context, finalized *models.Block, maxBatches int) {
+	if rm.storage == nil || rm.storage.BlockStorage() == nil || finalized == nil || finalized.Index == nil {
+		return
+	}
+	pruner, ok := rm.storage.BlockStorage().(partitionViewPruner)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), partitionViewPruneTimeout)
+	defer cancel()
+	for i := 0; i < maxBatches; i++ {
+		n, err := pruner.PrunePartitionViews(ctx, finalized.Index, partitionViewPruneBatch)
+		if err != nil {
+			metrics.PartitionViewPruneTotal.WithLabelValues("error").Inc()
+			rm.logger.WithContext(ctx).Warn("Cleaning superseded partition views failed; it is retried later",
+				"blockNumber", finalized.Index.String(), "error", err.Error())
+			return
+		}
+		metrics.PartitionViewPruneTotal.WithLabelValues("ok").Inc()
+		metrics.PartitionViewPrunedBlocksTotal.Add(float64(n))
+		if n < partitionViewPruneBatch {
+			return
+		}
+	}
+}
+
+// pruneRecentViews is the cleanup of a finalization: one indexed update clearing the views of the
+// blocks right behind the durably finalized one. A failure is counted and logged, never returned;
+// the next finalization or the startup sweep cleans what it left.
+func (rm *RoundManager) pruneRecentViews(ctx context.Context, finalized *models.Block) {
+	if rm.storage == nil || rm.storage.BlockStorage() == nil || finalized == nil || finalized.Index == nil {
+		return
+	}
+	pruner, ok := rm.storage.BlockStorage().(partitionViewPruner)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), partitionViewPruneTimeout)
+	defer cancel()
+	n, err := pruner.PruneRecentPartitionViews(ctx, finalized.Index, partitionViewPruneWindow)
+	if err != nil {
+		metrics.PartitionViewPruneTotal.WithLabelValues("error").Inc()
+		rm.logger.WithContext(ctx).Warn("Cleaning superseded partition views failed; it is retried later",
+			"blockNumber", finalized.Index.String(), "error", err.Error())
+		return
+	}
+	metrics.PartitionViewPruneTotal.WithLabelValues("ok").Inc()
+	metrics.PartitionViewPrunedBlocksTotal.Add(float64(n))
 }
 
 // publishRecoveredBlock publishes a block finalized by recovery once the backend and
@@ -1930,6 +2001,7 @@ func (rm *RoundManager) publishRecoveredBlock(ctx context.Context, blockNumber *
 		return
 	}
 	rm.proofPub.PublishFinalized(ctx, block)
+	rm.pruneRecentViews(ctx, block)
 }
 
 // newStatusTracker creates the proof status tracker with the default bounds.
@@ -1988,5 +2060,9 @@ func (rm *RoundManager) clearStaleAdmissionMarks(dropped []interfaces.Certificat
 // SetTestHookBeforeProofViewPublish installs a function run between disk finalization in storage
 // and proof-view publication. For tests only.
 func (rm *RoundManager) SetTestHookBeforeProofViewPublish(f func()) {
-	rm.testHookBeforeProofViewPublish = f
+	if f == nil {
+		rm.testHookBeforeProofViewPublish.Store(nil)
+		return
+	}
+	rm.testHookBeforeProofViewPublish.Store(&f)
 }

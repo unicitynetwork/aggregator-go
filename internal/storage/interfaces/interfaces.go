@@ -13,6 +13,10 @@ import (
 // ErrDuplicateKey is returned when a storage operation fails due to a duplicate key.
 var ErrDuplicateKey = errors.New("duplicate key error")
 
+// ErrStoreInFlight is returned by a certification request queue whose Store failed on the caller's side (the
+// context ended) after the request was handed to the asynchronous writer, which may still queue it.
+var ErrStoreInFlight = errors.New("store may still complete")
+
 // CommitmentQueue handles commitment queue operations
 type CommitmentQueue interface {
 	// Store stores a new certification request
