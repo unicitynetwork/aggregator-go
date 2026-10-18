@@ -203,7 +203,7 @@ func runCertifiedEmptyThenBlock(t *testing.T, be smtbackend.Backend) {
 	pub := rm.ProofViewPublisher()
 	pub.SetSealVerifier(func(context.Context) types.SealVerifier { return types.TrustBaseSealVerifier(tb) })
 	verifier := func() *noninclusion.Verifier {
-		v, err := noninclusion.NewVerifier(noninclusion.Context{Partition: nifixture.Partition,
+		v, err := noninclusion.NewVerifier(noninclusion.Context{
 			Resolver: func(*types.UnicitySeal) (types.RootTrustBase, error) { return tb, nil }})
 		require.NoError(t, err)
 		return v
@@ -234,9 +234,9 @@ func runCertifiedEmptyThenBlock(t *testing.T, be smtbackend.Backend) {
 	p, err := proofOf(key)
 	require.NoError(t, err)
 	require.True(t, p.Certificate.IsEmptyTree())
-	res, err := verifier().VerifyFor(key, p)
+	res, err := verifier().Verify(key, p)
 	require.NoError(t, err)
-	require.True(t, res.EmptyTree)
+	require.True(t, res.Snapshot().EmptyTree())
 
 	// the first block: committed, certified, published; latest is the block, the proof is not an empty-tree one
 	root := commitLeaf(t, be, 1)
@@ -248,9 +248,9 @@ func runCertifiedEmptyThenBlock(t *testing.T, be smtbackend.Backend) {
 	p, err = proofOf(key)
 	require.NoError(t, err)
 	require.False(t, p.Certificate.IsEmptyTree())
-	res, err = verifier().VerifyFor(key, p)
+	res, err = verifier().Verify(key, p)
 	require.NoError(t, err)
-	require.False(t, res.EmptyTree)
+	require.False(t, res.Snapshot().EmptyTree())
 	// the committed key (n=1 of commitLeaf) is included at that root
 	inc := make([]byte, 32)
 	inc[0], inc[1], inc[2] = byte(1*37), byte(1), byte(1>>8)
@@ -276,7 +276,7 @@ func runEmptyTreeAfterEmptyBlocks(t *testing.T, be smtbackend.Backend) {
 	require.NoError(t, err)
 	tb := auth.TrustBase()
 	verify := func(rm *RoundManager, key []byte) (*noninclusion.Result, error) {
-		v, err := noninclusion.NewVerifier(noninclusion.Context{Partition: nifixture.Partition,
+		v, err := noninclusion.NewVerifier(noninclusion.Context{
 			Resolver: func(*types.UnicitySeal) (types.RootTrustBase, error) { return tb, nil }})
 		require.NoError(t, err)
 		l, err := rm.ProofViewCatalog().AcquireLatest(ctx)
@@ -288,7 +288,7 @@ func runEmptyTreeAfterEmptyBlocks(t *testing.T, be smtbackend.Backend) {
 		if err != nil {
 			return nil, err
 		}
-		return v.VerifyFor(key, &api.NonInclusionProofV1{Certificate: cert, UnicityCertificate: types.RawCBOR(l.UC())})
+		return v.Verify(key, &api.NonInclusionProofV1{Certificate: cert, UnicityCertificate: types.RawCBOR(l.UC())})
 	}
 	newRM := func() *RoundManager {
 		rm := proofRoundManager(t, be, 8)
@@ -321,7 +321,7 @@ func runEmptyTreeAfterEmptyBlocks(t *testing.T, be smtbackend.Backend) {
 	require.NoError(t, publishInitial(rm))
 	res, err := verify(rm, key)
 	require.NoError(t, err)
-	require.True(t, res.EmptyTree)
+	require.True(t, res.Snapshot().EmptyTree())
 
 	// empty blocks certify the zero root: the empty tree no longer serves, and no absence is verifiable
 	emptyBlock(rm, 1)
@@ -358,7 +358,7 @@ func runEmptyTreeAfterEmptyBlocks(t *testing.T, be smtbackend.Backend) {
 	rm.ProofViewPublisher().PublishFinalized(ctx, blk)
 	res, err = verify(rm, key)
 	require.NoError(t, err)
-	require.False(t, res.EmptyTree)
+	require.False(t, res.Snapshot().EmptyTree())
 }
 
 func TestProductionPathEmptyTreeAfterEmptyBlocksMemoryBackend(t *testing.T) {

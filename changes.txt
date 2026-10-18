@@ -1,3 +1,19 @@
+CHANGELOG ENTRY - 18 Oct 2026
+
+Non-inclusion verification returns a snapshot result (owner decisions C/D, schema 2).
+
+- api.AggregationPartitionID (7) is the fixed aggregation partition; noninclusion.Context.Partition is removed and
+  every UC must be of that partition.
+- noninclusion.Verifier.Verify replaces VerifyFor and returns (*Result, error): absent_at_snapshot or
+  included_at_snapshot with an immutable Snapshot (networkId, partitionId, shardId, rootRound, sealTimestampSeconds,
+  rootEpoch, shardRound, shardEpoch, stateRoot), or an *Error with one rejection class and no snapshot.
+  A state present at the snapshot is the outcome included_at_snapshot, not an error.
+- MinRootRound and the stale verdict are removed: freshness is the caller's decision after verification. The D2
+  warning is on every non-inclusion entry point (package doc, Verify, Result, README, docs).
+- Verdict* constants are now Rejection*, VerdictOf is RejectionOf.
+- testdata/non-inclusion/v2 replaces v1 (new expectation schema, sharded positives, partition 7, policy.json,
+  sequences.json); regenerate with cmd/gen-ni-fixtures.
+
 CHANGELOG ENTRY - 04 May 2026 at 17:50 CET
 
 Add Redis Sentinel (HA) support for the commitment queue (#148).

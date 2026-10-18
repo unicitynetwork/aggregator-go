@@ -34,7 +34,7 @@ func key(top byte, tail ...byte) []byte { // top is the first byte; the shard of
 
 func (e *shardedEnv) verifier(t *testing.T, shard types.ShardID) *noninclusion.Verifier {
 	tb := e.auth.TrustBase()
-	v, err := noninclusion.NewVerifier(noninclusion.Context{Partition: nifixture.Partition, Shard: shard,
+	v, err := noninclusion.NewVerifier(noninclusion.Context{Shard: shard,
 		Resolver: func(*types.UnicitySeal) (types.RootTrustBase, error) { return tb, nil }})
 	require.NoError(t, err)
 	return v
@@ -67,7 +67,7 @@ func TestShardedAbsenceAndMembership(t *testing.T) {
 
 	// a valid sharded absence: the query is in the shard
 	q := key(0x10, 0x01)
-	_, err := e.verifier(t, e.shard).VerifyFor(q, e.proof(t, 0, inShard, q, nil))
+	_, err := e.verifier(t, e.shard).Verify(q, e.proof(t, 0, inShard, q, nil))
 	require.NoError(t, err)
 
 	// a query OUTSIDE the shard follows the same junction bits, so the certificate still folds: only
@@ -75,15 +75,15 @@ func TestShardedAbsenceAndMembership(t *testing.T) {
 	out := key(0xd0, 0x01) // top bits 11
 	p := e.proof(t, 0, inShard, out, nil)
 	require.NoError(t, p.Certificate.VerifyAgainstTrustedRoot(out, mustRoot(t, p), api.SHA256), "the fold alone accepts it")
-	_, err = e.verifier(t, e.shard).VerifyFor(out, p)
-	require.Equal(t, noninclusion.VerdictCertInvalid, noninclusion.VerdictOf(err))
+	_, err = e.verifier(t, e.shard).Verify(out, p)
+	require.Equal(t, noninclusion.RejectionCertInvalid, noninclusion.RejectionOf(err))
 
 	// a terminal OUTSIDE the shard (a shard tree which holds foreign leaves) is rejected even for an in-shard query
 	foreign := []nifixture.Leaf{leaf(key(0xd0, 0x00), 3), leaf(key(0xd0, 0x80), 4)}
 	p = e.proof(t, 0, foreign, q, nil)
 	require.NoError(t, p.Certificate.VerifyAgainstTrustedRoot(q, mustRoot(t, p), api.SHA256))
-	_, err = e.verifier(t, e.shard).VerifyFor(q, p)
-	require.Equal(t, noninclusion.VerdictCertInvalid, noninclusion.VerdictOf(err))
+	_, err = e.verifier(t, e.shard).Verify(q, p)
+	require.Equal(t, noninclusion.RejectionCertInvalid, noninclusion.RejectionOf(err))
 }
 
 func TestShardedUCStructure(t *testing.T) {
@@ -93,26 +93,26 @@ func TestShardedUCStructure(t *testing.T) {
 	good := e.proof(t, 0, leaves, q, nil)
 
 	// the context shard is not the UC's shard
-	_, err := e.verifier(t, e.auth.ShardID(1)).VerifyFor(q, good)
-	require.Equal(t, noninclusion.VerdictUCInvalid, noninclusion.VerdictOf(err))
-	_, err = e.verifier(t, types.ShardID{}).VerifyFor(q, good)
-	require.Equal(t, noninclusion.VerdictUCInvalid, noninclusion.VerdictOf(err), "an unsharded context never accepts a shard UC")
+	_, err := e.verifier(t, e.auth.ShardID(1)).Verify(q, good)
+	require.Equal(t, noninclusion.RejectionUCInvalid, noninclusion.RejectionOf(err))
+	_, err = e.verifier(t, types.ShardID{}).Verify(q, good)
+	require.Equal(t, noninclusion.RejectionUCInvalid, noninclusion.RejectionOf(err), "an unsharded context never accepts a shard UC")
 
 	// the UC of shard 1 presented for a context of shard 0
 	other := e.proof(t, 1, []nifixture.Leaf{leaf(key(0x50, 0x00), 1), leaf(key(0x50, 0x80), 2)}, key(0x50, 1), nil)
-	_, err = e.verifier(t, e.shard).VerifyFor(key(0x50, 1), other)
-	require.Equal(t, noninclusion.VerdictUCInvalid, noninclusion.VerdictOf(err))
+	_, err = e.verifier(t, e.shard).Verify(key(0x50, 1), other)
+	require.Equal(t, noninclusion.RejectionUCInvalid, noninclusion.RejectionOf(err))
 
 	// a missing or short shard path
 	short := e.proof(t, 0, leaves, q, func(uc *types.UnicityCertificate) {
 		require.NotEmpty(t, uc.ShardTreeCertificate.SiblingHashes)
 		uc.ShardTreeCertificate.SiblingHashes = uc.ShardTreeCertificate.SiblingHashes[:len(uc.ShardTreeCertificate.SiblingHashes)-1]
 	})
-	_, err = e.verifier(t, e.shard).VerifyFor(q, short)
-	require.Equal(t, noninclusion.VerdictUCInvalid, noninclusion.VerdictOf(err))
+	_, err = e.verifier(t, e.shard).Verify(q, short)
+	require.Equal(t, noninclusion.RejectionUCInvalid, noninclusion.RejectionOf(err))
 	none := e.proof(t, 0, leaves, q, func(uc *types.UnicityCertificate) { uc.ShardTreeCertificate.SiblingHashes = nil })
-	_, err = e.verifier(t, e.shard).VerifyFor(q, none)
-	require.Equal(t, noninclusion.VerdictUCInvalid, noninclusion.VerdictOf(err))
+	_, err = e.verifier(t, e.shard).Verify(q, none)
+	require.Equal(t, noninclusion.RejectionUCInvalid, noninclusion.RejectionOf(err))
 }
 
 func mustRoot(t *testing.T, p *api.NonInclusionProofV1) []byte {

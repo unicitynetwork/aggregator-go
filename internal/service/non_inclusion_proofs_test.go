@@ -99,10 +99,9 @@ func (e *niEnv) call(t *testing.T, key []byte) (*api.GetNonInclusionProofRespons
 	return &back, nil
 }
 
-func (e *niEnv) verifier(t *testing.T, min uint64) *noninclusion.Verifier {
+func (e *niEnv) verifier(t *testing.T) *noninclusion.Verifier {
 	tb := e.auth.TrustBase()
 	v, err := noninclusion.NewVerifier(noninclusion.Context{
-		Partition: nifixture.Partition, MinRootRound: min,
 		Resolver: func(*types.UnicitySeal) (types.RootTrustBase, error) { return tb, nil },
 	})
 	require.NoError(t, err)
@@ -124,14 +123,16 @@ func TestNonInclusionServiceServesAVerifiableAbsence(t *testing.T) {
 	// the complete verifier authenticates the UC (anchored authority, partition) and the relation
 	bound, err := resp.Proof.ForState(niKey(500))
 	require.NoError(t, err)
-	res, err := e.verifier(t, 0).VerifyFor(niKey(500), bound)
+	res, err := e.verifier(t).Verify(niKey(500), bound)
 	require.NoError(t, err)
-	require.False(t, res.EmptyTree)
-	// the same proof does not prove another state, nor a stale-free policy
-	_, err = e.verifier(t, 0).VerifyFor(niKey(501), resp.Proof)
-	require.Equal(t, noninclusion.VerdictCertInvalid, noninclusion.VerdictOf(err))
-	_, err = e.verifier(t, res.RootRound+1).VerifyFor(niKey(500), resp.Proof)
-	require.Equal(t, noninclusion.VerdictStale, noninclusion.VerdictOf(err))
+	require.Equal(t, noninclusion.OutcomeAbsentAtSnapshot, res.Outcome())
+	require.False(t, res.Snapshot().EmptyTree())
+	require.EqualValues(t, api.AggregationPartitionID, res.Snapshot().PartitionID())
+	// the same proof does not prove another state; freshness is not a verifier setting: the caller compares the
+	// authenticated snapshot with its own requirement
+	rej, err := e.verifier(t).Verify(niKey(501), resp.Proof)
+	require.Nil(t, rej)
+	require.Equal(t, noninclusion.RejectionCertInvalid, noninclusion.RejectionOf(err))
 	// a present state is reported as included, with the shared code, not as a proof
 	_, rerr = e.call(t, niKey(3))
 	require.NotNil(t, rerr)
@@ -150,7 +151,7 @@ func TestNonInclusionIsASnapshotStatement(t *testing.T) {
 	require.NotNil(t, rerr)
 	require.Equal(t, api.NonInclusionCodeStateIncluded, rerr.Code)
 	// the earlier response is a historical fact: still verifies against its own UC
-	_, err := e.verifier(t, 0).VerifyFor(niKey(900), respA.Proof)
+	_, err := e.verifier(t).Verify(niKey(900), respA.Proof)
 	require.NoError(t, err)
 	// and the retained older snapshot still proves it
 	l, err := e.cat.AcquireRoot(context.Background(), rootA)
@@ -180,9 +181,9 @@ func TestNonInclusionOfTheCertifiedEmptyTree(t *testing.T) {
 	resp, rerr := e.call(t, niKey(7))
 	require.Nil(t, rerr)
 	require.True(t, resp.Proof.Certificate.IsEmptyTree())
-	res, err := e.verifier(t, 0).VerifyFor(niKey(7), resp.Proof)
+	res, err := e.verifier(t).Verify(niKey(7), resp.Proof)
 	require.NoError(t, err)
-	require.True(t, res.EmptyTree)
+	require.True(t, res.Snapshot().EmptyTree())
 	// the first real block supersedes it as latest
 	e.commit(t, 0, 5)
 	resp, rerr = e.call(t, niKey(700))

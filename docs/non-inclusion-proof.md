@@ -2,7 +2,7 @@
 
 Absence of one state key **at the latest certified snapshot**. It is a historical fact about that snapshot, not
 current absence or spendability: pending, expired and unknown states are indistinguishable from absent ones at a root.
-The shared fixture corpus and the exact verification order are in `testdata/non-inclusion/v1/SPEC.md`.
+The shared fixture corpus and the exact verification order are in `testdata/non-inclusion/v2/SPEC.md`.
 
 ```json
 {"jsonrpc":"2.0","id":7,"method":"get_non_inclusion_proof.v1","params":{"stateId":"<64 hex digits>"}}
@@ -36,5 +36,34 @@ that zero root for an empty tree after genesis (empty rounds still finalize bloc
 only until the first block; from then until the first commitment is certified, requests answer `-32020`
 `empty_snapshot_not_provable` with `retryable: true`.
 
-Client verification: `pkg/noninclusion.Verifier` (anchored authority, expected partition/shard, optional configuration pin,
-epoch end, minimum root round).
+## Client verification
+
+> Non-inclusion proves absence only at the authenticated snapshot returned by verification. It does not prove absence now, continuous absence, or that a token can be spent. Compare the snapshot’s network and root round (or its certified seal timestamp under your application’s time policy) with an independently trusted requirement. The seal timestamp is a consensus-certified time, not proof of real-time freshness. Do not use unverified response metadata for this check.
+
+`pkg/noninclusion.Verifier` authenticates the proof (anchored authority, the fixed aggregation partition
+`api.AggregationPartitionID` = 7, expected shard, optional configuration pin, epoch end) and returns a discriminated
+result: `absent_at_snapshot` or `included_at_snapshot` (each with the queried state ID and the authenticated snapshot), or an
+`*noninclusion.Error` with one rejection class (`malformed`, `uc_invalid`, `authority_rejected`, `certificate_invalid`)
+and no snapshot metadata.
+
+```go
+v, err := noninclusion.NewVerifier(noninclusion.Context{Resolver: trustBaseResolver})
+res, err := v.Verify(stateID, proof)
+if err != nil { /* rejected: err is a *noninclusion.Error, RejectionOf(err) is the class; no snapshot */ }
+if res.Outcome() != noninclusion.OutcomeAbsentAtSnapshot { /* included at the snapshot */ }
+snap := res.Snapshot() // NetworkID, PartitionID, ShardID, RootRound, SealTimestampSeconds, RootEpoch, ShardRound, ShardEpoch, StateRoot
+if snap.NetworkID() != checkpoint.NetworkID || snap.RootRound() < checkpoint.RequiredRootRound { /* policy not met */ }
+// absence at snap only; any spend/finality decision needs its own policy
+```
+
+The checkpoint comes from an independent source, never from the proof or the server response. All snapshot values are
+read from the authenticated unicity certificate.
+
+### Migration (schema 2)
+
+* `Verifier.VerifyFor` is replaced by `Verifier.Verify`, which returns `(*Result, error)`; a state that is present at the
+  proof's snapshot is now the successful outcome `included_at_snapshot`, not an error (`VerdictStateIncluded` is gone).
+* `Context.MinRootRound` and the `stale` verdict are removed: freshness is the caller's decision after verification.
+* `Context.Partition` is removed: the partition is the constant `api.AggregationPartitionID` (7). `Verdict*` constants are renamed
+  `Rejection*`, `VerdictOf` is `RejectionOf`, `Result.UC`, `Result.RootRound` and `Result.EmptyTree` are replaced by the immutable `Snapshot`.
+* The shared corpus is `testdata/non-inclusion/v2` (schema 2); `v1` is removed.
