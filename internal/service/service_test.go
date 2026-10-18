@@ -1394,6 +1394,12 @@ type firstStoreRaceQueue struct {
 	entered  chan struct{}
 	release  chan struct{}
 	firstErr error
+	// existing is what GetByStateID reports for the row the duplicate key collided with.
+	existing *models.CertificationRequest
+}
+
+func (q *firstStoreRaceQueue) GetByStateID(context.Context, api.StateID) (*models.CertificationRequest, error) {
+	return q.existing, nil
 }
 
 func (q *firstStoreRaceQueue) Store(ctx context.Context, r *models.CertificationRequest) error {
@@ -1424,6 +1430,7 @@ func TestCertificationRequestKeepsPendingMarkWhenAnotherCopyIsQueued(t *testing.
 			log, err := logger.New("error", "text", "stdout", false)
 			require.NoError(t, err)
 			queue := &firstStoreRaceQueue{entered: make(chan struct{}), release: make(chan struct{}), firstErr: storeErr}
+			queue.existing = &models.CertificationRequest{} // the other copy's row, still unprocessed
 			shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
 			rm := &stubRoundManager{referenceTime: 1}
 			service := &AggregatorService{
@@ -1446,6 +1453,38 @@ func TestCertificationRequestKeepsPendingMarkWhenAnotherCopyIsQueued(t *testing.
 
 			require.Len(t, queue.stored, 1)
 			require.Equal(t, api.ProofStatusPending, rm.ProofStatus(req.StateID), "the request is queued, the hint must stay pending")
+		})
+	}
+}
+
+// A duplicate key over a row a round already processed (and not yet deleted) queues nothing: an
+// expired request resubmitted over it must not leave the hint pending for the whole TTL.
+func TestCertificationRequestClearsPendingMarkOverProcessedDuplicate(t *testing.T) {
+	processed := api.NewTimestamp(time.Now())
+	for name, existing := range map[string]*models.CertificationRequest{
+		"row processed":      {ProcessedAt: processed},
+		"row already pruned": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			log, err := logger.New("error", "text", "stdout", false)
+			require.NoError(t, err)
+			dup := fmt.Errorf("failed to store commitment: %w", interfaces.ErrDuplicateKey)
+			queue := &firstStoreRaceQueue{entered: make(chan struct{}), release: make(chan struct{}), firstErr: dup, existing: existing}
+			close(queue.release)
+			shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+			rm := &stubRoundManager{referenceTime: 1}
+			service := &AggregatorService{
+				config:                        &config.Config{Processing: config.ProcessingConfig{SkipDuplicateCheck: true}, Sharding: shardingCfg},
+				logger:                        log,
+				commitmentQueue:               queue,
+				roundManager:                  rm,
+				certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+			}
+			req := createTestCertificationRequests(t, 1)[0]
+
+			_, err = service.CertificationRequest(context.Background(), req)
+			require.ErrorIs(t, err, interfaces.ErrDuplicateKey)
+			require.NotEqual(t, api.ProofStatusPending, rm.ProofStatus(req.StateID), "nothing is queued, the hint must not stay pending")
 		})
 	}
 }
