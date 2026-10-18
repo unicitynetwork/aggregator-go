@@ -83,6 +83,7 @@ func TestVectorsAgreeWithTheReferenceModel(t *testing.T) {
 		w, q := unhex(v.Wrapper), [32]byte(unhex(v.Query))
 		verdict, snap := Verdict(w, q, c, tb)
 		want := expectedOf(verdict, snap, v.Query, v.Expected.Acceptable)
+		want.Verdict = "" // the intended classification is not part of the files
 		require.Equal(t, want, v.Expected, name)
 		if want.Outcome == OutcomeRejected {
 			require.Nil(t, v.Expected.Snapshot, name+": a rejection carries no snapshot")
@@ -233,7 +234,7 @@ func TestSnapshotsOfTheCorpus(t *testing.T) {
 	files := readCorpus(t)
 	read := func(name string) Vector {
 		var v Vector
-		require.NoError(t, json.Unmarshal(files[name], &v), name)
+		require.NoError(t, json.Unmarshal(files[name+".json"], &v), name)
 		return v
 	}
 	big := read("cases/large-uint64-fields").Expected.Snapshot

@@ -1,0 +1,217 @@
+{
+  "description": "Caller policy examples, applied AFTER verification to the authenticated snapshot with a checkpoint obtained independently of the proof and the server response. The verifier has no freshness setting and no stale verdict. decision is accept when the snapshot's networkId equals the checkpoint's, its rootRound \u003e= requiredRootRound and, if given, its sealTimestampSeconds \u003e= minSealTimestampSeconds (all uint64 comparisons exact). The seal timestamp is a consensus-certified time, not proof of real-time freshness.",
+  "examples": [
+    {
+      "name": "historical-absence-meets-its-own-round",
+      "vector": "cases/historical-snapshot-absent",
+      "snapshot": {
+        "networkId": 2,
+        "partitionId": 7,
+        "shardId": "",
+        "rootRound": "16",
+        "sealTimestampSeconds": "1731504150",
+        "rootEpoch": "1",
+        "shardRound": "14",
+        "shardEpoch": "0",
+        "stateRoot": "7e9f358e96811c556061a484c6691f74dc3845f0ba7c758fca91785d5f576423"
+      },
+      "checkpoint": {
+        "networkId": 2,
+        "requiredRootRound": "16"
+      },
+      "decision": "accept",
+      "note": "the requirement equals the snapshot round: accepted (the comparison is not strict)"
+    },
+    {
+      "name": "historical-absence-is-older-than-required",
+      "vector": "cases/historical-snapshot-absent",
+      "snapshot": {
+        "networkId": 2,
+        "partitionId": 7,
+        "shardId": "",
+        "rootRound": "16",
+        "sealTimestampSeconds": "1731504150",
+        "rootEpoch": "1",
+        "shardRound": "14",
+        "shardEpoch": "0",
+        "stateRoot": "7e9f358e96811c556061a484c6691f74dc3845f0ba7c758fca91785d5f576423"
+      },
+      "checkpoint": {
+        "networkId": 2,
+        "requiredRootRound": "17"
+      },
+      "decision": "reject",
+      "note": "valid absence at an older snapshot; the application requires a root round of the later snapshot, in which the state is included"
+    },
+    {
+      "name": "historical-absence-wrong-network",
+      "vector": "cases/historical-snapshot-absent",
+      "snapshot": {
+        "networkId": 2,
+        "partitionId": 7,
+        "shardId": "",
+        "rootRound": "16",
+        "sealTimestampSeconds": "1731504150",
+        "rootEpoch": "1",
+        "shardRound": "14",
+        "shardEpoch": "0",
+        "stateRoot": "7e9f358e96811c556061a484c6691f74dc3845f0ba7c758fca91785d5f576423"
+      },
+      "checkpoint": {
+        "networkId": 1,
+        "requiredRootRound": "1"
+      },
+      "decision": "reject",
+      "note": "the snapshot is of another network than the checkpoint (network 1): rejected whatever the round"
+    },
+    {
+      "name": "later-snapshot-included-is-not-absence",
+      "vector": "cases/later-snapshot-included",
+      "snapshot": {
+        "networkId": 2,
+        "partitionId": 7,
+        "shardId": "",
+        "rootRound": "17",
+        "sealTimestampSeconds": "1731504160",
+        "rootEpoch": "1",
+        "shardRound": "15",
+        "shardEpoch": "0",
+        "stateRoot": "1ad5e794a9a82dd4c3874cb40bf70206a297c217795e8a509d78b6f834387a91"
+      },
+      "checkpoint": {
+        "networkId": 2,
+        "requiredRootRound": "16"
+      },
+      "decision": "accept",
+      "note": "policy accepts the snapshot, but its outcome is included_at_snapshot: the caller must check the outcome before the policy"
+    },
+    {
+      "name": "timestamp-policy-accepts-equal",
+      "vector": "cases/historical-snapshot-absent",
+      "snapshot": {
+        "networkId": 2,
+        "partitionId": 7,
+        "shardId": "",
+        "rootRound": "16",
+        "sealTimestampSeconds": "1731504150",
+        "rootEpoch": "1",
+        "shardRound": "14",
+        "shardEpoch": "0",
+        "stateRoot": "7e9f358e96811c556061a484c6691f74dc3845f0ba7c758fca91785d5f576423"
+      },
+      "checkpoint": {
+        "networkId": 2,
+        "requiredRootRound": "1",
+        "minSealTimestampSeconds": "1731504150"
+      },
+      "decision": "accept",
+      "note": "certified seal timestamp policy: equal accepted"
+    },
+    {
+      "name": "timestamp-policy-rejects-older",
+      "vector": "cases/historical-snapshot-absent",
+      "snapshot": {
+        "networkId": 2,
+        "partitionId": 7,
+        "shardId": "",
+        "rootRound": "16",
+        "sealTimestampSeconds": "1731504150",
+        "rootEpoch": "1",
+        "shardRound": "14",
+        "shardEpoch": "0",
+        "stateRoot": "7e9f358e96811c556061a484c6691f74dc3845f0ba7c758fca91785d5f576423"
+      },
+      "checkpoint": {
+        "networkId": 2,
+        "requiredRootRound": "1",
+        "minSealTimestampSeconds": "1731504151"
+      },
+      "decision": "reject",
+      "note": "certified seal timestamp one second older than required: rejected"
+    },
+    {
+      "name": "large-round-meets-requirement",
+      "vector": "cases/large-uint64-fields",
+      "snapshot": {
+        "networkId": 2,
+        "partitionId": 7,
+        "shardId": "",
+        "rootRound": "18446744073709551613",
+        "sealTimestampSeconds": "18446744073709551612",
+        "rootEpoch": "18446744073709551611",
+        "shardRound": "18446744073709551610",
+        "shardEpoch": "9007199254740993",
+        "stateRoot": "23595af0c41f1dd99aaf49c7f810285ae0c85efbcef498e11aa82872c5ff6549"
+      },
+      "checkpoint": {
+        "networkId": 2,
+        "requiredRootRound": "18446744073709551613"
+      },
+      "decision": "accept",
+      "note": "root round near 2^64: exact uint64 comparison"
+    },
+    {
+      "name": "large-round-one-below-requirement",
+      "vector": "cases/large-uint64-fields",
+      "snapshot": {
+        "networkId": 2,
+        "partitionId": 7,
+        "shardId": "",
+        "rootRound": "18446744073709551613",
+        "sealTimestampSeconds": "18446744073709551612",
+        "rootEpoch": "18446744073709551611",
+        "shardRound": "18446744073709551610",
+        "shardEpoch": "9007199254740993",
+        "stateRoot": "23595af0c41f1dd99aaf49c7f810285ae0c85efbcef498e11aa82872c5ff6549"
+      },
+      "checkpoint": {
+        "networkId": 2,
+        "requiredRootRound": "18446744073709551614"
+      },
+      "decision": "reject",
+      "note": "requirement one above a root round near 2^64: rejected (a float or int64 comparison gets this wrong)"
+    },
+    {
+      "name": "large-round-vs-2-53",
+      "vector": "cases/large-uint64-fields",
+      "snapshot": {
+        "networkId": 2,
+        "partitionId": 7,
+        "shardId": "",
+        "rootRound": "18446744073709551613",
+        "sealTimestampSeconds": "18446744073709551612",
+        "rootEpoch": "18446744073709551611",
+        "shardRound": "18446744073709551610",
+        "shardEpoch": "9007199254740993",
+        "stateRoot": "23595af0c41f1dd99aaf49c7f810285ae0c85efbcef498e11aa82872c5ff6549"
+      },
+      "checkpoint": {
+        "networkId": 2,
+        "requiredRootRound": "9007199254740993"
+      },
+      "decision": "accept",
+      "note": "requirement of 2^53+1: accepted"
+    },
+    {
+      "name": "sharded-absence-meets-requirement",
+      "vector": "cases/sharded-absent",
+      "snapshot": {
+        "networkId": 2,
+        "partitionId": 7,
+        "shardId": "00",
+        "rootRound": "2",
+        "sealTimestampSeconds": "1731504010",
+        "rootEpoch": "1",
+        "shardRound": "1",
+        "shardEpoch": "0",
+        "stateRoot": "464d3f32d63b70cc2bec925ced155c76e40912f4d88ad7cd4fa0b83e61dec5ed"
+      },
+      "checkpoint": {
+        "networkId": 2,
+        "requiredRootRound": "2"
+      },
+      "decision": "accept",
+      "note": "a sharded snapshot is judged by the same network and root round rule"
+    }
+  ]
+}
