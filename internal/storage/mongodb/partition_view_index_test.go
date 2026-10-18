@@ -19,9 +19,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-// The documented minimum is MongoDB 5.0; mainnet and testnet2 run 7.0. The partition view index keeps its own key
-// pattern {index: -1} (cheap, and it is also what 4.4 needs: it refuses a second index with the key pattern of the
-// unique index_1), checked once on 4.4 below without further 4.4 test infrastructure.
+// The documented minimum is MongoDB 5.0; mainnet and testnet2 run 7.0.
 var indexTestImages = []string{"mongo:7.0"}
 
 func startMongo(t *testing.T, image string) (uri string, db *mongo.Database) {
@@ -114,8 +112,8 @@ func fillHistory(t *testing.T, bs *BlockStorage, n int, withViewUpTo int) {
 	}
 }
 
-// On every supported server the startup indexes are created (the 4.4 conflict is gone), the partition view index
-// has its own key pattern and the planner really uses it in the normal state (one block carries a view).
+// The startup indexes are created, the partition view index is built separately and the planner really uses it in
+// the normal state (one block carries a view).
 func TestPartitionViewIndex_FreshAndUpgradedDatabases(t *testing.T) {
 	for _, image := range indexTestImages {
 		t.Run(image, func(t *testing.T) {
@@ -124,13 +122,13 @@ func TestPartitionViewIndex_FreshAndUpgradedDatabases(t *testing.T) {
 			bs := NewBlockStorage(db)
 
 			t.Run("fresh database", func(t *testing.T) {
-				require.NoError(t, bs.CreateIndexes(ctx), "the fatal startup indexes no longer conflict on %s", image)
+				require.NoError(t, bs.CreateIndexes(ctx), "the fatal startup indexes on %s", image)
 				require.NotContains(t, listIndexSpecsByName(t, ctx, bs.collection), partitionViewIndexName)
 				require.NoError(t, bs.EnsurePartitionViewIndex(ctx))
 				require.NoError(t, bs.EnsurePartitionViewIndex(ctx), "idempotent")
 				specs := listIndexSpecsByName(t, ctx, bs.collection)
 				require.Contains(t, specs, partitionViewIndexName)
-				require.True(t, sameIndexKey(specs[partitionViewIndexName].Key, bson.D{{Key: "index", Value: -1}}), "%v", specs[partitionViewIndexName].Key)
+				require.Equal(t, bson.D{{Key: "index", Value: int32(1)}}, specs[partitionViewIndexName].Key)
 				require.True(t, specs["index_1"].Unique, "the unique index is untouched")
 
 				// the planner picks the partial index in the normal state and touches nothing
@@ -156,35 +154,6 @@ func TestPartitionViewIndex_FreshAndUpgradedDatabases(t *testing.T) {
 			})
 		})
 	}
-}
-
-// A database upgraded to the earlier version of this branch on a server which accepted it (5.0+) holds the partial
-// index with the key {index: 1}: the build drops and recreates it with the new key; the pruning is unaffected.
-func TestPartitionViewIndex_OldKeyIndexConverges(t *testing.T) {
-	ctx := context.Background()
-	_, db := startMongo(t, "mongo:7.0")
-	bs := NewBlockStorage(db)
-	require.NoError(t, bs.CreateIndexes(ctx))
-	fillHistory(t, bs, 50, 50)
-	_, err := bs.collection.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "index", Value: 1}},
-		Options: options.Index().SetName(partitionViewIndexName).
-			SetPartialFilterExpression(bson.M{"partitionView": bson.M{"$exists": true}}),
-	})
-	require.NoError(t, err, "7.0 accepts the old key pattern")
-	require.True(t, sameIndexKey(listIndexSpecsByName(t, ctx, bs.collection)[partitionViewIndexName].Key, bson.D{{Key: "index", Value: 1}}))
-
-	require.NoError(t, bs.CreateIndexes(ctx), "the fatal startup indexes are unaffected by the old index")
-	require.NoError(t, bs.EnsurePartitionViewIndex(ctx))
-	specs := listIndexSpecsByName(t, ctx, bs.collection)
-	require.True(t, sameIndexKey(specs[partitionViewIndexName].Key, bson.D{{Key: "index", Value: -1}}), "%v", specs[partitionViewIndexName].Key)
-	require.Len(t, specs, 7, "_id, the five startup indexes and one (not two) partial index: %v", specs)
-
-	got, err := bs.PrunePartitionViews(ctx, api.NewBigInt(big.NewInt(50)), 1000)
-	require.NoError(t, err)
-	require.Equal(t, 49, got)
-	idx, _, _ := explainPrune(t, db)
-	require.Contains(t, idx, partitionViewIndexName)
 }
 
 func storageConfig(uri string) config.Config {
@@ -268,15 +237,4 @@ func TestPartitionViewIndex_CloseStopsTheBuild(t *testing.T) {
 	n := attempts.Load()
 	time.Sleep(200 * time.Millisecond)
 	require.Equal(t, n, attempts.Load(), "no attempts after Close")
-}
-
-// One quick check that the fatal startup indexes and the partition view index also work on 4.4 (no longer
-// supported, but the separate key pattern keeps it startable).
-func TestPartitionViewIndex_Mongo44QuickCheck(t *testing.T) {
-	ctx := context.Background()
-	_, db := startMongo(t, "mongo:4.4")
-	bs := NewBlockStorage(db)
-	require.NoError(t, bs.CreateIndexes(ctx))
-	require.NoError(t, bs.EnsurePartitionViewIndex(ctx))
-	require.Contains(t, listIndexSpecsByName(t, ctx, bs.collection), partitionViewIndexName)
 }
