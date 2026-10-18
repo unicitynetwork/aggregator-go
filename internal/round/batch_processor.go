@@ -772,8 +772,8 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 		precomputeProofDuration = time.Since(precomputeProofStart)
 	}
 	if preparedProofView != nil {
-		if rm.testHookBeforeProofViewPublish != nil {
-			rm.testHookBeforeProofViewPublish()
+		if hook := rm.testHookBeforeProofViewPublish.Load(); hook != nil {
+			(*hook)()
 		}
 		if err := preparedProofView.Publish(ctx); err != nil {
 			return fmt.Errorf("failed to publish disk SMT proof view: %w", err)
