@@ -1887,9 +1887,9 @@ func (rm *RoundManager) publishStartupView(ctx context.Context) {
 const (
 	// partitionViewPruneBatch is the number of block documents cleaned per storage call.
 	partitionViewPruneBatch = 64
-	// partitionViewPruneBatchesOnFinalize bounds the cleanup done by one finalization: normally one
-	// previous block is left to clean, leftovers beyond the bound wait for the next run.
-	partitionViewPruneBatchesOnFinalize = 2
+	// partitionViewPruneWindow is the number of heights behind a finalized block which its
+	// finalization cleans with one update.
+	partitionViewPruneWindow = 256
 	// partitionViewPruneBatchesOnStartup bounds the startup sweep of crash leftovers and of the
 	// history written before views were pruned; what remains is cleaned by the following runs.
 	partitionViewPruneBatchesOnStartup = 256
@@ -1928,6 +1928,30 @@ func (rm *RoundManager) pruneSupersededViews(ctx context.Context, finalized *mod
 	}
 }
 
+// pruneRecentViews is the cleanup of a finalization: one indexed update clearing the views of the
+// blocks right behind the durably finalized one. A failure is counted and logged, never returned;
+// the next finalization or the startup sweep cleans what it left.
+func (rm *RoundManager) pruneRecentViews(ctx context.Context, finalized *models.Block) {
+	if rm.storage == nil || rm.storage.BlockStorage() == nil || finalized == nil || finalized.Index == nil {
+		return
+	}
+	pruner, ok := rm.storage.BlockStorage().(partitionViewPruner)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), partitionViewPruneTimeout)
+	defer cancel()
+	n, err := pruner.PruneRecentPartitionViews(ctx, finalized.Index, partitionViewPruneWindow)
+	if err != nil {
+		metrics.PartitionViewPruneTotal.WithLabelValues("error").Inc()
+		rm.logger.WithContext(ctx).Warn("Cleaning superseded partition views failed; it is retried later",
+			"blockNumber", finalized.Index.String(), "error", err.Error())
+		return
+	}
+	metrics.PartitionViewPruneTotal.WithLabelValues("ok").Inc()
+	metrics.PartitionViewPrunedBlocksTotal.Add(float64(n))
+}
+
 // publishRecoveredBlock publishes a block finalized by recovery once the backend and
 // storage agree on it. The caller holds finalizationMu (commit ordering). If the block
 // cannot be published, latest is invalidated rather than left at an older block.
@@ -1943,7 +1967,7 @@ func (rm *RoundManager) publishRecoveredBlock(ctx context.Context, blockNumber *
 		return
 	}
 	rm.proofPub.PublishFinalized(ctx, block)
-	rm.pruneSupersededViews(ctx, block, partitionViewPruneBatchesOnFinalize)
+	rm.pruneRecentViews(ctx, block)
 }
 
 // newStatusTracker creates the proof status tracker with the default bounds.

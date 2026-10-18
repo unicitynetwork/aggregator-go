@@ -29,6 +29,10 @@ type pruneFailBlockStorage struct {
 	err error
 }
 
+func (s *pruneFailBlockStorage) PruneRecentPartitionViews(context.Context, *api.BigInt, int) (int, error) {
+	return 0, s.err
+}
+
 func (s *pruneFailBlockStorage) PrunePartitionViews(context.Context, *api.BigInt, int) (int, error) {
 	return 0, s.err
 }
@@ -95,7 +99,7 @@ func (s *ViewRetentionSuite) Test3_CleanupFailureIsObservableAndNeverFailsFinali
 
 	// the retry (the next finalization or the startup sweep) cleans it
 	rmB.storage = s.storage
-	rmB.pruneSupersededViews(ctx, s.stored(322), partitionViewPruneBatchesOnFinalize)
+	rmB.pruneRecentViews(ctx, s.stored(322))
 	s.Require().Empty(s.stored(321).PartitionView)
 }
 

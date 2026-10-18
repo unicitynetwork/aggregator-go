@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -284,6 +285,27 @@ func (bs *BlockStorage) PrunePartitionViews(ctx context.Context, below *api.BigI
 	// the cutoff is part of the update as well: nothing at or above it is ever touched
 	filter["index"] = bson.M{"$lt": bigIntToDecimal128(below), "$in": ids}
 	res, err := bs.collection.UpdateMany(ctx, filter, bson.M{"$unset": bson.M{"partitionView": ""}})
+	if err != nil {
+		return 0, fmt.Errorf("failed to unset partition views: %w", err)
+	}
+	return int(res.ModifiedCount), nil
+}
+
+// PruneRecentPartitionViews unsets, in one indexed update, the partition view of the blocks in
+// [below-window, below): the heights right behind a durably finalized block, where the views left
+// by earlier finalizations live. The cutoff is a height as in PrunePartitionViews. What lies
+// further back (crash leftovers, history of earlier versions) is the startup sweep's job.
+func (bs *BlockStorage) PruneRecentPartitionViews(ctx context.Context, below *api.BigInt, window int) (int, error) {
+	if below == nil || window <= 0 {
+		return 0, errors.New("prune partition views: block number and a positive window are required")
+	}
+	index := bson.M{"$lt": bigIntToDecimal128(below)}
+	if low := new(big.Int).Sub(below.Int, big.NewInt(int64(window))); low.Sign() > 0 {
+		index["$gte"] = bigIntToDecimal128(api.NewBigInt(low))
+	}
+	res, err := bs.collection.UpdateMany(ctx,
+		bson.M{"index": index, "partitionView": bson.M{"$exists": true}},
+		bson.M{"$unset": bson.M{"partitionView": ""}})
 	if err != nil {
 		return 0, fmt.Errorf("failed to unset partition views: %w", err)
 	}

@@ -168,6 +168,27 @@ func TestBlockStorage_PrunePartitionViews(t *testing.T) {
 		require.Equal(t, api.HexBytes("v"), viewOf(t, bs, 25))
 	})
 
+	t.Run("recent views are cleaned by one update bounded to a window", func(t *testing.T) {
+		reset()
+		for n := int64(1); n <= 25; n++ {
+			finalizeWithView(t, bs, viewBlock(n, fmt.Sprintf("uc%d", n), "v"))
+		}
+		got, err := bs.PruneRecentPartitionViews(ctx, pb(25), 5)
+		require.NoError(t, err)
+		require.Equal(t, 5, got, "heights 20..24")
+		require.Empty(t, viewOf(t, bs, 24))
+		require.Empty(t, viewOf(t, bs, 20))
+		require.Equal(t, api.HexBytes("v"), viewOf(t, bs, 19), "older history is the startup sweep's")
+		require.Equal(t, api.HexBytes("v"), viewOf(t, bs, 25), "the cutoff block keeps its view")
+		got, err = bs.PruneRecentPartitionViews(ctx, pb(3), 100) // window reaching below block 1
+		require.NoError(t, err)
+		require.Equal(t, 2, got)
+		_, err = bs.PruneRecentPartitionViews(ctx, nil, 5)
+		require.Error(t, err)
+		_, err = bs.PruneRecentPartitionViews(ctx, pb(3), 0)
+		require.Error(t, err)
+	})
+
 	t.Run("invalid arguments", func(t *testing.T) {
 		_, err := bs.PrunePartitionViews(ctx, nil, 10)
 		require.Error(t, err)
