@@ -307,9 +307,12 @@ func TestDirect_RefusesAnAuthenticUCOfAnotherPartition(t *testing.T) {
 
 	u := newUnshardedOf(t, testPartition+1)
 	s := u.session(t)
-	_, err = s.AuthenticateMaster(u.bound(s), u.result(u.uc(u.round, nil)), nil)
+	// the evidence stage refuses it ...
+	r := u.result(u.uc(u.round-10, nil))
+	_, err = s.AuthenticateEvidence([]Evidence{{Request: u.req, Proof: r.Proofs[0].InclusionProof}})
 	require.Error(t, err)
-	got, ok := OutcomeOf(err)
-	require.True(t, ok, "untyped error: %v", err)
-	require.Contains(t, []Outcome{OutcomeInvalidInput, OutcomeBindingMismatch, OutcomeIncompatibleLineage}, got, err.Error())
+	requireOutcome(t, err, OutcomeIncompatibleLineage)
+	// ... and so does the master stage (the bound is the one of a session which accepted partition 7)
+	_, err = s.AuthenticateMaster(good.bound(good.session(t)), u.result(u.uc(u.round, nil)), nil)
+	require.Error(t, err)
 }
