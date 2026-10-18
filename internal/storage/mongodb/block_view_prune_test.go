@@ -196,9 +196,20 @@ func TestBlockStorage_PrunePartitionViews(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	t.Run("the cleanup uses the partial index", func(t *testing.T) {
-		specs := listIndexSpecsByName(t, ctx, bs.collection)
-		require.Contains(t, specs, partitionViewIndexName)
+	t.Run("the pruning is correct without the performance index", func(t *testing.T) {
+		reset() // CreateIndexes does not create the partition view index: it is built in the background
+		require.NotContains(t, listIndexSpecsByName(t, ctx, bs.collection), partitionViewIndexName)
+		for n := int64(1); n <= 6; n++ {
+			finalizeWithView(t, bs, viewBlock(n, fmt.Sprintf("uc%d", n), "v"))
+		}
+		got, err := bs.PruneRecentPartitionViews(ctx, pb(4), 100)
+		require.NoError(t, err)
+		require.Equal(t, 3, got)
+		got, err = bs.PrunePartitionViews(ctx, pb(6), 100)
+		require.NoError(t, err)
+		require.Equal(t, 2, got)
+		require.Equal(t, api.HexBytes("v"), viewOf(t, bs, 6))
+		require.Empty(t, viewOf(t, bs, 5))
 	})
 
 	t.Run("old binaries decode blocks with and without the sidecar", func(t *testing.T) {

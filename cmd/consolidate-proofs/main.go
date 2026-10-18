@@ -42,7 +42,9 @@ const (
 
 // Config is the trusted deployment configuration.
 type Config struct {
-	PartitionID    uint32        `json:"partitionId"`
+	// PartitionID is deprecated and only an equality assertion: absent (0) or api.AggregationPartitionID (7) are
+	// accepted, any other value is refused. The consolidated partition is always 7.
+	PartitionID    uint32        `json:"partitionId,omitempty"`
 	Shards         []ShardConfig `json:"shards"`
 	TrustBases     []string      `json:"trustBases"`
 	TimeoutSeconds float64       `json:"timeoutSeconds,omitempty"`
@@ -240,7 +242,10 @@ func loadConfig(path, master string, timeout time.Duration) (*client.Config, err
 	if n := len(hashes); n != 0 && n != len(cf.Shards) {
 		return nil, errors.New("confHash must be given for every shard or for none (pinning is all-or-none)")
 	}
-	cfg.Policy = consolidation.Policy{PartitionID: types.PartitionID(cf.PartitionID)}
+	if cf.PartitionID != 0 && types.PartitionID(cf.PartitionID) != api.AggregationPartitionID {
+		return nil, fmt.Errorf("partitionId %d is not the aggregation partition %d (the field is optional and only an assertion)", cf.PartitionID, api.AggregationPartitionID)
+	}
+	cfg.Policy = consolidation.Policy{}
 	if len(hashes) > 0 {
 		cfg.Policy.Topology = types.PartitionViewTopology{Scheme: scheme, ShardConfHashes: hashes}
 	}

@@ -37,7 +37,7 @@ func Test_ValidateView(t *testing.T) {
 		f := prooftest.New(t, bits, 5, prooftest.Hash("root"), 80)
 		// authenticated by the seal alone, and additionally pinned
 		for name, pins := range map[string]proofmaterial.TopologyProvider{"no pins": nil, "unresolved pins": noTopo{}, "pinned": f.Provider(t)} {
-			res, got, err := proofmaterial.ValidateView(f.Raw, f.UC, prooftest.Partition, accept{}, pins)
+			res, got, err := proofmaterial.ValidateView(f.Raw, f.UC, accept{}, pins)
 			require.NoError(t, err, "%d %s", bits, name)
 			require.Equal(t, proofmaterial.ResultOK, res)
 			require.Equal(t, f.Raw, got)
@@ -65,7 +65,7 @@ func Test_ValidateView_PinsAreOptionalAndStricter(t *testing.T) {
 
 	// without pins the view hashes into the seal and is retained
 	for _, p := range []proofmaterial.TopologyProvider{nil, noTopo{}} {
-		res, _, err := proofmaterial.ValidateView(f.Raw, f.UC, prooftest.Partition, accept{}, p)
+		res, _, err := proofmaterial.ValidateView(f.Raw, f.UC, accept{}, p)
 		require.NoError(t, err)
 		require.Equal(t, proofmaterial.ResultOK, res)
 	}
@@ -76,19 +76,19 @@ func Test_ValidateView_PinsAreOptionalAndStricter(t *testing.T) {
 		"hash of the wrong size":        topo{types.PartitionViewTopology{Scheme: f.Topo.Scheme, ShardConfHashes: short}},
 		"incomplete scheme with hashes": topo{types.PartitionViewTopology{Scheme: f.Topo.Scheme[:3], ShardConfHashes: f.Topo.ShardConfHashes}},
 	} {
-		res, view, err := proofmaterial.ValidateView(f.Raw, f.UC, prooftest.Partition, accept{}, p)
+		res, view, err := proofmaterial.ValidateView(f.Raw, f.UC, accept{}, p)
 		require.Error(t, err, name)
 		require.Equal(t, proofmaterial.ResultNoTopology, res, name)
 		require.Nil(t, view, name)
 	}
 
-	_, err := proofmaterial.NewStaticTopology(prooftest.Partition, f.Topo.Scheme, incomplete)
+	_, err := proofmaterial.NewStaticTopology(f.Topo.Scheme, incomplete)
 	require.Error(t, err)
-	_, err = proofmaterial.NewStaticTopology(prooftest.Partition, f.Topo.Scheme[:3], f.Topo.ShardConfHashes)
+	_, err = proofmaterial.NewStaticTopology(f.Topo.Scheme[:3], f.Topo.ShardConfHashes)
 	require.Error(t, err)
-	_, err = proofmaterial.SingleShardTopology(prooftest.Partition, []byte{1})
+	_, err = proofmaterial.SingleShardTopology([]byte{1})
 	require.Error(t, err)
-	st, err := proofmaterial.SingleShardTopology(prooftest.Partition, prooftest.Hash("c"))
+	st, err := proofmaterial.SingleShardTopology(prooftest.Hash("c"))
 	require.NoError(t, err)
 	_, ok := st.Topology(prooftest.Partition + 1)
 	require.False(t, ok)
@@ -120,7 +120,7 @@ func Test_ValidateView_Failures(t *testing.T) {
 		"wrong config hash":         {f.Raw, topo{types.PartitionViewTopology{Scheme: f.Topo.Scheme, ShardConfHashes: wrongConf}}, proofmaterial.ResultInvalid},
 	}
 	for name, c := range cases {
-		res, view, err := proofmaterial.ValidateView(c.raw, f.UC, prooftest.Partition, accept{}, c.topos)
+		res, view, err := proofmaterial.ValidateView(c.raw, f.UC, accept{}, c.topos)
 		require.Equal(t, c.result, res, name)
 		require.Nil(t, view, name)
 		if c.result != proofmaterial.ResultMissing {
@@ -133,14 +133,14 @@ func Test_ValidateView_Failures(t *testing.T) {
 		seal.Hash = prooftest.Hash("tampered")
 		uc.UnicitySeal = &seal
 		for _, pins := range []proofmaterial.TopologyProvider{nil, good} {
-			res, _, err := proofmaterial.ValidateView(f.Raw, &uc, prooftest.Partition, accept{}, pins)
+			res, _, err := proofmaterial.ValidateView(f.Raw, &uc, accept{}, pins)
 			require.Error(t, err)
 			require.Equal(t, proofmaterial.ResultInvalid, res)
 		}
 	})
 	t.Run("seal not authenticated", func(t *testing.T) {
 		for name, v := range map[string]types.SealVerifier{"rejecting": reject{}, "nil": nil} {
-			res, view, err := proofmaterial.ValidateView(f.Raw, f.UC, prooftest.Partition, v, nil)
+			res, view, err := proofmaterial.ValidateView(f.Raw, f.UC, v, nil)
 			require.Error(t, err, name)
 			require.Equal(t, proofmaterial.ResultInvalid, res, name)
 			require.Nil(t, view, name)
@@ -152,15 +152,25 @@ func Test_ValidateView_Failures(t *testing.T) {
 		utc.HashSteps = []*types.PathItem{nil}
 		uc.UnicityTreeCertificate = &utc
 		require.NotPanics(t, func() {
-			res, _, err := proofmaterial.ValidateView(f.Raw, &uc, prooftest.Partition, accept{}, nil)
+			res, _, err := proofmaterial.ValidateView(f.Raw, &uc, accept{}, nil)
 			require.Error(t, err)
 			require.Equal(t, proofmaterial.ResultInvalid, res)
 		})
 	})
 	t.Run("wrong partition", func(t *testing.T) {
-		res, _, err := proofmaterial.ValidateView(f.Raw, f.UC, prooftest.Partition+1, accept{}, nil)
+		// a view and UC of another partition, validly signed by the trusted authority, are not proof material
+		other := prooftest.NewForPartition(t, prooftest.Partition+1, 2, 5, prooftest.Hash("x"), 9)
+		res, _, err := proofmaterial.ValidateView(other.Raw, other.UC, accept{}, nil)
 		require.Error(t, err)
 		require.Equal(t, proofmaterial.ResultInvalid, res)
+		res, _, err = proofmaterial.ValidateView(other.Raw, other.UC, accept{}, other.Provider(t))
+		require.Error(t, err)
+		require.Equal(t, proofmaterial.ResultInvalid, res)
+		// control: the same construction for the aggregation partition is accepted
+		same := prooftest.NewForPartition(t, prooftest.Partition, 2, 5, prooftest.Hash("x"), 9)
+		res, _, err = proofmaterial.ValidateView(same.Raw, same.UC, accept{}, nil)
+		require.NoError(t, err)
+		require.Equal(t, proofmaterial.ResultOK, res)
 	})
 }
 

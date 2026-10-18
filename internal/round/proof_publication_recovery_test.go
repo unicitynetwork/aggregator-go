@@ -136,7 +136,7 @@ func Test_RecoveredBlockWhichCannotBePublishedInvalidatesLatest(t *testing.T) {
 }
 
 func newPub(cat *proofview.Catalog, b smtbackend.Backend, f *prooftest.Fixture, log *logger.Logger) *proofpub.Publisher {
-	p := proofpub.New(cat, b, prooftest.Partition, nil, log)
+	p := proofpub.New(cat, b, nil, log)
 	p.SetSealVerifier(f.Verifier())
 	return p
 }

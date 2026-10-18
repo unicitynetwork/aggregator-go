@@ -1,0 +1,26 @@
+{
+  "base": "shards-4",
+  "description": "every UC, the view and the proofs are authentic (signed by the trusted authority) but of partition 8: only the fixed partition check refuses them",
+  "stage": "evidence",
+  "outcome": "incompatible_lineage",
+  "changedFiles": [
+    "context.json",
+    "partition-view.cbor",
+    "producer.json",
+    "requests.json",
+    "response-v1.cbor",
+    "response-v2.cbor",
+    "responses.json",
+    "shard-configs/00.cbor",
+    "shard-configs/01.cbor",
+    "shard-configs/10.cbor",
+    "shard-configs/11.cbor",
+    "ucs/00.cbor",
+    "ucs/01.cbor",
+    "ucs/10.cbor",
+    "ucs/11.cbor"
+  ],
+  "removedFiles": [
+    "expected.json"
+  ]
+}

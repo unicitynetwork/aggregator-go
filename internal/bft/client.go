@@ -989,7 +989,7 @@ func proofTopologyFromConfig(conf *config.BFTConfig) (proofmaterial.TopologyProv
 	if len(scheme) == 1 && scheme[0].Length() == 0 {
 		scheme = types.ShardingScheme{}
 	}
-	t, err := proofmaterial.NewStaticTopology(conf.ShardConf.PartitionID, scheme, hashes)
+	t, err := proofmaterial.NewStaticTopology(scheme, hashes)
 	if err != nil {
 		return nil, err
 	}
@@ -1088,7 +1088,7 @@ func (c *BFTClientImpl) stagePartitionViewOp(ctx context.Context, op *authOp, cr
 		metrics.BFTPartitionViewTotal.WithLabelValues("unsharded_skipped").Inc()
 		return
 	}
-	result, view, err := proofmaterial.ValidateView(cr.PartitionView, &cr.UC, c.partitionID, op.sealVerifier(), c.proofTopology)
+	result, view, err := proofmaterial.ValidateView(cr.PartitionView, &cr.UC, op.sealVerifier(), c.proofTopology)
 	metrics.BFTPartitionViewTotal.WithLabelValues(result).Inc()
 	if err != nil {
 		c.logger.WithContext(ctx).Warn("Ignoring partition view sidecar",

@@ -76,10 +76,14 @@ consolidate-proofs -config config.json -in items.json [-out bundle.json] [-maste
 `config.json` (trusted deployment configuration; trust bases are `RootTrustBaseV1` JSON files, resolved by network+epoch):
 
 ```json
-{"partitionId": 168496141, "timeoutSeconds": 10, "maxParallel": 4, "trustBases": ["trust-base.json"],
+{"timeoutSeconds": 10, "maxParallel": 4, "trustBases": ["trust-base.json"],
  "shards": [{"shardBits": "0", "url": "http://shard0:3000", "confHash": "<32-byte hex>"},
             {"shardBits": "1", "url": "http://shard1:3000", "confHash": "<32-byte hex>"}]}
 ```
+
+The consolidated partition is the fixed aggregation partition `api.AggregationPartitionID` (7); it is not configurable. A
+`partitionId` in the file is optional and only an assertion: any value other than 7 is refused (exit 2). Every UC, view and
+proof must be of partition 7 (a validly signed UC of another partition is rejected).
 
 `items.json`: `{"items":[{"request":"<hex CBOR CertificationRequest>","proof":"<hex CBOR get_inclusion_proof.v2 result>"}]}`.
 The output bundle (`version`, `masterShard`, `rootRound`, `stats`, `counters`, `proofs[]` in input order, `unicityCertificates`)

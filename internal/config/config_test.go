@@ -1,6 +1,7 @@
 package config
 
 import (
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"reflect"
 	"strings"
 	"testing"
@@ -49,7 +50,8 @@ func validBFTShardTestConfig(t *testing.T) *Config {
 	cfg.BFT.Enabled = true
 	cfg.BFT.BootstrapAddresses = []string{"/ip4/127.0.0.1/tcp/26662/p2p/16Uiu2HAm6eQMr2sQVbcWZsPPbpc2Su7AnnMVGHpC23PUzGTAATnp"}
 	cfg.BFT.ShardConf = &bfttypes.PartitionDescriptionRecord{
-		ShardID: shardIDFromHex(t, "0x40"),
+		PartitionID: api.AggregationPartitionID,
+		ShardID:     shardIDFromHex(t, "0x40"),
 	}
 	return cfg
 }
@@ -475,5 +477,21 @@ func TestProcessingConfigRequestTTL(t *testing.T) {
 	configured := ProcessingConfig{DefaultRequestTTL: 90 * time.Minute}
 	if got := configured.RequestTTL(); got != 90*time.Minute {
 		t.Fatalf("configured request TTL = %s, want 90m", got)
+	}
+}
+
+// The aggregation layer is the fixed partition: a shard configuration of another one is refused at startup.
+func TestConfigValidateRefusesAnotherPartition(t *testing.T) {
+	cfg := validBFTShardTestConfig(t)
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.BFT.ShardConf.PartitionID = api.AggregationPartitionID + 1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "aggregation partition is 7") {
+		t.Fatalf("another partition accepted or wrong error: %v", err)
+	}
+	cfg.BFT.ShardConf.PartitionID = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("partition 0 accepted")
 	}
 }
