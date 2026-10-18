@@ -15,7 +15,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-const corpusDir = "../../testdata/non-inclusion/v1"
+const corpusDir = "../../testdata/non-inclusion/v2"
 
 func readCorpus(t *testing.T) Files {
 	t.Helper()
@@ -81,7 +81,16 @@ func TestVectorsAgreeWithTheReferenceModel(t *testing.T) {
 		require.True(t, ok, name)
 		var tb types.RootTrustBase = decodeTB(t, files[c.TrustBase])
 		w, q := unhex(v.Wrapper), [32]byte(unhex(v.Query))
-		require.Equal(t, v.Expected.Verdict, Verdict(w, q, c, tb), name)
+		verdict, snap := Verdict(w, q, c, tb)
+		want := expectedOf(verdict, snap, v.Query, v.Expected.Acceptable)
+		require.Equal(t, want, v.Expected, name)
+		if want.Outcome == OutcomeRejected {
+			require.Nil(t, v.Expected.Snapshot, name+": a rejection carries no snapshot")
+			require.Empty(t, v.Expected.StateID, name)
+		} else {
+			require.Equal(t, v.Query, v.Expected.StateID, name)
+			require.NotNil(t, v.Expected.Snapshot, name)
+		}
 		if isPos {
 			positives++
 			var leaves []Leaf
@@ -107,8 +116,8 @@ func TestVectorsAgreeWithTheReferenceModel(t *testing.T) {
 			negatives++
 		}
 	}
-	require.GreaterOrEqual(t, positives, 15)
-	require.GreaterOrEqual(t, negatives, 40)
+	require.GreaterOrEqual(t, positives, 25)
+	require.GreaterOrEqual(t, negatives, 55)
 }
 
 func decodeTB(t *testing.T, b []byte) types.RootTrustBase {
@@ -192,11 +201,77 @@ func TestJSONTrustBasesAndAcceptableVerdicts(t *testing.T) {
 		var v Vector
 		require.NoError(t, json.Unmarshal(b, &v))
 		for _, a := range v.Expected.Acceptable {
-			require.NotEqual(t, VerdictAbsent, a, name)
-			require.NotEqual(t, VerdictStateInclude, a, name)
+			require.Contains(t, []string{VerdictMalformed, VerdictUCInvalid, VerdictAuthority, VerdictCertInvalid}, a, name)
 		}
-		if v.Expected.Verdict == VerdictAbsent || v.Expected.Verdict == VerdictStateInclude {
+		if v.Expected.Outcome != OutcomeRejected {
 			require.Empty(t, v.Expected.Acceptable, name)
 		}
 	}
+}
+
+// The corpus partition is the fixed aggregation partition and every snapshot is of it; the schema has no freshness
+// verdict or option.
+func TestSchemaHasNoFreshnessAndTheFixedPartition(t *testing.T) {
+	require.EqualValues(t, 7, Partition)
+	files := readCorpus(t)
+	require.NotContains(t, string(files["contexts.json"]), "minRootRound")
+	require.NotContains(t, string(files["contexts.json"]), `"partition"`)
+	for name, b := range files {
+		if strings.HasPrefix(name, "cases/") || strings.HasPrefix(name, "negative/") {
+			require.NotContains(t, string(b), "stale", name)
+			var v Vector
+			require.NoError(t, json.Unmarshal(b, &v))
+			if v.Expected.Snapshot != nil {
+				require.EqualValues(t, 7, v.Expected.Snapshot.PartitionID, name)
+			}
+		}
+	}
+}
+
+// Every sharded and every large-value case is present with the snapshot fields the UC authenticates.
+func TestSnapshotsOfTheCorpus(t *testing.T) {
+	files := readCorpus(t)
+	read := func(name string) Vector {
+		var v Vector
+		require.NoError(t, json.Unmarshal(files[name], &v), name)
+		return v
+	}
+	big := read("cases/large-uint64-fields").Expected.Snapshot
+	require.Equal(t, "18446744073709551613", big.RootRound)
+	require.Equal(t, "18446744073709551612", big.SealTimestampSeconds)
+	require.Equal(t, "18446744073709551611", big.RootEpoch)
+	require.Equal(t, "18446744073709551610", big.ShardRound)
+	require.Equal(t, "9007199254740993", big.ShardEpoch)
+	empty := read("cases/empty-tree").Expected.Snapshot
+	require.Nil(t, empty.StateRoot, "the certified empty tree is a null state root")
+	sharded := read("cases/sharded-absent").Expected.Snapshot
+	require.Equal(t, "00", sharded.ShardID)
+	require.Equal(t, "", read("cases/shared-prefix").Expected.Snapshot.ShardID)
+	require.NotNil(t, sharded.StateRoot)
+	require.Equal(t, "01", read("cases/sharded-empty-tree").Expected.Snapshot.ShardID)
+	require.Nil(t, read("cases/sharded-empty-tree").Expected.Snapshot.StateRoot)
+	for _, n := range []string{"sharded-included", "sharded-shard-01-absent", "sharded-shard-11-singleton", "sharded-random-16", "sharded-same-seal-00", "sharded-same-seal-01"} {
+		require.NotEmpty(t, read("cases/"+n).Expected.Snapshot.ShardID, n)
+	}
+	require.Equal(t, OutcomeIncluded, read("cases/sharded-included").Expected.Outcome)
+	require.Equal(t, read("cases/sharded-same-seal-00").Expected.Snapshot.RootRound, read("cases/sharded-same-seal-01").Expected.Snapshot.RootRound)
+}
+
+// The policy examples follow from the reference policy over the verified snapshots.
+func TestPolicyExamplesAreConsistent(t *testing.T) {
+	files := readCorpus(t)
+	var p struct {
+		Examples []policyExample `json:"examples"`
+	}
+	require.NoError(t, json.Unmarshal(files["policy.json"], &p))
+	require.GreaterOrEqual(t, len(p.Examples), 10)
+	seen := map[string]bool{}
+	for _, e := range p.Examples {
+		require.Equal(t, e.Decision, PolicyDecision(e.Snapshot, e.Checkpoint), e.Name)
+		seen[e.Decision] = true
+		var v Vector
+		require.NoError(t, json.Unmarshal(files[e.Vector+".json"], &v))
+		require.Equal(t, *v.Expected.Snapshot, e.Snapshot, e.Name)
+	}
+	require.True(t, seen["accept"] && seen["reject"])
 }
