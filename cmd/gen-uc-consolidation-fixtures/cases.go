@@ -18,7 +18,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-const fixturePartition types.PartitionID = 0x0a0b0c0d
+const fixturePartition types.PartitionID = api.AggregationPartitionID
 
 // Root chain rounds of the case timeline.
 const (
@@ -49,6 +49,8 @@ type caseSpec struct {
 	fExtra []ucfixture.Change
 	// etHash per participant shard, nil keeps the field absent.
 	etHash map[int][]byte
+	// partition overrides the fixture partition: only for the validly signed wrong-partition negative.
+	partition types.PartitionID
 }
 
 func (s caseSpec) participants() []int { return append([]int{s.master}, s.peers...) }
@@ -221,7 +223,11 @@ func toProducerChange(c ucfixture.Change) producerChange {
 func buildCase(spec caseSpec) (*builtCase, error) {
 	ctx := context.Background()
 	_ = ctx
-	prod, err := ucfixture.New(ucfixture.Config{Partition: fixturePartition, ShardBits: spec.bits})
+	partition := fixturePartition
+	if spec.partition != 0 {
+		partition = spec.partition
+	}
+	prod, err := ucfixture.New(ucfixture.Config{Partition: partition, ShardBits: spec.bits})
 	if err != nil {
 		return nil, err
 	}
@@ -385,7 +391,7 @@ func buildCase(spec caseSpec) (*builtCase, error) {
 	// files
 	files := consolidationcorpus.Files{}
 	ctxFile := consolidationcorpus.Context{
-		CorpusVersion: consolidationcorpus.Version, NetworkID: uint32(ucfixture.NetworkID), PartitionID: uint32(fixturePartition),
+		CorpusVersion: consolidationcorpus.Version, NetworkID: uint32(ucfixture.NetworkID), PartitionID: uint32(partition),
 		Master: consolidationcorpus.ShardName(shards[spec.master].ID), TrustBase: consolidationcorpus.FileTrustBase,
 	}
 	for _, s := range shards {
@@ -405,7 +411,7 @@ func buildCase(spec caseSpec) (*builtCase, error) {
 	if files[consolidationcorpus.FileTrustBase], err = prod.TrustBaseCBOR(); err != nil {
 		return nil, err
 	}
-	pspec := producerSpec{Partition: uint32(fixturePartition), ShardBits: spec.bits}
+	pspec := producerSpec{Partition: uint32(partition), ShardBits: spec.bits}
 	for _, b := range []struct {
 		name string
 		s    ucfixture.BlockSpec
@@ -468,6 +474,10 @@ func buildCase(spec caseSpec) (*builtCase, error) {
 	}
 
 	bc := &builtCase{spec: spec, files: files, lateEvidence: lateEv, oldPeerProofs: oldPeer, otherCert: otherCert}
+	if spec.partition != 0 {
+		// material of another partition is only a source of the wrong-partition negative: no positive expectation
+		return bc, nil
+	}
 	if err := bc.writeExpected(); err != nil {
 		return nil, fmt.Errorf("case %s: %w", spec.name, err)
 	}

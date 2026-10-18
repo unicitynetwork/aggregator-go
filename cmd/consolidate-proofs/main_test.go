@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -356,4 +357,37 @@ func TestCLI_UnshardedHasNoViewAndOneRequest(t *testing.T) {
 	stderr.Reset()
 	require.Equal(t, exitUnavailable, run([]string{"-config", e.cfg, "-in", e.in}, &stdout, &stderr), stderr.String())
 	require.Contains(t, stderr.String(), "partition_view_unavailable")
+}
+
+// The partition is fixed: a configured partitionId is only an assertion.
+func TestCLI_PartitionIDIsOnlyAnAssertion(t *testing.T) {
+	e := setup(t, 2)
+	var raw map[string]any
+	b, err := os.ReadFile(e.cfg)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(b, &raw))
+	for _, tc := range []struct {
+		name string
+		id   any // nil removes the field
+		code int
+	}{
+		{"absent", nil, exitOK},
+		{"aggregation partition", float64(7), exitOK},
+		{"another partition", float64(8), exitInput},
+		{"the old fixture partition", float64(0x0a0b0c0d), exitInput},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := map[string]any{}
+			for k, v := range raw {
+				cfg[k] = v
+			}
+			delete(cfg, "partitionId")
+			if tc.id != nil {
+				cfg["partitionId"] = tc.id
+			}
+			path := writeJSON(t, e.dir, "config-"+strings.ReplaceAll(tc.name, " ", "-")+".json", cfg)
+			var stdout, stderr bytes.Buffer
+			require.Equal(t, tc.code, run([]string{"-config", path, "-in", e.in}, &stdout, &stderr), stderr.String())
+		})
+	}
 }

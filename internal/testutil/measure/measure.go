@@ -17,6 +17,8 @@ import (
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	testsig "github.com/unicitynetwork/bft-go-base/testutils/sig"
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // Require skips the calling test unless UC_MEASURE is set.
@@ -104,7 +106,7 @@ func h32(label string) []byte {
 }
 
 // PartitionID of the measured partition.
-const PartitionID types.PartitionID = 0x0f0f0f0f
+const PartitionID types.PartitionID = api.AggregationPartitionID
 
 // Certification is complete ordinary UC material for one shard of an S-shard
 // partition, bound to a given state root, plus the encoded partition view.

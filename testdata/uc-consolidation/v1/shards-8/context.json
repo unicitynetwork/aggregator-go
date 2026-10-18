@@ -1,7 +1,7 @@
 {
   "corpusVersion": 1,
   "networkId": 2,
-  "partitionId": 168496141,
+  "partitionId": 7,
   "shards": [
     "000",
     "001",
@@ -16,42 +16,42 @@
     {
       "shard": "000",
       "file": "shard-configs/000.cbor",
-      "hash": "7b546bf26cd40be86f1573cfe70d581de5caefe676a9c9913771e0687910476c"
+      "hash": "c983e31d3c1cc6a5b97bfcb8c3283cacf436c2f05efa4cfd707eeeda6d8d54cb"
     },
     {
       "shard": "001",
       "file": "shard-configs/001.cbor",
-      "hash": "dd30cc7882eb585c1c4143a3469802bc56b5f584ac9fe1133e6065031b3cfebd"
+      "hash": "ec83152ddec1cee14cf7823e221f04c98da3c73dcb939b4a057065aa4a0f92a7"
     },
     {
       "shard": "010",
       "file": "shard-configs/010.cbor",
-      "hash": "0424ff67988fa5c8e957bac153544e46b0a297a7b781e20146923fa6ee66fab7"
+      "hash": "8168493f01af819e91654cda79d43ce4eaaae1f5df17306fb219f8945cf4d449"
     },
     {
       "shard": "011",
       "file": "shard-configs/011.cbor",
-      "hash": "85f7041e8a136d1c3384027f5b45aeb6a6c446e912dbdae015516e7156f57a0d"
+      "hash": "1976a12d8028bf816dd797a089c41bcdc39270041a576b8786b6a0c0c0677bef"
     },
     {
       "shard": "100",
       "file": "shard-configs/100.cbor",
-      "hash": "495520135ab27cd871a04ca2a52039faccaa28ba6be27503d44f4833b6167909"
+      "hash": "a7164fc0553d198ed82b4dc46bcd4249615d76079806881b9529307ff3bcc951"
     },
     {
       "shard": "101",
       "file": "shard-configs/101.cbor",
-      "hash": "0029f76e5f004a7e9a39af9822dbf5c277cf606236ed75b420642520889beb53"
+      "hash": "17b3383c7da9a5d78921210d81821b181d54699fc515da4993c4dd50c7082982"
     },
     {
       "shard": "110",
       "file": "shard-configs/110.cbor",
-      "hash": "6b38f88126e00c08a9f92f24efff5b8a113d6549388b2667da750c6c02e23e3d"
+      "hash": "3626cac1253d43ef16b225092bb42b9b6d0efc9865d9f6976526c6955296b004"
     },
     {
       "shard": "111",
       "file": "shard-configs/111.cbor",
-      "hash": "df210317d7de119c411b92bed46b3aa9c3e1fb3a8cdd870bf2556e8c5fec9c15"
+      "hash": "496e049f0404e97759096bd3dbf0d810244468adcd98d47b01830d4ccde382b6"
     }
   ],
   "master": "010",

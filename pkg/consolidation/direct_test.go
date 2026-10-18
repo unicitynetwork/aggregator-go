@@ -30,7 +30,11 @@ type unsharded struct {
 	conf   []byte
 }
 
-func newUnsharded(t *testing.T) *unsharded {
+func newUnsharded(t *testing.T) *unsharded { return newUnshardedOf(t, testPartition) }
+
+// newUnshardedOf builds the fixture for any partition (authentic, signed by the trusted authority); only
+// testPartition is the aggregation partition.
+func newUnshardedOf(t *testing.T, partition types.PartitionID) *unsharded {
 	u := &unsharded{t: t, ref: 1000}
 	signer, verifier := testsig.CreateSignerAndVerifier(t)
 	u.signer = signer
@@ -62,12 +66,12 @@ func newUnsharded(t *testing.T) *unsharded {
 	u.tree, err = types.CreateShardTree(types.ShardingScheme{}, []types.ShardTreeInput{u.input}, crypto.SHA256)
 	require.NoError(t, err)
 	u.ut, err = types.NewUnicityTree(crypto.SHA256, []*types.UnicityTreeData{
-		{Partition: testPartition, ShardTreeRoot: u.tree.RootHash()}, {Partition: 0x01010101, ShardTreeRoot: h32("other")}})
+		{Partition: partition, ShardTreeRoot: u.tree.RootHash()}, {Partition: 0x01010101, ShardTreeRoot: h32("other")}})
 	require.NoError(t, err)
-	u.utc, err = u.ut.Certificate(testPartition)
+	u.utc, err = u.ut.Certificate(partition)
 	require.NoError(t, err)
 	u.round = u.tb.GetEpochStart() + 50
-	u.policy = Policy{PartitionID: testPartition}
+	u.policy = Policy{}
 	return u
 }
 
@@ -256,7 +260,7 @@ func TestDirect_StaleBoundAndMixedUCsAndPeers(t *testing.T) {
 func TestDirect_PinsOnlyRestrict(t *testing.T) {
 	u := newUnsharded(t)
 	emptyKey := types.ShardID{}.Key()
-	good := Policy{PartitionID: testPartition, Topology: types.PartitionViewTopology{ShardConfHashes: map[string][]byte{emptyKey: u.conf}}}
+	good := Policy{Topology: types.PartitionViewTopology{ShardConfHashes: map[string][]byte{emptyKey: u.conf}}}
 	s := u.session(t, good)
 	m, err := s.AuthenticateMaster(u.bound(s), u.result(u.uc(u.round, nil)), nil)
 	require.NoError(t, err)
@@ -264,7 +268,7 @@ func TestDirect_PinsOnlyRestrict(t *testing.T) {
 	require.NoError(t, err)
 
 	// a pin for another configuration rejects the UC
-	bad := Policy{PartitionID: testPartition, Topology: types.PartitionViewTopology{ShardConfHashes: map[string][]byte{emptyKey: h32("another configuration")}}}
+	bad := Policy{Topology: types.PartitionViewTopology{ShardConfHashes: map[string][]byte{emptyKey: h32("another configuration")}}}
 	s = u.session(t, bad)
 	// (the same pins already refuse the original evidence)
 	_, err = s.AuthenticateEvidence([]Evidence{{Request: u.req, Proof: u.result(u.uc(u.round-10, nil)).Proofs[0].InclusionProof}})
@@ -276,7 +280,7 @@ func TestDirect_PinsOnlyRestrict(t *testing.T) {
 
 	// pins describing a sharded partition are incompatible with an unsharded master UC
 	a, b := types.ShardID{}.Split()
-	sharded := Policy{PartitionID: testPartition, Topology: types.PartitionViewTopology{
+	sharded := Policy{Topology: types.PartitionViewTopology{
 		Scheme: types.ShardingScheme{a, b}, ShardConfHashes: map[string][]byte{a.Key(): u.conf, b.Key(): u.conf}}}
 	s = u.session(t, sharded)
 	// evidence in the sharded policy cannot even be authenticated (its shard is not in the pins)
@@ -291,4 +295,24 @@ func TestDirect_MalformedSidecarIsNotIgnored(t *testing.T) {
 	s := u.session(t)
 	_, err := s.AuthenticateMaster(u.bound(s), u.result(u.uc(u.round, nil)), []byte{0x83, 0x01, 0x02})
 	requireOutcome(t, err, OutcomeInvalidInput)
+}
+
+// The direct (unsharded) path enforces the fixed aggregation partition on an authentic UC of another partition:
+// no session setting selects it, the evidence path and the master path both refuse it.
+func TestDirect_RefusesAnAuthenticUCOfAnotherPartition(t *testing.T) {
+	good := newUnsharded(t)
+	gs := good.session(t)
+	_, err := gs.AuthenticateMaster(good.bound(gs), good.result(good.uc(good.round, nil)), nil)
+	require.NoError(t, err, "control: the same construction for partition 7 is accepted")
+
+	u := newUnshardedOf(t, testPartition+1)
+	s := u.session(t)
+	// the evidence stage refuses it ...
+	r := u.result(u.uc(u.round-10, nil))
+	_, err = s.AuthenticateEvidence([]Evidence{{Request: u.req, Proof: r.Proofs[0].InclusionProof}})
+	require.Error(t, err)
+	requireOutcome(t, err, OutcomeIncompatibleLineage)
+	// ... and so does the master stage (the bound is the one of a session which accepted partition 7)
+	_, err = s.AuthenticateMaster(good.bound(good.session(t)), u.result(u.uc(u.round, nil)), nil)
+	require.Error(t, err)
 }
