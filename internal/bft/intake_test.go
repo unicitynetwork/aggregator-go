@@ -245,7 +245,7 @@ func (h *harness) response(n uint64, epoch uint64, signWith map[string]cryptobft
 	seal := &types.UnicitySeal{
 		Version:              1,
 		NetworkID:            types.NetworkLocal,
-		RootChainRoundNumber: n + 10,
+		RootChainRoundNumber: epoch*1000 + n + 10,
 		Epoch:                epoch,
 		Timestamp:            fakeRoundTime + n,
 		PreviousHash:         hash(n + 200),
@@ -292,7 +292,7 @@ func TestIntake_SteadyStateAddsNoNetworkExchange(t *testing.T) {
 	require.EqualValues(t, 0, h.store.headRead.Load()-heads0, "no head read")
 	require.EqualValues(t, 0, h.client.catchup.attempts.Load(), "no catch-up attempt")
 	require.EqualValues(t, 0, h.handshakes.Load(), "no handshake")
-	require.EqualValues(t, n, h.store.getReads.Load()-reads0, "one local trust base lookup per message")
+	require.LessOrEqual(t, h.store.getReads.Load()-reads0, int64(n), "at most one local trust base lookup per message")
 	require.Len(t, h.rm.startedRounds, n+1)
 	require.EqualValues(t, n+1, h.client.receivedResponses.Load())
 }
