@@ -791,6 +791,8 @@ func (rm *RoundManager) FinalizeBlock(ctx context.Context, block *models.Block) 
 	if !diskFinalize {
 		rm.finalizationMu.Unlock()
 	}
+	// The block is durably finalized: its predecessors' views are superseded.
+	rm.pruneSupersededViews(ctx, block, partitionViewPruneBatchesOnFinalize)
 
 	// Proofs are requestable only after the SMT snapshot is committed and the block is visible as finalized.
 	// Redis ACK is recovery bookkeeping.

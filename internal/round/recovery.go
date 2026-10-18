@@ -191,6 +191,11 @@ type blockCertificateFinalizer interface {
 	SetFinalizedWithCertificate(ctx context.Context, block *models.Block) error
 }
 
+// partitionViewPruner is the optional block storage capability to drop superseded partition views.
+type partitionViewPruner interface {
+	PrunePartitionViews(ctx context.Context, below *api.BigInt, limit int) (int, error)
+}
+
 type blockCertificateFinalizingMarker interface {
 	SetFinalizingWithCertificate(ctx context.Context, block *models.Block) error
 }
