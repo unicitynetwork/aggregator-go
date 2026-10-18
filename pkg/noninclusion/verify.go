@@ -8,14 +8,26 @@
 // the exact key present), each with the authenticated Snapshot, or a *Error carrying one rejection class and no
 // snapshot. The verifier has no freshness setting; freshness is the caller's decision after verification:
 //
-//	res, err := v.Verify(stateID, proof)
-//	if err != nil { /* rejected: malformed, UC, authority or certificate failure; no snapshot */ }
-//	if res.Outcome() != noninclusion.OutcomeAbsentAtSnapshot { /* the state is included at the snapshot */ }
-//	snap := res.Snapshot()
-//	if snap.NetworkID() != checkpoint.NetworkID || snap.RootRound() < checkpoint.RequiredRootRound {
-//		/* the snapshot does not meet the application policy (checkpoint obtained independently of the proof) */
+//	// trusted comes from the application's own configuration, never from the proof, the server response or the
+//	// snapshot being checked.
+//	func checkAbsence(trusted Checkpoint, stateID api.StateID, proof *api.NonInclusionProofV1) error {
+//		v, err := noninclusion.NewVerifier(noninclusion.Context{Resolver: trustBaseResolver})
+//		if err != nil {
+//			return err
+//		}
+//		res, err := v.Verify(stateID, proof)
+//		if err != nil {
+//			return fmt.Errorf("proof rejected, no snapshot: %w", err)
+//		}
+//		if res.Outcome() != noninclusion.OutcomeAbsentAtSnapshot {
+//			return errors.New("the state is included at the snapshot: not an absence")
+//		}
+//		snap := res.Snapshot()
+//		if snap.NetworkID() != trusted.NetworkID || snap.RootRound() < trusted.RequiredRootRound {
+//			return errors.New("the snapshot does not meet the application policy")
+//		}
+//		return nil // absent at snap only; any spend or finality decision needs its own policy
 //	}
-//	// absence at snap only; any spend or finality decision needs its own policy
 //
 // The partition is the fixed api.AggregationPartitionID; a proof never selects its authority or partition.
 // Everything the result depends on comes from the Context (the verifier's own configuration), never from the

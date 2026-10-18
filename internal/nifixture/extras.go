@@ -89,7 +89,7 @@ func shardNegatives(sa, sameA, sameB Vector) ([]Vector, error) {
 	})
 	withUC("shard-path-missing", "no shard path at all for a shard of two bits", VerdictUCInvalid, "shard-00", func(uc *types.UnicityCertificate) {
 		uc.ShardTreeCertificate.SiblingHashes = nil
-	})
+	}, VerdictMalformed) // a decoder which checks the path length while decoding stops earlier (JS SDK)
 	withUC("shard-path-sibling-altered", "a shard path sibling altered: the path no longer reaches the seal hash", VerdictUCInvalid, "shard-00", func(uc *types.UnicityCertificate) {
 		s := append([]byte(nil), uc.ShardTreeCertificate.SiblingHashes[0]...)
 		s[0] ^= 1

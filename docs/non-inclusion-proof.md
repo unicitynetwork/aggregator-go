@@ -47,16 +47,29 @@ result: `absent_at_snapshot` or `included_at_snapshot` (each with the queried st
 and no snapshot metadata.
 
 ```go
-v, err := noninclusion.NewVerifier(noninclusion.Context{Resolver: trustBaseResolver})
-res, err := v.Verify(stateID, proof)
-if err != nil { /* rejected: err is a *noninclusion.Error, RejectionOf(err) is the class; no snapshot */ }
-if res.Outcome() != noninclusion.OutcomeAbsentAtSnapshot { /* included at the snapshot */ }
-snap := res.Snapshot() // NetworkID, PartitionID, ShardID, RootRound, SealTimestampSeconds, RootEpoch, ShardRound, ShardEpoch, StateRoot
-if snap.NetworkID() != checkpoint.NetworkID || snap.RootRound() < checkpoint.RequiredRootRound { /* policy not met */ }
-// absence at snap only; any spend/finality decision needs its own policy
+// trusted comes from the application's own configuration, never from the proof, the server response or the
+// snapshot being checked.
+func checkAbsence(trusted Checkpoint, stateID api.StateID, proof *api.NonInclusionProofV1) error {
+	v, err := noninclusion.NewVerifier(noninclusion.Context{Resolver: trustBaseResolver})
+	if err != nil {
+		return err
+	}
+	res, err := v.Verify(stateID, proof)
+	if err != nil {
+		return fmt.Errorf("proof rejected, no snapshot: %w", err) // err is a *noninclusion.Error; RejectionOf(err) is the class
+	}
+	if res.Outcome() != noninclusion.OutcomeAbsentAtSnapshot {
+		return errors.New("the state is included at the snapshot: not an absence")
+	}
+	snap := res.Snapshot() // NetworkID, PartitionID, ShardID, RootRound, SealTimestampSeconds, RootEpoch, ShardRound, ShardEpoch, StateRoot
+	if snap.NetworkID() != trusted.NetworkID || snap.RootRound() < trusted.RequiredRootRound {
+		return errors.New("the snapshot does not meet the application policy")
+	}
+	return nil // absent at snap only; any spend/finality decision needs its own policy
+}
 ```
 
-The checkpoint comes from an independent source, never from the proof or the server response. All snapshot values are
+The checkpoint (`trusted`) comes from the application's configuration or another independent source, never from the proof, the server response or the snapshot being checked. All snapshot values are
 read from the authenticated unicity certificate.
 
 ### Migration (schema 2)

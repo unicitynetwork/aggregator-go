@@ -12,6 +12,12 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/noninclusion"
 )
 
+// appCheckpoint is the independently trusted requirement of the application.
+type appCheckpoint struct {
+	NetworkID         types.NetworkID
+	RequiredRootRound uint64
+}
+
 // Verification returns the authenticated snapshot; whether it is recent enough is the caller's decision, made with
 // a checkpoint which does not come from the proof or the server.
 //
@@ -56,10 +62,9 @@ func ExampleVerifier_Verify() {
 		return
 	}
 	snap := res.Snapshot()
-	checkpoint := struct {
-		NetworkID         types.NetworkID
-		RequiredRootRound uint64
-	}{NetworkID: snap.NetworkID(), RequiredRootRound: 3} // obtained independently of the proof
+	// the checkpoint is the application's own configuration (here the fixture network and a required round), never
+	// derived from the proof, the response or this snapshot
+	checkpoint := appCheckpoint{NetworkID: types.NetworkTestNet, RequiredRootRound: 3}
 	if snap.NetworkID() != checkpoint.NetworkID || snap.RootRound() < checkpoint.RequiredRootRound {
 		fmt.Println("snapshot does not meet the application policy")
 		return
@@ -119,4 +124,56 @@ func ExampleVerifier_Verify_outcome() {
 	// cases/shared-prefix.json: absent at root round 6
 	// cases/singleton-included.json: INCLUDED at root round 5 (verified, but not an absence)
 	// negative/cert-sibling-flipped.json: rejected (certificate_invalid)
+}
+
+// An application which requires another network than the one of the (authenticated) snapshot rejects it: the
+// verifier authenticates the snapshot against the trust base it was given, the application decides which network
+// and which round it requires.
+func ExampleVerifier_Verify_otherNetwork() {
+	var vec struct {
+		Query   string `json:"query"`
+		Wrapper string `json:"wrapper"`
+	}
+	readExampleJSON("cases/shared-prefix.json", &vec)
+	tbBytes, _ := os.ReadFile(filepath.Join(corpus, "authority/trust-base.cbor"))
+	tb := &types.RootTrustBaseV1{}
+	if err := tb.UnmarshalCBOR(tbBytes); err != nil {
+		panic(err)
+	}
+	v, err := noninclusion.NewVerifier(noninclusion.Context{
+		Resolver: func(*types.UnicitySeal) (types.RootTrustBase, error) { return tb, nil },
+	})
+	if err != nil {
+		panic(err)
+	}
+	var resp api.GetNonInclusionProofResponseV1
+	wrapper, _ := hex.DecodeString(vec.Wrapper)
+	if err := resp.UnmarshalCBOR(wrapper); err != nil {
+		panic(err)
+	}
+	query, _ := hex.DecodeString(vec.Query)
+	proof, err := resp.Proof.ForState(api.StateID(query))
+	if err != nil {
+		panic(err)
+	}
+	res, err := v.Verify(api.StateID(query), proof)
+	if err != nil || res.Outcome() != noninclusion.OutcomeAbsentAtSnapshot {
+		panic("the proof is a valid absence")
+	}
+	snap := res.Snapshot()
+	for _, required := range []appCheckpoint{
+		{NetworkID: types.NetworkMainNet, RequiredRootRound: 1}, // the application is a mainnet one
+		{NetworkID: types.NetworkTestNet, RequiredRootRound: snap.RootRound() + 1},
+		{NetworkID: types.NetworkTestNet, RequiredRootRound: snap.RootRound()},
+	} {
+		if snap.NetworkID() != required.NetworkID || snap.RootRound() < required.RequiredRootRound {
+			fmt.Printf("rejected for network %d, round >= %d (snapshot: network %d, round %d)\n", required.NetworkID, required.RequiredRootRound, snap.NetworkID(), snap.RootRound())
+			continue
+		}
+		fmt.Printf("accepted for network %d, round >= %d\n", required.NetworkID, required.RequiredRootRound)
+	}
+	// Output:
+	// rejected for network 1, round >= 1 (snapshot: network 2, round 6)
+	// rejected for network 2, round >= 7 (snapshot: network 2, round 6)
+	// accepted for network 2, round >= 6
 }
