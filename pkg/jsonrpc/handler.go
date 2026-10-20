@@ -110,9 +110,7 @@ func (s *Server) AddMiddleware(middleware MiddlewareFunc) {
 // ServeHTTP implements http.Handler interface
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Set CORS headers
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	SetCORSHeaders(w.Header(), "POST, OPTIONS")
 
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
@@ -330,6 +328,7 @@ func checkParamsLimit(l MethodLimits, req *Request) *Error {
 // json.Marshal (the existing path) and measured.
 func (s *Server) writeLimitedResponse(w http.ResponseWriter, response *Response, max int) {
 	data, err := encodeLimited(response, max)
+	emitted := response // the envelope actually written decides the HTTP status
 	if tooLarge(err) {
 		n := max
 		e := NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "response_bytes", false, &n)
@@ -339,14 +338,15 @@ func (s *Server) writeLimitedResponse(w http.ResponseWriter, response *Response,
 				e = e.WithWaited(ms)
 			}
 		}
-		data, err = json.Marshal(NewErrorResponse(e, response.ID))
+		emitted = NewErrorResponse(e, response.ID)
+		data, err = json.Marshal(emitted)
 	}
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to encode JSON response")
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-	writeBody(w, http.StatusOK, append(data, '\n'))
+	writeBody(w, statusOf(http.StatusOK, emitted), append(data, '\n'))
 }
 
 // writeBody writes one complete JSON body with its Content-Length, set before the header is sent, so that a gateway
@@ -356,8 +356,45 @@ func writeBody(w http.ResponseWriter, status int, body []byte) {
 	_, _ = w.Write(body)
 }
 
+// CORS header values of the JSON-RPC endpoint: the request headers clients send, and the response header browsers
+// need to see to honour an overload answer.
+const (
+	CORSAllowHeaders  = "Content-Type, Authorization, X-API-Key, X-State-ID"
+	CORSExposeHeaders = "Retry-After"
+)
+
+// SetCORSHeaders sets the CORS headers of an answer (also on error answers: a browser can only classify a 503 whose
+// headers it is allowed to read).
+func SetCORSHeaders(h http.Header, methods string) {
+	h.Set("Access-Control-Allow-Origin", "*")
+	h.Set("Access-Control-Allow-Methods", methods)
+	h.Set("Access-Control-Allow-Headers", CORSAllowHeaders)
+	h.Set("Access-Control-Expose-Headers", CORSExposeHeaders)
+}
+
+// OverloadRetryAfterSeconds is the Retry-After of every capacity-overload answer (integer seconds).
+const OverloadRetryAfterSeconds = 1
+
+// IsOverload reports whether the error is a capacity-overload answer (-32006, whatever its reason): it is sent with
+// HTTP 503 and Retry-After so that load balancers, proxies and clients see it at the HTTP layer. The JSON-RPC body
+// (code, message, data, id) is unchanged.
+func IsOverload(e *Error) bool { return e != nil && e.Code == ConcurrencyLimitCode }
+
+// statusOf is the HTTP status of a response sent with status: an overload answer on 200 becomes 503.
+func statusOf(status int, response *Response) int {
+	if status == http.StatusOK && response != nil && IsOverload(response.Error) {
+		return http.StatusServiceUnavailable
+	}
+	return status
+}
+
 func writeHead(w http.ResponseWriter, status, length int) {
+	if status == http.StatusServiceUnavailable {
+		w.Header().Set("Retry-After", strconv.Itoa(OverloadRetryAfterSeconds))
+	}
 	w.Header().Set("Content-Type", "application/json")
+	// proof, status and error answers change over time: proxies and caches must not keep them
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Length", strconv.Itoa(length))
 	w.WriteHeader(status)
 }
@@ -453,7 +490,7 @@ func (s *sizedWriter) Write(b []byte) (int, error) {
 
 // writeJSONStatus encodes the response and writes it with its Content-Length.
 func (s *Server) writeJSONStatus(w http.ResponseWriter, status int, response *Response) {
-	sw := &sizedWriter{w: w, status: status}
+	sw := &sizedWriter{w: w, status: statusOf(status, response)}
 	if err := json.NewEncoder(sw).Encode(response); err != nil {
 		s.logger.WithError(err).Error("Failed to encode JSON response")
 		if !sw.started {

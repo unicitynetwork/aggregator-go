@@ -93,7 +93,14 @@ func goldenPost(t *testing.T, url, body string) string {
 	defer resp.Body.Close()
 	b, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	// a capacity-overload answer (-32006) is HTTP 503 with Retry-After and the unchanged JSON-RPC body; everything
+	// else is 200
+	if strings.Contains(string(b), `"code":-32006`) {
+		require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, string(b))
+		require.Equal(t, "1", resp.Header.Get("Retry-After"))
+	} else {
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
 	return string(b)
 }
 
