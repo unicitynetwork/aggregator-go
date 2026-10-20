@@ -352,10 +352,14 @@ func (s *Server) writeLimitedResponse(w http.ResponseWriter, response *Response,
 // writeBody writes one complete JSON body with its Content-Length, set before the header is sent, so that a gateway
 // can reserve the whole response up front. Every JSON-RPC response goes through it (no streaming, no flush).
 func writeBody(w http.ResponseWriter, status int, body []byte) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	w.WriteHeader(status)
+	writeHead(w, status, len(body))
 	_, _ = w.Write(body)
+}
+
+func writeHead(w http.ResponseWriter, status, length int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(length))
+	w.WriteHeader(status)
 }
 
 // encodeLimited returns the response JSON without the trailing newline, or
@@ -430,15 +434,32 @@ func (s *Server) writeJSONResponse(w http.ResponseWriter, response *Response) {
 	s.writeJSONStatus(w, http.StatusOK, response)
 }
 
-// writeJSONStatus marshals first, then sets Content-Length and writes: an encoding failure is still a clean 500.
-func (s *Server) writeJSONStatus(w http.ResponseWriter, status int, response *Response) {
-	data, err := json.Marshal(response)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to encode JSON response")
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
+// sizedWriter sets Content-Length inside the single Write that json.Encoder makes with the complete body (and does
+// not make at all when encoding fails), so that a large response is encoded once into the encoder's pooled buffer,
+// with no body-sized copy, and an encoding failure is still a clean 500.
+type sizedWriter struct {
+	w       http.ResponseWriter
+	status  int
+	started bool
+}
+
+func (s *sizedWriter) Write(b []byte) (int, error) {
+	if !s.started {
+		s.started = true
+		writeHead(s.w, s.status, len(b))
 	}
-	writeBody(w, status, append(data, '\n'))
+	return s.w.Write(b)
+}
+
+// writeJSONStatus encodes the response and writes it with its Content-Length.
+func (s *Server) writeJSONStatus(w http.ResponseWriter, status int, response *Response) {
+	sw := &sizedWriter{w: w, status: status}
+	if err := json.NewEncoder(sw).Encode(response); err != nil {
+		s.logger.WithError(err).Error("Failed to encode JSON response")
+		if !sw.started {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		}
+	}
 }
 
 // writeErrorResponse writes an error response
