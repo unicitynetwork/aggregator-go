@@ -328,6 +328,7 @@ func checkParamsLimit(l MethodLimits, req *Request) *Error {
 // json.Marshal (the existing path) and measured.
 func (s *Server) writeLimitedResponse(w http.ResponseWriter, response *Response, max int) {
 	data, err := encodeLimited(response, max)
+	emitted := response // the envelope actually written decides the HTTP status
 	if tooLarge(err) {
 		n := max
 		e := NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "response_bytes", false, &n)
@@ -337,14 +338,15 @@ func (s *Server) writeLimitedResponse(w http.ResponseWriter, response *Response,
 				e = e.WithWaited(ms)
 			}
 		}
-		data, err = json.Marshal(NewErrorResponse(e, response.ID))
+		emitted = NewErrorResponse(e, response.ID)
+		data, err = json.Marshal(emitted)
 	}
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to encode JSON response")
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-	writeBody(w, statusOf(http.StatusOK, response), append(data, '\n'))
+	writeBody(w, statusOf(http.StatusOK, emitted), append(data, '\n'))
 }
 
 // writeBody writes one complete JSON body with its Content-Length, set before the header is sent, so that a gateway

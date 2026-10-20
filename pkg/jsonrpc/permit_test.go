@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -234,4 +235,29 @@ func TestResponseTooLargeFallbackKeepsTheEcho(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"m"}`)))
 	require.Contains(t, rec.Body.String(), `"detail":"response_bytes","retryable":false,"limit":1000,"waitedMs":7}`)
+}
+
+// The HTTP status follows the envelope actually emitted: an oversized -32006 answer replaced by the -32007
+// limit_exceeded envelope is HTTP 200 without Retry-After; the same answer that fits stays 503 + Retry-After.
+func TestOversizedOverloadReplacementIsNotAnOverloadStatus(t *testing.T) {
+	s := testServer(t, 2)
+	s.RegisterMethodWithLimits("big", func(context.Context, json.RawMessage) (interface{}, *Error) {
+		return nil, NewError(ConcurrencyLimitCode, strings.Repeat("x", 2000), nil)
+	}, MethodLimits{MaxResponseBytes: 1000})
+	s.RegisterMethodWithLimits("small", func(context.Context, json.RawMessage) (interface{}, *Error) {
+		return nil, NewError(ConcurrencyLimitCode, "Concurrency limit exceeded", nil)
+	}, MethodLimits{MaxResponseBytes: 1000})
+
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"big"}`)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Empty(t, rec.Header().Get("Retry-After"))
+	require.Contains(t, rec.Body.String(), `"code":-32007`)
+	require.Contains(t, rec.Body.String(), `"detail":"response_bytes"`)
+	require.Equal(t, strconv.Itoa(rec.Body.Len()), rec.Header().Get("Content-Length"))
+
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"small"}`)))
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, "1", rec.Header().Get("Retry-After"))
 }
