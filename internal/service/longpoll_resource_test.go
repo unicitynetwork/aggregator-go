@@ -743,11 +743,11 @@ collect:
 		switch {
 		case o.status == 200 && strings.Contains(o.body, `"result"`):
 			res.Completed++
-		case o.status == 200 && strings.Contains(o.body, `"code":-32006`) && strings.Contains(o.body, `"detail":"deadline"`) &&
+		case o.status == 503 && strings.Contains(o.body, `"code":-32006`) && strings.Contains(o.body, `"detail":"deadline"`) &&
 			strings.Contains(o.body, `"retryable":true`) && strings.Contains(o.body, `"waitedMs":`):
 			res.Errors++ // the shared resume deadline expired in the queue: the ruling's permitted outcome
 			res.ErrorsAdmission++
-		case o.status == 200 && strings.Contains(o.body, `"code":-32006`) && strings.Contains(o.body, `"retryable":true`) && strings.Contains(o.body, `"waitedMs":`):
+		case o.status == 503 && strings.Contains(o.body, `"code":-32006`) && strings.Contains(o.body, `"retryable":true`) && strings.Contains(o.body, `"waitedMs":`):
 			res.Errors++
 			res.ErrorsDownstream++
 			if res.ErrorsDownstream <= 2 {
