@@ -1025,7 +1025,7 @@ The service implements comprehensive JSON-RPC 2.0 error codes:
 | `-32003` | Block not found |
 | `-32004` | Database error |
 | `-32005` | Consensus error |
-| `-32006` | Concurrency limit exceeded |
+| `-32006` | Concurrency limit exceeded (sent as HTTP 503 with `Retry-After: 1`; honour it) |
 
 ## Performance Considerations
 

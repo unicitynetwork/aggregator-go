@@ -62,6 +62,10 @@ through a FIFO resume queue limited to `max(1, CONCURRENCY_LIMIT/4)` running re-
 leaving one token for fresh requests. A re-read that cannot get capacity within the resume
 reserve fails with the existing retryable `-32006 busy` / `deadline` error (with the echo).
 
+### Overload signalling
+
+Every `-32006` answer is sent as **HTTP 503 Service Unavailable with `Retry-After: 1`** (integer seconds); the JSON-RPC body (code, message, `data` including `retryable`, the request id) is unchanged. The server-wide limit that is hit before the request is parsed answers the same way with `"id": null`. Clients and proxies should honour `Retry-After`, and treat 503 or a `-32006` body as an inconclusive overload, not a failure; a client that does not read the body of a non-200 answer still sees a failure, as before. Aggregator-go sends no 429 (there is no per-client rate limit). All other answers keep their status (200 for JSON-RPC errors, 413, 500).
+
 ### Sizing guidance
 
 The memory bound is
@@ -106,6 +110,14 @@ admitted the submission:
 6. **Load balancer idle timeout.** A held request is an idle connection from the LB's point of view.
    Set the LB's idle / response timeout above `LONG_POLL_MAX_WAIT + 8s` (default 28 s), and for
    cookie-based affinity make sure the cookie outlives the polling session.
+7. **Do not auto-retry POSTs.** A load balancer or proxy must not retry JSON-RPC POSTs on its own: a failed
+   `certification_request` has an uncertain outcome. SDK waiters repeat the known read operations themselves
+   (and honour `Retry-After`). HTTP/1.1 is the interoperable baseline between every hop; enable h2c only when the
+   next hop supports it, and never discover protocol support by replaying a request.
+8. **Do not cache.** Every JSON-RPC response carries `Cache-Control: no-store` (proof, status and error answers
+   change over time). Pass `Retry-After` through; for browsers the aggregator exposes it
+   (`Access-Control-Expose-Headers`) and allows `Content-Type`, `Authorization`, `X-API-Key` and `X-State-ID`.
+   LB-generated errors need the same CORS headers, or browsers cannot read their status.
 
 ## Shutdown
 

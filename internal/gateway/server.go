@@ -138,6 +138,21 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 
 // setupRoutes sets up HTTP routes
 func (s *Server) setupRoutes() {
+	// CORS for all routes. gin applies a middleware only to the routes registered after it, so it is installed first
+	// (it used to be added after the routes and covered none of them).
+	if s.config.Server.EnableCORS {
+		s.router.Use(func(c *gin.Context) {
+			jsonrpc.SetCORSHeaders(c.Writer.Header(), "GET, POST, PUT, OPTIONS")
+
+			if c.Request.Method == "OPTIONS" {
+				c.AbortWithStatus(http.StatusOK)
+				return
+			}
+
+			c.Next()
+		})
+	}
+
 	// Health and metrics endpoints
 	s.router.GET("/health", s.handleHealth)
 	s.router.GET("/health/leader", s.handleLeaderHealth)
@@ -151,22 +166,6 @@ func (s *Server) setupRoutes() {
 	// API documentation endpoint
 	if s.config.Server.EnableDocs {
 		s.router.GET("/docs", s.handleDocs)
-	}
-
-	// CORS for all routes
-	if s.config.Server.EnableCORS {
-		s.router.Use(func(c *gin.Context) {
-			c.Header("Access-Control-Allow-Origin", "*")
-			c.Header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			c.Header("Access-Control-Allow-Headers", "Content-Type")
-
-			if c.Request.Method == "OPTIONS" {
-				c.AbortWithStatus(http.StatusOK)
-				return
-			}
-
-			c.Next()
-		})
 	}
 }
 
