@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -156,8 +157,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if isBodyTooLarge(err) {
 			recordMetrics("unknown", "error")
 			n := int(ceiling)
-			w.WriteHeader(http.StatusRequestEntityTooLarge)
-			s.writeErrorResponse(w, NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "request_bytes", false, &n), nil)
+			s.writeJSONStatus(w, http.StatusRequestEntityTooLarge, NewErrorResponse(NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "request_bytes", false, &n), nil))
 			return
 		}
 		s.logger.WithContext(ctx).Error("Failed to parse JSON-RPC request", "error", err.Error())
@@ -346,8 +346,16 @@ func (s *Server) writeLimitedResponse(w http.ResponseWriter, response *Response,
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
+	writeBody(w, http.StatusOK, append(data, '\n'))
+}
+
+// writeBody writes one complete JSON body with its Content-Length, set before the header is sent, so that a gateway
+// can reserve the whole response up front. Every JSON-RPC response goes through it (no streaming, no flush).
+func writeBody(w http.ResponseWriter, status int, body []byte) {
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(append(data, '\n'))
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
 }
 
 // encodeLimited returns the response JSON without the trailing newline, or
@@ -417,14 +425,20 @@ func (s *Server) handleRequest(ctx context.Context, req *Request) *Response {
 	return NewResponse(result, req.ID)
 }
 
-// writeJSONResponse writes a JSON response
+// writeJSONResponse writes a JSON response with HTTP 200.
 func (s *Server) writeJSONResponse(w http.ResponseWriter, response *Response) {
-	w.Header().Set("Content-Type", "application/json")
+	s.writeJSONStatus(w, http.StatusOK, response)
+}
 
-	if err := json.NewEncoder(w).Encode(response); err != nil {
+// writeJSONStatus marshals first, then sets Content-Length and writes: an encoding failure is still a clean 500.
+func (s *Server) writeJSONStatus(w http.ResponseWriter, status int, response *Response) {
+	data, err := json.Marshal(response)
+	if err != nil {
 		s.logger.WithError(err).Error("Failed to encode JSON response")
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
 	}
+	writeBody(w, status, append(data, '\n'))
 }
 
 // writeErrorResponse writes an error response
