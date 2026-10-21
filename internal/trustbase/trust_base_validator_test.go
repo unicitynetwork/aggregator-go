@@ -156,6 +156,7 @@ func newRootNodes(t *testing.T, n int) ([]*types.NodeInfo, map[string]cryptobft.
 type mockStorage struct {
 	GetByEpochFunc func(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error)
 	StoreFunc      func(ctx context.Context, trustBase types.RootTrustBase) error
+	GetLatestFunc  func(ctx context.Context) (*types.RootTrustBaseV1, error)
 
 	stored map[uint64]types.RootTrustBase
 }
@@ -193,4 +194,11 @@ func (m *mockStorage) CreateIndexes(ctx context.Context) error {
 
 func (m *mockStorage) GetVersion(epoch uint64) uint64 {
 	return 1
+}
+
+func (m *mockStorage) GetLatest(ctx context.Context) (*types.RootTrustBaseV1, error) {
+	if m.GetLatestFunc != nil {
+		return m.GetLatestFunc(ctx)
+	}
+	return nil, interfaces.ErrTrustBaseNotFound
 }
