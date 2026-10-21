@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -153,6 +154,24 @@ type CertificationData struct {
 	// a signature created on the hash of CBOR array[SourceStateHash, TransactionHash],
 	// in Unicity's [R || S || V] format (65 bytes).
 	Witness HexBytes `json:"witness"`
+}
+
+// Clone returns a deep copy; nil and empty slices stay distinct.
+func (c *CertificationData) Clone() *CertificationData {
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	cp.OwnerPredicate.Code = slices.Clone(c.OwnerPredicate.Code)
+	cp.OwnerPredicate.Params = slices.Clone(c.OwnerPredicate.Params)
+	cp.SourceStateHash = slices.Clone(c.SourceStateHash)
+	cp.TransactionHash = slices.Clone(c.TransactionHash)
+	cp.Witness = slices.Clone(c.Witness)
+	if c.ExpiresAt != nil {
+		e := *c.ExpiresAt
+		cp.ExpiresAt = &e
+	}
+	return &cp
 }
 
 func (c *CertificationData) GetVersion() types.Version {

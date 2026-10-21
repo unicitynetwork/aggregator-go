@@ -1,0 +1,65 @@
+{
+  "corpusVersion": 1,
+  "networkId": 2,
+  "partitionId": 7,
+  "shards": [
+    "000",
+    "001",
+    "010",
+    "011",
+    "100",
+    "101",
+    "110",
+    "111"
+  ],
+  "shardConfigs": [
+    {
+      "shard": "000",
+      "file": "shard-configs/000.cbor",
+      "hash": "c983e31d3c1cc6a5b97bfcb8c3283cacf436c2f05efa4cfd707eeeda6d8d54cb"
+    },
+    {
+      "shard": "001",
+      "file": "shard-configs/001.cbor",
+      "hash": "ec83152ddec1cee14cf7823e221f04c98da3c73dcb939b4a057065aa4a0f92a7"
+    },
+    {
+      "shard": "010",
+      "file": "shard-configs/010.cbor",
+      "hash": "8168493f01af819e91654cda79d43ce4eaaae1f5df17306fb219f8945cf4d449"
+    },
+    {
+      "shard": "011",
+      "file": "shard-configs/011.cbor",
+      "hash": "1976a12d8028bf816dd797a089c41bcdc39270041a576b8786b6a0c0c0677bef"
+    },
+    {
+      "shard": "100",
+      "file": "shard-configs/100.cbor",
+      "hash": "a7164fc0553d198ed82b4dc46bcd4249615d76079806881b9529307ff3bcc951"
+    },
+    {
+      "shard": "101",
+      "file": "shard-configs/101.cbor",
+      "hash": "17b3383c7da9a5d78921210d81821b181d54699fc515da4993c4dd50c7082982"
+    },
+    {
+      "shard": "110",
+      "file": "shard-configs/110.cbor",
+      "hash": "3626cac1253d43ef16b225092bb42b9b6d0efc9865d9f6976526c6955296b004"
+    },
+    {
+      "shard": "111",
+      "file": "shard-configs/111.cbor",
+      "hash": "496e049f0404e97759096bd3dbf0d810244468adcd98d47b01830d4ccde382b6"
+    }
+  ],
+  "master": "010",
+  "participants": [
+    "010",
+    "000",
+    "101",
+    "111"
+  ],
+  "trustBase": "trust-base.cbor"
+}

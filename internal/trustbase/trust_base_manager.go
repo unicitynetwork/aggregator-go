@@ -11,6 +11,9 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 )
 
+// maxCatchUpEpochs bounds store probes and REST fetches per GetByEpoch call.
+const maxCatchUpEpochs = 16
+
 // TrustBaseManager manages trust base synchronization between BFT node and local state
 type TrustBaseManager struct {
 	log                *logger.Logger
@@ -46,9 +49,29 @@ func NewTrustBaseManager(log *logger.Logger, trustBaseStore ManagerStore, bftRes
 	}
 }
 
+// GetAdmitted returns the trust base of the epoch only if it is already admitted to the
+// local store. It never asks the BFT node and never stores anything: it is the lookup for
+// history the aggregator already knows (for example the start of the next epoch, which
+// ends the interval an epoch's keys may certify in).
+func (s *TrustBaseManager) GetAdmitted(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, bool, error) {
+	tb, err := s.trustBaseStore.GetByEpoch(ctx, epoch)
+	if err != nil {
+		if errors.Is(err, interfaces.ErrTrustBaseNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("failed to load admitted trust base for epoch %d: %w", epoch, err)
+	}
+	return tb, tb != nil, nil
+}
+
 // GetByEpoch returns trust base from (in order of precedence):
 // cache -> storage -> BFT node -> error if not found.
-// If new trust base is found from BFT node then the trust base is persisted to TrustBaseStore before returning.
+//
+// The BFT REST endpoint is NOT a trust anchor. The installed epoch-1 trust base (from configuration)
+// is the only anchor: a trust base fetched from the BFT node is admitted only if it has exactly the
+// requested epoch, the anchor's network, is epoch > 1, and extends the already installed predecessor
+// (hash link + predecessor quorum signatures). Replacement genesis (epoch 1) entries are never accepted
+// from the network. The value returned is always the one held in storage, never the received object.
 func (s *TrustBaseManager) GetByEpoch(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
 	// attempt to load from local store (cache + disk via decorator chain)
 	tbFromCache, err := s.trustBaseStore.GetByEpoch(ctx, epoch)
@@ -59,6 +82,55 @@ func (s *TrustBaseManager) GetByEpoch(ctx context.Context, epoch uint64) (*types
 		return tbFromCache, nil
 	}
 
+	// epoch 1 is the configured anchor and cannot be obtained from the network
+	if epoch <= 1 {
+		return nil, fmt.Errorf("trust base anchor (epoch 1) is not installed and cannot be fetched from BFT node, requested epoch %d", epoch)
+	}
+
+	// the installed anchor fixes the expected network
+	anchor, err := s.trustBaseStore.GetByEpoch(ctx, 1)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load installed trust base anchor (epoch 1): %w", err)
+	}
+	if anchor == nil {
+		return nil, errors.New("installed trust base anchor (epoch 1) not found")
+	}
+
+	// Resolve history iteratively from the installed chain head. The requested epoch may come from an
+	// unauthenticated message, so work is bounded: at most maxCatchUpEpochs store probes below the
+	// requested epoch and at most maxCatchUpEpochs REST fetches, stopping at the first failure.
+	head := uint64(0)
+	for e := epoch - 1; e >= 1 && epoch-e <= maxCatchUpEpochs; e-- {
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
+		tb, getErr := s.trustBaseStore.GetByEpoch(ctx, e)
+		if getErr != nil && !errors.Is(getErr, interfaces.ErrTrustBaseNotFound) {
+			return nil, fmt.Errorf("failed to load trust base for epoch %d: %w", e, getErr)
+		}
+		if tb != nil {
+			head = e
+			break
+		}
+	}
+	if head == 0 {
+		return nil, fmt.Errorf("trust base epoch %d is more than %d epochs beyond the installed chain", epoch, maxCatchUpEpochs)
+	}
+	var tb *types.RootTrustBaseV1
+	for e := head + 1; e <= epoch; e++ {
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
+		if tb, err = s.fetchAndAdmit(ctx, e, anchor); err != nil {
+			return nil, fmt.Errorf("cannot extend trust base chain to epoch %d: %w", epoch, err)
+		}
+	}
+	return tb, nil
+}
+
+// fetchAndAdmit fetches exactly one epoch from the BFT node, verifies it against the installed
+// predecessor and stores it. It returns the stored admitted entry.
+func (s *TrustBaseManager) fetchAndAdmit(ctx context.Context, epoch uint64, anchor *types.RootTrustBaseV1) (*types.RootTrustBaseV1, error) {
 	// not found locally: query BFT node
 	trustBases, err := s.bftRestClient.GetTrustBases(ctx, epoch, epoch)
 	if err != nil {
@@ -66,37 +138,56 @@ func (s *TrustBaseManager) GetByEpoch(ctx context.Context, epoch uint64) (*types
 	}
 
 	// validate trust base received from BFT node
-	if len(trustBases) != 1 {
+	if len(trustBases) != 1 || trustBases[0] == nil {
 		return nil, fmt.Errorf("trust base for epoch %d not found for BFT node, len(trustBases)=%d", epoch, len(trustBases))
 	}
 	tb := trustBases[0]
+	if tb.GetEpoch() != epoch {
+		return nil, fmt.Errorf("BFT node returned trust base for epoch %d, requested epoch %d", tb.GetEpoch(), epoch)
+	}
+	if tb.GetNetworkID() != anchor.GetNetworkID() {
+		return nil, fmt.Errorf("BFT node returned trust base for network %d, expected network %d", tb.GetNetworkID(), anchor.GetNetworkID())
+	}
 	if err = s.trustBaseValidator.Verify(ctx, tb); err != nil {
 		return nil, fmt.Errorf("failed to verify trust base received from BFT node for epoch %d: %w", epoch, err)
 	}
 
 	// store the received trust base
 	if err = s.trustBaseStore.Store(ctx, tb); err != nil {
-		if errors.Is(err, interfaces.ErrTrustBaseAlreadyExists) {
-			s.log.WithContext(ctx).Warn("Trust base already stored, not overwriting it", "epoch", tb.GetEpoch())
-		} else {
+		if !errors.Is(err, interfaces.ErrTrustBaseAlreadyExists) {
 			return nil, fmt.Errorf("failed to store trust base for epoch %d: %w", epoch, err)
 		}
-	} else {
-		s.log.WithContext(ctx).Info("Updated trust base storage with new trust base from BFT node", "epoch", tb.GetEpoch())
+		s.log.WithContext(ctx).Warn("Trust base already stored, not overwriting it", "epoch", epoch)
+		// return the admitted stored entry, not the received object
+		stored, getErr := s.trustBaseStore.GetByEpoch(ctx, epoch)
+		if getErr != nil {
+			return nil, fmt.Errorf("failed to load stored trust base for epoch %d: %w", epoch, getErr)
+		}
+		if stored == nil {
+			return nil, fmt.Errorf("stored trust base for epoch %d not found after conflict", epoch)
+		}
+		return stored, nil
 	}
-
-	// return the received trust base
+	s.log.WithContext(ctx).Info("Updated trust base storage with new trust base from BFT node", "epoch", epoch)
 	return tb, nil
 }
 
-// ErrNextEpochUnavailable is returned by AdmitNext when the BFT node has no trust base for the epoch
-// after the admitted head (or answered with something unusable).
+// ErrNextEpochUnavailable is returned by AdmitNext when the BFT node has no usable trust base for the
+// epoch after the admitted head.
 var ErrNextEpochUnavailable = errors.New("the next trust base epoch is not available")
 
-// GetByEpochLocal returns the trust base of the epoch from the local store only: it never queries the
-// BFT node, so it is safe to call for every received message.
+// GetByEpochLocal returns the trust base of the epoch from the local store only (interfaces.
+// ErrTrustBaseNotFound if it is not admitted): it never queries the BFT node, so it is safe to call
+// for every received message.
 func (s *TrustBaseManager) GetByEpochLocal(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
-	return s.trustBaseStore.GetByEpoch(ctx, epoch)
+	tb, known, err := s.GetAdmitted(ctx, epoch)
+	if err != nil {
+		return nil, err
+	}
+	if !known {
+		return nil, interfaces.ErrTrustBaseNotFound
+	}
+	return tb, nil
 }
 
 // Head returns the highest admitted epoch. Admission only ever extends the history by one verified
@@ -109,32 +200,21 @@ func (s *TrustBaseManager) Head(ctx context.Context) (uint64, error) {
 	return tb.GetEpoch(), nil
 }
 
-// AdmitNext asks the BFT node for the epoch after the admitted head, verifies it against its
-// predecessor (previous-trust-base hash, quorum of the previous epoch's validators, network) and stores
-// it. It never trusts or follows an epoch number that came from a received message, and never skips a
-// predecessor. The admitted epoch is returned.
+// AdmitNext asks the BFT node for exactly the epoch after the admitted head, verifies it against the
+// installed anchor's network and its predecessor (hash link and predecessor quorum) and stores it. It
+// never follows an epoch number that came from a received message and never skips a predecessor. The
+// admitted epoch is returned.
 func (s *TrustBaseManager) AdmitNext(ctx context.Context) (uint64, error) {
 	head, err := s.Head(ctx)
 	if err != nil {
 		return 0, err
 	}
-	next := head + 1
-	trustBases, err := s.bftRestClient.GetTrustBases(ctx, next, next)
+	anchor, err := s.trustBaseStore.GetByEpoch(ctx, 1)
 	if err != nil {
-		return 0, fmt.Errorf("%w: epoch %d: %w", ErrNextEpochUnavailable, next, err)
+		return 0, fmt.Errorf("failed to load installed trust base anchor (epoch 1): %w", err)
 	}
-	if len(trustBases) != 1 || trustBases[0] == nil || trustBases[0].GetEpoch() != next {
-		return 0, fmt.Errorf("%w: epoch %d", ErrNextEpochUnavailable, next)
+	if _, err := s.fetchAndAdmit(ctx, head+1, anchor); err != nil {
+		return 0, fmt.Errorf("%w: %w", ErrNextEpochUnavailable, err)
 	}
-	tb := trustBases[0]
-	if err := s.trustBaseValidator.Verify(ctx, tb); err != nil {
-		return 0, fmt.Errorf("failed to verify trust base for epoch %d: %w", next, err)
-	}
-	if err := s.trustBaseStore.Store(ctx, tb); err != nil {
-		if !errors.Is(err, interfaces.ErrTrustBaseAlreadyExists) {
-			return 0, fmt.Errorf("failed to store trust base for epoch %d: %w", next, err)
-		}
-	}
-	s.log.Info("Admitted trust base epoch", "epoch", next)
-	return next, nil
+	return head + 1, nil
 }

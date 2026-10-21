@@ -15,14 +15,15 @@ import (
 // Any method name not in this set is normalized to "unknown" to prevent
 // unbounded label cardinality from arbitrary client input.
 var knownMethods = map[string]struct{}{
-	"certification_request":  {},
-	"get_inclusion_proof.v2": {},
-	"get_no_deletion_proof":  {},
-	"get_block_height":       {},
-	"get_block":              {},
-	"get_block_records":      {},
-	"submit_shard_root":      {},
-	"get_shard_proof":        {},
+	"certification_request":   {},
+	"get_inclusion_proof.v2":  {},
+	"get_inclusion_proofs.v1": {},
+	"get_no_deletion_proof":   {},
+	"get_block_height":        {},
+	"get_block":               {},
+	"get_block_records":       {},
+	"submit_shard_root":       {},
+	"get_shard_proof":         {},
 }
 
 // NormalizeMethod returns the method name if it is a known RPC method,
@@ -216,6 +217,108 @@ var (
 		},
 	)
 
+	// BFTCertificationResponsesTotal counts certification response messages received
+	// from the BFT root (one per root->shard message, whatever its protocol version).
+	BFTCertificationResponsesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_bft_certification_responses_total",
+			Help: "Certification response messages received from the BFT root, by shard.",
+		},
+		[]string{"shard"},
+	)
+
+	// BFTCertificationResponseNonProgressTotal counts responses which certify no new shard
+	// block: the shard input record round does not advance beyond the newest one received. It
+	// covers re-deliveries, timeout repeats and any extra traffic carrying an advancing root round.
+	BFTCertificationResponseNonProgressTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_bft_certification_response_nonprogress_total",
+			Help: "Certification responses that certify no new shard block, by shard.",
+		},
+		[]string{"shard"},
+	)
+
+	// BFTHandshakesTotal counts handshakes sent to the root; each may legitimately be answered by a
+	// re-delivery of the last certification response.
+	BFTHandshakesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_bft_handshakes_total",
+			Help: "Handshakes sent to the BFT root, by shard.",
+		},
+		[]string{"shard"},
+	)
+
+	BFTPartitionViewTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_bft_partition_view_total",
+			Help: "Partition view sidecars received with certification responses by outcome (ok, missing, malformed, invalid, too_large, ...).",
+		},
+		[]string{"result"},
+	)
+
+	// PartitionViewPruneTotal counts the cleanups of superseded partition view sidecars in block
+	// documents by outcome (ok, error). A cleanup failure never fails finalization; it is retried by the
+	// next finalization or startup.
+	PartitionViewPruneTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_partition_view_prune_total",
+			Help: "Cleanups of superseded partition views stored in block documents, by outcome (ok, error).",
+		},
+		[]string{"result"},
+	)
+
+	// PartitionViewPrunedBlocksTotal counts the block documents whose superseded view was removed.
+	PartitionViewPrunedBlocksTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_partition_view_pruned_blocks_total",
+			Help: "Block documents whose superseded partition view was removed.",
+		},
+	)
+
+	ProofViewPublicationTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_proofview_publication_total",
+			Help: "Retained finalized proof view publications by outcome.",
+		},
+		[]string{"result"},
+	)
+
+	ProofStatusPending = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "aggregator_proof_status_pending",
+			Help: "State IDs currently marked pending (admitted, not yet in a published certified state).",
+		},
+	)
+
+	ProofStatusExpired = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "aggregator_proof_status_expired_remembered",
+			Help: "Recently expired state IDs currently remembered (bounded by count and TTL).",
+		},
+	)
+
+	ProofStatusPendingRejected = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_proof_status_pending_rejected_total",
+			Help: "Requests not tracked as pending because the pending entry cap was reached.",
+		},
+	)
+
+	ProofStatusExpiredEvictions = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_proof_status_expired_evictions_total",
+			Help: "Expired state IDs forgotten because of the count or TTL cap.",
+		},
+	)
+
+	ProofStatusServedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aggregator_proof_status_served_total",
+			Help: "Proof status hints served by method and status.",
+		},
+		[]string{"method", "status"},
+	)
+
 	BFTErrorsTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "aggregator_bft_errors_total",
@@ -359,6 +462,27 @@ var (
 			Help: "SMT startup recovery actions by outcome.",
 		},
 		[]string{"action"},
+	)
+
+	SMTDiskBatchProofLeaves = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_smt_disk_batch_proof_leaves_total",
+			Help: "Leaves proven by union-path batch builds on retained disk views.",
+		},
+	)
+
+	SMTDiskBatchNodeReads = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_smt_disk_batch_node_reads_total",
+			Help: "Node reads requested by union-path batch proof builds (compare with unique nodes and leaves).",
+		},
+	)
+
+	SMTDiskBatchUniqueNodes = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aggregator_smt_disk_batch_unique_nodes_total",
+			Help: "Distinct nodes read by union-path batch proof builds.",
+		},
 	)
 
 	SMTDiskProofSnapshotsActive = promauto.NewGauge(

@@ -79,6 +79,13 @@ type ApplyStats struct {
 	ApplyDuration      time.Duration
 	OverlayEntries     int
 	OverlayBytes       int64
+
+	// SortCalls and SortedElements count comparison sorts and the elements they sorted
+	// (hardware independent metrics of the ordering work of an update).
+	SortCalls      int
+	SortedElements int
+	// WaveOrderings counts frontier waves put in node key order without a comparison sort.
+	WaveOrderings int
 }
 
 // Tree is the algorithm-only path-compressed SMT used by disk snapshots after
@@ -114,9 +121,49 @@ func (t *Tree) RootHash() Hash {
 	return hash
 }
 
+// SortedInputOrder returns the indexes of the inputs with a valid key in key order (equal
+// keys by index): the one comparison sort an update needs. Callers which also need the keys in
+// order (materialization) derive them from it and pass it to ApplyLeavesOrdered.
+func SortedInputOrder(inputs []LeafInput) (order []int, sorted int) {
+	order = make([]int, 0, len(inputs))
+	keys := make([]Key, len(inputs))
+	for i, in := range inputs {
+		k, err := KeyFromBytes(in.Key)
+		if err != nil {
+			continue
+		}
+		keys[i] = k
+		order = append(order, i)
+	}
+	sort.Slice(order, func(a, b int) bool {
+		if c := bytes.Compare(keys[order[a]][:], keys[order[b]][:]); c != 0 {
+			return c < 0
+		}
+		return order[a] < order[b]
+	})
+	return order, len(order)
+}
+
 func (t *Tree) ApplyLeaves(inputs []LeafInput) (ApplyResult, error) {
+	order, sorted := SortedInputOrder(inputs)
+	res, err := t.ApplyLeavesOrdered(inputs, order)
+	res.Stats.SortCalls++
+	res.Stats.SortedElements += sorted
+	return res, err
+}
+
+// ApplyLeavesOrdered is ApplyLeaves for inputs whose order of valid keys is already known
+// (SortedInputOrder): no further sorting is done.
+func (t *Tree) ApplyLeavesOrdered(inputs []LeafInput, order []int) (ApplyResult, error) {
 	if t == nil {
 		return ApplyResult{}, fmt.Errorf("disk smt: nil tree")
+	}
+	pos := make([]int, len(inputs))
+	for i := range pos {
+		pos[i] = -1
+	}
+	for p, idx := range order {
+		pos[idx] = p
 	}
 
 	ctx := newApplyContext()
@@ -165,9 +212,19 @@ func (t *Tree) ApplyLeaves(inputs []LeafInput) (ApplyResult, error) {
 	}
 
 	if len(items) > 0 {
-		sort.Slice(items, func(i, j int) bool {
-			return keyPathLess(items[i].Key, items[j].Key)
-		})
+		// place the accepted items in key order by their known rank: no comparisons
+		placed := make([]batchItem, len(order))
+		have := make([]bool, len(order))
+		for _, it := range items {
+			placed[pos[it.Index]] = it
+			have[pos[it.Index]] = true
+		}
+		items = items[:0]
+		for p := range placed {
+			if have[p] {
+				items = append(items, placed[p])
+			}
+		}
 		workers := runtime.GOMAXPROCS(0)
 		if workers < 1 {
 			workers = 1
@@ -283,16 +340,17 @@ func batchInsert(branch *Branch, items []batchItem, start, end, startBit int, ct
 		if branch.Leaf == nil {
 			return nil, fmt.Errorf("disk smt: malformed leaf branch")
 		}
-		mixed := make([]batchItem, 0, end-start+1)
-		mixed = append(mixed, items[start:end]...)
+		// items[start:end] is sorted: the existing leaf is inserted at its place (O(k), no sort)
+		sub := items[start:end]
+		at := sort.Search(len(sub), func(i int) bool { return keyPathLess(branch.Leaf.Key, sub[i].Key) })
+		mixed := make([]batchItem, 0, len(sub)+1)
+		mixed = append(mixed, sub[:at]...)
 		mixed = append(mixed, batchItem{
 			Key:   branch.Leaf.Key,
 			Value: append([]byte(nil), branch.Leaf.Value...),
 			Index: -1,
 		})
-		sort.Slice(mixed, func(i, j int) bool {
-			return keyPathLess(mixed[i].Key, mixed[j].Key)
-		})
+		mixed = append(mixed, sub[at:]...)
 		return buildSubtree(mixed, 0, len(mixed), startBit, ctx, sem)
 	case BranchKindInternal:
 		node := branch.Internal

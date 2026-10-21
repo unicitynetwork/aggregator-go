@@ -34,6 +34,10 @@ func NewCommitmentStorage(db *mongo.Database) *CommitmentStorage {
 func (cs *CommitmentStorage) Store(ctx context.Context, commitment *models.CertificationRequest) error {
 	_, err := cs.collection.InsertOne(ctx, commitment.ToBSON())
 	if err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			// the same state ID is already queued
+			return fmt.Errorf("failed to store commitment: %w: %w", interfaces.ErrDuplicateKey, err)
+		}
 		return fmt.Errorf("failed to store commitment: %w", err)
 	}
 	return nil

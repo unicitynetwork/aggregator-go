@@ -22,6 +22,12 @@ type (
 		IsLeader(ctx context.Context) (bool, error)
 	}
 
+	// ViewPublisher publishes a finalized, committed state to the retained-view
+	// catalog. It must never fail the sync; problems only make proof views unavailable.
+	ViewPublisher interface {
+		PublishFinalized(ctx context.Context, block *models.Block)
+	}
+
 	// BlockSyncer updates the node's state tree using the blocks from storage, if in follower mode.
 	// Needs to be started with the Start method and stopped with the Stop method.
 	// Should not be started in standalone mode.
@@ -33,6 +39,7 @@ type (
 		shardID        api.ShardID
 		syncInterval   time.Duration
 		stateTracker   *state.Tracker
+		viewPublisher  ViewPublisher
 
 		syncSem chan struct{}
 		wg      sync.WaitGroup
@@ -63,6 +70,36 @@ func NewBlockSyncer(
 		stateTracker:   stateTracker,
 		syncSem:        syncSem,
 	}
+}
+
+// SetViewPublisher sets the retained-view publisher used after replaying the final
+// block of a sync run (nil disables). Call before Start.
+func (bs *BlockSyncer) SetViewPublisher(p ViewPublisher) { bs.viewPublisher = p }
+
+func (bs *BlockSyncer) publishView(ctx context.Context, block *models.Block, target *models.Block) {
+	// Only the state a sync run ends at is retained: intermediate roots are transient
+	// and history is rebuilt by subsequent blocks.
+	if bs.viewPublisher == nil || block.Index.Cmp(target.Index.Int) != 0 {
+		return
+	}
+	// The replay reloads the block, and the leader removes the partition view of a superseded block
+	// meanwhile. The attachment captured with the sync target is published only for the very same
+	// certification (index, root and full UC bytes, not merely the root: different certificates can
+	// share one). Otherwise the reloaded block is published as it is stored, with its own view or
+	// none; an older view is never substituted.
+	if len(block.PartitionView) == 0 && len(target.PartitionView) > 0 && sameCertification(block, target) {
+		withView := *block
+		withView.PartitionView = append(api.HexBytes(nil), target.PartitionView...)
+		block = &withView
+	}
+	bs.viewPublisher.PublishFinalized(ctx, block)
+}
+
+func sameCertification(a, b *models.Block) bool {
+	return a.Index.Cmp(b.Index.Int) == 0 &&
+		bytes.Equal(a.RootHash, b.RootHash) &&
+		len(a.UnicityCertificate) > 0 &&
+		bytes.Equal(a.UnicityCertificate, b.UnicityCertificate)
 }
 
 func (bs *BlockSyncer) Start(ctx context.Context) {
@@ -147,12 +184,12 @@ func (bs *BlockSyncer) syncToBlock(ctx context.Context, target *models.Block) er
 		return nil
 	}
 	if bs.usesDiskSMTBackend() {
-		if err := bs.syncDiskToBlock(ctx, target.Index.Int); err != nil {
+		if err := bs.syncDiskToBlock(ctx, target); err != nil {
 			return err
 		}
 		return bs.verifyDiskCommittedBlock(ctx, target)
 	}
-	return bs.syncMemoryToBlock(ctx, target.Index.Int)
+	return bs.syncMemoryToBlock(ctx, target)
 }
 
 func (bs *BlockSyncer) acquireSync(ctx context.Context) (func(), error) {
@@ -166,7 +203,8 @@ func (bs *BlockSyncer) acquireSync(ctx context.Context) (func(), error) {
 	}
 }
 
-func (bs *BlockSyncer) syncMemoryToBlock(ctx context.Context, endBlock *big.Int) error {
+func (bs *BlockSyncer) syncMemoryToBlock(ctx context.Context, target *models.Block) error {
+	endBlock := target.Index.Int
 	// fetch last synced smt block number and last stored block number
 	currBlock := bs.stateTracker.GetLastSyncedBlock()
 	for currBlock.Cmp(endBlock) < 0 {
@@ -186,12 +224,14 @@ func (bs *BlockSyncer) syncMemoryToBlock(ctx context.Context, endBlock *big.Int)
 
 		currBlock = b.Index.Int
 		bs.stateTracker.SetLastSyncedBlock(currBlock)
+		bs.publishView(ctx, b, target)
 		bs.logger.Info("SMT updated for round", "roundNumber", currBlock)
 	}
 	return nil
 }
 
-func (bs *BlockSyncer) syncDiskToBlock(ctx context.Context, endBlock *big.Int) error {
+func (bs *BlockSyncer) syncDiskToBlock(ctx context.Context, target *models.Block) error {
+	endBlock := target.Index.Int
 	state, err := bs.smtBackend.CommittedState(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to read disk SMT committed state: %w", err)
@@ -220,6 +260,7 @@ func (bs *BlockSyncer) syncDiskToBlock(ctx context.Context, endBlock *big.Int) e
 		if bs.stateTracker != nil {
 			bs.stateTracker.SetLastSyncedBlock(currBlock)
 		}
+		bs.publishView(ctx, b, target) // disk read views: the committed state is exactly this block
 		bs.logger.Info("Disk SMT updated for round", "roundNumber", currBlock)
 	}
 	return nil

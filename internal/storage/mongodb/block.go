@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -245,6 +246,89 @@ func (bs *BlockStorage) GetNextFinalizedAfter(ctx context.Context, afterBlock, t
 	return block, nil
 }
 
+// partitionViewIndexName names the partial index over the blocks which carry a partition view.
+const partitionViewIndexName = "index_with_partition_view"
+
+// PrunePartitionViews unsets the partition view of up to limit blocks whose number is below the
+// given one, oldest first, and returns how many blocks it changed. Only the latest finalized block
+// (and an in-flight finalizing candidate above it) needs its view, so the caller passes the number
+// of a block which is durably finalized: the cutoff is a height, never "everything except my
+// block", and a stale caller can only clear blocks which are older than the newest one anyway.
+// The UC of a block is left as it is; a view is only ever cleared together with nothing else.
+func (bs *BlockStorage) PrunePartitionViews(ctx context.Context, below *api.BigInt, limit int) (int, error) {
+	if below == nil || limit <= 0 {
+		return 0, errors.New("prune partition views: block number and a positive limit are required")
+	}
+	filter := bson.M{
+		"index":         bson.M{"$lt": bigIntToDecimal128(below)},
+		"partitionView": bson.M{"$exists": true},
+	}
+	cursor, err := bs.collection.Find(ctx, filter,
+		options.Find().SetSort(bson.D{{Key: "index", Value: 1}}).SetLimit(int64(limit)).
+			SetProjection(bson.M{"index": 1}))
+	if err != nil {
+		return 0, fmt.Errorf("failed to find blocks with partition views: %w", err)
+	}
+	var found []struct {
+		Index bson.RawValue `bson:"index"`
+	}
+	if err := cursor.All(ctx, &found); err != nil {
+		return 0, fmt.Errorf("failed to read blocks with partition views: %w", err)
+	}
+	if len(found) == 0 {
+		return 0, nil
+	}
+	ids := make(bson.A, 0, len(found))
+	for _, f := range found {
+		ids = append(ids, f.Index)
+	}
+	// the cutoff is part of the update as well: nothing at or above it is ever touched
+	filter["index"] = bson.M{"$lt": bigIntToDecimal128(below), "$in": ids}
+	res, err := bs.collection.UpdateMany(ctx, filter, bson.M{"$unset": bson.M{"partitionView": ""}})
+	if err != nil {
+		return 0, fmt.Errorf("failed to unset partition views: %w", err)
+	}
+	return int(res.ModifiedCount), nil
+}
+
+// PruneRecentPartitionViews unsets, in one indexed update, the partition view of the blocks in
+// [below-window, below): the heights right behind a durably finalized block, where the views left
+// by earlier finalizations live. The cutoff is a height as in PrunePartitionViews. What lies
+// further back (crash leftovers, history of earlier versions) is the startup sweep's job.
+func (bs *BlockStorage) PruneRecentPartitionViews(ctx context.Context, below *api.BigInt, window int) (int, error) {
+	if below == nil || window <= 0 {
+		return 0, errors.New("prune partition views: block number and a positive window are required")
+	}
+	index := bson.M{"$lt": bigIntToDecimal128(below)}
+	if low := new(big.Int).Sub(below.Int, big.NewInt(int64(window))); low.Sign() > 0 {
+		index["$gte"] = bigIntToDecimal128(api.NewBigInt(low))
+	}
+	res, err := bs.collection.UpdateMany(ctx,
+		bson.M{"index": index, "partitionView": bson.M{"$exists": true}},
+		bson.M{"$unset": bson.M{"partitionView": ""}})
+	if err != nil {
+		return 0, fmt.Errorf("failed to unset partition views: %w", err)
+	}
+	return int(res.ModifiedCount), nil
+}
+
+// EnsurePartitionViewIndex creates the partial index over the blocks which carry a partition view if it does not
+// exist. It is a performance index only (the pruning is correct without it, it just has to look at more documents)
+// and building it scans the whole collection once, so it is not part of the fatal startup indexes: the storage
+// builds it in the background (Storage.startPartitionViewIndexBuild). It shares the key pattern {index: 1} with the
+// unique index_1, which MongoDB accepts from 5.0 on (the documented minimum).
+func (bs *BlockStorage) EnsurePartitionViewIndex(ctx context.Context) error {
+	_, err := bs.collection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "index", Value: 1}},
+		Options: options.Index().SetName(partitionViewIndexName).
+			SetPartialFilterExpression(bson.M{"partitionView": bson.M{"$exists": true}}),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create the partition view index: %w", err)
+	}
+	return nil
+}
+
 // CreateIndexes creates necessary indexes for the block collection
 func (bs *BlockStorage) CreateIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
@@ -314,11 +398,10 @@ func (bs *BlockStorage) SetFinalizingWithCertificate(ctx context.Context, block 
 		return errors.New("block is nil")
 	}
 	filter := bson.M{"index": bigIntToDecimal128(block.Index)}
-	update := bson.M{"$set": bson.M{
-		"finalized":          false,
-		"status":             models.FinalityStatusFinalizing,
-		"unicityCertificate": block.UnicityCertificate.String(),
-	}}
+	update := certificateUpdate(block, bson.M{
+		"finalized": false,
+		"status":    models.FinalityStatusFinalizing,
+	})
 
 	result, err := bs.collection.UpdateOne(ctx, filter, update)
 	if err != nil {
@@ -338,11 +421,10 @@ func (bs *BlockStorage) SetFinalizedWithCertificate(ctx context.Context, block *
 	}
 	indexDecimal := bigIntToDecimal128(block.Index)
 	filter := bson.M{"index": indexDecimal}
-	update := bson.M{"$set": bson.M{
-		"finalized":          true,
-		"status":             models.FinalityStatusFinalized,
-		"unicityCertificate": block.UnicityCertificate.String(),
-	}}
+	update := certificateUpdate(block, bson.M{
+		"finalized": true,
+		"status":    models.FinalityStatusFinalized,
+	})
 
 	result, err := bs.collection.UpdateOne(ctx, filter, update)
 	if err != nil {
@@ -385,4 +467,19 @@ func (bs *BlockStorage) GetUnfinalized(ctx context.Context) ([]*models.Block, er
 	}
 
 	return blocks, nil
+}
+
+// certificateUpdate builds the update which persists the block's UC together with its
+// optional partition view. The view is always written or cleared in the same update as
+// the UC, so a stored view can only belong to the stored UC bytes.
+func certificateUpdate(block *models.Block, set bson.M) bson.M {
+	set["unicityCertificate"] = block.UnicityCertificate.String()
+	update := bson.M{}
+	if len(block.PartitionView) > 0 {
+		set["partitionView"] = block.PartitionView.String()
+	} else {
+		update["$unset"] = bson.M{"partitionView": ""}
+	}
+	update["$set"] = set
+	return update
 }

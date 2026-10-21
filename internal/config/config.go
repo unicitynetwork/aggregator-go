@@ -62,6 +62,9 @@ type ServerConfig struct {
 	EnableTLS                 bool          `mapstructure:"enable_tls"`
 	EnableH2C                 bool          `mapstructure:"enable_h2c"`
 	HTTP2MaxConcurrentStreams int           `mapstructure:"http2_max_concurrent_streams"`
+	// MaxRequestBodyBytes is the outer JSON-RPC request body ceiling applied
+	// before decoding (0 = jsonrpc.DefaultMaxRequestBodyBytes, 16 MiB).
+	MaxRequestBodyBytes int64 `mapstructure:"max_request_body_bytes"`
 }
 
 // DatabaseConfig holds MongoDB configuration
@@ -201,6 +204,14 @@ type SMTConfig struct {
 	NodeKeyFormat             string     `mapstructure:"node_key_format"`
 	PrecomputeProofs          bool       `mapstructure:"precompute_proofs"`
 	ProofMetadataCacheEntries int        `mapstructure:"proof_metadata_cache_entries"`
+
+	// Retained finalized read views (consolidation batch proofs). Zero selects
+	// the default; see internal/proofview.DefaultLimits.
+	RetainedViews              int           `mapstructure:"retained_views"`
+	RetainedAttachmentsPerView int           `mapstructure:"retained_attachments_per_view"`
+	RetentionBudgetMB          int           `mapstructure:"retention_budget_mb"`
+	MaxConcurrentBatches       int           `mapstructure:"max_concurrent_batches"`
+	BatchTimeout               time.Duration `mapstructure:"batch_timeout"`
 }
 
 // ShardingMode represents the aggregator operating mode
@@ -300,6 +311,11 @@ type BFTConfig struct {
 	KeyConf    *cmdbft.KeyConf                   `mapstructure:"key_conf"`
 	ShardConf  *types.PartitionDescriptionRecord `mapstructure:"shard_conf"`
 	TrustBases []types.RootTrustBaseV1           `mapstructure:"trust_bases"`
+	// ConsolidationShards is an OPTIONAL independently pinned topology (every shard with its
+	// admitted configuration hash) which partition view sidecars must additionally match.
+	// It is a stricter policy, not a prerequisite: without it views are authenticated by the
+	// root seal alone, which commits to the complete scheme and every configuration hash.
+	ConsolidationShards []ConsolidationShard `mapstructure:"consolidation_shards"`
 
 	// Peer configuration
 	Address                    string        `mapstructure:"address"`
@@ -316,6 +332,12 @@ type BFTConfig struct {
 
 	// BFT node REST api address
 	RPCAddress string `mapstructure:"rpc_address"`
+}
+
+// ConsolidationShard is one shard of the trusted consolidation topology.
+type ConsolidationShard struct {
+	ShardID    types.ShardID `json:"shardId"`
+	ConfigHash string        `json:"configHash"` // hex SHA-256 of the shard's PartitionDescriptionRecord
 }
 
 func (c *BFTConfig) Validate() error {
@@ -347,6 +369,7 @@ func Load() (*Config, error) {
 			WriteTimeout:              getEnvDurationOrDefault("WRITE_TIMEOUT", "30s"),
 			IdleTimeout:               getEnvDurationOrDefault("IDLE_TIMEOUT", "120s"),
 			ConcurrencyLimit:          getEnvIntOrDefault("CONCURRENCY_LIMIT", 1000),
+			MaxRequestBodyBytes:       int64(getEnvIntOrDefault("MAX_REQUEST_BODY_BYTES", 16<<20)),
 			EnableDocs:                getEnvBoolOrDefault("ENABLE_DOCS", true),
 			EnableCORS:                getEnvBoolOrDefault("ENABLE_CORS", true),
 			TLSCertFile:               getEnvOrDefault("TLS_CERT_FILE", ""),
@@ -442,6 +465,12 @@ func Load() (*Config, error) {
 			NodeKeyFormat:             getEnvOrDefault("SMT_NODE_KEY_FORMAT", "depth-major"),
 			PrecomputeProofs:          getEnvBoolOrDefault("SMT_PRECOMPUTE_PROOFS", false),
 			ProofMetadataCacheEntries: getEnvIntOrDefault("SMT_PROOF_METADATA_CACHE_ENTRIES", 250000),
+
+			RetainedViews:              getEnvIntOrDefault("SMT_RETAINED_VIEWS", 16),
+			RetainedAttachmentsPerView: getEnvIntOrDefault("SMT_RETAINED_ATTACHMENTS_PER_VIEW", 4),
+			RetentionBudgetMB:          getEnvIntOrDefault("SMT_RETENTION_BUDGET_MB", 256),
+			MaxConcurrentBatches:       getEnvIntOrDefault("SMT_MAX_CONCURRENT_BATCHES", 8),
+			BatchTimeout:               getEnvDurationOrDefault("SMT_BATCH_TIMEOUT", "5s"),
 		},
 		Sharding: ShardingConfig{
 			Mode:                       ShardingMode(getEnvOrDefault("SHARDING_MODE", "standalone")),
@@ -480,6 +509,11 @@ func Load() (*Config, error) {
 		config.BFT.KeyConf = config.Signing.KeyConf
 		if err := loadConf(getEnvOrDefault("BFT_SHARD_CONF_FILE", "bft-config/shard-conf-7_0.json"), &config.BFT.ShardConf); err != nil {
 			return nil, fmt.Errorf("failed to load shard configuration: %w", err)
+		}
+		if f := getEnvOrDefault("BFT_CONSOLIDATION_TOPOLOGY_FILE", ""); f != "" {
+			if err := loadConf(f, &config.BFT.ConsolidationShards); err != nil {
+				return nil, fmt.Errorf("failed to load consolidation topology: %w", err)
+			}
 		}
 		trustBaseFiles := strings.Split(getEnvOrDefault("BFT_TRUST_BASE_FILES", "bft-config/trust-base.json"), ",")
 		config.BFT.TrustBases = make([]types.RootTrustBaseV1, 0, len(trustBaseFiles))
@@ -582,6 +616,13 @@ func (c *Config) Validate() error {
 	if c.SMT.MaterializeWorkers < 0 {
 		return fmt.Errorf("SMT_MATERIALIZE_WORKERS must be non-negative")
 	}
+	if c.Server.MaxRequestBodyBytes < 0 {
+		return fmt.Errorf("MAX_REQUEST_BODY_BYTES must be non-negative")
+	}
+	if c.SMT.RetainedViews < 0 || c.SMT.RetainedAttachmentsPerView < 0 || c.SMT.RetentionBudgetMB < 0 ||
+		c.SMT.MaxConcurrentBatches < 0 || c.SMT.BatchTimeout < 0 {
+		return fmt.Errorf("SMT retained-view settings (SMT_RETAINED_VIEWS, SMT_RETAINED_ATTACHMENTS_PER_VIEW, SMT_RETENTION_BUDGET_MB, SMT_MAX_CONCURRENT_BATCHES, SMT_BATCH_TIMEOUT) must be non-negative")
+	}
 	switch c.SMT.NodeKeyFormat {
 	case "", "depth-major", "prefix-major":
 	default:
@@ -620,6 +661,12 @@ func (c *Config) Validate() error {
 
 	if err := c.BFT.Validate(); err != nil {
 		return err
+	}
+
+	// The aggregation layer is the fixed partition: a node configured for another one would produce
+	// no verifiable proof material (every verifier requires the partition constant).
+	if c.BFT.Enabled && c.BFT.ShardConf != nil && c.BFT.ShardConf.PartitionID != api.AggregationPartitionID {
+		return fmt.Errorf("BFT shard conf is of partition %d, the aggregation partition is %d", c.BFT.ShardConf.PartitionID, api.AggregationPartitionID)
 	}
 
 	if c.Sharding.Mode == ShardingModeBFTShard {

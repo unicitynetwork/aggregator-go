@@ -3,13 +3,15 @@ package bft
 import (
 	"bytes"
 	"context"
-	"crypto"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial"
 	"math/big"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,7 +27,6 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
-	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
@@ -42,8 +43,6 @@ var (
 	ErrInvalidUCSequence       = errors.New("invalid unicity certificate sequence")
 	ErrCertifiedStateMismatch  = errors.New("local committed state does not match latest certified root")
 	ErrBFTClientStopping       = errors.New("BFT client is stopping")
-	// ErrEpochNotAdmitted: the response's epoch is not in the admitted trust base history (yet).
-	ErrEpochNotAdmitted = errors.New("root epoch is not admitted yet")
 )
 
 // BFTClientImpl handles communication with the BFT root chain via P2P network
@@ -89,23 +88,30 @@ type (
 
 		// Trust base history for the certification intake (local reads only on the message path),
 		// the admitted root peer set, and the single background catch-up worker.
-		// configured network and cache of known epoch ends (epoch -> start round of the next epoch)
-		sealNetwork types.NetworkID
-		endsMu      sync.Mutex
-		ends        map[uint64]uint64
 		// last inactivity recovery attempt (unix milli), to pace handshakes while the root is stalled
 		lastRecovery atomic.Int64
 		intakeOnce   sync.Once
 		history      IntakeTrustBases
 		members      *Membership
 		catchup      *catchUp
-		// raw count of received certification responses (separate from liveness)
-		receivedResponses atomic.Uint64
 		// highest root round of an authenticated, sequence-checked UC; only an advance refreshes
 		// lastCertResponseTime
 		lastAuthRootRound atomic.Uint64
 		// admitted trust base head as last seen, to decide whether an epoch is merely unknown
 		admittedHead atomic.Uint64
+
+		// Optional proof material (partition view sidecar) intake. Staged views are
+		// keyed by complete UC digest and published only once that exact UC is accepted.
+		proofStaging  *proofmaterial.Staging
+		proofSink     atomic.Pointer[proofmaterial.Sink]
+		proofTopology proofmaterial.TopologyProvider
+		// lastResponseRound is the newest shard input record round seen in a certification response.
+		lastResponseRound atomic.Uint64
+		// authn is the boundary which authenticates received certificates
+		authn         *ucAuthenticator
+		publishedMu   sync.Mutex
+		published     map[proofmaterial.Digest]bool // recent accepted UC digests -> partition view delivered to the sink
+		publishedFIFO []proofmaterial.Digest
 	}
 
 	BFTClient interface {
@@ -166,11 +172,18 @@ func NewBFTClient(
 		trustBaseStore: trustBaseStore,
 		conf:           conf,
 		eventBus:       eventBus,
+		authn:          newUCAuthenticator(conf.ShardConf.NetworkID, trustBaseStore),
+		proofStaging:   proofmaterial.NewStaging(proofmaterial.DefaultStagingEntries),
+		published:      map[proofmaterial.Digest]bool{},
 	}
+	topo, err := proofTopologyFromConfig(conf)
+	if err != nil {
+		return nil, fmt.Errorf("invalid consolidation topology: %w", err)
+	}
+	bftClient.proofTopology = topo
 	bftClient.status.Store(idle)
 	bftClient.luc.Store(luc)
 	bftClient.lastCertResponseTime.Store(time.Now().UnixMilli())
-	bftClient.sealNetwork = conf.ShardConf.NetworkID
 	bftClient.lastAuthRootRound.Store(luc.GetRootRoundNumber())
 	bftClient.ensureIntake()
 	return bftClient, nil
@@ -416,20 +429,21 @@ func (c *BFTClientImpl) Stop() {
 }
 
 func (c *BFTClientImpl) sendHandshake(ctx context.Context, bftNetwork *BftNetwork, nodeID string) error {
-	c.ensureIntake()
+	metrics.BFTHandshakesTotal.WithLabelValues(c.shardID.String()).Inc()
 	c.logger.WithContext(ctx).Debug("sending handshake to root chain")
 	if bftNetwork == nil {
 		return errors.New("BFT network is not initialized")
 	}
 
 	// load trust base: the newest admitted epoch, so that after a catch-up the new roots are asked
+	c.ensureIntake()
 	rootEpoch := c.luc.Load().GetRootEpoch()
 	if head := c.admittedHead.Load(); head > rootEpoch {
 		rootEpoch = head
 	}
-	tb, err := c.history.GetByEpochLocal(ctx, rootEpoch)
+	tb, err := c.authn.trustBase(ctx, rootEpoch)
 	if err != nil {
-		return fmt.Errorf("failed to load trust base for epoch %d: %w", rootEpoch, err)
+		return err
 	}
 	// select some random root nodes
 	rootIDs, err := randomNodeSelector(tb, defaultHandshakeNodes)
@@ -438,7 +452,7 @@ func (c *BFTClientImpl) sendHandshake(ctx context.Context, bftNetwork *BftNetwor
 	}
 	// A newly admitted epoch may not be active yet: also ask some roots of the live epoch.
 	if liveEpoch := c.luc.Load().GetRootEpoch(); liveEpoch != rootEpoch {
-		if liveTB, lerr := c.history.GetByEpochLocal(ctx, liveEpoch); lerr == nil {
+		if liveTB, lerr := c.authn.trustBase(ctx, liveEpoch); lerr == nil {
 			if liveIDs, serr := randomNodeSelector(liveTB, defaultHandshakeNodes); serr == nil {
 				rootIDs = mergePeerIDs(rootIDs, liveIDs)
 			}
@@ -515,6 +529,13 @@ func (c *BFTClientImpl) handleMessage(ctx context.Context, msg any) {
 		if err := c.handleCertificationResponse(ctx, mt); err != nil {
 			c.logger.WithContext(ctx).Error("error processing CertificationResponse message", "error", err.Error())
 		}
+	case *certification.CertificationResponseV2:
+		c.logger.WithContext(ctx).Info("received CertificationResponseV2")
+		// The envelope is already structurally valid (version, framing). The ordinary
+		// response goes through the unchanged handler; the opaque view is optional.
+		if err := c.handleCertificationResponse(ctx, mt.Legacy()); err != nil {
+			c.logger.WithContext(ctx).Error("error processing CertificationResponseV2 message", "error", err.Error())
+		}
 	default:
 		c.logger.WithContext(ctx).Info("received unknown message")
 	}
@@ -522,9 +543,9 @@ func (c *BFTClientImpl) handleMessage(ctx context.Context, msg any) {
 
 func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *certification.CertificationResponse) error {
 	c.ensureIntake()
-	// raw reception is counted, but it is not liveness: only an authenticated, sequence-checked UC
-	// with an advancing root round refreshes the recovery timer (see noteAuthenticated)
-	c.receivedResponses.Add(1)
+	// raw reception is counted, but it is not liveness and not progress: only an authenticated,
+	// sequence-checked UC with an advancing root round refreshes the recovery timer (noteAuthenticated)
+	metrics.BFTCertificationResponsesTotal.WithLabelValues(c.shardID.String()).Inc()
 
 	// malformed nested shapes (null path elements) are rejected before anything evaluates them
 	if err := validateUCShape(&cr.UC); err != nil {
@@ -536,144 +557,35 @@ func (c *BFTClientImpl) handleCertificationResponse(ctx context.Context, cr *cer
 	if cr.Partition != c.PartitionID() || !cr.Shard.Equal(c.ShardID()) {
 		return fmt.Errorf("got CertificationResponse for a wrong shard %s - %s", cr.Partition, cr.Shard)
 	}
-
-	// verify UC against an already admitted trust base: local reads only, never the BFT node
-	epoch := cr.UC.GetRootEpoch()
-	if head := c.admittedHead.Load(); head > 0 && epoch > head {
-		// beyond the admitted history: no store read, no REST; only wake the worker (coalesced)
+	if epoch, head := cr.UC.GetRootEpoch(), c.admittedHead.Load(); head > 0 && epoch > head {
+		// beyond the admitted history: no store read, no REST; only wake the worker (coalesced).
+		// "Not admitted yet" is not "invalid": nothing is accepted, nothing is cached as invalid.
 		c.catchup.Signal()
 		return fmt.Errorf("%w: epoch %d", ErrEpochNotAdmitted, epoch)
 	}
-	tb, err := c.history.GetByEpochLocal(ctx, epoch)
-	if err != nil {
-		if errors.Is(err, interfaces.ErrTrustBaseNotFound) {
-			// "not admitted yet" is not "invalid": the certificate is dropped without being accepted
-			// and the single background worker walks forward from the trusted head
-			if epoch > c.admittedHead.Load() {
-				c.catchup.Signal()
-			}
-			return fmt.Errorf("%w: epoch %d", ErrEpochNotAdmitted, epoch)
+
+	// verify UC: configured network, exact root epoch, epoch start and quorum; the partition
+	// view of the same response is authenticated within the same operation (one resolution of
+	// the authority and history, one judgment of the shared seal)
+	op := c.authn.beginIntake(ctx)
+	if err := op.verifyUC(&cr.UC, c.partitionID, c.shardID); err != nil {
+		if errors.Is(err, ErrEpochNotAdmitted) {
+			c.catchup.Signal()
 		}
-		return fmt.Errorf("failed to load trust base for epoch %d: %w", epoch, err)
-	}
-	// the configured network, the exact epoch and the epoch's interval are not part of the native
-	// verification: check them against the admitted local history before the quorum counts
-	if err := c.checkSealContext(ctx, &cr.UC, tb); err != nil {
-		return fmt.Errorf("failed to verify UC: %w", err)
-	}
-	if err := cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, nil); err != nil {
 		return fmt.Errorf("failed to verify UC: %w", err)
 	}
 
 	c.logger.WithContext(ctx).Info(fmt.Sprintf("handleCertificationResponse: UC round %d, next round %d, next leader %s",
 		cr.UC.GetRoundNumber(), cr.Technical.Round, cr.Technical.Leader))
 
-	return c.handleUnicityCertificate(ctx, &cr.UC, &cr.Technical)
-}
+	// Only the response's own UC is processed; the view's other leaves are never dispatched.
+	c.stagePartitionViewOp(ctx, op, cr)
 
-// validateUCShape rejects certificates with missing parts or null path elements, which the native
-// verification would dereference.
-func validateUCShape(uc *types.UnicityCertificate) error {
-	switch {
-	case uc == nil:
-		return types.ErrUnicityCertificateIsNil
-	case uc.InputRecord == nil:
-		return types.ErrInputRecordIsNil
-	case uc.UnicitySeal == nil:
-		return types.ErrUnicitySealIsNil
-	case uc.UnicityTreeCertificate == nil:
-		return errors.New("unicity tree certificate is nil")
-	}
-	for i, step := range uc.UnicityTreeCertificate.HashSteps {
-		if step == nil {
-			return fmt.Errorf("unicity tree certificate hash step %d is null", i)
-		}
-	}
-	return nil
-}
-
-// checkSealContext binds the seal to the configured network, to the exact epoch of the trust base
-// it is verified under and to that epoch's interval: the seal round is not before the epoch start
-// and, when the next epoch is admitted, before its start (the retired authority may not certify
-// after it). It reads only the local admitted history: the end of the head epoch is unknown by
-// definition (nothing above the head is admitted), so steady state needs no extra lookup, and a
-// known boundary never changes, so it is cached.
-func (c *BFTClientImpl) checkSealContext(ctx context.Context, uc *types.UnicityCertificate, tb *types.RootTrustBaseV1) error {
-	seal := uc.UnicitySeal
-	if seal.NetworkID != c.sealNetwork {
-		return fmt.Errorf("unicity seal is of network %d, configured network is %d", seal.NetworkID, c.sealNetwork)
-	}
-	if tb.GetNetworkID() != c.sealNetwork {
-		return fmt.Errorf("trust base of epoch %d is of network %d, configured network is %d", tb.GetEpoch(), tb.GetNetworkID(), c.sealNetwork)
-	}
-	if tb.GetEpoch() != seal.Epoch {
-		return fmt.Errorf("trust base of epoch %d returned for the seal's epoch %d", tb.GetEpoch(), seal.Epoch)
-	}
-	if seal.RootChainRoundNumber < tb.GetEpochStart() {
-		return fmt.Errorf("seal round %d is before the start of epoch %d (round %d)", seal.RootChainRoundNumber, seal.Epoch, tb.GetEpochStart())
-	}
-	end, known, err := c.epochEnd(ctx, seal.Epoch)
-	if err != nil {
+	if err := c.handleUnicityCertificate(ctx, &cr.UC, &cr.Technical); err != nil {
 		return err
 	}
-	if known && seal.RootChainRoundNumber >= end {
-		return fmt.Errorf("seal round %d is at or after the start of the next epoch %d (round %d): epoch %d authority has retired",
-			seal.RootChainRoundNumber, seal.Epoch+1, end, seal.Epoch)
-	}
+	c.publishSidecarFill(ctx, &cr.UC)
 	return nil
-}
-
-// epochEnd returns the start round of the epoch after "epoch" if it is admitted locally.
-func (c *BFTClientImpl) epochEnd(ctx context.Context, epoch uint64) (uint64, bool, error) {
-	c.endsMu.Lock()
-	end, ok := c.ends[epoch]
-	c.endsMu.Unlock()
-	if ok {
-		return end, true, nil
-	}
-	if head := c.admittedHead.Load(); head > 0 && epoch >= head {
-		return 0, false, nil // nothing above the head is admitted
-	}
-	next, err := c.history.GetByEpochLocal(ctx, epoch+1)
-	if err != nil {
-		if errors.Is(err, interfaces.ErrTrustBaseNotFound) {
-			return 0, false, nil
-		}
-		return 0, false, fmt.Errorf("failed to load trust base for epoch %d: %w", epoch+1, err)
-	}
-	if next.GetEpoch() != epoch+1 || next.GetNetworkID() != c.sealNetwork {
-		return 0, false, fmt.Errorf("history entry for epoch %d is of epoch %d, network %d", epoch+1, next.GetEpoch(), next.GetNetworkID())
-	}
-	c.endsMu.Lock()
-	if c.ends == nil || len(c.ends) >= 64 {
-		c.ends = map[uint64]uint64{}
-	}
-	c.ends[epoch] = next.GetEpochStart()
-	c.endsMu.Unlock()
-	return next.GetEpochStart(), true, nil
-}
-
-// noteAuthenticated records that an authenticated, sequence-checked UC arrived. Only an advance of the
-// authenticated root round refreshes the recovery timer, so an old valid UC replayed by a peer can not
-// suppress recovery; legitimate timeout/repeat UCs advance the root round even when the shard round
-// does not. A newer live epoch republishes the admitted peer set.
-func (c *BFTClientImpl) noteAuthenticated(ctx context.Context, uc *types.UnicityCertificate) {
-	c.ensureIntake()
-	r := uc.GetRootRoundNumber()
-	for {
-		cur := c.lastAuthRootRound.Load()
-		if r <= cur {
-			break
-		}
-		if c.lastAuthRootRound.CompareAndSwap(cur, r) {
-			c.lastCertResponseTime.Store(time.Now().UnixMilli())
-			break
-		}
-	}
-	if err := c.members.Advance(ctx, uc.GetRootEpoch()); err != nil {
-		c.logger.WithContext(ctx).Warn("failed to republish the admitted root peers, will retry", "error", err.Error())
-		c.catchup.RetryLater(time.Second)
-	}
 }
 
 func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
@@ -743,6 +655,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		// cleanup succeeds, so a failed cleanup can be retried by the next UC.
 		c.luc.Store(uc)
 		c.lastRootRound.Store(uc.GetRootRoundNumber())
+		c.publishProofMaterial(ctx, uc, proofmaterial.KindRepeat, 0, false)
 
 		// Start new round immediately with the next expected round
 		nextRoundNumber := big.NewInt(0)
@@ -792,6 +705,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 			return err
 		}
 		if recovered {
+			c.publishProofMaterial(ctx, uc, proofmaterial.KindFinalized, uc.GetRoundNumber(), true)
 			c.logger.WithContext(ctx).Info("Durable proposal finalized from initialization UC",
 				"ucRound", uc.GetRoundNumber(),
 				"nextRoundNumber", nextRoundNumber.String())
@@ -901,6 +815,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 					return fmt.Errorf("failed to finalize durable proposal: %w", err)
 				}
 				if recovered {
+					c.publishProofMaterial(ctx, uc, proofmaterial.KindFinalized, expectedRound, true)
 					c.logger.WithContext(ctx).Info("Durable proposal finalized from UC",
 						"ucRound", expectedRound,
 						"nextRoundNumber", nextRoundNumber.String())
@@ -970,6 +885,11 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		return fmt.Errorf("failed to encode unicity certificate: %w", err)
 	}
 	c.proposedBlock.UnicityCertificate = api.NewHexBytes(ucCbor)
+	// Persist the view only when it was received for exactly these UC bytes.
+	c.proposedBlock.PartitionView = nil
+	if view, ok := c.proofStaging.Get(sha256.Sum256(ucCbor)); ok {
+		c.proposedBlock.PartitionView = api.NewHexBytes(view)
+	}
 
 	if c.resumedDurableProposal {
 		finalizer, ok := c.roundManager.(DurableProposalFinalizer)
@@ -995,6 +915,7 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 			rollbackInitialization()
 			return fmt.Errorf("resumed durable proposal %s was not finalized", c.proposedBlock.Index.String())
 		}
+		c.publishProofMaterial(ctx, uc, proofmaterial.KindFinalized, c.proposedBlock.Index.Uint64(), true)
 		c.proposedBlock = nil
 		c.resumedDurableProposal = false
 
@@ -1021,6 +942,8 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 		return fmt.Errorf("failed to finalize block after retries: %w", err)
 	}
 
+	c.publishProofMaterial(ctx, uc, proofmaterial.KindFinalized, c.proposedBlock.Index.Uint64(), true)
+
 	// Clear the proposed block after finalization
 	c.proposedBlock = nil
 	c.resumedDurableProposal = false
@@ -1035,6 +958,227 @@ func (c *BFTClientImpl) handleUnicityCertificate(ctx context.Context, uc *types.
 			"error", err.Error())
 	}
 	return err
+}
+
+// proofTopologyFromConfig derives the OPTIONAL independently pinned topology used to
+// validate partition views more strictly (BFT_CONSOLIDATION_TOPOLOGY_FILE). Without it
+// views are authenticated by the seal alone: the scheme and every configuration hash are
+// the ones the root quorum signed. Returns nil when no pins are configured.
+func proofTopologyFromConfig(conf *config.BFTConfig) (proofmaterial.TopologyProvider, error) {
+	if conf == nil || conf.ShardConf == nil || len(conf.ConsolidationShards) == 0 {
+		return nil, nil
+	}
+	scheme := make(types.ShardingScheme, 0, len(conf.ConsolidationShards))
+	hashes := make(map[string][]byte, len(conf.ConsolidationShards))
+	for _, sh := range conf.ConsolidationShards {
+		h, err := hex.DecodeString(strings.TrimPrefix(sh.ConfigHash, "0x"))
+		if err != nil {
+			return nil, fmt.Errorf("shard %q configuration hash: %w", sh.ShardID, err)
+		}
+		if _, dup := hashes[sh.ShardID.Key()]; dup {
+			return nil, fmt.Errorf("duplicate shard %q", sh.ShardID)
+		}
+		scheme = append(scheme, sh.ShardID)
+		hashes[sh.ShardID.Key()] = h
+	}
+	if len(scheme) == 1 && scheme[0].Length() == 0 {
+		scheme = types.ShardingScheme{}
+	}
+	t, err := proofmaterial.NewStaticTopology(scheme, hashes)
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// noteResponseRound counts responses which certify no new shard block: the shard input
+// record round must advance beyond the newest one already received for the response to
+// carry new work (new finalized block). Re-deliveries, timeout repeats and extra traffic
+// with an advancing root round all count as non-progress. Only authenticated, sequence-checked
+// certificates are counted (noteAuthenticated).
+func (c *BFTClientImpl) noteResponseRound(uc *types.UnicityCertificate) {
+	if uc == nil || uc.InputRecord == nil {
+		return
+	}
+	round := uc.InputRecord.RoundNumber
+	for {
+		last := c.lastResponseRound.Load()
+		if round > last {
+			if c.lastResponseRound.CompareAndSwap(last, round) {
+				return
+			}
+			continue
+		}
+		metrics.BFTCertificationResponseNonProgressTotal.WithLabelValues(c.shardID.String()).Inc()
+		return
+	}
+}
+
+// noteAuthenticated records that an authenticated, sequence-checked UC arrived. Only an advance of the
+// authenticated root round refreshes the recovery timer, so an old valid UC replayed by a peer can not
+// suppress recovery; legitimate timeout/repeat UCs advance the root round even when the shard round
+// does not. A newer live epoch republishes the admitted peer set.
+func (c *BFTClientImpl) noteAuthenticated(ctx context.Context, uc *types.UnicityCertificate) {
+	c.ensureIntake()
+	c.noteResponseRound(uc)
+	r := uc.GetRootRoundNumber()
+	for {
+		cur := c.lastAuthRootRound.Load()
+		if r <= cur {
+			break
+		}
+		if c.lastAuthRootRound.CompareAndSwap(cur, r) {
+			c.lastCertResponseTime.Store(time.Now().UnixMilli())
+			break
+		}
+	}
+	if err := c.members.Advance(ctx, uc.GetRootEpoch()); err != nil {
+		c.logger.WithContext(ctx).Warn("failed to republish the admitted root peers, will retry", "error", err.Error())
+		c.catchup.RetryLater(time.Second)
+	}
+}
+
+// ProofTopology returns the optional independently pinned topology (nil: none configured).
+func (c *BFTClientImpl) ProofTopology() proofmaterial.TopologyProvider { return c.proofTopology }
+
+// SealVerifier returns the client's trusted seal verifier (authority resolved from the
+// admitted trust history) for re-authenticating stored material.
+func (c *BFTClientImpl) SealVerifier(ctx context.Context) types.SealVerifier {
+	return c.authn.sealVerifier(ctx)
+}
+
+// SetProofMaterialSink sets the consumer of published proof material (A4 wires the
+// retained-view catalog here). Safe to call before or after Start; nil resets to discard.
+func (c *BFTClientImpl) SetProofMaterialSink(sink proofmaterial.Sink) {
+	if sink == nil {
+		c.proofSink.Store(nil)
+		return
+	}
+	c.proofSink.Store(&sink)
+}
+
+// SetProofTopologyProvider sets the optional trusted topology source used to validate
+// partition views. Call before Start.
+func (c *BFTClientImpl) SetProofTopologyProvider(p proofmaterial.TopologyProvider) {
+	c.proofTopology = p
+}
+
+// stagePartitionView validates the sidecar of an already authenticated UC and stages it.
+// Every failure only means missing proof material (metric + bounded log).
+func (c *BFTClientImpl) stagePartitionView(ctx context.Context, cr *certification.CertificationResponse) {
+	if cr.PartitionView == nil {
+		return // legacy v1 response, or v2 with null view
+	}
+	c.stagePartitionViewOp(ctx, c.authn.begin(ctx), cr)
+}
+
+// stagePartitionViewOp is stagePartitionView within the intake operation "op".
+func (c *BFTClientImpl) stagePartitionViewOp(ctx context.Context, op *authOp, cr *certification.CertificationResponse) {
+	if cr.PartitionView == nil {
+		return
+	}
+	if proofmaterial.IsUnshardedUC(&cr.UC) {
+		// the UC of an unsharded partition is complete by itself: the sidecar of a one-leaf
+		// partition is neither validated, staged, persisted nor served
+		metrics.BFTPartitionViewTotal.WithLabelValues("unsharded_skipped").Inc()
+		return
+	}
+	result, view, err := proofmaterial.ValidateView(cr.PartitionView, &cr.UC, op.sealVerifier(), c.proofTopology)
+	metrics.BFTPartitionViewTotal.WithLabelValues(result).Inc()
+	if err != nil {
+		c.logger.WithContext(ctx).Warn("Ignoring partition view sidecar",
+			"result", result, "error", truncate(err.Error(), 200), "rootRound", cr.UC.GetRootRoundNumber())
+		return
+	}
+	digest, _, err := proofmaterial.DigestOfUC(&cr.UC)
+	if err != nil {
+		return
+	}
+	c.proofStaging.Put(digest, view)
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+const maxPublishedTracked = 16
+
+// publishProofMaterial hands the accepted UC (with its staged view, if any) to the sink.
+// Sink failures never affect certification.
+func (c *BFTClientImpl) publishProofMaterial(ctx context.Context, uc *types.UnicityCertificate, kind proofmaterial.Kind, blockNumber uint64, hasBlock bool) {
+	digest, ucBytes, err := proofmaterial.DigestOfUC(uc)
+	if err != nil {
+		c.logger.WithContext(ctx).Warn("Not publishing proof material", "error", err.Error())
+		return
+	}
+	view, _ := c.proofStaging.Get(digest)
+	c.deliverProofMaterial(ctx, &proofmaterial.Material{
+		Kind: kind, UC: uc, UCBytes: ucBytes, UCDigest: digest,
+		PartitionView: view, BlockNumber: blockNumber, HasBlock: hasBlock,
+	})
+}
+
+func (c *BFTClientImpl) deliverProofMaterial(ctx context.Context, m *proofmaterial.Material) {
+	// The UC is tracked as accepted from now on; its view counts as delivered only once
+	// the sink has accepted it, so a failed fill stays eligible for later duplicates.
+	c.trackPublished(m.UCDigest, false)
+
+	sink := c.proofSink.Load()
+	if sink == nil {
+		return
+	}
+	if err := (*sink).PublishProofMaterial(ctx, m); err != nil {
+		c.logger.WithContext(ctx).Warn("Publishing proof material failed",
+			"kind", m.Kind.String(), "error", err.Error())
+		return
+	}
+	if len(m.PartitionView) > 0 {
+		c.trackPublished(m.UCDigest, true)
+	}
+}
+
+// trackPublished records an accepted UC; viewDelivered only ever moves to true.
+func (c *BFTClientImpl) trackPublished(d proofmaterial.Digest, viewDelivered bool) {
+	c.publishedMu.Lock()
+	defer c.publishedMu.Unlock()
+	if c.published == nil {
+		c.published = map[proofmaterial.Digest]bool{}
+	}
+	prev, seen := c.published[d]
+	if !seen {
+		c.publishedFIFO = append(c.publishedFIFO, d)
+		if len(c.publishedFIFO) > maxPublishedTracked {
+			delete(c.published, c.publishedFIFO[0])
+			c.publishedFIFO = c.publishedFIFO[1:]
+		}
+	}
+	c.published[d] = prev || viewDelivered
+}
+
+// publishSidecarFill handles a duplicate delivery of an already published UC which
+// carried a valid view the earlier publication lacked. The UC must be the one this
+// client already accepted and published; nothing is re-executed.
+func (c *BFTClientImpl) publishSidecarFill(ctx context.Context, uc *types.UnicityCertificate) {
+	digest, ucBytes, err := proofmaterial.DigestOfUC(uc)
+	if err != nil {
+		return
+	}
+	view, ok := c.proofStaging.Get(digest)
+	if !ok {
+		return
+	}
+	c.publishedMu.Lock()
+	hadView, seen := c.published[digest]
+	c.publishedMu.Unlock()
+	if !seen || hadView {
+		return
+	}
+	c.deliverProofMaterial(ctx, &proofmaterial.Material{
+		Kind: proofmaterial.KindSidecarFill, UC: uc, UCBytes: ucBytes, UCDigest: digest, PartitionView: view,
+	})
 }
 
 func (c *BFTClientImpl) publishFatalError(ctx context.Context, err error) {
@@ -1180,9 +1324,9 @@ func (c *BFTClientImpl) sendCertificationRequest(ctx context.Context, rootHash s
 	c.logger.WithContext(ctx).Info(fmt.Sprintf("Round %d sending block certification request to root chain, IR hash %X",
 		req.InputRecord.RoundNumber, req.InputRecord.Hash))
 
-	tb, err := c.trustBaseStore.GetByEpoch(ctx, luc.GetRootEpoch())
+	tb, err := c.authn.trustBase(ctx, luc.GetRootEpoch())
 	if err != nil {
-		return fmt.Errorf("failed to load trust base for epoch %d: %w", luc.GetRootEpoch(), err)
+		return err
 	}
 	rootIDs, err := rootNodesSelector(luc, tb, defaultNofRootNodes)
 	if err != nil {

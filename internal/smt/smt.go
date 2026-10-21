@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync/atomic"
 
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
@@ -16,6 +17,8 @@ var (
 	ErrKeyLength              = errors.New("smt: invalid key length")
 	ErrWrongShard             = errors.New("smt: key does not belong in this shard")
 	ErrInvalidChildHashLength = errors.New("smt: child hash value length does not match hash algorithm")
+	// ErrLeafNotFound: no leaf exists at the requested key (inclusion cert).
+	ErrLeafNotFound = errors.New("smt: leaf not found")
 )
 
 // smtCachedHashBytes is the fixed size of the inline hash cache arrays in
@@ -261,7 +264,8 @@ type LeafBranch struct {
 	Value   []byte
 	rawHash [smtCachedHashBytes]byte // inline hash cache; valid when hashSet == true
 	hashSet bool
-	isChild bool // true if this is the root hash from a child aggregator
+	isChild bool   // true if this is the root hash from a child aggregator
+	seq     uint64 // creation sequence; see nextNodeSeq
 }
 
 // NodeBranch represents an internal node
@@ -278,8 +282,18 @@ type NodeBranch struct {
 	Right   branch
 	rawHash [smtCachedHashBytes]byte // inline hash cache; valid when hashSet == true
 	hashSet bool
-	isRoot  bool // true if this is the root node
+	isRoot  bool   // true if this is the root node
+	seq     uint64 // creation sequence; see nextNodeSeq
 }
+
+// nodeSeqCounter stamps every node at construction. Nodes are immutable once
+// reachable from a published root and a parent is always constructed after its
+// children, so seq(parent) > seq(child). Retained read views use this to count
+// the nodes a root introduced relative to an earlier root by descending only
+// into nodes newer than that root, without walking the whole tree.
+var nodeSeqCounter atomic.Uint64
+
+func nextNodeSeq() uint64 { return nodeSeqCounter.Add(1) }
 
 // NewLeafBranch creates a regular leaf branch
 func newLeafBranch(path *big.Int, value []byte) *LeafBranch {
@@ -296,6 +310,7 @@ func newLeafBranchWithKey(path *big.Int, key, value []byte) *LeafBranch {
 		Key:     append([]byte(nil), key...),
 		Value:   append([]byte(nil), value...),
 		isChild: false,
+		seq:     nextNodeSeq(),
 		// Hash will be computed on demand
 	}
 }
@@ -317,6 +332,7 @@ func newChildLeafBranchWithKey(path *big.Int, key, value []byte) *LeafBranch {
 		Key:     key,
 		Value:   value,
 		isChild: true,
+		seq:     nextNodeSeq(),
 		// Hash will be set on demand
 	}
 }
@@ -369,6 +385,7 @@ func newNodeBranchWithDepth(path *big.Int, left, right branch, depth int, region
 		Left:   left,
 		Right:  right,
 		isRoot: false,
+		seq:    nextNodeSeq(),
 	}
 }
 
@@ -384,6 +401,7 @@ func newRootBranch(path *big.Int, left, right branch, depth int) *NodeBranch {
 		Left:   left,
 		Right:  right,
 		isRoot: true,
+		seq:    nextNodeSeq(),
 	}
 }
 
@@ -617,7 +635,7 @@ func (smt *SparseMerkleTree) GetInclusionCert(key []byte) (*api.InclusionCert, e
 		return nil, err
 	}
 	if len(leafValue) == 0 {
-		return nil, fmt.Errorf("smt: leaf not found for key %x", key)
+		return nil, fmt.Errorf("%w for key %x", ErrLeafNotFound, key)
 	}
 	return &cert, nil
 }
@@ -674,7 +692,7 @@ func (smt *SparseMerkleTree) generateInclusionCertWithLeafValue(hasher *api.Data
 		// Value. For those placeholders, key equality is validated only after the
 		// first real AddLeaf replaces them with a keyed leaf.
 		if leaf.Key != nil && !bytes.Equal(leaf.Key, key) {
-			return nil, fmt.Errorf("smt: leaf not found for key %x", key)
+			return nil, fmt.Errorf("%w for key %x", ErrLeafNotFound, key)
 		}
 		if leaf.Value == nil {
 			return nil, nil
@@ -731,7 +749,7 @@ func (smt *SparseMerkleTree) generateInclusionCertWithLeafValue(hasher *api.Data
 	if node.Right != nil {
 		return smt.generateInclusionCertWithLeafValue(hasher, key, node.Right, cert)
 	}
-	return nil, fmt.Errorf("smt: reached empty subtree in inclusion cert traversal")
+	return nil, fmt.Errorf("%w: reached empty subtree in inclusion cert traversal", ErrLeafNotFound)
 }
 
 // keyBit returns bit d of the raw key under the yellowpaper big-endian bit

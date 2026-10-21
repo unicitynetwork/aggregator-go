@@ -1,0 +1,20 @@
+{
+  "corpusVersion": 1,
+  "networkId": 2,
+  "partitionId": 7,
+  "shards": [
+    ""
+  ],
+  "shardConfigs": [
+    {
+      "shard": "",
+      "file": "shard-configs/root.cbor",
+      "hash": "7243d3acc12f960fdb69ae385b588878b82f29ed49baba8718698ffbb9e5b8f1"
+    }
+  ],
+  "master": "",
+  "participants": [
+    ""
+  ],
+  "trustBase": "trust-base.cbor"
+}

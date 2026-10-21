@@ -33,7 +33,7 @@ The Unicity Aggregator implements a decentralized Agent-Aggregator communication
 ### Prerequisites
 
 - Go 1.25 or later
-- MongoDB 4.4 or later
+- MongoDB 5.0 or later (4.4 is no longer supported; the deployments run 7.0)
 - Make (optional, for using Makefile)
 
 ### Installation
@@ -388,6 +388,10 @@ The `stateId` must be exactly 64 hex characters (32 raw bytes).
   "id": 2
 }
 ```
+
+Optional `"includeStatus": true` returns `{"proof": "<the same hex string>", "status": "included|pending|expired|unknown"}`
+(an unauthenticated hint, see [docs/proof-status.md](docs/proof-status.md)); without it the result is exactly the
+string below, and a server without the feature answers with the plain string.
 
 The `result` field is a hex-encoded CBOR array whose proof is tagged. Every inclusion proof carries
 the reference time at which its leaf was created, independently of request-deadline policy:
@@ -752,6 +756,43 @@ The service implements a MongoDB-based leader election system:
 - **`parent-leader`** - Parent aggregator actively aggregating child shard roots
 - **`parent-follower`** - Parent aggregator processing API requests, monitoring for leadership
 - **`parent-standalone`** - Single parent aggregator (HA disabled)
+
+## Upgrading: strict signature rule
+
+The release with the strict secp256k1 `VerifyHash` / `VerifyBytes` rule (and the stricter `ShardingScheme.IsValid`,
+which rejects incomplete shard schemes) is described in
+[bft-go-base `docs/UPGRADING.md`](https://github.com/unicitynetwork/bft-go-base/blob/uc-consolidation/docs/UPGRADING.md)
+and, for the root validators, in
+[bft-core `docs/upgrade.md`](https://github.com/unicitynetwork/bft-core/blob/uc-consolidation/docs/upgrade.md#strict-signature-rule-bft-go-base-uc-consolidation).
+This section gives the aggregator's part. Terms are the same as there: *root validators* are the BFT Core root chain nodes,
+aggregators are also the shard nodes in this stack, and *shard validators* are a separately deployed shard consensus
+cohort, if there is one. The `bft-shard` aggregators, called shard validators in
+[BFT-side sharding](#bft-side-sharding-sharding_modebft-shard), are aggregators here and are upgraded after the root
+validators.
+
+- **Baseline assumption:** the binaries have no activation gate, so the conservative baseline is a stop-all upgrade of
+  every process. This is an assumption about what is known to be safe, not a requirement; a gentler procedure is fine
+  where it is simple and safe.
+- **Gentler procedure:** a coordinated cutover of all root validators first, then (after checking that a still-old
+  aggregator accepts the new UCs) the aggregators, rolling. Strict-valid
+  certificates pass the old verifier and aggregators already send strict-valid requests, so aggregators keep running
+  during the cutover. Do not reverse the order: a strict aggregator with legacy root validators can reject seals the
+  root chain finalized. This procedure has not been rehearsed in a deployment yet.
+- **What the aggregator verifies:** UC seals and the root trust base (including trust-base records of the next epoch),
+  not QCs. An old-version aggregator may accept a UC that upgraded nodes reject; strict-valid UCs also pass the legacy
+  signature rule. This is why the root validators go first. Mixed rules can stall progress only when a
+  non-strict signature is present (a Byzantine signer, or anyone altering the recovery byte of a relayed signature);
+  honest signers are unaffected. This is a liveness issue, not a fork.
+- **HA:** in a stop-all upgrade stop and upgrade the leader and all followers together; do not keep an old-version
+  instance as standby. In the rolling procedure each aggregator (HA group) is upgraded after the root validators; an
+  upgraded follower can take over leadership safely because the root validators are already strict. The same applies
+  to parent and child shard aggregators.
+- **During the root cutover:** no new UCs arrive, so block finalization pauses and certification requests wait or are
+  retried. Recovery is confirmed when new UCs are received again and the block height advances (`get_block_height`).
+- **Rollback:** the strict rule changes no stored format. The release adds the stored partition view (next to the UC
+  in the block records) and the V2 certification response; check rollback compatibility of the pinned builds
+  separately. After new progress, roll back by a coordinated plan, not by restarting isolated old instances.
+- **Order of releases:** bft-go-base → bft-core → aggregator-go.
 
 ## Sharding
 

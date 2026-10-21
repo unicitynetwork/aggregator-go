@@ -34,7 +34,7 @@ type (
 		BlockCertificationTimeout time.Duration
 		HandshakeTimeout          time.Duration
 		// AdmitPeer, when set, decides per authenticated sender (before a frame is read) whether
-		// certification responses are accepted.
+		// certification responses (V1 and V2) are accepted.
 		AdmitPeer func(peer.ID) bool
 		// RevalidatePeer, when set, is the quota-free membership test repeated after a frame was
 		// read and before it is enqueued (revocation while waiting for the frame).
@@ -101,6 +101,13 @@ func NewLibP2PNetwork(ctx context.Context, peer *network.Peer, logger *logger.Lo
 			AdmitPeer:  opts.AdmitPeer,
 			// a finite byte limit for the legacy protocol too: a valid response is a few KiB
 			MaxFrameSize:   MaxCertificationResponseFrame,
+			RevalidatePeer: opts.RevalidatePeer,
+		},
+		{
+			ProtocolID:     network.ProtocolUnicityCertificatesV2,
+			MaxFrameSize:   certification.MaxCertificationResponseV2Frame,
+			TypeFn:         func() any { return &certification.CertificationResponseV2{} },
+			AdmitPeer:      opts.AdmitPeer,
 			RevalidatePeer: opts.RevalidatePeer,
 		},
 	}

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math/bits"
 	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/unicitynetwork/aggregator-go/internal/smt/disk"
@@ -31,6 +33,9 @@ type Tree struct {
 	nodeCache          map[disk.NodeKey]cachedNode
 	nodeCacheBytes     int64
 	nodeCacheMu        sync.RWMutex
+
+	// overlayCopies counts overlay entries copied by Fork (a hardware independent metric)
+	overlayCopies atomic.Int64
 }
 
 const (
@@ -197,6 +202,8 @@ func (t *Tree) CreateSnapshot() (*Snapshot, error) {
 		baseRoot:   t.rootHash,
 		rootHash:   t.rootHash,
 		ownOverlay: make(nodeOverlay),
+		writeIdx:   make(map[disk.NodeKey]int),
+		collected:  make(map[*disk.Branch]disk.NodeKey),
 		loadedKeys: make(map[disk.NodeKey]struct{}),
 	}, nil
 }
@@ -262,6 +269,31 @@ func (t *Tree) GetInclusionCertsWithReadSnapshot(keys [][]byte, openReadSnapshot
 	return buildInclusionCerts(rootHash, reader, keys)
 }
 
+// RetainReadSnapshot atomically captures the committed root and opens a read
+// snapshot of the store at it: commits take the tree lock around their engine
+// write, so the snapshot contains exactly the nodes of the returned root. The
+// caller owns the returned close function. For the empty root no snapshot is
+// opened and reader and close are nil.
+func (t *Tree) RetainReadSnapshot(openReadSnapshot func() (storage.ReadStore, func(), error)) (disk.Hash, storage.ReadStore, func(), error) {
+	if t == nil {
+		return disk.Hash{}, nil, nil, fmt.Errorf("disk SMT persist: nil tree")
+	}
+	if openReadSnapshot == nil {
+		return disk.Hash{}, nil, nil, fmt.Errorf("disk SMT persist: no read snapshot opener")
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	root := t.rootHash
+	if root == disk.EmptyRootHash() {
+		return root, nil, nil, nil
+	}
+	reader, closeSnapshot, err := openReadSnapshot()
+	if err != nil {
+		return disk.Hash{}, nil, nil, err
+	}
+	return root, reader, closeSnapshot, nil
+}
+
 func buildInclusionCerts(rootHash disk.Hash, reader storage.ReadStore, keys [][]byte) ([]*api.InclusionCert, error) {
 	return BuildInclusionCerts(rootHash, reader, keys)
 }
@@ -270,6 +302,17 @@ func buildInclusionCerts(rootHash disk.Hash, reader storage.ReadStore, keys [][]
 // store. It materializes the union of requested proof paths once, then derives
 // each certificate from that shared materialized root.
 func BuildInclusionCerts(rootHash disk.Hash, reader storage.ReadStore, keys [][]byte) ([]*api.InclusionCert, error) {
+	return buildInclusionCertsOpt(rootHash, reader, keys, false)
+}
+
+// BuildInclusionCertsPartial is BuildInclusionCerts which reports keys absent from the
+// root per key: their entry is nil and the other proofs are still built (a client-chosen
+// batch with one absent key must not turn the union build into an error path).
+func BuildInclusionCertsPartial(rootHash disk.Hash, reader storage.ReadStore, keys [][]byte) ([]*api.InclusionCert, error) {
+	return buildInclusionCertsOpt(rootHash, reader, keys, true)
+}
+
+func buildInclusionCertsOpt(rootHash disk.Hash, reader storage.ReadStore, keys [][]byte, allowMissing bool) ([]*api.InclusionCert, error) {
 	certs := make([]*api.InclusionCert, len(keys))
 	if len(keys) == 0 {
 		return certs, nil
@@ -310,6 +353,9 @@ func BuildInclusionCerts(rootHash disk.Hash, reader storage.ReadStore, keys [][]
 	for i, diskKey := range diskKeys {
 		var cert api.InclusionCert
 		if err := buildInclusionCert(root, diskKey, &cert); err != nil {
+			if allowMissing && errors.Is(err, ErrProofLeafNotFound) {
+				continue // absent from this root: nil entry
+			}
 			return nil, fmt.Errorf("build inclusion cert %d: %w", i, err)
 		}
 		certs[i] = &cert
@@ -409,9 +455,7 @@ func loadProofFrontier(reader storage.ReadStore, loads []frontierLoadReq) error 
 	if len(loads) == 0 {
 		return nil
 	}
-	sort.Slice(loads, func(i, j int) bool {
-		return nodeKeyLess(loads[i].req.nodeKey, loads[j].req.nodeKey)
-	})
+	loads = orderFrontierLoads(loads, nil)
 	keys := make([]disk.NodeKey, len(loads))
 	for i, load := range loads {
 		keys[i] = load.req.nodeKey
@@ -518,11 +562,22 @@ type Snapshot struct {
 	parent *Tree
 	tree   *disk.Tree
 
-	baseRoot       disk.Hash
-	rootHash       disk.Hash
-	ownOverlay     nodeOverlay
-	parentOverlay  nodeOverlay
-	overlayWrites  []storage.NodeWrite
+	baseRoot   disk.Hash
+	rootHash   disk.Hash
+	ownOverlay nodeOverlay
+	// parentOverlay is the immutable, shared chain of the uncommitted overlays this snapshot
+	// builds on (nil when it builds on committed state). Forking pushes a layer; it never
+	// copies the inherited chain.
+	parentOverlay *overlayChain
+	overlayWrites []storage.NodeWrite
+	// writeIdx is the position of each key in overlayWrites (a rewritten node replaces its
+	// earlier version in place).
+	writeIdx map[disk.NodeKey]int
+	// collected records, for every branch already persisted (encoded into the overlay, or loaded
+	// unchanged from the overlay chain or the store) the node key it is persisted at: a subtree whose
+	// root is unchanged and at the same key is not visited, and so not written, again.
+	collected      map[*disk.Branch]disk.NodeKey
+	collectedMu    sync.Mutex
 	overlayDeletes []disk.NodeKey
 	loadedKeys     map[disk.NodeKey]struct{}
 	cacheWrites    map[disk.NodeKey]cachedNode
@@ -531,6 +586,10 @@ type Snapshot struct {
 	statsMu        sync.Mutex
 	commitStats    CommitStats
 	closed         bool
+
+	// work counters of the overlay collection (hardware independent metrics)
+	collectVisited int // nodes examined by the collector
+	collectEncoded int // nodes encoded into the overlay
 }
 
 func buildInclusionCert(branch *disk.Branch, key disk.Key, cert *api.InclusionCert) error {
@@ -599,9 +658,15 @@ func (s *Snapshot) LastCommitStats() CommitStats {
 }
 
 // Fork creates a child snapshot over this snapshot's overlay. If this snapshot
-// already depends on an uncommitted parent overlay, flatten the inherited
-// overlays into the child so chained precollection can continue without
-// requiring every intermediate snapshot to commit first.
+// already depends on an uncommitted parent overlay, the child inherits it too, so
+// chained precollection can continue without requiring every intermediate snapshot
+// to commit first.
+//
+// The inherited overlays are not copied: the child shares the immutable chain and
+// pushes this snapshot's own overlay (frozen as a copy, since this snapshot may go on
+// changing it) as a new layer. Layers are merged geometrically, so a chain of depth
+// g costs O(Δ log g) amortized copying per fork instead of O(gΔ), and a lookup visits
+// O(log) layers.
 func (s *Snapshot) Fork() (*Snapshot, error) {
 	if s == nil {
 		return nil, fmt.Errorf("disk SMT persist: nil snapshot")
@@ -617,17 +682,20 @@ func (s *Snapshot) Fork() (*Snapshot, error) {
 			return nil, err
 		}
 	}
-	parentOverlay := cloneOverlay(s.ownOverlay)
+	var inherited *overlayChain
 	if s.parentOverlay != nil && s.parent.RootHash() != s.baseRoot {
-		parentOverlay = mergeOverlays(s.parentOverlay, s.ownOverlay)
+		inherited = s.parentOverlay
 	}
+	chain := inherited.push(cloneOverlay(s.ownOverlay, &s.parent.overlayCopies), &s.parent.overlayCopies)
 	return &Snapshot{
 		parent:        s.parent,
 		tree:          disk.NewTreeWithRoot(stubForRoot(s.rootHash)),
 		baseRoot:      s.rootHash,
 		rootHash:      s.rootHash,
 		ownOverlay:    make(nodeOverlay),
-		parentOverlay: parentOverlay,
+		writeIdx:      make(map[disk.NodeKey]int),
+		collected:     make(map[*disk.Branch]disk.NodeKey),
+		parentOverlay: chain,
 		loadedKeys:    make(map[disk.NodeKey]struct{}),
 	}, nil
 }
@@ -686,13 +754,22 @@ func (s *Snapshot) AddLeaves(inputs []disk.LeafInput) (disk.ApplyResult, error) 
 	materializedDepthLE24Before := s.stats.MaterializedDepthLE24
 	materializedDepthGT24Before := s.stats.MaterializedDepthGT24
 	materializeParallelForksBefore := s.stats.MaterializeParallelForks
+	sortCallsBefore, sortedBefore, wavesBefore := s.stats.SortCalls, s.stats.SortedElements, s.stats.WaveOrderings
+	// the one comparison sort of the update: materialization and the tree update share it
+	sortStart := time.Now()
+	order, sortedN := disk.SortedInputOrder(inputs)
+	sortDuration := time.Since(sortStart)
+	if sortedN > 1 {
+		s.stats.SortCalls++
+		s.stats.SortedElements += sortedN
+	}
 	materializeStart := time.Now()
-	if err := s.materializeInputs(inputs); err != nil {
+	if err := s.materializeInputs(inputs, order, sortDuration); err != nil {
 		return disk.ApplyResult{}, err
 	}
 	materializeDuration := time.Since(materializeStart)
 	applyStart := time.Now()
-	result, err := s.tree.ApplyLeaves(inputs)
+	result, err := s.tree.ApplyLeavesOrdered(inputs, order)
 	applyDuration := time.Since(applyStart)
 	if err != nil {
 		return result, err
@@ -720,9 +797,12 @@ func (s *Snapshot) AddLeaves(inputs []disk.LeafInput) (disk.ApplyResult, error) 
 	result.Stats.MaterializedDepthGT24 += s.stats.MaterializedDepthGT24 - materializedDepthGT24Before
 	result.Stats.MaterializeParallelForks += s.stats.MaterializeParallelForks - materializeParallelForksBefore
 	result.Stats.ApplyDuration += applyDuration
+	result.Stats.SortCalls += s.stats.SortCalls - sortCallsBefore
+	result.Stats.SortedElements += s.stats.SortedElements - sortedBefore
+	result.Stats.WaveOrderings += s.stats.WaveOrderings - wavesBefore
 	s.rootHash = result.CandidateRoot
 	if len(result.AcceptedIndexes) > 0 || len(s.ownOverlay) > 0 {
-		if err := s.rebuildOverlay(); err != nil {
+		if err := s.collectOverlay(); err != nil {
 			return disk.ApplyResult{}, err
 		}
 	}
@@ -821,48 +901,124 @@ func (s *Snapshot) releaseBuffers() {
 	s.ownOverlay = nil
 	s.parentOverlay = nil
 	s.overlayWrites = nil
+	s.writeIdx = nil
+	s.collected = nil
 	s.overlayDeletes = nil
 	s.loadedKeys = nil
 	s.cacheWrites = nil
 	s.cacheDeletes = nil
 }
 
+// rebuildOverlay re-collects the overlay of the whole materialized tree from scratch: the
+// reference semantics of the incremental collection (collectOverlay), kept for the paths which
+// need the complete state (commit of a snapshot whose overlay was never built, fork) and as the
+// model which the tests compare the incremental collection with.
 func (s *Snapshot) rebuildOverlay() error {
 	if s == nil || s.tree == nil || s.parent == nil {
 		return fmt.Errorf("disk SMT persist: nil snapshot")
 	}
 	collectStart := time.Now()
-	writeHint := len(s.loadedKeys) + len(s.loadedKeys)/4 + 1024
-	writes := make([]storage.NodeWrite, 0, writeHint)
-	writeSet := make(map[disk.NodeKey]struct{}, writeHint)
-	cacheWrites := s.parent.newNodeCacheWrites()
-	if err := collectWrites(s.tree.Root(), disk.RootNodeKey(), disk.PrefixBits{}, 0, &writes, writeSet, cacheWrites, s.parent.nodeCacheDepth); err != nil {
+	s.ownOverlay = make(nodeOverlay)
+	s.overlayWrites = nil
+	s.writeIdx = make(map[disk.NodeKey]int)
+	s.collected = make(map[*disk.Branch]disk.NodeKey)
+	s.overlayDeletes = nil
+	s.cacheWrites = s.parent.newNodeCacheWrites()
+	s.cacheDeletes = nil
+	if err := s.collectDirty(s.tree.Root(), disk.RootNodeKey(), disk.PrefixBits{}, 0); err != nil {
 		return err
 	}
-	collectDuration := time.Since(collectStart)
-
-	tombstoneStart := time.Now()
 	// Disk SMT node storage is append-only from the tree's perspective: updated
 	// path nodes are overwritten, and obsolete path nodes are left unreachable.
 	// Keeping old nodes lets speculative child snapshots materialize safely while
 	// their parent snapshot is being committed.
-	tombstoneDuration := time.Since(tombstoneStart)
-
-	overlay := make(nodeOverlay, len(writes))
-	for _, write := range writes {
-		overlay[write.Key] = overlayEntry{value: write.Value}
-	}
-	s.ownOverlay = overlay
-	s.overlayWrites = writes
-	s.overlayDeletes = nil
-	s.cacheWrites = cacheWrites
-	s.cacheDeletes = nil
-	s.commitStats.CollectDuration = collectDuration
-	s.commitStats.TombstoneDuration = tombstoneDuration
+	s.commitStats.CollectDuration = time.Since(collectStart)
+	s.commitStats.TombstoneDuration = 0
 	return nil
 }
 
-func cloneOverlay(in nodeOverlay) nodeOverlay {
+// collectOverlay brings the overlay up to date with the tree after an update by visiting only
+// what is new: a branch which was already encoded at the same node key (together with its whole,
+// immutable subtree) is skipped, so the work of an update is proportional to the nodes it
+// created or moved, not to everything materialized so far in this snapshot.
+func (s *Snapshot) collectOverlay() error {
+	if s == nil || s.tree == nil || s.parent == nil {
+		return fmt.Errorf("disk SMT persist: nil snapshot")
+	}
+	if s.collected == nil || s.writeIdx == nil || s.ownOverlay == nil {
+		return s.rebuildOverlay()
+	}
+	collectStart := time.Now()
+	if s.cacheWrites == nil {
+		s.cacheWrites = s.parent.newNodeCacheWrites()
+	}
+	if err := s.collectDirty(s.tree.Root(), disk.RootNodeKey(), disk.PrefixBits{}, 0); err != nil {
+		return err
+	}
+	s.commitStats.CollectDuration = time.Since(collectStart)
+	return nil
+}
+
+// collectDirty encodes every branch below "branch" which is not already in the overlay at its
+// current node key.
+func (s *Snapshot) collectDirty(branch *disk.Branch, key disk.NodeKey, prefix disk.PrefixBits, startBit int) error {
+	if branch == nil || branch.Kind == disk.BranchKindStub {
+		return nil
+	}
+	s.collectVisited++
+	if at, ok := s.collected[branch]; ok && at == key {
+		return nil // unchanged and already in place, with everything below it
+	}
+	var encoded []byte
+	var err error
+	switch branch.Kind {
+	case disk.BranchKindLeaf:
+		if branch.Leaf == nil {
+			return fmt.Errorf("disk SMT persist: malformed leaf branch")
+		}
+		encoded, err = disk.MarshalLeaf(branch.Leaf)
+	case disk.BranchKindInternal:
+		if branch.Internal == nil {
+			return fmt.Errorf("disk SMT persist: malformed internal branch")
+		}
+		encoded, err = disk.MarshalInternal(branch.Internal)
+	default:
+		return fmt.Errorf("disk SMT persist: unknown branch kind %d", branch.Kind)
+	}
+	if err != nil {
+		return err
+	}
+	s.collectEncoded++
+	if i, ok := s.writeIdx[key]; ok {
+		s.overlayWrites[i] = storage.NodeWrite{Key: key, Value: encoded}
+	} else {
+		s.writeIdx[key] = len(s.overlayWrites)
+		s.overlayWrites = append(s.overlayWrites, storage.NodeWrite{Key: key, Value: encoded})
+	}
+	s.ownOverlay[key] = overlayEntry{value: encoded}
+	if err := collectCacheWrite(branch, key, encoded, s.cacheWrites, s.parent.nodeCacheDepth); err != nil {
+		return err
+	}
+	s.collected[branch] = key
+	if branch.Kind == disk.BranchKindLeaf {
+		return nil
+	}
+	leftKey, leftPrefix, leftStart, err := childNodeKey(prefix, startBit, branch.Internal.Path, 0)
+	if err != nil {
+		return err
+	}
+	if err := s.collectDirty(branch.Internal.Left, leftKey, leftPrefix, leftStart); err != nil {
+		return err
+	}
+	rightKey, rightPrefix, rightStart, err := childNodeKey(prefix, startBit, branch.Internal.Path, 1)
+	if err != nil {
+		return err
+	}
+	return s.collectDirty(branch.Internal.Right, rightKey, rightPrefix, rightStart)
+}
+
+// cloneOverlay copies an overlay (nil for an empty one), counting the copied entries.
+func cloneOverlay(in nodeOverlay, copied *atomic.Int64) nodeOverlay {
 	if len(in) == 0 {
 		return nil
 	}
@@ -874,25 +1030,71 @@ func cloneOverlay(in nodeOverlay) nodeOverlay {
 		}
 		out[key] = next
 	}
+	if copied != nil {
+		copied.Add(int64(len(in)))
+	}
 	return out
 }
 
-func mergeOverlays(base, override nodeOverlay) nodeOverlay {
-	out := cloneOverlay(base)
-	if len(override) == 0 {
-		return out
+// overlayChain is an immutable stack of overlay layers, oldest first: a lookup returns the entry
+// of the newest layer holding the key. Layers are never modified after they enter a chain, so
+// chains share their prefix with the chains they were derived from.
+type overlayChain struct {
+	layers []nodeOverlay
+}
+
+// get returns the newest entry for key.
+func (c *overlayChain) get(key disk.NodeKey) (overlayEntry, bool) {
+	if c == nil {
+		return overlayEntry{}, false
 	}
-	if out == nil {
-		out = make(nodeOverlay, len(override))
-	}
-	for key, entry := range override {
-		next := overlayEntry{delete: entry.delete}
-		if entry.value != nil {
-			next.value = append([]byte(nil), entry.value...)
+	for i := len(c.layers) - 1; i >= 0; i-- {
+		if e, ok := c.layers[i][key]; ok {
+			return e, true
 		}
-		out[key] = next
 	}
-	return out
+	return overlayEntry{}, false
+}
+
+// entries is the number of distinct layer entries (for tests).
+func (c *overlayChain) depth() int {
+	if c == nil {
+		return 0
+	}
+	return len(c.layers)
+}
+
+// push returns the chain with "layer" (which must not be modified afterwards) on top. Layers are
+// merged by size class (the bit length of their entry count), like the carries of a binary
+// counter: while the layer below is of the same or a smaller class than the top one, they are merged
+// into one new layer. Classes then strictly increase toward the bottom of the chain, so there are at
+// most log2(total entries)+1 layers whatever the sequence of layer sizes (also decreasing ones), and
+// every entry is copied O(log) times.
+func (c *overlayChain) push(layer nodeOverlay, copied *atomic.Int64) *overlayChain {
+	var layers []nodeOverlay
+	if c != nil {
+		layers = append(layers, c.layers...)
+	}
+	if len(layer) > 0 {
+		layers = append(layers, layer)
+	}
+	for n := len(layers); n >= 2 && bits.Len(uint(len(layers[n-2]))) <= bits.Len(uint(len(layers[n-1]))); n = len(layers) {
+		merged := make(nodeOverlay, len(layers[n-2])+len(layers[n-1]))
+		for k, e := range layers[n-2] {
+			merged[k] = e
+		}
+		for k, e := range layers[n-1] {
+			merged[k] = e
+		}
+		if copied != nil {
+			copied.Add(int64(len(layers[n-2]) + len(layers[n-1])))
+		}
+		layers = append(layers[:n-2:n-2], merged)
+	}
+	if len(layers) == 0 {
+		return nil
+	}
+	return &overlayChain{layers: layers}
 }
 
 func (t *Tree) shouldCacheNode(key disk.NodeKey) bool {
@@ -959,35 +1161,26 @@ func (t *Tree) applyNodeCacheUpdate(deletes []disk.NodeKey, updates map[disk.Nod
 	}
 }
 
-func (s *Snapshot) materializeInputs(inputs []disk.LeafInput) error {
+func (s *Snapshot) materializeInputs(inputs []disk.LeafInput, order []int, sortDuration time.Duration) error {
 	if len(s.loadedKeys) == 0 && len(inputs) > 0 {
 		// A 10k-leaf batch at tens of millions of leaves usually materializes
 		// more than 100k nodes. Pre-sizing avoids repeated large map growth.
 		s.loadedKeys = make(map[disk.NodeKey]struct{}, len(inputs)*16)
 	}
-	seen := make(map[disk.Key]struct{}, len(inputs))
-	keys := make([]disk.Key, 0, len(inputs))
-	for _, input := range inputs {
-		key, err := disk.KeyFromBytes(input.Key)
+	// the keys in tree order, without duplicates, derived from the shared order (no sort here)
+	keys := make([]disk.Key, 0, len(order))
+	for _, idx := range order {
+		key, err := disk.KeyFromBytes(inputs[idx].Key)
 		if err != nil {
 			continue
 		}
-		if _, ok := seen[key]; ok {
+		if n := len(keys); n > 0 && keys[n-1] == key {
 			continue
 		}
-		seen[key] = struct{}{}
 		keys = append(keys, key)
 	}
-	trackStats := s.trackApplyStats()
-	var sortStart time.Time
-	if trackStats {
-		sortStart = time.Now()
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		return keyPathLess(keys[i], keys[j])
-	})
-	if trackStats {
-		s.stats.MaterializeSortDuration += time.Since(sortStart)
+	if s.trackApplyStats() {
+		s.stats.MaterializeSortDuration += sortDuration
 	}
 	if s.parent != nil && (s.parent.materializeMode == MaterializeFrontier || s.parent.materializeMode == MaterializeParallel) {
 		if s.parent.materializeMode == MaterializeParallel {
@@ -1153,7 +1346,30 @@ func (s *Snapshot) materializeBranchParallel(branch *disk.Branch, nodeKey disk.N
 	return branch, nil
 }
 
+// noteLoaded records that "branch" was just loaded, unchanged, from what is already persisted
+// (the overlay chain or the store) at key: it needs no write unless it later moves to another key
+// or is replaced by an updated copy. Safe for the parallel materialization.
+func (s *Snapshot) noteLoaded(branch *disk.Branch, key disk.NodeKey) {
+	if branch == nil || branch.Kind == disk.BranchKindStub {
+		return
+	}
+	s.collectedMu.Lock()
+	if s.collected == nil {
+		s.collected = make(map[*disk.Branch]disk.NodeKey)
+	}
+	s.collected[branch] = key
+	s.collectedMu.Unlock()
+}
+
 func (s *Snapshot) loadBranchParallel(key disk.NodeKey, expectedHash disk.Hash) (*disk.Branch, error) {
+	branch, err := s.loadBranchParallelRaw(key, expectedHash)
+	if err == nil {
+		s.noteLoaded(branch, key)
+	}
+	return branch, err
+}
+
+func (s *Snapshot) loadBranchParallelRaw(key disk.NodeKey, expectedHash disk.Hash) (*disk.Branch, error) {
 	if branch, ok, err := s.loadBranchFromOverlay(key, expectedHash, true); ok || err != nil {
 		return branch, err
 	}
@@ -1250,7 +1466,7 @@ func (s *Snapshot) lookupOverlay(key disk.NodeKey) (overlayEntry, overlaySource,
 	if entry, ok := s.ownOverlay[key]; ok {
 		return entry, overlaySourceOwn, true
 	}
-	if entry, ok := s.parentOverlay[key]; ok {
+	if entry, ok := s.parentOverlay.get(key); ok {
 		return entry, overlaySourceParent, true
 	}
 	return overlayEntry{}, 0, false
@@ -1430,9 +1646,7 @@ func (s *Snapshot) loadFrontier(loads []frontierLoadReq) error {
 	}
 
 	sortStart := time.Now()
-	sort.Slice(misses, func(i, j int) bool {
-		return nodeKeyLess(misses[i].req.nodeKey, misses[j].req.nodeKey)
-	})
+	misses = orderFrontierLoads(misses, &s.stats)
 	s.stats.MaterializeSortDuration += time.Since(sortStart)
 
 	keys := make([]disk.NodeKey, len(misses))
@@ -1572,6 +1786,7 @@ func (s *Snapshot) loadFrontierParallel(loads []frontierLoadReq) error {
 }
 
 func (s *Snapshot) attachLoadedBranch(req frontierReq, branch *disk.Branch) {
+	s.noteLoaded(branch, req.nodeKey)
 	*req.slot = branch
 	if req.root {
 		s.tree = disk.NewTreeWithRoot(branch)
@@ -1686,6 +1901,74 @@ func nodeKeyLess(left, right disk.NodeKey) bool {
 	return left.Less(right)
 }
 
+// nodeKeyDepthRank is the primary sort key of NodeKey.Less (the encoded depth bytes, low byte first;
+// the root sorts last).
+func nodeKeyDepthRank(k disk.NodeKey) int {
+	if k.IsRoot() {
+		return 0xffff
+	}
+	d := k.DepthBits()
+	return (d&0xff)<<8 | d>>8
+}
+
+// orderFrontierLoads puts the loads of a frontier wave in NodeKey order without a comparison sort.
+//
+// A wave is generated from the previous one in tree (left to right) order, so within one depth the
+// loads are already in prefix order; ordering by NodeKey is then a stable grouping by depth, linear
+// in the wave (plus the few distinct depths). The result is verified in one pass and only if the
+// assumption were ever violated is a comparison sort used (counted in st: it stays zero).
+func orderFrontierLoads(loads []frontierLoadReq, st *disk.ApplyStats) []frontierLoadReq {
+	if st != nil {
+		st.WaveOrderings++
+	}
+	sorted := func(l []frontierLoadReq) bool {
+		for i := 1; i < len(l); i++ {
+			if nodeKeyLess(l[i].req.nodeKey, l[i-1].req.nodeKey) {
+				return false
+			}
+		}
+		return true
+	}
+	if sorted(loads) {
+		return loads
+	}
+	// stable grouping by depth rank
+	rankIdx := map[int]int{}
+	var ranks []int
+	for _, l := range loads {
+		r := nodeKeyDepthRank(l.req.nodeKey)
+		if _, ok := rankIdx[r]; !ok {
+			rankIdx[r] = len(ranks)
+			ranks = append(ranks, r)
+		}
+	}
+	sort.Ints(ranks) // the distinct depths only (at most 258)
+	for i, r := range ranks {
+		rankIdx[r] = i
+	}
+	counts := make([]int, len(ranks)+1)
+	for _, l := range loads {
+		counts[rankIdx[nodeKeyDepthRank(l.req.nodeKey)]+1]++
+	}
+	for i := 1; i < len(counts); i++ {
+		counts[i] += counts[i-1]
+	}
+	out := make([]frontierLoadReq, len(loads))
+	for _, l := range loads {
+		b := rankIdx[nodeKeyDepthRank(l.req.nodeKey)]
+		out[counts[b]] = l
+		counts[b]++
+	}
+	if !sorted(out) {
+		sort.Slice(out, func(i, j int) bool { return nodeKeyLess(out[i].req.nodeKey, out[j].req.nodeKey) })
+		if st != nil {
+			st.SortCalls++
+			st.SortedElements += len(out)
+		}
+	}
+	return out
+}
+
 // keyPathLess orders keys by big-endian tree-traversal order, which equals
 // unsigned lexicographic byte order (rsmt_sort_key(k) = k).
 func keyPathLess(left, right disk.Key) bool {
@@ -1755,6 +2038,14 @@ func (s *Snapshot) materializeSlot(slot **disk.Branch, nodeKey disk.NodeKey, pre
 }
 
 func (s *Snapshot) loadBranch(key disk.NodeKey, expectedHash disk.Hash) (*disk.Branch, error) {
+	branch, err := s.loadBranchRaw(key, expectedHash)
+	if err == nil {
+		s.noteLoaded(branch, key)
+	}
+	return branch, err
+}
+
+func (s *Snapshot) loadBranchRaw(key disk.NodeKey, expectedHash disk.Hash) (*disk.Branch, error) {
 	if branch, ok, err := s.loadBranchFromOverlay(key, expectedHash, false); ok || err != nil {
 		return branch, err
 	}
@@ -1810,58 +2101,6 @@ func decodeBranch(key disk.NodeKey, encoded []byte) (*disk.Branch, error) {
 		return &disk.Branch{Kind: disk.BranchKindInternal, Internal: internal}, nil
 	default:
 		return nil, fmt.Errorf("disk SMT persist: unknown serialized node tag %d", tag)
-	}
-}
-
-func collectWrites(branch *disk.Branch, key disk.NodeKey, prefix disk.PrefixBits, startBit int, writes *[]storage.NodeWrite, writeSet map[disk.NodeKey]struct{}, cacheWrites map[disk.NodeKey]cachedNode, cacheDepth int) error {
-	if branch == nil {
-		return nil
-	}
-	switch branch.Kind {
-	case disk.BranchKindLeaf:
-		if branch.Leaf == nil {
-			return fmt.Errorf("disk SMT persist: malformed leaf branch")
-		}
-		encoded, err := disk.MarshalLeaf(branch.Leaf)
-		if err != nil {
-			return err
-		}
-		*writes = append(*writes, storage.NodeWrite{Key: key, Value: encoded})
-		writeSet[key] = struct{}{}
-		if err := collectCacheWrite(branch, key, encoded, cacheWrites, cacheDepth); err != nil {
-			return err
-		}
-		return nil
-	case disk.BranchKindInternal:
-		if branch.Internal == nil {
-			return fmt.Errorf("disk SMT persist: malformed internal branch")
-		}
-		encoded, err := disk.MarshalInternal(branch.Internal)
-		if err != nil {
-			return err
-		}
-		*writes = append(*writes, storage.NodeWrite{Key: key, Value: encoded})
-		writeSet[key] = struct{}{}
-		if err := collectCacheWrite(branch, key, encoded, cacheWrites, cacheDepth); err != nil {
-			return err
-		}
-
-		leftKey, leftPrefix, leftStart, err := childNodeKey(prefix, startBit, branch.Internal.Path, 0)
-		if err != nil {
-			return err
-		}
-		if err := collectWrites(branch.Internal.Left, leftKey, leftPrefix, leftStart, writes, writeSet, cacheWrites, cacheDepth); err != nil {
-			return err
-		}
-		rightKey, rightPrefix, rightStart, err := childNodeKey(prefix, startBit, branch.Internal.Path, 1)
-		if err != nil {
-			return err
-		}
-		return collectWrites(branch.Internal.Right, rightKey, rightPrefix, rightStart, writes, writeSet, cacheWrites, cacheDepth)
-	case disk.BranchKindStub:
-		return nil
-	default:
-		return fmt.Errorf("disk SMT persist: unknown branch kind %d", branch.Kind)
 	}
 }
 

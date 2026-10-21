@@ -1,0 +1,9 @@
+{
+  "base": "shards-4",
+  "description": "the context asserts a partition other than the fixed aggregation partition 7: the field is only an equality assertion and never selects the partition",
+  "stage": "policy",
+  "outcome": "invalid_input",
+  "changedFiles": [
+    "context.json"
+  ]
+}

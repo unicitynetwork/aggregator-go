@@ -13,6 +13,7 @@ import (
 	cryptolibp2p "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -23,6 +24,8 @@ import (
 	tnoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
+	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
 	"github.com/unicitynetwork/aggregator-go/internal/trustbase"
 )
@@ -167,7 +170,7 @@ type harness struct {
 	clock  *fakeClock
 	// handshakes counts catch-up triggered handshakes
 	handshakes atomic.Int64
-	// optional hooks of response(): override the seal (before signing) and the root round
+	// optional hook of response(): override the seal (before signing)
 	sealMut func(*types.UnicitySeal)
 	// realCaughtUp is the production post-catch-up action (the recovery handshake)
 	realCaughtUp     func(context.Context)
@@ -204,7 +207,9 @@ func newHarness(t *testing.T, epochs, admitted, available int) *harness {
 		shardID:        types.ShardID{},
 		roundManager:   rm,
 		trustBaseStore: manager,
-		sealNetwork:    types.NetworkLocal,
+		authn:          newUCAuthenticator(types.NetworkLocal, manager),
+		proofStaging:   proofmaterial.NewStaging(proofmaterial.DefaultStagingEntries),
+		published:      map[proofmaterial.Digest]bool{},
 	}
 	c.status.Store(normal)
 	h := &harness{t: t, chain: chain, store: store, rest: rest, client: c, rm: rm, clock: &fakeClock{t: time.Unix(1_900_000_000, 0)}}
@@ -288,6 +293,11 @@ func (h *harness) valid(n, epoch uint64) *certification.CertificationResponse {
 	return h.response(n, epoch, h.chain.signers[epoch])
 }
 
+// received is the raw count of certification responses received.
+func received(h *harness) float64 {
+	return testutil.ToFloat64(metrics.BFTCertificationResponsesTotal.WithLabelValues(h.client.shardID.String()))
+}
+
 // ------------------------------------------------------------------- tests --
 
 // Steady state with a known epoch adds no network exchange: no REST call, no head read, no catch-up
@@ -299,6 +309,7 @@ func TestIntake_SteadyStateAddsNoNetworkExchange(t *testing.T) {
 	require.NoError(t, h.client.handleCertificationResponse(t.Context(), h.valid(1, 2)))
 	reads0 := h.store.getReads.Load()
 	heads0 := h.store.headRead.Load()
+	recv0 := received(h) - 1
 	const n = 50
 	for i := uint64(2); i <= n+1; i++ {
 		require.NoError(t, h.client.handleCertificationResponse(t.Context(), h.valid(i, 2)))
@@ -307,9 +318,9 @@ func TestIntake_SteadyStateAddsNoNetworkExchange(t *testing.T) {
 	require.EqualValues(t, 0, h.store.headRead.Load()-heads0, "no head read")
 	require.EqualValues(t, 0, h.client.catchup.attempts.Load(), "no catch-up attempt")
 	require.EqualValues(t, 0, h.handshakes.Load(), "no handshake")
-	require.EqualValues(t, n, h.store.getReads.Load()-reads0, "exactly one local trust base lookup per message: the seal context check adds none")
+	require.LessOrEqual(t, h.store.getReads.Load()-reads0, int64(n), "at most one local trust base lookup per message")
 	require.Len(t, h.rm.startedRounds, n+1)
-	require.EqualValues(t, n+1, h.client.receivedResponses.Load())
+	require.EqualValues(t, n+1, received(h)-recv0)
 }
 
 // Forged epochs cost no store read and no REST call per message; the single worker's work is bounded
@@ -345,6 +356,7 @@ func TestIntake_ForgedEpochsHaveBoundedAggregateWork(t *testing.T) {
 func TestIntake_OnlyAdvancingAuthenticatedUCsRefreshTheRecoveryTimer(t *testing.T) {
 	h := newHarness(t, 3, 3, 3)
 	c := h.client
+	recv0 := received(h)
 	old := time.Now().Add(-time.Hour).UnixMilli()
 	reset := func() { c.lastCertResponseTime.Store(old) }
 	untouched := func(what string) {
@@ -379,7 +391,7 @@ func TestIntake_OnlyAdvancingAuthenticatedUCsRefreshTheRecoveryTimer(t *testing.
 
 	require.NoError(t, c.handleCertificationResponse(t.Context(), h.valid(6, 2)))
 	require.Greater(t, c.lastCertResponseTime.Load(), old)
-	require.EqualValues(t, 8, c.receivedResponses.Load(), "raw receptions are counted separately from liveness")
+	require.EqualValues(t, 8, received(h)-recv0, "raw receptions are counted separately from liveness")
 }
 
 // "Not admitted yet" is not "invalid": after a verified catch-up the same otherwise valid certificate
@@ -558,26 +570,37 @@ func TestIntake_OutsiderIsRejectedBeforeEnqueue(t *testing.T) {
 	srvNet, err := NewLibP2PNetwork(t.Context(), server, log, opts)
 	require.NoError(t, err)
 
-	send := func(p *network.Peer) {
+	send := func(p *network.Peer, v2 bool) {
 		nw, err := network.NewLibP2PNetwork(p, 1, &Observability{mp: mnoop.NewMeterProvider(), tp: tnoop.NewTracerProvider(), logger: log.Logger})
 		require.NoError(t, err)
-		require.NoError(t, nw.RegisterSendProtocols([]network.SendProtocolDescription{{
-			ProtocolID: network.ProtocolUnicityCertificates, Timeout: time.Second, MsgType: certification.CertificationResponse{},
-		}}))
+		require.NoError(t, nw.RegisterSendProtocols([]network.SendProtocolDescription{
+			{ProtocolID: network.ProtocolUnicityCertificates, Timeout: time.Second, MsgType: certification.CertificationResponse{}},
+			{ProtocolID: network.ProtocolUnicityCertificatesV2, Timeout: time.Second, MsgType: certification.CertificationResponseV2{}},
+		}))
 		p.Network().Peerstore().AddAddrs(server.ID(), server.MultiAddresses(), peerstore.PermanentAddrTTL)
-		_ = nw.Send(t.Context(), h.valid(1, 1), server.ID())
+		if v2 {
+			_ = nw.Send(t.Context(), certification.NewCertificationResponseV2(h.valid(1, 1)), server.ID())
+		} else {
+			_ = nw.Send(t.Context(), h.valid(1, 1), server.ID())
+		}
 	}
-	send(outsider)
-	select {
-	case <-srvNet.ReceivedChannel():
-		t.Fatal("a response from a peer that is not admitted must not be enqueued")
-	case <-time.After(500 * time.Millisecond):
-	}
-	send(honest)
-	select {
-	case m := <-srvNet.ReceivedChannel():
-		require.IsType(t, &certification.CertificationResponse{}, m)
-	case <-time.After(3 * time.Second):
-		t.Fatal("the admitted root's response was not delivered")
+	for _, v2 := range []bool{false, true} {
+		send(outsider, v2)
+		select {
+		case <-srvNet.ReceivedChannel():
+			t.Fatalf("v2=%v: a response from a peer that is not admitted must not be enqueued", v2)
+		case <-time.After(500 * time.Millisecond):
+		}
+		send(honest, v2)
+		select {
+		case m := <-srvNet.ReceivedChannel():
+			if v2 {
+				require.IsType(t, &certification.CertificationResponseV2{}, m)
+			} else {
+				require.IsType(t, &certification.CertificationResponse{}, m)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("v2=%v: the admitted root's response was not delivered", v2)
+		}
 	}
 }

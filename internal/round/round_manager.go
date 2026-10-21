@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,9 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
+	"github.com/unicitynetwork/aggregator-go/internal/proofpub"
+	"github.com/unicitynetwork/aggregator-go/internal/proofstatus"
+	"github.com/unicitynetwork/aggregator-go/internal/proofview"
 	"github.com/unicitynetwork/aggregator-go/internal/smt"
 	smtbackend "github.com/unicitynetwork/aggregator-go/internal/smt/backend"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
@@ -115,8 +119,11 @@ type RoundManager struct {
 	smtBackend      smtbackend.Backend
 	rootClient      RootAggregatorClient
 	bftClient       bft.BFTClient
-	stateTracker    *state.Tracker
-	eventBus        *events.EventBus
+	// proofPub publishes finalized states to the retained-view catalog; nil when
+	// consolidation proof views are not supported by this deployment.
+	proofPub     *proofpub.Publisher
+	stateTracker *state.Tracker
+	eventBus     *events.EventBus
 
 	// Round management
 	currentRound *Round
@@ -131,7 +138,14 @@ type RoundManager struct {
 	proofCacheMu          sync.RWMutex
 	proofPending          map[string]struct{}
 	latestProofReadyBlock *models.Block
-	proofMetadataCache    *proofMetadataCache
+
+	// testHookBeforeProofViewPublish runs between disk finalization in storage and the proof-view
+	// publication (tests only: nil in production, installed per instance, atomically as the
+	// round goroutine may be running).
+	testHookBeforeProofViewPublish atomic.Pointer[func()]
+	proofMetadataCache             *proofMetadataCache
+	// statusTracker backs the unauthenticated proof status hints (pending/expired/unknown).
+	statusTracker *proofstatus.Tracker
 
 	// Streaming support
 	commitmentStream chan *models.CertificationRequest
@@ -237,11 +251,14 @@ func NewRoundManagerWithBackend(
 		eventBus:            eventBus,
 		commitmentStream:    make(chan *models.CertificationRequest, cfg.Processing.CommitmentStreamBufferSize), // Buffer for queue streamer
 		proofPending:        make(map[string]struct{}),
+		statusTracker:       newStatusTracker(),
 		proofMetadataCache:  newProofMetadataCache(cfg.SMT.ProofMetadataCacheEntries),
 		avgProcessingRate:   1.0,                    // Initial estimate: 1 commitment per ms
 		avgFinalizationTime: 200 * time.Millisecond, // Initial estimate (conservative)
 		avgSMTUpdateTime:    5 * time.Millisecond,   // Initial estimate per batch
 	}
+
+	rm.statusTracker.SetReferenceTime(rm.CurrentReferenceTime)
 
 	// Count records (SMT leaves) in Mongo; disk-backed SMT nodes live in RocksDB,
 	// so the SMT collection reads ~0.
@@ -260,9 +277,13 @@ func NewRoundManagerWithBackend(
 	if cfg.Sharding.Mode == config.ShardingModeStandalone || cfg.Sharding.Mode == config.ShardingModeBFTShard {
 		if cfg.BFT.Enabled {
 			var err error
-			rm.bftClient, err = bft.NewBFTClient(ctx, &cfg.BFT, rm, trustBaseProvider, luc, logger, eventBus)
+			bftClient, err := bft.NewBFTClient(ctx, &cfg.BFT, rm, trustBaseProvider, luc, logger, eventBus)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create BFT client: %w", err)
+			}
+			rm.bftClient = bftClient
+			if err := rm.initProofViews(cfg, bftClient); err != nil {
+				return nil, err
 			}
 		} else {
 			nextBlockNumber := api.NewBigInt(nil)
@@ -336,6 +357,8 @@ func (rm *RoundManager) Start(ctx context.Context) error {
 			return fmt.Errorf("failed to restore SMT from storage: %w", err)
 		}
 	}
+
+	rm.publishStartupView(ctx)
 
 	rm.logger.Info("Round Manager started successfully.")
 	return nil
@@ -489,6 +512,8 @@ func (rm *RoundManager) markProofsPending(commitments []*models.CertificationReq
 	for _, commitment := range commitments {
 		if commitment != nil {
 			rm.proofPending[commitment.StateID.String()] = struct{}{}
+			// also covers requests replayed from the queue after a restart (never admitted here)
+			rm.statusTracker.MarkInRound(commitment.StateID, commitmentDeadline(commitment))
 		}
 	}
 }
@@ -504,12 +529,18 @@ func (rm *RoundManager) markProofsReady(block *models.Block, stateIDs []api.Stat
 	for _, stateID := range stateIDs {
 		delete(rm.proofPending, stateID.String())
 	}
+	rm.statusTracker.ClearFinalized(stateIDs...)
 }
 
+// clearProofPending forgets which requests this node's rounds have pulled (abandoned rounds,
+// discarded precollector, deactivation). Admitted requests are still in the shared queue and
+// will be pulled again: they stay pending in the status hints, only handed back to the queue.
+// Deactivation alone also resets the status memory (see Deactivate).
 func (rm *RoundManager) clearProofPending() {
 	rm.proofCacheMu.Lock()
 	defer rm.proofCacheMu.Unlock()
 	rm.proofPending = make(map[string]struct{})
+	rm.statusTracker.ReturnAllToQueue()
 }
 
 func (rm *RoundManager) clearProofsPending(commitments []*models.CertificationRequest) {
@@ -522,6 +553,7 @@ func (rm *RoundManager) clearProofsPending(commitments []*models.CertificationRe
 	for _, commitment := range commitments {
 		if commitment != nil {
 			delete(rm.proofPending, commitment.StateID.String())
+			rm.statusTracker.ReturnToQueue(commitment.StateID) // back in the queue, swept by deadline again
 		}
 	}
 }
@@ -536,6 +568,7 @@ func (rm *RoundManager) clearProofStateIDsPending(stateIDs []api.StateID) {
 	for _, stateID := range stateIDs {
 		delete(rm.proofPending, stateID.String())
 	}
+	rm.statusTracker.ClearFinalized(stateIDs...)
 }
 
 // GetStats returns round manager statistics
@@ -563,6 +596,14 @@ func (rm *RoundManager) GetStats() map[string]interface{} {
 
 // StartNewRound starts a new round for processing commitments (delegates to unified function)
 func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigInt, referenceTime uint64) error {
+	rm.abandonSupersededRound(ctx, roundNumber, referenceTime)
+	return rm.StartNewRoundWithSnapshot(ctx, roundNumber, referenceTime, nil, nil, nil, false, "")
+}
+
+// abandonSupersededRound drops an unresolved round which the new round supersedes, with its
+// snapshot, precollected state and pending sweep. The requests it had pulled are still in the
+// shared queue: their status hints stay pending (see clearProofPending).
+func (rm *RoundManager) abandonSupersededRound(ctx context.Context, roundNumber *api.BigInt, referenceTime uint64) {
 	rm.roundMutex.Lock()
 	supersededSnapshot, resetPendingSweep, unresolved := rm.abandonSupersededRoundLocked(roundNumber, referenceTime)
 	rm.roundMutex.Unlock()
@@ -576,7 +617,6 @@ func (rm *RoundManager) StartNewRound(ctx context.Context, roundNumber *api.BigI
 			rm.resetRedisPendingSweep(ctx)
 		}
 	}
-	return rm.StartNewRoundWithSnapshot(ctx, roundNumber, referenceTime, nil, nil, nil, false, "")
 }
 
 // StartNewRoundWithSnapshot starts a new round, optionally with pre-collected data.
@@ -1306,6 +1346,9 @@ func (rm *RoundManager) Activate(ctx context.Context) error {
 			if err := LoadRecoveredNodesIntoBackend(activeCtx, rm.logger, rm.storage, rm.smtBackend, recoveryResult.BlockNumber, recoveryResult.StateIDs); err != nil {
 				return fmt.Errorf("failed to load recovered nodes into SMT: %w", err)
 			}
+			rm.finalizationMu.Lock()
+			rm.publishRecoveredBlock(activeCtx, recoveryResult.BlockNumber)
+			rm.finalizationMu.Unlock()
 		}
 	}
 
@@ -1463,6 +1506,8 @@ func (rm *RoundManager) Deactivate(ctx context.Context) error {
 	rm.currentRound = nil
 	rm.roundMutex.Unlock()
 	rm.clearProofPending()
+	// this node no longer answers for the queue: forget what it admitted
+	rm.statusTracker.Reset()
 
 	return nil
 }
@@ -1780,4 +1825,211 @@ func (rm *RoundManager) stopCommitmentPrefetcherAndWait() bool {
 		<-done
 	}
 	return true
+}
+
+// newProofViewCatalog is the production constructor of the retained-view catalog. The catalog owns
+// every read view the publisher retains from the backend, so the backend's O(1) total of the
+// retained bytes of its open views (both the memory and the RocksDB backend provide it) replaces the
+// linear sum over the views; backends without it use the correct linear fallback.
+func newProofViewCatalog(limits proofview.Limits, be smtbackend.Backend) (*proofview.Catalog, error) {
+	return proofview.NewCatalog(limits, proofview.AccountantFor(be))
+}
+
+// initProofViews creates the retained-view catalog and connects it to finalization
+// and to the BFT client's proof material. Backends which cannot retain read views
+// simply leave consolidation proof views unavailable.
+func (rm *RoundManager) initProofViews(cfg *config.Config, client *bft.BFTClientImpl) error {
+	if cfg.BFT.ShardConf == nil {
+		return nil
+	}
+	limits, err := proofview.LimitsFromConfig(cfg.SMT)
+	if err != nil {
+		return fmt.Errorf("invalid proof view retention limits: %w", err)
+	}
+	catalog, err := newProofViewCatalog(limits, rm.smtBackend)
+	if err != nil {
+		return fmt.Errorf("failed to create proof view catalog: %w", err)
+	}
+	rm.proofPub = proofpub.New(catalog, rm.smtBackend, client.ProofTopology(), rm.logger)
+	if rm.proofPub == nil {
+		_ = catalog.Close()
+		return nil
+	}
+	rm.proofPub.SetSealVerifier(client.SealVerifier)
+	client.SetProofMaterialSink(rm.proofPub)
+	return nil
+}
+
+// ProofViewPublisher returns the retained-view publisher (nil if unsupported).
+func (rm *RoundManager) ProofViewPublisher() *proofpub.Publisher { return rm.proofPub }
+
+// ProofViewCatalog returns the retained-view catalog (nil if unsupported).
+func (rm *RoundManager) ProofViewCatalog() *proofview.Catalog { return rm.proofPub.Catalog() }
+
+// publishStartupView publishes the validated current local state after recovery:
+// the latest finalized block, if the restored backend is exactly at its root.
+// History is not rebuilt from storage.
+func (rm *RoundManager) publishStartupView(ctx context.Context) {
+	if rm.proofPub == nil || rm.storage == nil || rm.storage.BlockStorage() == nil {
+		return
+	}
+	latest, err := rm.storage.BlockStorage().GetLatest(ctx)
+	if err != nil || latest == nil {
+		if err != nil {
+			rm.logger.WithContext(ctx).Warn("Cannot load latest block to publish proof view", "error", err.Error())
+		}
+		return
+	}
+	rm.proofPub.EnsurePublishedAtStartup(ctx, latest)
+	// crash leftovers and views of the history written by earlier versions
+	rm.pruneSupersededViews(ctx, latest, partitionViewPruneBatchesOnStartup)
+}
+
+const (
+	// partitionViewPruneBatch is the number of block documents cleaned per storage call.
+	partitionViewPruneBatch = 64
+	// partitionViewPruneWindow is the number of heights behind a finalized block which its
+	// finalization cleans with one update.
+	partitionViewPruneWindow = 256
+	// partitionViewPruneBatchesOnStartup bounds the startup sweep of crash leftovers and of the
+	// history written before views were pruned; what remains is cleaned by the following runs.
+	partitionViewPruneBatchesOnStartup = 256
+	partitionViewPruneTimeout          = 10 * time.Second
+)
+
+// pruneSupersededViews removes the partition views stored with blocks below the given durably
+// finalized block: only the latest finalized block keeps its attachment (an in-flight finalizing
+// candidate is above it and untouched). It runs only after the new finalized state is durable, also
+// when that block has no view of its own, and uses the finalized height as the cutoff. A failure is
+// counted and logged but never fails the caller; the next run starts from the same cutoff rule and
+// retries. Extra copies left by a crash are harmless.
+func (rm *RoundManager) pruneSupersededViews(ctx context.Context, finalized *models.Block, maxBatches int) {
+	if rm.storage == nil || rm.storage.BlockStorage() == nil || finalized == nil || finalized.Index == nil {
+		return
+	}
+	pruner, ok := rm.storage.BlockStorage().(partitionViewPruner)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), partitionViewPruneTimeout)
+	defer cancel()
+	for i := 0; i < maxBatches; i++ {
+		n, err := pruner.PrunePartitionViews(ctx, finalized.Index, partitionViewPruneBatch)
+		if err != nil {
+			metrics.PartitionViewPruneTotal.WithLabelValues("error").Inc()
+			rm.logger.WithContext(ctx).Warn("Cleaning superseded partition views failed; it is retried later",
+				"blockNumber", finalized.Index.String(), "error", err.Error())
+			return
+		}
+		metrics.PartitionViewPruneTotal.WithLabelValues("ok").Inc()
+		metrics.PartitionViewPrunedBlocksTotal.Add(float64(n))
+		if n < partitionViewPruneBatch {
+			return
+		}
+	}
+}
+
+// pruneRecentViews is the cleanup of a finalization: one indexed update clearing the views of the
+// blocks right behind the durably finalized one. A failure is counted and logged, never returned;
+// the next finalization or the startup sweep cleans what it left.
+func (rm *RoundManager) pruneRecentViews(ctx context.Context, finalized *models.Block) {
+	if rm.storage == nil || rm.storage.BlockStorage() == nil || finalized == nil || finalized.Index == nil {
+		return
+	}
+	pruner, ok := rm.storage.BlockStorage().(partitionViewPruner)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), partitionViewPruneTimeout)
+	defer cancel()
+	n, err := pruner.PruneRecentPartitionViews(ctx, finalized.Index, partitionViewPruneWindow)
+	if err != nil {
+		metrics.PartitionViewPruneTotal.WithLabelValues("error").Inc()
+		rm.logger.WithContext(ctx).Warn("Cleaning superseded partition views failed; it is retried later",
+			"blockNumber", finalized.Index.String(), "error", err.Error())
+		return
+	}
+	metrics.PartitionViewPruneTotal.WithLabelValues("ok").Inc()
+	metrics.PartitionViewPrunedBlocksTotal.Add(float64(n))
+}
+
+// publishRecoveredBlock publishes a block finalized by recovery once the backend and
+// storage agree on it. The caller holds finalizationMu (commit ordering). If the block
+// cannot be published, latest is invalidated rather than left at an older block.
+func (rm *RoundManager) publishRecoveredBlock(ctx context.Context, blockNumber *api.BigInt) {
+	if rm.proofPub == nil || blockNumber == nil {
+		return
+	}
+	block, err := rm.storage.BlockStorage().GetByNumber(ctx, blockNumber)
+	if err != nil || block == nil {
+		rm.logger.WithContext(ctx).Warn("Recovered block cannot be loaded for proof view publication",
+			"blockNumber", blockNumber.String())
+		rm.proofPub.InvalidateLatest()
+		return
+	}
+	rm.proofPub.PublishFinalized(ctx, block)
+	rm.pruneRecentViews(ctx, block)
+}
+
+// newStatusTracker creates the proof status tracker with the default bounds.
+func newStatusTracker() *proofstatus.Tracker {
+	return proofstatus.New(proofstatus.Config{})
+}
+
+// commitmentDeadline is the effective deadline (reference-time seconds) of a queued request;
+// requests without one never expire by deadline.
+func commitmentDeadline(c *models.CertificationRequest) uint64 {
+	if c.EffectiveTimeout != 0 {
+		return c.EffectiveTimeout
+	}
+	if c.CertificationData.ExpiresAt != nil {
+		return *c.CertificationData.ExpiresAt
+	}
+	return math.MaxUint64
+}
+
+// MarkRequestAdmitted marks an accepted request pending at admission, closing the
+// queued-but-not-in-a-round window of the status hints. Idempotent: resubmitting the same
+// request while it is pending changes nothing.
+func (rm *RoundManager) MarkRequestAdmitted(stateID api.StateID, deadline uint64) bool {
+	return rm.statusTracker.MarkPending(stateID, deadline)
+}
+
+// ClearRequestAdmitted removes the admission mark of a request which could not be queued.
+func (rm *RoundManager) ClearRequestAdmitted(stateID api.StateID) {
+	rm.statusTracker.ClearPending(stateID)
+}
+
+// ProofStatus is the unauthenticated hint for a state ID without a proof: pending,
+// expired or unknown. O(1), no I/O. The sets are per node and volatile: a node which did
+// not admit the request, or restarted, answers unknown.
+func (rm *RoundManager) ProofStatus(stateID api.StateID) api.ProofStatus {
+	return rm.statusTracker.Status(stateID)
+}
+
+// clearStaleAdmissionMarks removes the admission marks of requests a round dropped as
+// duplicates or rejected leaves, unless the original is in a round (then its mark stays: it is
+// the same state, still being certified). A copy of an already certified leaf must not leave a
+// mark behind which nothing would clear.
+func (rm *RoundManager) clearStaleAdmissionMarks(dropped []interfaces.CertificationRequestAck) {
+	if len(dropped) == 0 {
+		return
+	}
+	rm.proofCacheMu.RLock()
+	defer rm.proofCacheMu.RUnlock()
+	for _, d := range dropped {
+		if _, inRound := rm.proofPending[d.StateID.String()]; !inRound {
+			rm.statusTracker.ClearPending(d.StateID)
+		}
+	}
+}
+
+// SetTestHookBeforeProofViewPublish installs a function run between disk finalization in storage
+// and proof-view publication. For tests only.
+func (rm *RoundManager) SetTestHookBeforeProofViewPublish(f func()) {
+	if f == nil {
+		rm.testHookBeforeProofViewPublish.Store(nil)
+		return
+	}
+	rm.testHookBeforeProofViewPublish.Store(&f)
 }

@@ -19,16 +19,19 @@ type Block struct {
 	RootHash api.HexBytes `json:"rootHash"`
 	// ReferenceTime is the reference time this round's leaves were built under,
 	// pinned when the round started and reported as the input record timestamp.
-	ReferenceTime       uint64                       `json:"referenceTime"`
-	PreviousBlockHash   api.HexBytes                 `json:"previousBlockHash"`
-	NoDeletionProofHash api.HexBytes                 `json:"noDeletionProofHash"`
-	CreatedAt           *api.Timestamp               `json:"createdAt"`
-	UnicityCertificate  api.HexBytes                 `json:"unicityCertificate"`
-	ParentFragment      *api.ParentInclusionFragment `json:"parentFragment,omitempty"`    // child mode only
-	ParentBlockNumber   uint64                       `json:"parentBlockNumber,omitempty"` // child mode only
-	Finalized           bool                         `json:"finalized"`                   // true when all data is persisted
-	Status              string                       `json:"status"`
-	ProposalID          string                       `json:"proposalId,omitempty"`
+	ReferenceTime       uint64         `json:"referenceTime"`
+	PreviousBlockHash   api.HexBytes   `json:"previousBlockHash"`
+	NoDeletionProofHash api.HexBytes   `json:"noDeletionProofHash"`
+	CreatedAt           *api.Timestamp `json:"createdAt"`
+	UnicityCertificate  api.HexBytes   `json:"unicityCertificate"`
+	// PartitionView is the optional validated PartitionViewV1 CBOR received with
+	// exactly this block's UnicityCertificate. Set only together with that UC.
+	PartitionView     api.HexBytes                 `json:"-"`
+	ParentFragment    *api.ParentInclusionFragment `json:"parentFragment,omitempty"`    // child mode only
+	ParentBlockNumber uint64                       `json:"parentBlockNumber,omitempty"` // child mode only
+	Finalized         bool                         `json:"finalized"`                   // true when all data is persisted
+	Status            string                       `json:"status"`
+	ProposalID        string                       `json:"proposalId,omitempty"`
 }
 
 // BlockBSON represents the BSON version of Block for MongoDB storage
@@ -44,6 +47,7 @@ type BlockBSON struct {
 	NoDeletionProofHash string               `bson:"noDeletionProofHash,omitempty"`
 	CreatedAt           time.Time            `bson:"createdAt"`
 	UnicityCertificate  string               `bson:"unicityCertificate"`
+	PartitionView       string               `bson:"partitionView,omitempty"`
 	ParentFragment      *ParentFragmentBSON  `bson:"parentFragment,omitempty"` // child mode only
 	ParentBlockNumber   uint64               `bson:"parentBlockNumber,omitempty"`
 	Finalized           bool                 `bson:"finalized"`
@@ -82,6 +86,7 @@ func (b *Block) ToBSON() (*BlockBSON, error) {
 		NoDeletionProofHash: b.NoDeletionProofHash.String(),
 		CreatedAt:           b.CreatedAt.Time,
 		UnicityCertificate:  b.UnicityCertificate.String(),
+		PartitionView:       b.PartitionView.String(),
 		ParentFragment:      parentFragment,
 		ParentBlockNumber:   b.ParentBlockNumber,
 		Finalized:           b.Finalized,
@@ -112,6 +117,14 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 		return nil, fmt.Errorf("failed to parse unicityCertificate: %w", err)
 	}
 
+	partitionView, err := api.NewHexBytesFromString(bb.PartitionView)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse partitionView: %w", err)
+	}
+	if len(partitionView) == 0 {
+		partitionView = nil
+	}
+
 	var parentFragment *api.ParentInclusionFragment
 	if bb.ParentFragment != nil {
 		parentFragment = &api.ParentInclusionFragment{
@@ -137,6 +150,7 @@ func (bb *BlockBSON) FromBSON() (*Block, error) {
 		NoDeletionProofHash: noDeletionProofHash,
 		CreatedAt:           api.NewTimestamp(bb.CreatedAt),
 		UnicityCertificate:  unicityCertificate,
+		PartitionView:       partitionView,
 		ParentFragment:      parentFragment,
 		ParentBlockNumber:   bb.ParentBlockNumber,
 		Finalized:           bb.Finalized,

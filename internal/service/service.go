@@ -160,6 +160,18 @@ func NewAggregatorService(cfg *config.Config,
 }
 
 // CertificationRequest handles certification request submission
+// ShardValidator exposes the shard routing check used for certification requests.
+func (as *AggregatorService) ShardValidator() BatchShardValidator {
+	return as.certificationRequestValidator
+}
+
+// ProofStatusHint is the unauthenticated hint for a state ID: pending, expired or unknown
+// (included is decided by the proof itself). O(1), no I/O; the sets are per node and
+// volatile, so another instance, or this one after a restart, answers unknown.
+func (as *AggregatorService) ProofStatusHint(stateID api.StateID) api.ProofStatus {
+	return as.roundManager.ProofStatus(stateID)
+}
+
 func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.CertificationRequest) (*api.CertificationResponse, error) {
 	// Create certificationRequest with aggregate count
 	aggregateCount := req.AggregateRequestCount
@@ -246,8 +258,21 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 		}
 	}
 
+	// Mark the state ID pending at admission (before queueing, so a round cannot finalize
+	// it before the mark exists), idempotently: resubmitting a still-pending request only
+	// reaches the queue again, where the leaf deduplication drops the second copy. A
+	// request that could not be queued must not stay marked, but only a mark made here is
+	// removed, never the original's. A duplicate key keeps the mark only while the existing row
+	// is still unprocessed (a concurrent copy queued it); a row a round already processed, and
+	// not yet deleted, queues nothing, so an expired request resubmitted over it must not stay
+	// pending. A store the caller abandoned after the handoff may still complete and keeps it.
+	newlyMarked := as.roundManager.MarkRequestAdmitted(req.StateID, effectiveTimeout)
+
 	// Store certificationRequest
 	if err := as.commitmentQueue.Store(ctx, certificationRequest); err != nil {
+		if newlyMarked && !as.requestStillQueued(ctx, req.StateID, err) {
+			as.roundManager.ClearRequestAdmitted(req.StateID)
+		}
 		return nil, fmt.Errorf("failed to store certificationRequest: %w", err)
 	}
 
@@ -259,6 +284,28 @@ func (as *AggregatorService) CertificationRequest(ctx context.Context, req *api.
 	as.logger.WithContext(ctx).Log(ctx, logger.LevelTrace, "CertificationData submitted successfully", "stateId", req.StateID)
 
 	return &api.CertificationResponse{Status: "SUCCESS"}, nil
+}
+
+// requestStillQueued reports whether a failed Store leaves the request queued (or about to be),
+// so that the pending mark made for it is still true.
+func (as *AggregatorService) requestStillQueued(ctx context.Context, stateID api.StateID, storeErr error) bool {
+	if errors.Is(storeErr, interfaces.ErrStoreInFlight) {
+		return true
+	}
+	if !errors.Is(storeErr, interfaces.ErrDuplicateKey) {
+		return false
+	}
+	// The caller's ctx may be the reason the store failed; the lookup must not depend on it.
+	lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	existing, err := as.commitmentQueue.GetByStateID(lookupCtx, stateID)
+	if err != nil {
+		// Unknown: keep the mark, which expires with the request's deadline.
+		as.logger.WithContext(ctx).Warn("Could not check the queued duplicate, keeping the pending mark",
+			"stateId", stateID, "error", err.Error())
+		return true
+	}
+	return existing != nil && existing.ProcessedAt == nil
 }
 
 // GetInclusionProofV2 retrieves a v2 inclusion proof for the given stateId.
@@ -353,7 +400,7 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 					return nil, fmt.Errorf("failed to get latest block by root hash: %w", err)
 				}
 				if block == nil {
-					return nil, fmt.Errorf("no block found with root hash %s", rootHashRaw.String())
+					return nil, fmt.Errorf("%w: no block found with root hash %s", api.ErrProofNotYetAvailable, rootHashRaw.String())
 				}
 			}
 			responseBlockNumber, err := proofBundleBlockNumber(as.config.Sharding.Mode, block)
@@ -384,7 +431,7 @@ func (as *AggregatorService) GetInclusionProofV2(ctx context.Context, req *api.G
 			return nil, fmt.Errorf("failed to get latest block by root hash: %w", err)
 		}
 		if block == nil {
-			return nil, fmt.Errorf("no block found with root hash %s", rootHashRaw.String())
+			return nil, fmt.Errorf("%w: no block found with root hash %s", api.ErrProofNotYetAvailable, rootHashRaw.String())
 		}
 	} else {
 		as.recordProofPath(ctx, proofPathMetadataHit)
