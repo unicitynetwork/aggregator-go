@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,14 +22,16 @@ type HandlerFunc func(ctx context.Context, params json.RawMessage) (interface{},
 
 // Server represents a JSON-RPC server
 type Server struct {
-	handlers         map[string]HandlerFunc
-	limits           map[string]MethodLimits
-	middleware       []MiddlewareFunc
-	logger           *logger.Logger
-	concurrencyLimit int
-	activeSemaphore  chan struct{}
-	maxBodyBytes     int64
-	mutex            sync.RWMutex
+	handlers     map[string]HandlerFunc
+	limits       map[string]MethodLimits
+	middleware   []MiddlewareFunc
+	logger       *logger.Logger
+	pool         *slotPool
+	ownership    map[string]OwnershipPredicate
+	optIn        map[string]MethodLimits
+	workers      atomic.Int64 // method workers running, also after their response (see TimeoutMiddleware)
+	maxBodyBytes int64
+	mutex        sync.RWMutex
 }
 
 // DefaultMaxRequestBodyBytes is the outer ceiling on any JSON-RPC request body,
@@ -67,12 +71,11 @@ type MiddlewareFunc func(ctx context.Context, req *Request, next func(context.Co
 // NewServer creates a new JSON-RPC server
 func NewServer(logger *logger.Logger, concurrencyLimit int) *Server {
 	return &Server{
-		handlers:         make(map[string]HandlerFunc),
-		limits:           make(map[string]MethodLimits),
-		middleware:       make([]MiddlewareFunc, 0),
-		logger:           logger,
-		concurrencyLimit: concurrencyLimit,
-		activeSemaphore:  make(chan struct{}, concurrencyLimit),
+		handlers:   make(map[string]HandlerFunc),
+		limits:     make(map[string]MethodLimits),
+		middleware: make([]MiddlewareFunc, 0),
+		logger:     logger,
+		pool:       &slotPool{limit: concurrencyLimit},
 	}
 }
 
@@ -107,9 +110,7 @@ func (s *Server) AddMiddleware(middleware MiddlewareFunc) {
 // ServeHTTP implements http.Handler interface
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Set CORS headers
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	SetCORSHeaders(w.Header(), "POST, OPTIONS")
 
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
@@ -129,17 +130,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check concurrency limit
-	select {
-	case s.activeSemaphore <- struct{}{}:
-		defer func() { <-s.activeSemaphore }()
-	default:
+	permit, ok := s.newPermit()
+	if !ok {
 		recordMetrics("unknown", "error")
 		s.writeErrorResponse(w, ErrConcurrencyLimit, nil)
 		return
 	}
+	defer permit.Close()
 
 	// Add request ID to context
 	ctx := context.WithValue(r.Context(), logger.StateIDKey, uuid.New().String())
+	ctx = ContextWithPermit(ctx, permit)
+	ctx = context.WithValue(ctx, workerCountKey{}, &s.workers)
 
 	// Parse request. The ID is kept raw so that method-limited requests can
 	// validate its original encoding and echo it without number conversion.
@@ -153,8 +155,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if isBodyTooLarge(err) {
 			recordMetrics("unknown", "error")
 			n := int(ceiling)
-			w.WriteHeader(http.StatusRequestEntityTooLarge)
-			s.writeErrorResponse(w, NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "request_bytes", false, &n), nil)
+			s.writeJSONStatus(w, http.StatusRequestEntityTooLarge, NewErrorResponse(NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "request_bytes", false, &n), nil))
 			return
 		}
 		s.logger.WithContext(ctx).Error("Failed to parse JSON-RPC request", "error", err.Error())
@@ -179,6 +180,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			recordMetrics("unknown", "error")
 			s.writeErrorResponse(w, ErrInvalidRequest, req.ID)
 			return
+		}
+		// Requests which opt in to a long-poll wait are bounded like a method-limited request
+		// (the legacy requests of the method keep their unbounded legacy decoding).
+		if l, ok := s.optInLimitsFor(&req); ok {
+			if rpcErr := checkRequestBody(l, dec, r.Body); rpcErr != nil {
+				recordMetrics(metrics.NormalizeMethod(req.Method), "error")
+				s.writeErrorResponse(w, rpcErr, nil)
+				return
+			}
+			if !validRawID(env.ID, l.MaxIDBytes) {
+				recordMetrics(metrics.NormalizeMethod(req.Method), "error")
+				s.writeErrorResponse(w, NewDetailedError(InvalidParamsCode, "Invalid params", "invalid_request", "invalid_id", false, nil), nil)
+				return
+			}
+			if rpcErr := checkParamsLimit(l, &req); rpcErr != nil {
+				recordMetrics(metrics.NormalizeMethod(req.Method), "error")
+				s.writeErrorResponse(w, rpcErr, req.ID)
+				return
+			}
 		}
 	} else {
 		idOK := validRawID(env.ID, limits.MaxIDBytes)
@@ -216,6 +236,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctxID = string(raw)
 	}
 	ctx = context.WithValue(ctx, logger.JSONRPCIDKey, ctxID)
+
+	s.markOwned(permit, &req)
 
 	// Process request
 	response := s.processRequest(ctx, &req)
@@ -306,18 +328,75 @@ func checkParamsLimit(l MethodLimits, req *Request) *Error {
 // json.Marshal (the existing path) and measured.
 func (s *Server) writeLimitedResponse(w http.ResponseWriter, response *Response, max int) {
 	data, err := encodeLimited(response, max)
+	emitted := response // the envelope actually written decides the HTTP status
 	if tooLarge(err) {
 		n := max
-		data, err = json.Marshal(NewErrorResponse(
-			NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "response_bytes", false, &n), response.ID))
+		e := NewDetailedError(LimitExceededCode, "Limit exceeded", "limit_exceeded", "response_bytes", false, &n)
+		// the result that did not fit carried the wait echo: the replacement error keeps it
+		if w, ok := response.Result.(interface{ WaitedEcho() (uint64, bool) }); ok {
+			if ms, has := w.WaitedEcho(); has {
+				e = e.WithWaited(ms)
+			}
+		}
+		emitted = NewErrorResponse(e, response.ID)
+		data, err = json.Marshal(emitted)
 	}
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to encode JSON response")
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
+	writeBody(w, statusOf(http.StatusOK, emitted), append(data, '\n'))
+}
+
+// writeBody writes one complete JSON body with its Content-Length, set before the header is sent, so that a gateway
+// can reserve the whole response up front. Every JSON-RPC response goes through it (no streaming, no flush).
+func writeBody(w http.ResponseWriter, status int, body []byte) {
+	writeHead(w, status, len(body))
+	_, _ = w.Write(body)
+}
+
+// CORS header values of the JSON-RPC endpoint: the request headers clients send, and the response header browsers
+// need to see to honour an overload answer.
+const (
+	CORSAllowHeaders  = "Content-Type, Authorization, X-API-Key, X-State-ID"
+	CORSExposeHeaders = "Retry-After"
+)
+
+// SetCORSHeaders sets the CORS headers of an answer (also on error answers: a browser can only classify a 503 whose
+// headers it is allowed to read).
+func SetCORSHeaders(h http.Header, methods string) {
+	h.Set("Access-Control-Allow-Origin", "*")
+	h.Set("Access-Control-Allow-Methods", methods)
+	h.Set("Access-Control-Allow-Headers", CORSAllowHeaders)
+	h.Set("Access-Control-Expose-Headers", CORSExposeHeaders)
+}
+
+// OverloadRetryAfterSeconds is the Retry-After of every capacity-overload answer (integer seconds).
+const OverloadRetryAfterSeconds = 1
+
+// IsOverload reports whether the error is a capacity-overload answer (-32006, whatever its reason): it is sent with
+// HTTP 503 and Retry-After so that load balancers, proxies and clients see it at the HTTP layer. The JSON-RPC body
+// (code, message, data, id) is unchanged.
+func IsOverload(e *Error) bool { return e != nil && e.Code == ConcurrencyLimitCode }
+
+// statusOf is the HTTP status of a response sent with status: an overload answer on 200 becomes 503.
+func statusOf(status int, response *Response) int {
+	if status == http.StatusOK && response != nil && IsOverload(response.Error) {
+		return http.StatusServiceUnavailable
+	}
+	return status
+}
+
+func writeHead(w http.ResponseWriter, status, length int) {
+	if status == http.StatusServiceUnavailable {
+		w.Header().Set("Retry-After", strconv.Itoa(OverloadRetryAfterSeconds))
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(append(data, '\n'))
+	// proof, status and error answers change over time: proxies and caches must not keep them
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", strconv.Itoa(length))
+	w.WriteHeader(status)
 }
 
 // encodeLimited returns the response JSON without the trailing newline, or
@@ -387,13 +466,36 @@ func (s *Server) handleRequest(ctx context.Context, req *Request) *Response {
 	return NewResponse(result, req.ID)
 }
 
-// writeJSONResponse writes a JSON response
+// writeJSONResponse writes a JSON response with HTTP 200.
 func (s *Server) writeJSONResponse(w http.ResponseWriter, response *Response) {
-	w.Header().Set("Content-Type", "application/json")
+	s.writeJSONStatus(w, http.StatusOK, response)
+}
 
-	if err := json.NewEncoder(w).Encode(response); err != nil {
+// sizedWriter sets Content-Length inside the single Write that json.Encoder makes with the complete body (and does
+// not make at all when encoding fails), so that a large response is encoded once into the encoder's pooled buffer,
+// with no body-sized copy, and an encoding failure is still a clean 500.
+type sizedWriter struct {
+	w       http.ResponseWriter
+	status  int
+	started bool
+}
+
+func (s *sizedWriter) Write(b []byte) (int, error) {
+	if !s.started {
+		s.started = true
+		writeHead(s.w, s.status, len(b))
+	}
+	return s.w.Write(b)
+}
+
+// writeJSONStatus encodes the response and writes it with its Content-Length.
+func (s *Server) writeJSONStatus(w http.ResponseWriter, status int, response *Response) {
+	sw := &sizedWriter{w: w, status: statusOf(status, response)}
+	if err := json.NewEncoder(sw).Encode(response); err != nil {
 		s.logger.WithError(err).Error("Failed to encode JSON response")
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		if !sw.started {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		}
 	}
 }
 
@@ -448,7 +550,26 @@ func TimeoutMiddleware(timeout time.Duration, log *logger.Logger) MiddlewareFunc
 
 		done := make(chan *Response, 1)
 
+		// The worker may outlive this middleware (it returns on the deadline without waiting).
+		// A request's permit must then stay held until the worker really stops (C07).
+		permit := PermitFromContext(ctx)
+		tracked := permit != nil && permit.Owned() && permit.AddWorker()
+		// Independently of any permit accounting (legacy requests release their token with the
+		// response), the server counts every method worker until it really stops, so shutdown
+		// can join workers that outlive their response. Response bytes and timing are unchanged.
+		var wc *atomic.Int64
+		if c, ok := ctx.Value(workerCountKey{}).(*atomic.Int64); ok {
+			c.Add(1)
+			wc = c
+		}
+
 		go func() {
+			if wc != nil {
+				defer wc.Add(-1)
+			}
+			if tracked {
+				defer permit.WorkerDone()
+			}
 			defer func() {
 				if r := recover(); r != nil {
 					log.WithContext(ctx).Error("panic in JSON-RPC handler", "panic", r, "method", req.Method)
@@ -471,7 +592,11 @@ func TimeoutMiddleware(timeout time.Duration, log *logger.Logger) MiddlewareFunc
 		case response := <-done:
 			return response
 		case <-ctx.Done():
-			return NewErrorResponse(NewError(InternalErrorCode, "Request timeout", nil), req.ID)
+			e := NewError(InternalErrorCode, "Request timeout", nil)
+			if permit != nil && permit.Owned() { // an opt-in request: the echo is part of every handled error
+				e = e.WithWaited(permit.Waited())
+			}
+			return NewErrorResponse(e, req.ID)
 		}
 	}
 }

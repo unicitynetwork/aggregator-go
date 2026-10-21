@@ -45,6 +45,7 @@ func (rm *RoundManager) FinalizeCertifiedProposal(
 	}
 	if block.Finalized {
 		rm.proofPub.EnsurePublished(ctx, block)
+		rm.notifyWaiters()
 		return true, nil
 	}
 	if block.Status != "" && block.Status != models.FinalityStatusProposed && block.Status != models.FinalityStatusFinalizing {
@@ -66,6 +67,7 @@ func (rm *RoundManager) FinalizeCertifiedProposal(
 	}
 
 	rm.finalizationMu.Lock()
+	defer rm.notifyWaiters() // deferred first of the two: runs after finalizationMu is released
 	defer rm.finalizationMu.Unlock()
 
 	snapshot, err := rm.smtBackend.CreateSnapshot(ctx)

@@ -25,3 +25,12 @@ type IncludedProofStatusResponse struct {
 	Proof  *GetInclusionProofResponseV2 `json:"proof"`
 	Status ProofStatus                  `json:"status"`
 }
+
+// WaitedProofResponse is the get_inclusion_proof.v2 result of a request which carried waitMs:
+// {"proof": <unchanged hex>, "status"?: ..., "waitedMs": n}. Status is present iff
+// includeStatus was requested. waitedMs is unauthenticated timing metadata.
+type WaitedProofResponse struct {
+	Proof    *GetInclusionProofResponseV2 `json:"proof"`
+	Status   *ProofStatus                 `json:"status,omitempty"`
+	WaitedMs uint64                       `json:"waitedMs"`
+}

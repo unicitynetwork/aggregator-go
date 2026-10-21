@@ -1,6 +1,7 @@
 package round
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math/big"
@@ -170,6 +171,120 @@ func (s *ProofPublicationSuite) Test4_DurableRecoveryPublishesAndLateViewFills()
 	require.NoError(t, err)
 	defer l.Release()
 	require.Equal(t, f.Raw, l.PartitionView())
+}
+
+// notifyProbe records what a wake-up observes at the instant it is raised (T4): the retained
+// view, the pending hints and the finalization lock.
+type notifyProbe struct {
+	rm       *RoundManager
+	cat      *proofview.Catalog
+	ids      []api.StateID
+	wantRoot []byte
+
+	calls           int
+	publishedAtCall []bool
+	hintsCleared    []bool
+	lockFree        []bool
+}
+
+func (p *notifyProbe) fn() {
+	p.calls++
+	l, err := p.cat.AcquireLatest(context.Background())
+	pub := err == nil && bytes.Equal(l.Root(), p.wantRoot)
+	if err == nil {
+		l.Release()
+	}
+	p.publishedAtCall = append(p.publishedAtCall, pub)
+	cleared := true
+	for _, id := range p.ids {
+		if p.rm.ProofStatus(id) == api.ProofStatusPending {
+			cleared = false
+		}
+	}
+	p.hintsCleared = append(p.hintsCleared, cleared)
+	free := p.rm.finalizationMu.TryLock()
+	if free {
+		p.rm.finalizationMu.Unlock()
+	}
+	p.lockFree = append(p.lockFree, free)
+}
+
+// Normal finalization notifies once, after the retained publication, the proof-ready update
+// and the clearing of the hints, with finalizationMu released; the duplicate finalization of an
+// already finalized block notifies again after it republished; a failed finalization still
+// notifies (waiters observe the outcome) but publishes nothing.
+func (s *ProofPublicationSuite) Test5_NotifyComesAfterEveryServingBoundary() {
+	t := s.T()
+	ctx := context.Background()
+	rm, cat := s.newRM()
+	block, _ := s.proposal(rm, 15, "pp5", true)
+	var ids []api.StateID
+	for _, c := range rm.currentRound.Commitments {
+		ids = append(ids, c.StateID)
+	}
+	probe := &notifyProbe{rm: rm, cat: cat, ids: ids, wantRoot: block.RootHash}
+	rm.SetWaitNotifier(probe.fn)
+
+	require.NoError(t, rm.FinalizeBlock(ctx, block))
+	require.Equal(t, 1, probe.calls, "exactly one wake for one finalization (no wake before the serving boundary)")
+	require.True(t, probe.publishedAtCall[0])
+	require.True(t, probe.hintsCleared[0])
+	require.True(t, probe.lockFree[0])
+
+	// duplicate finalization of the same finalized block
+	stored, err := s.storage.BlockStorage().GetByNumber(ctx, block.Index)
+	require.NoError(t, err)
+	require.NoError(t, rm.FinalizeBlock(ctx, stored))
+	require.Equal(t, 2, probe.calls)
+	require.True(t, probe.publishedAtCall[1])
+	require.True(t, probe.hintsCleared[1])
+	require.True(t, probe.lockFree[1])
+
+	// failed finalization: a wake, but nothing was published for that block
+	rm2, cat2 := s.newRM()
+	block2, _ := s.proposal(rm2, 16, "pp5b", true)
+	rm2.storage = &finalizationFailStorage{Storage: s.storage,
+		blockStorage: &finalizationFailBlockStorage{BlockStorage: s.storage.BlockStorage(), finalizeErr: errors.New("mongo down")}}
+	probe2 := &notifyProbe{rm: rm2, cat: cat2, wantRoot: block2.RootHash}
+	rm2.SetWaitNotifier(probe2.fn)
+	require.Error(t, rm2.FinalizeBlock(ctx, block2))
+	require.Equal(t, 1, probe2.calls)
+	require.False(t, probe2.publishedAtCall[0], "an unfinalized root is never published, so the wake can only lead to an ordinary read")
+	require.True(t, probe2.lockFree[0])
+}
+
+// Durable-proposal recovery: the wake follows the retained publication and the proof-ready
+// update, with finalizationMu released; a late sidecar wakes through the publisher.
+func (s *ProofPublicationSuite) Test6_RecoveryAndLateMaterialNotify() {
+	t := s.T()
+	ctx := context.Background()
+	rm, cat := s.newRM()
+	block, f := s.proposal(rm, 17, "pp6", false)
+	uc := append(api.HexBytes(nil), block.UnicityCertificate...)
+	var ids []api.StateID
+	for _, c := range rm.currentRound.Commitments {
+		ids = append(ids, c.StateID)
+	}
+	rm.currentRound.Snapshot.Discard(ctx)
+	rm.currentRound = nil
+	probe := &notifyProbe{rm: rm, cat: cat, ids: ids, wantRoot: block.RootHash}
+	rm.SetWaitNotifier(probe.fn)
+	rm.proofPub.SetNotify(rm.notifyWaiters)
+
+	recovered, err := rm.FinalizeCertifiedProposal(ctx, block.Index, block.RootHash, uc)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, 1, probe.calls)
+	require.True(t, probe.publishedAtCall[0])
+	require.True(t, probe.hintsCleared[0])
+	require.True(t, probe.lockFree[0])
+
+	digest, ucBytes, err := proofmaterial.DigestOfUC(f.UC)
+	require.NoError(t, err)
+	require.NoError(t, rm.proofPub.PublishProofMaterial(ctx, &proofmaterial.Material{
+		Kind: proofmaterial.KindFinalized, UC: f.UC, UCBytes: ucBytes, UCDigest: digest,
+		PartitionView: f.Raw, BlockNumber: 17, HasBlock: true}))
+	require.Equal(t, 2, probe.calls, "a late partition view wakes the waiters once attached")
 }
 
 // The startup test restores the SMT from storage, so it needs a database holding a

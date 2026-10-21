@@ -65,6 +65,12 @@ type ServerConfig struct {
 	// MaxRequestBodyBytes is the outer JSON-RPC request body ceiling applied
 	// before decoding (0 = jsonrpc.DefaultMaxRequestBodyBytes, 16 MiB).
 	MaxRequestBodyBytes int64 `mapstructure:"max_request_body_bytes"`
+
+	// LongPollMaxWait caps the optional waitMs of inclusion-proof reads (LONG_POLL_MAX_WAIT).
+	LongPollMaxWait time.Duration `mapstructure:"long_poll_max_wait"`
+	// LongPollMaxWaiters is the global reservation cap of admitted waits (LONG_POLL_MAX_WAITERS).
+	// Zero is supported: requests carrying waitMs are then served immediately with a zero echo.
+	LongPollMaxWaiters int `mapstructure:"long_poll_max_waiters"`
 }
 
 // DatabaseConfig holds MongoDB configuration
@@ -377,6 +383,8 @@ func Load() (*Config, error) {
 			EnableTLS:                 getEnvBoolOrDefault("ENABLE_TLS", false),
 			EnableH2C:                 getEnvBoolOrDefault("ENABLE_H2C", true),
 			HTTP2MaxConcurrentStreams: getEnvIntOrDefault("HTTP2_MAX_CONCURRENT_STREAMS", 4096),
+			LongPollMaxWait:           getEnvDurationOrDefault("LONG_POLL_MAX_WAIT", "20s"),
+			LongPollMaxWaiters:        getEnvIntOrDefault("LONG_POLL_MAX_WAITERS", 1024),
 		},
 		Database: DatabaseConfig{
 			URI:                    getEnvOrDefault("MONGODB_URI", "mongodb://localhost:27017"),
@@ -566,6 +574,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.HTTP2MaxConcurrentStreams <= 0 {
 		return fmt.Errorf("HTTP/2 max concurrent streams must be positive")
+	}
+	if err := c.validateLongPoll(); err != nil {
+		return err
 	}
 	if c.Processing.CommitmentStreamBufferSize <= 0 {
 		return fmt.Errorf("COMMITMENT_STREAM_BUFFER_SIZE must be positive")
@@ -805,4 +816,34 @@ func (c *BFTConfig) PeerConf() (*network.PeerConfiguration, error) {
 	}
 
 	return network.NewPeerConfiguration(c.Address, c.AnnounceAddresses, authKeyPair, bootNodes, bootstrapConnectRetry)
+}
+
+// Long-poll request budget (revision 3 section 8): the application deadline of a JSON-RPC method
+// and the part of it reserved after the wait for resume admission (up to 2s), one final batch read
+// (up to 5s) and writing the response (1s).
+const (
+	LongPollMethodBudget = 30 * time.Second
+	LongPollReserve      = 8 * time.Second
+)
+
+func (c *Config) validateLongPoll() error {
+	s := c.Server
+	if s.LongPollMaxWaiters < 0 {
+		return fmt.Errorf("LONG_POLL_MAX_WAITERS must not be negative")
+	}
+	if s.LongPollMaxWait < 0 {
+		return fmt.Errorf("LONG_POLL_MAX_WAIT must not be negative")
+	}
+	if s.LongPollMaxWaiters == 0 || s.LongPollMaxWait == 0 {
+		return nil // parking disabled: nothing to fit into the budgets
+	}
+	if s.LongPollMaxWait+LongPollReserve >= LongPollMethodBudget {
+		return fmt.Errorf("LONG_POLL_MAX_WAIT (%s) plus the %s response reserve must stay below the %s method budget",
+			s.LongPollMaxWait, LongPollReserve, LongPollMethodBudget)
+	}
+	if s.WriteTimeout > 0 && s.LongPollMaxWait+LongPollReserve >= s.WriteTimeout {
+		return fmt.Errorf("LONG_POLL_MAX_WAIT (%s) plus the %s response reserve must stay below WRITE_TIMEOUT (%s); "+
+			"parking never extends a transport deadline", s.LongPollMaxWait, LongPollReserve, s.WriteTimeout)
+	}
+	return nil
 }

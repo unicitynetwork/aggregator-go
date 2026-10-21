@@ -28,6 +28,8 @@ whose finalization publishes retained views; parent/child aggregation answers `-
 | -32006 | Concurrency limit exceeded | `busy`: `active_requests`, `pinned_views`, `retention_budget`, `deadline` (retryable) |
 | -32008 | Proof unavailable | `proof_unavailable`: `state_pending` (retryable), `state_expired`, `state_unknown`, `state_not_in_root`, `view_not_retained`, `no_finalized_view`, `partition_view_unavailable`, `unsupported_configuration` |
 
+`-32006` is sent as HTTP 503 with `Retry-After: 1` and the body unchanged (see [long-poll.md](long-poll.md#overload-signalling)); clients should honour `Retry-After`.
+
 Database failures stay `-32004` without database text.
 
 `state_pending` / `state_expired` / `state_unknown` (latest requests) and `state_not_in_root` (exact-root requests) carry
