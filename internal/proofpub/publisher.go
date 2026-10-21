@@ -247,6 +247,12 @@ func (p *Publisher) PublishProofMaterial(ctx context.Context, m *proofmaterial.M
 		metrics.ProofViewPublicationTotal.WithLabelValues(ResultNoConfig).Inc()
 		return errors.New("certification carries no shard configuration identity")
 	}
+	if m.Kind == proofmaterial.KindInitial && len(root) != 0 {
+		return nil // a retained state is published by the startup/finalization paths
+	}
+	if len(root) == 0 {
+		return p.publishCertifiedEmpty(ctx, m, lineage)
+	}
 	var id proofview.BlockIdentity
 	if m.Kind == proofmaterial.KindFinalized && m.HasBlock {
 		id = proofview.BlockIdentity{Number: api.NewBigIntFromUint64(m.BlockNumber), ConfigLineage: lineage}
@@ -284,6 +290,73 @@ func (p *Publisher) PublishProofMaterial(ctx context.Context, m *proofmaterial.M
 	// The error goes back to the BFT client, which only logs it (certification is never
 	// failed) but keeps the sidecar fill retryable for later duplicate deliveries.
 	return err
+}
+
+// EmptyTreeBlockNumber is the block identity number of the certified empty tree: it precedes
+// every real block (blocks start at 1) and is never served as a block.
+const EmptyTreeBlockNumber = 0
+
+// ErrEmptyTreeNotPublishable: the empty tree cannot be published as a certified snapshot now.
+var ErrEmptyTreeNotPublishable = errors.New("the certified empty tree cannot be published")
+
+// publishCertifiedEmpty publishes (or re-certifies) the certified EMPTY tree: an authenticated
+// native UC whose input record carries the empty state hash, reconciled with the backend's explicit
+// statement that its committed state is the empty tree of a node without any committed block. A
+// UC with an empty hash never authorizes anything else: not a finalized block, not a state of a
+// node which has committed history, not a 32 byte zero root.
+func (p *Publisher) publishCertifiedEmpty(ctx context.Context, m *proofmaterial.Material, lineage []byte) error {
+	reject := func(result string, err error) error {
+		metrics.ProofViewPublicationTotal.WithLabelValues(result).Inc()
+		return err
+	}
+	if m.Kind == proofmaterial.KindFinalized || m.Kind == proofmaterial.KindSidecarFill || m.HasBlock {
+		return reject(ResultRejected, fmt.Errorf("%w: an empty root is not a finalized block", ErrEmptyTreeNotPublishable))
+	}
+	if m.UC.InputRecord.Hash == nil {
+		// native null: the certified empty tree
+	} else {
+		// an empty byte string is a different encoding and is not the empty tree
+		return reject(ResultRejected, fmt.Errorf("%w: the input record hash is an empty byte string, not null", ErrEmptyTreeNotPublishable))
+	}
+	id := proofview.BlockIdentity{Number: api.NewBigIntFromUint64(EmptyTreeBlockNumber), ConfigLineage: lineage}
+	cert := proofview.Certification{UC: m.UCBytes}
+	// a later UC of the same empty state (repeat/timeout) attaches to the retained snapshot
+	if err := p.catalog.AttachCertification(ctx, id, nil, cert); err == nil {
+		metrics.ProofViewPublicationTotal.WithLabelValues(ResultAttached).Inc()
+		return nil
+	} else if !errors.Is(err, proofview.ErrViewNotRetained) {
+		metrics.ProofViewPublicationTotal.WithLabelValues(ResultAttachFailed).Inc()
+		return err
+	}
+	// first publication: the UC seal is authenticated again here, the backend must be at its
+	// explicit empty state and have no committed block
+	var verifier types.SealVerifier
+	if p.sealVerifier != nil {
+		verifier = p.sealVerifier(ctx)
+	}
+	if verifier == nil || verifier.VerifySeal(m.UC.UnicitySeal) != nil {
+		return reject(ResultRejected, fmt.Errorf("%w: the unicity certificate is not authenticated", ErrEmptyTreeNotPublishable))
+	}
+	st, err := p.backend.CommittedState(ctx)
+	if err != nil {
+		return reject(ResultRetainFailed, err)
+	}
+	if st.BlockNumber != nil {
+		return reject(ResultStaleBlock, fmt.Errorf("%w: the backend has committed blocks", ErrEmptyTreeNotPublishable))
+	}
+	rv, err := p.retainer.RetainReadView(ctx)
+	if err != nil {
+		return reject(ResultRetainFailed, err)
+	}
+	if !smtbackend.IsEmptyState(rv) {
+		_ = rv.Close()
+		return reject(ResultRootMismatch, fmt.Errorf("%w: the backend state is not empty", ErrEmptyTreeNotPublishable))
+	}
+	if err := p.catalog.Publish(ctx, proofview.PublishInput{Block: id, Reader: rv, Cert: cert, EmptyTree: true}); err != nil {
+		return reject(ResultRejected, err)
+	}
+	metrics.ProofViewPublicationTotal.WithLabelValues(ResultPublished).Inc()
+	return nil
 }
 
 // ErrIncompatibleCertification: the certification is not for the retained state's accepted

@@ -60,6 +60,12 @@ type PublishInput struct {
 	Root   []byte
 	Reader backend.ReadView
 	Cert   Certification
+	// EmptyTree publishes the certified EMPTY tree: Root is empty, the reader explicitly
+	// declares the empty state (backend.EmptyStateReadView) and the UC input record carries
+	// the empty state hash. It is a distinct identity, never "32 zero bytes": a UC certifying
+	// the all-zero hash is an ordinary 32 byte root. It can only be selected as "latest";
+	// no exact-root selector reaches it.
+	EmptyTree bool
 }
 
 // attIndex is the digest index of the attachments of one view. Every lookup is counted in the catalog
@@ -102,6 +108,7 @@ type attachment struct {
 type view struct {
 	block   BlockIdentity
 	root    []byte
+	empty   bool // the certified empty tree: root is empty by identity, not by value
 	reader  backend.ReadView
 	refs    int
 	retired bool
@@ -266,8 +273,8 @@ func decodeUC(uc []byte) ([]byte, uint64, [sha256.Size]byte, error) {
 		return nil, 0, [sha256.Size]byte{}, fmt.Errorf("decode UC: %w", err)
 	}
 	root := cert.GetStateHash()
-	if len(root) == 0 || cert.InputRecord == nil {
-		return nil, 0, [sha256.Size]byte{}, errors.New("UC has no input record state hash")
+	if cert.InputRecord == nil {
+		return nil, 0, [sha256.Size]byte{}, errors.New("UC has no input record")
 	}
 	return root, cert.GetRootRoundNumber(), CompatDigest(&cert), nil
 }
@@ -405,7 +412,11 @@ func (c *Catalog) Publish(ctx context.Context, in PublishInput) error {
 	if in.Block.Number == nil {
 		return fmt.Errorf("%w: missing block number", ErrInvalidPublication)
 	}
-	if len(in.Root) == 0 || !bytes.Equal(in.Root, in.Reader.RootHash()) {
+	if in.EmptyTree {
+		if len(in.Root) != 0 || !backend.IsEmptyState(in.Reader) {
+			return fmt.Errorf("%w: an empty tree publication needs an empty root and a reader of the explicitly empty state", ErrInvalidPublication)
+		}
+	} else if len(in.Root) == 0 || !bytes.Equal(in.Root, in.Reader.RootHash()) {
 		return fmt.Errorf("%w: reader root does not match block root", ErrInvalidPublication)
 	}
 	att, err := newAttachment(in.Cert, in.Root)
@@ -431,6 +442,7 @@ func (c *Catalog) Publish(ctx context.Context, in PublishInput) error {
 	v := &view{
 		block:    in.Block.clone(),
 		root:     append([]byte(nil), in.Root...),
+		empty:    in.EmptyTree,
 		reader:   in.Reader,
 		attIdx:   attIndex{m: make(map[[sha256.Size]byte]*attachment, 1), probes: &c.attProbes},
 		evictIdx: -1,

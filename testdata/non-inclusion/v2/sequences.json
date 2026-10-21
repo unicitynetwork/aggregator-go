@@ -1,0 +1,180 @@
+{
+  "description": "Ordered verifications on ONE verifier instance (which memoizes authenticated seals). Each step's expected result is the result for that vector under the sequence context.",
+  "sequences": [
+    {
+      "name": "cache-hit-keeps-the-snapshot",
+      "description": "ONE verifier: the second verification of the same proof is a memo hit and returns the same snapshot; the included outcome of another query on the same seal is not influenced",
+      "context": "default",
+      "steps": [
+        {
+          "vector": "cases/shared-prefix",
+          "expected": {
+            "outcome": "absent_at_snapshot",
+            "stateId": "1100000000000000000000000000000000000000000000000000000000000000",
+            "snapshot": {
+              "networkId": 2,
+              "partitionId": 7,
+              "shardId": "",
+              "rootRound": "6",
+              "sealTimestampSeconds": "1731504050",
+              "rootEpoch": "1",
+              "shardRound": "4",
+              "shardEpoch": "0",
+              "stateRoot": "23595af0c41f1dd99aaf49c7f810285ae0c85efbcef498e11aa82872c5ff6549"
+            }
+          }
+        },
+        {
+          "vector": "cases/shared-prefix",
+          "expected": {
+            "outcome": "absent_at_snapshot",
+            "stateId": "1100000000000000000000000000000000000000000000000000000000000000",
+            "snapshot": {
+              "networkId": 2,
+              "partitionId": 7,
+              "shardId": "",
+              "rootRound": "6",
+              "sealTimestampSeconds": "1731504050",
+              "rootEpoch": "1",
+              "shardRound": "4",
+              "shardEpoch": "0",
+              "stateRoot": "23595af0c41f1dd99aaf49c7f810285ae0c85efbcef498e11aa82872c5ff6549"
+            }
+          }
+        },
+        {
+          "vector": "negative/query-is-terminal",
+          "expected": {
+            "outcome": "included_at_snapshot",
+            "stateId": "1000000000000000000000000000000000000000000000000000000000000000",
+            "snapshot": {
+              "networkId": 2,
+              "partitionId": 7,
+              "shardId": "",
+              "rootRound": "6",
+              "sealTimestampSeconds": "1731504050",
+              "rootEpoch": "1",
+              "shardRound": "4",
+              "shardEpoch": "0",
+              "stateRoot": "23595af0c41f1dd99aaf49c7f810285ae0c85efbcef498e11aa82872c5ff6549"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "rejection-between-successes",
+      "description": "ONE verifier: a rejected proof (altered certificate, wrong partition UC, wrong query) between two successes changes nothing",
+      "context": "default",
+      "steps": [
+        {
+          "vector": "cases/shared-prefix",
+          "expected": {
+            "outcome": "absent_at_snapshot",
+            "stateId": "1100000000000000000000000000000000000000000000000000000000000000",
+            "snapshot": {
+              "networkId": 2,
+              "partitionId": 7,
+              "shardId": "",
+              "rootRound": "6",
+              "sealTimestampSeconds": "1731504050",
+              "rootEpoch": "1",
+              "shardRound": "4",
+              "shardEpoch": "0",
+              "stateRoot": "23595af0c41f1dd99aaf49c7f810285ae0c85efbcef498e11aa82872c5ff6549"
+            }
+          }
+        },
+        {
+          "vector": "negative/cert-sibling-flipped",
+          "expected": {
+            "outcome": "rejected",
+            "rejection": "certificate_invalid"
+          }
+        },
+        {
+          "vector": "negative/uc-wrong-partition-validly-signed",
+          "expected": {
+            "outcome": "rejected",
+            "rejection": "uc_invalid"
+          }
+        },
+        {
+          "vector": "negative/query-other-branch",
+          "expected": {
+            "outcome": "rejected",
+            "rejection": "certificate_invalid"
+          }
+        },
+        {
+          "vector": "cases/shared-prefix",
+          "expected": {
+            "outcome": "absent_at_snapshot",
+            "stateId": "1100000000000000000000000000000000000000000000000000000000000000",
+            "snapshot": {
+              "networkId": 2,
+              "partitionId": 7,
+              "shardId": "",
+              "rootRound": "6",
+              "sealTimestampSeconds": "1731504050",
+              "rootEpoch": "1",
+              "shardRound": "4",
+              "shardEpoch": "0",
+              "stateRoot": "23595af0c41f1dd99aaf49c7f810285ae0c85efbcef498e11aa82872c5ff6549"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "same-seal-other-shard",
+      "description": "ONE verifier of shard 00: the seal of block B is authenticated by the first step; the UC of shard 01 of the same block must still be rejected by the shard rule, and the first proof still verifies afterwards (no state leaks between steps)",
+      "context": "shard-00",
+      "steps": [
+        {
+          "vector": "cases/sharded-same-seal-00",
+          "expected": {
+            "outcome": "absent_at_snapshot",
+            "stateId": "2001000000000000000000000000000000000000000000000000000000000000",
+            "snapshot": {
+              "networkId": 2,
+              "partitionId": 7,
+              "shardId": "00",
+              "rootRound": "10",
+              "sealTimestampSeconds": "1731504090",
+              "rootEpoch": "1",
+              "shardRound": "5",
+              "shardEpoch": "0",
+              "stateRoot": "9c4089779dcb29f24d2b53b16e0538646baa85ddb90c07ac6b3c75dc5091a301"
+            }
+          }
+        },
+        {
+          "vector": "negative/shard-same-seal-other-shard",
+          "expected": {
+            "outcome": "rejected",
+            "rejection": "uc_invalid"
+          }
+        },
+        {
+          "vector": "cases/sharded-same-seal-00",
+          "expected": {
+            "outcome": "absent_at_snapshot",
+            "stateId": "2001000000000000000000000000000000000000000000000000000000000000",
+            "snapshot": {
+              "networkId": 2,
+              "partitionId": 7,
+              "shardId": "00",
+              "rootRound": "10",
+              "sealTimestampSeconds": "1731504090",
+              "rootEpoch": "1",
+              "shardRound": "5",
+              "shardEpoch": "0",
+              "stateRoot": "9c4089779dcb29f24d2b53b16e0538646baa85ddb90c07ac6b3c75dc5091a301"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

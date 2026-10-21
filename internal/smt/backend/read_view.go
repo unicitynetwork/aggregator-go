@@ -45,6 +45,43 @@ type ReadView interface {
 	Close() error
 }
 
+// ErrNonInclusionUnsupported is returned when a view cannot produce non-inclusion
+// certificates. It is a capability failure, never an absence.
+var ErrNonInclusionUnsupported = errors.New("read view does not support non-inclusion certificates")
+
+// NonInclusionReadView is the optional capability of a ReadView to build non-inclusion
+// certificates from its retained state. GetNonInclusionCert returns the certificate when the
+// key is absent from the retained root, an error wrapping api.ErrStateIncluded when the
+// key's leaf is present, and any other error (storage, cancellation, closed view,
+// corrupt or missing nodes) as an operational failure: a failure is never converted into an
+// absence.
+type NonInclusionReadView interface {
+	GetNonInclusionCert(ctx context.Context, key []byte) (*api.NonInclusionCert, error)
+}
+
+// EmptyStateReadView is the optional capability of a ReadView to state, explicitly, that the
+// retained state is the empty tree (no leaf). It is the fact a certified empty snapshot is
+// reconciled with; it is never inferred from the bytes of the root hash.
+type EmptyStateReadView interface {
+	IsEmptyState() bool
+}
+
+// IsEmptyState reports whether the view explicitly declares the empty tree. A view without the
+// capability is not empty as far as callers can tell.
+func IsEmptyState(rv ReadView) bool {
+	e, ok := rv.(EmptyStateReadView)
+	return ok && e.IsEmptyState()
+}
+
+// NonInclusionCert builds the non-inclusion certificate through the view's capability.
+func NonInclusionCert(ctx context.Context, rv ReadView, key []byte) (*api.NonInclusionCert, error) {
+	ni, ok := rv.(NonInclusionReadView)
+	if !ok {
+		return nil, ErrNonInclusionUnsupported
+	}
+	return ni.GetNonInclusionCert(ctx, key)
+}
+
 // ReadViewRetainer is implemented by backends that can retain read views.
 type ReadViewRetainer interface {
 	// RetainReadView captures the backend's current committed state as a
@@ -219,6 +256,28 @@ func (v *memoryReadView) GetInclusionCert(ctx context.Context, key []byte) (*api
 	return cert, err
 }
 
+func (v *memoryReadView) GetNonInclusionCert(ctx context.Context, key []byte) (*api.NonInclusionCert, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	if v.closed {
+		return nil, ErrReadViewClosed
+	}
+	cert, err := v.view.GetNonInclusionCert(key)
+	if errors.Is(err, smt.ErrNonInclusionUnsupported) {
+		return nil, fmt.Errorf("%w: %v", ErrNonInclusionUnsupported, err)
+	}
+	return cert, err
+}
+
+func (v *memoryReadView) IsEmptyState() bool {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return !v.closed && v.view.IsEmpty()
+}
+
 func (v *memoryReadView) RetainedBytes() uint64 {
 	return v.lin.retained(v.entry)
 }
@@ -255,8 +314,10 @@ type AccountingRetirer interface {
 }
 
 var (
-	_ ReadView            = (*memoryReadView)(nil)
-	_ ReadViewRetainer    = (*MemoryBackend)(nil)
-	_ RetentionAccountant = (*MemoryBackend)(nil)
-	_ AccountingRetirer   = (*memoryReadView)(nil)
+	_ NonInclusionReadView = (*memoryReadView)(nil)
+	_ EmptyStateReadView   = (*memoryReadView)(nil)
+	_ ReadView             = (*memoryReadView)(nil)
+	_ ReadViewRetainer     = (*MemoryBackend)(nil)
+	_ RetentionAccountant  = (*MemoryBackend)(nil)
+	_ AccountingRetirer    = (*memoryReadView)(nil)
 )

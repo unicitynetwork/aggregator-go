@@ -172,6 +172,9 @@ func verifyBitmapPath(bitmap *[BitmapSize]byte, siblings [][SiblingSize]byte, ke
 
 // ExclusionCert is the decoded v2 non-inclusion certificate.
 //
+// Deprecated: unfinished and never verifiable (terminal-first layout). Non-inclusion
+// uses NonInclusionCert (bitmap-first, rugregator/Rust wire) and get_non_inclusion_proof.v1.
+//
 // Wire format (raw binary, no framing):
 //
 //	k_l[32] || h_l[32] || bitmap[32] || s_1[32] || ... || s_n[32]

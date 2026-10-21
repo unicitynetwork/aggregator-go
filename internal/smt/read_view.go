@@ -98,6 +98,23 @@ func (v *ReadView) GetInclusionCert(key []byte) (*api.InclusionCert, error) {
 	return v.tree.GetInclusionCert(key)
 }
 
+// IsEmpty reports whether the frozen tree has no leaf: an explicit structural fact, not an
+// inference from the root hash bytes.
+func (v *ReadView) IsEmpty() bool {
+	if v.tree == nil || v.tree.root == nil {
+		return false
+	}
+	return v.tree.root.Left == nil && v.tree.root.Right == nil
+}
+
+// GetNonInclusionCert builds the non-inclusion certificate against the frozen root.
+func (v *ReadView) GetNonInclusionCert(key []byte) (*api.NonInclusionCert, error) {
+	if v.tree == nil {
+		return nil, ErrReadViewReleased
+	}
+	return v.tree.GetNonInclusionCert(key)
+}
+
 // introducedBytesSince estimates the bytes of nodes reachable from v that
 // the root with sequence floor did not hold. Parents are constructed after their children, so
 // descending only into nodes newer than floor visits exactly the nodes

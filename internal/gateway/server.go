@@ -196,6 +196,23 @@ func (s *Server) SetBatchProofHandler(h jsonrpc.HandlerFunc) {
 	})
 }
 
+// SetNonInclusionHandler registers get_non_inclusion_proof.v1 with its request and response
+// bounds (the params are one state ID). Deployments which cannot serve it get the
+// unsupported_configuration error instead of a missing method.
+func (s *Server) SetNonInclusionHandler(h jsonrpc.HandlerFunc) {
+	if m := s.config.Sharding.Mode; m.IsParent() || m.IsChild() {
+		h = func(context.Context, json.RawMessage) (interface{}, *jsonrpc.Error) {
+			return nil, jsonrpc.NewDetailedError(api.NonInclusionCodeNotFound, "No certified snapshot", "proof_unavailable", "unsupported_configuration", false, nil)
+		}
+	}
+	s.rpcServer.RegisterMethodWithLimits(api.GetNonInclusionProofMethod, h, jsonrpc.MethodLimits{
+		MaxRequestBytes:  api.NonInclusionMaxRequestBytes,
+		MaxParamsBytes:   1 << 10,
+		MaxIDBytes:       api.InclusionProofsMaxIDBytes,
+		MaxResponseBytes: api.NonInclusionMaxResponseBytes,
+	})
+}
+
 // Start starts the HTTP server
 func (s *Server) Start() error {
 	s.logger.WithComponent("gateway").Info("Starting HTTP server", "addr", s.httpServer.Addr)
