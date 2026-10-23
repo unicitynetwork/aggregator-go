@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"sync"
 
@@ -160,7 +161,7 @@ func (s *Session) verifySeal(seal *types.UnicitySeal, count func(*Counters)) err
 	if err != nil {
 		return &sealError{fmt.Errorf("resolving trust base: %w", err)}
 	}
-	if tb == nil {
+	if nilTrustBase(tb) {
 		return &sealError{types.ErrRootValidatorInfoMissing}
 	}
 	authority, err := authorityIdentity(tb)
@@ -188,6 +189,18 @@ func (s *Session) verifySeal(seal *types.UnicitySeal, count func(*Counters)) err
 	}
 	s.remember(s.seals, key)
 	return nil
+}
+
+func nilTrustBase(tb types.RootTrustBase) bool {
+	if tb == nil {
+		return true
+	}
+	switch v := reflect.ValueOf(tb); v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 // sealError marks a failure of seal authentication.
