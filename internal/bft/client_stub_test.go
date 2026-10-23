@@ -1104,3 +1104,43 @@ func testUnicityCertificate(round, rootRound uint64, root []byte, previous []byt
 		UnicitySeal: &types.UnicitySeal{RootChainRoundNumber: rootRound, Timestamp: testSealTimestamp},
 	}
 }
+
+// A live core certifies at sub-second cadence, so successive rounds share a reference second (equal seconds are valid). The stub's
+// default keeps its historical one-second advance; SameSecondReference makes it exercise the equal-second path: the seal records the
+// time the next round pins, and the next round pins exactly that.
+func TestBFTClientStub_ReferenceStep(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		step ReferenceStep // nil: the default
+		want func(ref uint64) uint64
+	}{
+		{"default advances one second per round", nil, func(ref uint64) uint64 { return ref + 1 }},
+		{"same second keeps the reference time", SameSecondReference, func(ref uint64) uint64 { return ref }},
+		{"a larger step is honoured", func(p uint64) uint64 { return p + 5 }, func(ref uint64) uint64 { return ref + 5 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rm := &stubRoundManager{}
+			log, err := logger.New("warn", "json", "", false)
+			require.NoError(t, err)
+			client := NewBFTClientStub(log, rm, api.NewBigIntFromUint64(1), 0)
+			if tc.step != nil {
+				client.WithReferenceStep(tc.step)
+			}
+			require.NoError(t, client.Start(t.Context()))
+			t.Cleanup(client.Stop)
+			require.Len(t, rm.startedReferenceTimes, 1)
+			ref := rm.startedReferenceTimes[0]
+
+			block := models.NewBlock(api.NewBigIntFromUint64(1), "unicity", 0, "1.0", "mainnet", api.HexBytes("0123"), nil, nil, ref)
+			require.NoError(t, client.CertificationRequest(t.Context(), block))
+			client.wg.Wait()
+
+			var uc types.UnicityCertificate
+			require.NoError(t, types.Cbor.Unmarshal(block.UnicityCertificate, &uc))
+			require.Equal(t, ref, uc.InputRecord.Timestamp, "the input record pins the round's own reference time")
+			require.Equal(t, tc.want(ref), uc.UnicitySeal.Timestamp, "the seal names the time the next round pins")
+			require.Len(t, rm.startedReferenceTimes, 2)
+			require.Equal(t, uc.UnicitySeal.Timestamp, rm.startedReferenceTimes[1], "and the next round pins exactly that")
+		})
+	}
+}
