@@ -1,6 +1,22 @@
 package proofview
 
-import "crypto/sha256"
+import (
+	"bytes"
+	"crypto/sha256"
+
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
+)
+
+// HasLatest checks publication without taking a reader pin. Pin saturation is not
+// a reason to rebuild an already retained view.
+func (c *Catalog) HasLatest(number *api.BigInt, root, uc []byte) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v := c.tail
+	return !c.closed && !c.latestStale && v != nil && number != nil &&
+		v.block.Number.Cmp(number.Int) == 0 && bytes.Equal(v.root, root) &&
+		v.attIdx.get(sha256.Sum256(uc)) != nil
+}
 
 // MarkLatestUnavailable records that the newest finalized state could not be
 // retained. Latest then reports ErrViewNotRetained until a later publication

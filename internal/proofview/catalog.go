@@ -441,6 +441,14 @@ func (c *Catalog) Publish(ctx context.Context, in PublishInput) error {
 		retireAccounting(in.Reader)
 		var aerr error
 		toClose, aerr = c.attachLocked(existing, att, toClose)
+		// A retried current-state publication can restore an invalidated view,
+		// but must not mask rejection of a newer certification or revive history.
+		if aerr == nil && c.latestStale && c.curView == nil && existing == c.tail &&
+			existing.attTail != nil && existing.attTail.round >= c.curRound &&
+			existing.attIdx.get(att.digest) != nil {
+			c.latestStale = false
+			c.curView, c.curRound = existing, existing.attTail.round
+		}
 		return aerr
 	}
 	v := &view{

@@ -14,8 +14,10 @@ package proofpub
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -59,7 +61,42 @@ type Publisher struct {
 	// reports itself: late certification material. Finalization publishes
 	// first and its caller notifies afterwards, once the proof-ready update is done (a wake
 	// from inside publish would precede markProofsReady). Called without publisher locks.
-	notify func()
+	notify      func()
+	failureMu   sync.Mutex
+	lastFailure *publicationFailure
+}
+
+type publicationFailure struct {
+	block             string
+	root, certificate [sha256.Size]byte
+	result, detail    string
+}
+
+func (p *Publisher) recordFailure(block *models.Block, result string, err error) bool {
+	failure := publicationFailure{result: result}
+	if block != nil {
+		if block.Index != nil {
+			failure.block = block.Index.String()
+		}
+		failure.root = sha256.Sum256(block.RootHash)
+		failure.certificate = sha256.Sum256(block.UnicityCertificate)
+	}
+	if err != nil {
+		failure.detail = err.Error()
+	}
+	p.failureMu.Lock()
+	defer p.failureMu.Unlock()
+	if p.lastFailure != nil && *p.lastFailure == failure {
+		return false
+	}
+	p.lastFailure = &failure
+	return true
+}
+
+func (p *Publisher) clearFailure() {
+	p.failureMu.Lock()
+	p.lastFailure = nil
+	p.failureMu.Unlock()
 }
 
 // SetNotify registers the wake-up callback (call before use). It must not block.
@@ -126,6 +163,20 @@ func (p *Publisher) EnsurePublished(ctx context.Context, block *models.Block) {
 	p.publish(ctx, block, false, false, false)
 }
 
+// RetryLatest retries an unavailable committed head under the commit ordering
+// lock. It reports recovery, not another failed attempt or an already healthy view.
+func (p *Publisher) RetryLatest(ctx context.Context, block *models.Block) bool {
+	if p == nil || block == nil || ctx.Err() != nil {
+		return false
+	}
+	if p.catalog.HasLatest(block.Index, block.RootHash, block.UnicityCertificate) {
+		p.clearFailure()
+		return false
+	}
+	p.publish(ctx, block, true, false, false)
+	return p.catalog.HasLatest(block.Index, block.RootHash, block.UnicityCertificate)
+}
+
 // EnsurePublishedAtStartup is EnsurePublished for a freshly restored backend which does
 // not know its committed block number: the caller has verified that the restored root is
 // the latest finalized block's root. It must only be given that latest block.
@@ -148,10 +199,12 @@ func (p *Publisher) publish(ctx context.Context, block *models.Block, strict, un
 	}
 	fail := func(result string, err error) {
 		metrics.ProofViewPublicationTotal.WithLabelValues(result).Inc()
-		if err != nil {
-			p.log.WithContext(ctx).Warn("Not publishing retained proof view", "result", result, "error", err.Error())
-		} else {
-			p.log.WithContext(ctx).Warn("Not publishing retained proof view", "result", result)
+		if p.recordFailure(block, result, err) {
+			if err != nil {
+				p.log.WithContext(ctx).Warn("Not publishing retained proof view", "result", result, "error", err.Error())
+			} else {
+				p.log.WithContext(ctx).Warn("Not publishing retained proof view", "result", result)
+			}
 		}
 		if strict {
 			p.catalog.MarkLatestUnavailable()
@@ -217,6 +270,7 @@ func (p *Publisher) publish(ctx context.Context, block *models.Block, strict, un
 		return
 	}
 	metrics.ProofViewPublicationTotal.WithLabelValues(ResultPublished).Inc()
+	p.clearFailure()
 }
 
 // revalidatedView re-checks the block's partition view against its own UC. A view

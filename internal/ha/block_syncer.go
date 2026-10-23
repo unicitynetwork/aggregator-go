@@ -26,6 +26,7 @@ type (
 	// catalog. It must never fail the sync; problems only make proof views unavailable.
 	ViewPublisher interface {
 		PublishFinalized(ctx context.Context, block *models.Block)
+		RetryLatest(ctx context.Context, block *models.Block) bool
 	}
 
 	// BlockSyncer updates the node's state tree using the blocks from storage, if in follower mode.
@@ -200,10 +201,7 @@ func (bs *BlockSyncer) syncToBlock(ctx context.Context, target *models.Block) er
 		return nil
 	}
 	if bs.usesDiskSMTBackend() {
-		if err := bs.syncDiskToBlock(ctx, target); err != nil {
-			return err
-		}
-		return bs.verifyDiskCommittedBlock(ctx, target)
+		return bs.syncDiskToBlock(ctx, target)
 	}
 	return bs.syncMemoryToBlock(ctx, target)
 }
@@ -256,6 +254,15 @@ func (bs *BlockSyncer) syncDiskToBlock(ctx context.Context, target *models.Block
 	if state.BlockNumber != nil {
 		currBlock = new(big.Int).Set(state.BlockNumber.Int)
 	}
+	if currBlock.Cmp(endBlock) == 0 {
+		if err := bs.verifyDiskCommittedBlock(ctx, target); err != nil {
+			return err
+		}
+		if bs.viewPublisher != nil && bs.viewPublisher.RetryLatest(ctx, target) && bs.notify != nil {
+			bs.notify()
+		}
+		return nil
+	}
 
 	for currBlock.Cmp(endBlock) < 0 {
 		b, err := bs.nextFinalizedBlock(ctx, currBlock, endBlock)
@@ -279,7 +286,7 @@ func (bs *BlockSyncer) syncDiskToBlock(ctx context.Context, target *models.Block
 		bs.published(ctx, b, target) // disk read views: the committed state is exactly this block
 		bs.logger.Info("Disk SMT updated for round", "roundNumber", currBlock)
 	}
-	return nil
+	return bs.verifyDiskCommittedBlock(ctx, target)
 }
 
 func (bs *BlockSyncer) verifyDiskCommittedBlock(ctx context.Context, target *models.Block) error {
