@@ -39,7 +39,7 @@ func requireCORS(t *testing.T, h http.Header) {
 	require.Equal(t, "Retry-After", h.Get("Access-Control-Expose-Headers"))
 }
 
-func TestCORS_AllRoutesPreflightAndErrorResponses(t *testing.T) {
+func TestCORS_JSONRPCRouteOnly(t *testing.T) {
 	srv := corsServer(t, true)
 	do := func(method, path, body string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
@@ -53,9 +53,19 @@ func TestCORS_AllRoutesPreflightAndErrorResponses(t *testing.T) {
 		requireCORS(t, rec.Header())
 		require.Contains(t, rec.Header().Get("Access-Control-Allow-Methods"), "POST")
 	})
-	t.Run("a route registered before the old middleware position now has the headers", func(t *testing.T) {
-		rec := do(http.MethodGet, "/health", "")
-		requireCORS(t, rec.Header())
+	t.Run("the preflight allows GET, POST and OPTIONS, not PUT", func(t *testing.T) {
+		rec := do(http.MethodOptions, "/", "")
+		require.Equal(t, "GET, POST, OPTIONS", rec.Header().Get("Access-Control-Allow-Methods"))
+	})
+	t.Run("other routes carry no CORS headers", func(t *testing.T) {
+		for _, route := range []struct{ method, path string }{
+			{http.MethodGet, "/health"}, {http.MethodGet, "/metrics"}, {http.MethodGet, "/api/v1/trustbases"},
+			{http.MethodPut, "/api/v1/trustbases"}, {http.MethodOptions, "/health"}, {http.MethodOptions, "/api/v1/trustbases"},
+		} {
+			rec := do(route.method, route.path, "")
+			require.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"), route.method+" "+route.path)
+			require.Empty(t, rec.Header().Get("Access-Control-Allow-Methods"), route.method+" "+route.path)
+		}
 	})
 	t.Run("a normal JSON-RPC response", func(t *testing.T) {
 		rec := do(http.MethodPost, "/", `{"jsonrpc":"2.0","method":"ok","params":{},"id":1}`)
@@ -69,10 +79,5 @@ func TestCORS_AllRoutesPreflightAndErrorResponses(t *testing.T) {
 		require.Equal(t, "1", rec.Header().Get("Retry-After"))
 		requireCORS(t, rec.Header())
 		require.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
-	})
-	t.Run("an unknown path still answers the preflight", func(t *testing.T) {
-		rec := do(http.MethodOptions, "/nope", "")
-		require.Equal(t, http.StatusOK, rec.Code)
-		requireCORS(t, rec.Header())
 	})
 }

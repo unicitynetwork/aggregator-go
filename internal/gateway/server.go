@@ -138,19 +138,20 @@ func NewServer(cfg *config.Config, logger *logger.Logger, service Service) *Serv
 
 // setupRoutes sets up HTTP routes
 func (s *Server) setupRoutes() {
-	// CORS for all routes. gin applies a middleware only to the routes registered after it, so it is installed first
-	// (it used to be added after the routes and covered none of them).
+	// CORS on the JSON-RPC route only (health, metrics, trust bases and docs are not browser APIs).
+	// gin applies a middleware only to the routes registered after it, so it is attached to the route itself.
+	var rpcCORS []gin.HandlerFunc
 	if s.config.Server.EnableCORS {
-		s.router.Use(func(c *gin.Context) {
-			jsonrpc.SetCORSHeaders(c.Writer.Header(), "GET, POST, PUT, OPTIONS")
+		rpcCORS = []gin.HandlerFunc{func(c *gin.Context) {
+			jsonrpc.SetCORSHeaders(c.Writer.Header(), "GET, POST, OPTIONS")
 
-			if c.Request.Method == "OPTIONS" {
+			if c.Request.Method == http.MethodOptions {
 				c.AbortWithStatus(http.StatusOK)
 				return
 			}
 
 			c.Next()
-		})
+		}}
 	}
 
 	// Health and metrics endpoints
@@ -161,7 +162,10 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/api/v1/trustbases", getTrustBaseHandler(s.logger, s.service))
 
 	// JSON-RPC endpoint
-	s.router.POST("/", gin.WrapH(s.rpcServer))
+	if s.config.Server.EnableCORS {
+		s.router.OPTIONS("/", rpcCORS...) // preflight
+	}
+	s.router.POST("/", append(rpcCORS, gin.WrapH(s.rpcServer))...)
 
 	// API documentation endpoint
 	if s.config.Server.EnableDocs {

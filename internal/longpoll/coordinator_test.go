@@ -370,13 +370,14 @@ func TestRun_SlowFirstReadIsTheFinalReadNotAnOverload(t *testing.T) {
 	require.Zero(t, r.reg.Stats().Running)
 }
 
-// An early wake queues for at most the resume reserve, not until the cutoff.
-func TestRun_EarlyWakeResumeIsBoundedByTheResumeReserve(t *testing.T) {
+// An early wake queues for its re-read until its own wait deadline plus the resume reserve, not
+// for the fixed reserve from the wake.
+func TestRun_EarlyWakeResumeQueuesUntilTheWaitDeadline(t *testing.T) {
 	r := newRig(t, 8, 4, func(c *Coordinator) { c.ResumeReserveOverride = 50 * time.Millisecond })
 	out := make(chan call, 1)
-	r.handler(2000, out, nil)
+	r.handler(600, out, nil)
 	done := make(chan struct{})
-	go func() { r.post(context.Background(), `{"waitMs":2000}`); close(done) }()
+	go func() { r.post(context.Background(), `{"waitMs":600}`); close(done) }()
 	require.Eventually(t, func() bool { return r.reg.Stats().Reserved == 1 && r.srv.ActiveRequests() == 0 }, 2*time.Second, time.Millisecond)
 	var hold []*jsonrpc.Permit
 	for i := 0; i < 3; i++ { // saturate: the resumption cannot be granted
@@ -385,13 +386,66 @@ func TestRun_EarlyWakeResumeIsBoundedByTheResumeReserve(t *testing.T) {
 		hold = append(hold, p)
 	}
 	start := time.Now()
-	r.reg.Notify() // an immediate notification, 2s before the cutoff
+	r.reg.Notify() // an immediate notification, 600ms before the cutoff
 	<-done
-	require.Less(t, time.Since(start), 600*time.Millisecond, "queued ~50ms, not until the 2s cutoff")
+	require.GreaterOrEqual(t, time.Since(start), 550*time.Millisecond, "queued past the fixed 50ms reserve, until cutoff + reserve")
+	require.Less(t, time.Since(start), 1500*time.Millisecond)
 	c := <-out
 	require.NotNil(t, c.res.Err)
 	require.Equal(t, jsonrpc.ConcurrencyLimitCode, c.res.Err.Code)
 	for _, p := range hold {
 		p.Close()
 	}
+}
+
+// A woken waiter whose re-read slot frees up later than the resume reserve is still served.
+func TestRun_EarlyWakeIsServedWhenCapacityFreesLate(t *testing.T) {
+	r := newRig(t, 8, 4, func(c *Coordinator) { c.ResumeReserveOverride = 50 * time.Millisecond })
+	out := make(chan call, 1)
+	r.handler(2000, out, nil)
+	done := make(chan struct{})
+	go func() { r.post(context.Background(), `{"waitMs":2000}`); close(done) }()
+	require.Eventually(t, func() bool { return r.reg.Stats().Reserved == 1 && r.srv.ActiveRequests() == 0 }, 2*time.Second, time.Millisecond)
+	var hold []*jsonrpc.Permit
+	for i := 0; i < 3; i++ {
+		p, ok := r.srv.AcquirePermit()
+		require.True(t, ok)
+		hold = append(hold, p)
+	}
+	r.ready.Store(true)
+	r.reg.Notify()
+	time.Sleep(300 * time.Millisecond) // six times the resume reserve
+	for _, p := range hold {
+		p.Close()
+	}
+	<-done
+	c := <-out
+	require.Nil(t, c.res.Err)
+	require.False(t, c.res.Pending)
+}
+
+// Drain(false) gives every waiter its ordinary final read even when the queue is longer than
+// the resume reserve.
+func TestRun_DrainGivesEveryWaiterItsFinalRead(t *testing.T) {
+	r := newRig(t, 8, 4, func(c *Coordinator) { c.ResumeReserveOverride = 50 * time.Millisecond })
+	out := make(chan call, 1)
+	r.handler(5000, out, nil)
+	done := make(chan struct{})
+	go func() { r.post(context.Background(), `{"waitMs":5000}`); close(done) }()
+	require.Eventually(t, func() bool { return r.reg.Stats().Reserved == 1 && r.srv.ActiveRequests() == 0 }, 2*time.Second, time.Millisecond)
+	var hold []*jsonrpc.Permit
+	for i := 0; i < 3; i++ {
+		p, ok := r.srv.AcquirePermit()
+		require.True(t, ok)
+		hold = append(hold, p)
+	}
+	r.reg.Drain(false)
+	time.Sleep(300 * time.Millisecond)
+	for _, p := range hold {
+		p.Close()
+	}
+	<-done
+	c := <-out
+	require.Nil(t, c.res.Err, "no busy answer for a drained waiter")
+	require.True(t, c.res.Pending)
 }

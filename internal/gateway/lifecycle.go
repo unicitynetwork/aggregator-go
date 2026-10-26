@@ -63,6 +63,15 @@ func (c *trackedConn) Close() error {
 	return c.Conn.Close()
 }
 
+// CloseWrite forwards the half-close of the inner connection (a *net.TCPConn has it). net/http
+// uses it to flush and close after an early error; hiding it delays that close by about 500 ms.
+func (c *trackedConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
 func (t *connTracker) wrap(c net.Conn) net.Conn {
 	tc := &trackedConn{Conn: c, t: t}
 	t.mu.Lock()
