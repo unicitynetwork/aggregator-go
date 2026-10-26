@@ -113,7 +113,7 @@ func Test_RetryLatest(t *testing.T) {
 	other, _ := finalizedBlock(t, 1, root, 81, true)
 	require.False(t, e.cat.HasLatest(block.Index, block.RootHash, other.UnicityCertificate))
 
-	e.pub.InvalidateLatest()
+	e.pub.InvalidateLatest(block.Index)
 	require.False(t, e.cat.HasLatest(block.Index, block.RootHash, block.UnicityCertificate))
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -537,12 +537,12 @@ func Test_Notify_OnlyForInvalidationAndLateMaterial(t *testing.T) {
 	require.NoError(t, e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindFinalized, f, f.Raw, 1, true)))
 	require.Equal(t, 1, n, "a late view turns partition_view_unavailable into a proof")
 
-	e.pub.InvalidateLatest()
+	e.pub.InvalidateLatest(block.Index)
 	require.Equal(t, 1, n, "no wake from inside the caller's lock: the finalizing caller signals after unlocking")
 	_, err := e.cat.AcquireLatest(t.Context())
 	require.Error(t, err)
 
 	var nilPub *proofpub.Publisher
 	nilPub.SetNotify(func() { t.Fatal("nil publisher") })
-	nilPub.InvalidateLatest()
+	nilPub.InvalidateLatest(nil)
 }

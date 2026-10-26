@@ -7,26 +7,43 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
-// HasLatest checks publication without taking a reader pin. Pin saturation is not
-// a reason to rebuild an already retained view.
+// HasLatest accepts a compatible, superseding certification without taking a
+// reader pin. Pin saturation is not a reason to rebuild an already retained view.
 func (c *Catalog) HasLatest(number *api.BigInt, root, uc []byte) bool {
+	certRoot, round, compat, err := decodeUC(uc)
+	if err != nil || !bytes.Equal(certRoot, root) {
+		return false
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	v := c.tail
 	return !c.closed && !c.latestStale && v != nil && number != nil &&
 		v.block.Number.Cmp(number.Int) == 0 && bytes.Equal(v.root, root) &&
-		v.attIdx.get(sha256.Sum256(uc)) != nil
+		v.attTail != nil && v.attTail.round >= round && v.attTail.compat == compat
 }
 
 // MarkLatestUnavailable records that the newest finalized state could not be
 // retained. Latest then reports ErrViewNotRetained until a later publication
-// succeeds; it never falls back to an older view. Exact-root lookups of other
-// retained views are unaffected.
-func (c *Catalog) MarkLatestUnavailable() {
+// succeeds at or above the failed block/certification watermark. Exact-root
+// lookups of other retained views are unaffected.
+func (c *Catalog) MarkLatestUnavailable(number *api.BigInt, round uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return
+	}
+	c.markLatestUnavailableLocked(number, round)
+}
+
+func (c *Catalog) markLatestUnavailableLocked(number *api.BigInt, round uint64) {
+	if number != nil && (c.curNumber == nil || number.Cmp(c.curNumber.Int) >= 0) {
+		if c.curNumber == nil || number.Cmp(c.curNumber.Int) > 0 {
+			c.curNumber = api.NewBigInt(nil)
+			c.curNumber.Set(number.Int)
+			c.curRound = round
+		} else {
+			c.curRound = max(c.curRound, round)
+		}
 	}
 	c.latestStale = true
 	c.curView = nil

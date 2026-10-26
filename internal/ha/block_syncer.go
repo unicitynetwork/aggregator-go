@@ -221,6 +221,19 @@ func (bs *BlockSyncer) syncMemoryToBlock(ctx context.Context, target *models.Blo
 	endBlock := target.Index.Int
 	// fetch last synced smt block number and last stored block number
 	currBlock := bs.stateTracker.GetLastSyncedBlock()
+	if currBlock.Cmp(endBlock) == 0 && bs.viewPublisher != nil {
+		root, err := bs.smtBackend.RootHashRaw(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to read memory SMT root: %w", err)
+		}
+		if err := bs.verifySMTForBlock(root, target); err != nil {
+			return err
+		}
+		if bs.viewPublisher.RetryLatest(ctx, target) && bs.notify != nil {
+			bs.notify()
+		}
+		return nil
+	}
 	for currBlock.Cmp(endBlock) < 0 {
 		b, err := bs.nextFinalizedBlock(ctx, currBlock, endBlock)
 		if err != nil {

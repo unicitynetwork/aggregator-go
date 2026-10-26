@@ -1999,7 +1999,7 @@ func (rm *RoundManager) publishRecoveredBlock(ctx context.Context, blockNumber *
 	if err != nil || block == nil {
 		rm.logger.WithContext(ctx).Warn("Recovered block cannot be loaded for proof view publication",
 			"blockNumber", blockNumber.String())
-		rm.proofPub.InvalidateLatest()
+		rm.proofPub.InvalidateLatest(blockNumber)
 		return
 	}
 	rm.proofPub.PublishFinalized(ctx, block)

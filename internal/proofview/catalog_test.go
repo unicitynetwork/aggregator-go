@@ -718,7 +718,7 @@ func TestRepublishCurrentStateRestoresInvalidatedLatest(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, c.Close()) })
 	publish(t, c, 1, 1, newFakeReader(1, 10), nil)
 	publish(t, c, 2, 2, newFakeReader(2, 10), nil)
-	c.MarkLatestUnavailable()
+	c.MarkLatestUnavailable(block(2).Number, 2)
 	publish(t, c, 1, 1, newFakeReader(1, 10), nil)
 	_, err := c.AcquireLatest(t.Context())
 	require.ErrorIs(t, err, ErrViewNotRetained, "a historical retry cannot restore latest")

@@ -185,9 +185,9 @@ func (p *Publisher) EnsurePublishedAtStartup(ctx context.Context, latest *models
 }
 
 // InvalidateLatest makes latest unavailable (state advanced but could not be published).
-func (p *Publisher) InvalidateLatest() {
+func (p *Publisher) InvalidateLatest(number *api.BigInt) {
 	if p != nil {
-		p.catalog.MarkLatestUnavailable()
+		p.catalog.MarkLatestUnavailable(number, 0)
 		// No wake here: its callers hold finalizationMu, and each of them signals after its own
 		// completion and unlock, so the waiter still observes the unavailable outcome.
 	}
@@ -197,6 +197,7 @@ func (p *Publisher) publish(ctx context.Context, block *models.Block, strict, un
 	if p == nil {
 		return
 	}
+	var round uint64
 	fail := func(result string, err error) {
 		metrics.ProofViewPublicationTotal.WithLabelValues(result).Inc()
 		if p.recordFailure(block, result, err) {
@@ -207,7 +208,11 @@ func (p *Publisher) publish(ctx context.Context, block *models.Block, strict, un
 			}
 		}
 		if strict {
-			p.catalog.MarkLatestUnavailable()
+			var number *api.BigInt
+			if block != nil {
+				number = block.Index
+			}
+			p.catalog.MarkLatestUnavailable(number, round)
 		}
 	}
 	if block == nil || block.Index == nil || !block.Finalized || len(block.RootHash) == 0 {
@@ -226,6 +231,7 @@ func (p *Publisher) publish(ctx context.Context, block *models.Block, strict, un
 		fail(ResultNoConfig, fmt.Errorf("decoding UC: %w", err))
 		return
 	}
+	round = uc.GetRootRoundNumber()
 	if len(uc.ShardConfHash) != proofmaterial.ConfHashSize {
 		fail(ResultNoConfig, errors.New("UC carries no shard configuration identity"))
 		return

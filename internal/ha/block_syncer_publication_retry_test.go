@@ -19,9 +19,13 @@ import (
 type transientRetainBackend struct {
 	*fakeDiskBackend
 	fail       bool
+	memory     bool
+	cancel     context.CancelFunc
 	calls      int
 	stateReads int
 }
+
+func (b *transientRetainBackend) IsDiskBackedSMT() bool { return !b.memory }
 
 func (b *transientRetainBackend) CommittedState(ctx context.Context) (backend.CommittedState, error) {
 	b.stateReads++
@@ -30,6 +34,10 @@ func (b *transientRetainBackend) CommittedState(ctx context.Context) (backend.Co
 
 func (b *transientRetainBackend) RetainReadView(ctx context.Context) (backend.ReadView, error) {
 	b.calls++
+	if b.cancel != nil {
+		b.cancel()
+		b.cancel = nil
+	}
 	if b.fail {
 		return nil, errors.New("temporary read-snapshot allocation failure")
 	}
@@ -37,6 +45,12 @@ func (b *transientRetainBackend) RetainReadView(ctx context.Context) (backend.Re
 }
 
 func TestBlockSyncer_RetriesUnavailableCurrentView(t *testing.T) {
+	for name, memory := range map[string]bool{"disk": false, "memory": true} {
+		t.Run(name, func(t *testing.T) { testBlockSyncerRetriesUnavailableCurrentView(t, memory) })
+	}
+}
+
+func testBlockSyncerRetriesUnavailableCurrentView(t *testing.T, memory bool) {
 	ctx := t.Context()
 	f := newBlockSyncerFixture(t)
 	root := f.addBlock(t, 1, 2)
@@ -45,7 +59,7 @@ func TestBlockSyncer_RetriesUnavailableCurrentView(t *testing.T) {
 	uc, err := types.Cbor.Marshal(auth.UC)
 	require.NoError(t, err)
 	block.UnicityCertificate = api.HexBytes(uc)
-	be := &transientRetainBackend{fakeDiskBackend: newFakeDiskBackend(), fail: true}
+	be := &transientRetainBackend{fakeDiskBackend: newFakeDiskBackend(), fail: true, memory: memory}
 	limits := proofview.DefaultLimits()
 	limits.MaxConcurrentPins = 1
 	cat, err := proofview.NewCatalog(limits)
@@ -73,7 +87,11 @@ func TestBlockSyncer_RetriesUnavailableCurrentView(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		reads := be.stateReads
 		require.NoError(t, s.SyncToLatestBlock(ctx))
-		require.Equal(t, reads+2, be.stateReads, "one cursor read and one committed-state check")
+		if memory {
+			require.Equal(t, reads, be.stateReads, "memory retries check the root without reading disk state")
+		} else {
+			require.Equal(t, reads+2, be.stateReads, "one cursor read and one committed-state check")
+		}
 	}
 	require.Equal(t, 3, be.calls, "a healthy view is not retained again, even with all pins occupied")
 	require.Equal(t, 2, wakes)
@@ -97,4 +115,39 @@ func TestBlockSyncer_RetriesUnavailableCurrentView(t *testing.T) {
 	l.Release()
 	require.Equal(t, 5, be.calls)
 	require.Equal(t, 4, wakes)
+}
+
+func TestBlockSyncer_MemoryPublicationRecoversAfterCancellation(t *testing.T) {
+	f := newBlockSyncerFixture(t)
+	root := f.addBlock(t, 1, 2)
+	block := f.storage.blocks.byNumber["1"]
+	auth := prooftest.New(t, 2, 1, root, 81)
+	uc, err := types.Cbor.Marshal(auth.UC)
+	require.NoError(t, err)
+	block.UnicityCertificate = api.HexBytes(uc)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	be := &transientRetainBackend{fakeDiskBackend: newFakeDiskBackend(), memory: true, cancel: cancel}
+	cat, err := proofview.NewCatalog(proofview.DefaultLimits())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, cat.Close()) })
+	pub := proofpub.New(cat, be, nil, testBlockSyncerLogger(t))
+	tracker := state.NewSyncStateTracker()
+	syncer := NewBlockSyncer(testBlockSyncerLogger(t), &mockLeaderSelector{}, f.storage, be, 0, time.Second, tracker)
+	syncer.SetViewPublisher(pub)
+	require.NoError(t, syncer.SyncToLatestBlock(ctx))
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.EqualValues(t, 1, tracker.GetLastSyncedBlock().Uint64())
+	_, err = cat.AcquireLatest(t.Context())
+	require.ErrorIs(t, err, proofview.ErrViewNotRetained)
+	require.NoError(t, syncer.SyncToLatestBlock(t.Context()))
+	lease, err := cat.AcquireLatest(t.Context())
+	require.NoError(t, err)
+	defer lease.Release()
+	require.EqualValues(t, 1, lease.Block().Number.Uint64())
+	require.Equal(t, 2, be.calls)
+
+	block.RootHash = api.HexBytes(prooftest.Hash("wrong root"))
+	require.ErrorContains(t, syncer.SyncToLatestBlock(t.Context()), "does not match latest block root hash")
+	require.Equal(t, 2, be.calls, "a mismatching committed state must not be republished")
 }

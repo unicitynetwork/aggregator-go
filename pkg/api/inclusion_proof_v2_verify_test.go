@@ -396,6 +396,16 @@ func TestInclusionProofV2Verify_HappyPath_FullySignedUC(t *testing.T) {
 	require.NoError(t, proof.Verify(req, vctx))
 }
 
+func TestInclusionProofV2Verify_TypedNilTrustBase(t *testing.T) {
+	shard, _ := types.ShardID{}.Split()
+	proof, req, partition, _ := buildSignedSingleLeafProof(t, shard, types.NetworkMainNet)
+	for _, tb := range []types.RootTrustBase{nil, (*types.RootTrustBaseV1)(nil), (*stubTrustBase)(nil)} {
+		require.EqualError(t, proof.Verify(req, &VerifierContext{
+			TrustBase: tb, PartitionID: partition, ExpectedShardID: shard,
+		}), "nil trust base")
+	}
+}
+
 // A valid UC for one shard must be rejected when the verifier expects another.
 func TestInclusionProofV2Verify_ShardMismatch_Rejected(t *testing.T) {
 	sid0, sid1 := types.ShardID{}.Split()
