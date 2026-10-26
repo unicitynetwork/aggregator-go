@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -93,6 +94,18 @@ func (s *Server) RegisterMethodWithLimits(method string, handler HandlerFunc, li
 	defer s.mutex.Unlock()
 	s.handlers[method] = handler
 	s.limits[method] = limits
+}
+
+// Methods returns the names of all registered methods, sorted.
+func (s *Server) Methods() []string {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	names := make([]string, 0, len(s.handlers))
+	for name := range s.handlers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (s *Server) methodLimits(method string) (MethodLimits, bool) {

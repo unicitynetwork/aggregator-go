@@ -15,15 +15,16 @@ import (
 // Any method name not in this set is normalized to "unknown" to prevent
 // unbounded label cardinality from arbitrary client input.
 var knownMethods = map[string]struct{}{
-	"certification_request":   {},
-	"get_inclusion_proof.v2":  {},
-	"get_inclusion_proofs.v1": {},
-	"get_no_deletion_proof":   {},
-	"get_block_height":        {},
-	"get_block":               {},
-	"get_block_records":       {},
-	"submit_shard_root":       {},
-	"get_shard_proof":         {},
+	"certification_request":      {},
+	"get_inclusion_proof.v2":     {},
+	"get_inclusion_proofs.v1":    {},
+	"get_non_inclusion_proof.v1": {},
+	"get_no_deletion_proof":      {},
+	"get_block_height":           {},
+	"get_block":                  {},
+	"get_block_records":          {},
+	"submit_shard_root":          {},
+	"get_shard_proof":            {},
 }
 
 // NormalizeMethod returns the method name if it is a known RPC method,
