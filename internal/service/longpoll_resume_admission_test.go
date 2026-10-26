@@ -327,7 +327,7 @@ func TestLongPollBatch_UnrelatedNotifyDoesNotShedParkedWaiters(t *testing.T) {
 	admBefore := outcomeCount("busy_admission_deadline")
 	results := parkBatchWaiters(t, r, waiters)
 
-	r.e.recs.delay = 30 * time.Millisecond
+	r.setReadDelay(30 * time.Millisecond)
 	rechecks := testutil.ToFloat64(metrics.LongPollRechecksTotal.WithLabelValues("get_inclusion_proofs.v1"))
 	r.reg.Notify() // unrelated: no state changed
 	require.Eventually(t, func() bool {
@@ -340,7 +340,7 @@ func TestLongPollBatch_UnrelatedNotifyDoesNotShedParkedWaiters(t *testing.T) {
 	}
 	require.Equal(t, waiters, r.reg.Stats().Reserved, "all are parked again")
 
-	r.e.recs.delay = 0
+	r.setReadDelay(0)
 	r.publish() // the states are now included: everyone is served
 	for i := 0; i < waiters; i++ {
 		select {
@@ -363,7 +363,7 @@ func TestLongPollBatch_DrainGivesEveryParkedWaiterItsFinalRead(t *testing.T) {
 	admBefore := outcomeCount("busy_admission_deadline")
 	results := parkBatchWaiters(t, r, waiters)
 
-	r.e.recs.delay = 30 * time.Millisecond
+	r.setReadDelay(30 * time.Millisecond)
 	r.reg.Drain(false)
 	for i := 0; i < waiters; i++ {
 		select {
@@ -397,7 +397,7 @@ func TestLongPollBatch_ResumeQueueIsDeadlineBounded(t *testing.T) {
 		}
 	}
 	require.Eventually(t, func() bool { return r.reg.Stats().Reserved == waiters }, 30*time.Second, 10*time.Millisecond)
-	r.e.recs.delay = 100 * time.Millisecond // every re-read now takes 100 ms: 40 reads / 7 at a time >> 150 ms
+	r.setReadDelay(100 * time.Millisecond) // every re-read now takes 100 ms: 40 reads / 7 at a time >> 150 ms
 
 	start := time.Now()
 	r.e.finalize([]byte("pv2")) // no wake: the waiters reach their wait deadline, all within about 150 ms
@@ -501,4 +501,11 @@ func TestBatchHeadroomIsAtomicWithFreshAdmission(t *testing.T) {
 		require.Equal(t, "busy", berr.Reason)
 		require.Less(t, time.Since(start), 500*time.Millisecond)
 	})
+}
+
+// setReadDelay slows every record read; the fake reads it under its lock.
+func (r *lpBatchRig) setReadDelay(d time.Duration) {
+	r.e.recs.mu.Lock()
+	r.e.recs.delay = d
+	r.e.recs.mu.Unlock()
 }
