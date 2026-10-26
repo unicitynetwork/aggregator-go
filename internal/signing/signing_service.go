@@ -123,6 +123,10 @@ func (s *SigningService) VerifyHashWithPublicKey(dataHash []byte, signature []by
 		return false, fmt.Errorf("failed to parse public key: %w", err)
 	}
 
+	if err := checkCanonicalSignature(signature); err != nil {
+		return false, err
+	}
+
 	// Convert from Unicity's [R || S || V] format to btcec's [V || R || S] format
 	compactSig := convertUnicityToBtcec(signature)
 
@@ -139,6 +143,27 @@ func (s *SigningService) VerifyHashWithPublicKey(dataHash []byte, signature []by
 	}
 
 	return true, nil
+}
+
+// checkCanonicalSignature enforces the unlock signature rule shared with the SDKs:
+// 1 <= r < n, 1 <= s <= n/2 (low-S) and recovery id v in 0..=3. Recovery alone accepts
+// both s and n-s, which would let a third party submit a malleated twin of the owner's
+// signature that the SDKs then reject. Admission only: do not call this on stored records.
+func checkCanonicalSignature(signature []byte) error {
+	var r, sc btcec.ModNScalar
+	if r.SetByteSlice(signature[0:32]) || r.IsZero() {
+		return errors.New("signature r must be in [1, n-1]")
+	}
+	if sc.SetByteSlice(signature[32:64]) || sc.IsZero() {
+		return errors.New("signature s must be in [1, n-1]")
+	}
+	if sc.IsOverHalfOrder() {
+		return errors.New("signature s must not be greater than n/2 (high-S)")
+	}
+	if signature[64] > 3 {
+		return fmt.Errorf("signature recovery id must be 0..3, got %d", signature[64])
+	}
+	return nil
 }
 
 // RecoverPublicKey recovers the public key from a signature and the original data
