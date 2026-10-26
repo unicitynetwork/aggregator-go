@@ -640,6 +640,45 @@ func TestCertificationRequestDoesNotTouchSMTBackend(t *testing.T) {
 	require.Equal(t, 0, backend.calls, "submit path must not read or write the SMT")
 }
 
+// A third party that sees the owner's request first can submit the high-S twin of its
+// signature (s' = n - s, v' = v ^ 1). The twin must be rejected at admission, so the genuine
+// copy is the one certified.
+func TestCertificationRequestRejectsHighSTwinThenCertifiesGenuine(t *testing.T) {
+	ctx := context.Background()
+	log, err := logger.New("error", "text", "stdout", false)
+	require.NoError(t, err)
+
+	queue := &recordingCommitmentQueue{}
+	shardingCfg := config.ShardingConfig{Mode: config.ShardingModeBFTShard}
+	service := &AggregatorService{
+		config:                        &config.Config{Processing: config.ProcessingConfig{SkipDuplicateCheck: true}, Sharding: shardingCfg},
+		logger:                        log,
+		commitmentQueue:               queue,
+		roundManager:                  &stubRoundManager{referenceTime: 1},
+		certificationRequestValidator: signing.NewCertificationRequestValidator(shardingCfg, bfttypes.ShardID{}),
+	}
+
+	genuine := createTestCertificationRequests(t, 1)[0]
+	sig := genuine.CertificationData.Witness
+	twinWitness := make([]byte, 65)
+	copy(twinWitness, sig[:32])
+	new(big.Int).Sub(btcec.S256().N, new(big.Int).SetBytes(sig[32:64])).FillBytes(twinWitness[32:64])
+	twinWitness[64] = sig[64] ^ 1
+	twin := *genuine
+	twin.CertificationData.Witness = twinWitness
+
+	resp, err := service.CertificationRequest(ctx, &twin)
+	require.NoError(t, err)
+	require.Equal(t, "SIGNATURE_VERIFICATION_FAILED", resp.Status)
+	require.Empty(t, queue.stored)
+
+	resp, err = service.CertificationRequest(ctx, genuine)
+	require.NoError(t, err)
+	require.Equal(t, "SUCCESS", resp.Status)
+	require.Len(t, queue.stored, 1)
+	require.Equal(t, []byte(sig), []byte(queue.stored[0].CertificationData.Witness))
+}
+
 func TestCertificationRequestAssignsDefaultTimeoutFromConsensusTime(t *testing.T) {
 	ctx := context.Background()
 	log, err := logger.New("error", "text", "stdout", false)
