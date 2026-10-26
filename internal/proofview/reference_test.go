@@ -12,11 +12,13 @@ import (
 	"sync"
 
 	"github.com/unicitynetwork/aggregator-go/internal/smt/backend"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 type refAttachment struct {
 	uc     []byte
 	digest [sha256.Size]byte
+	compat [sha256.Size]byte
 	view   []byte
 	round  uint64 // UC root-chain round: the order in which certifications supersede each other
 	bytes  uint64
@@ -51,9 +53,10 @@ type refCatalog struct {
 	// root round. Only a genuinely newer certification on curView, or a newer
 	// published view, clears latestStale; filling in historical material never
 	// does.
-	curView  *refView
-	curRound uint64
-	closed   bool
+	curView   *refView
+	curNumber *api.BigInt
+	curRound  uint64
+	closed    bool
 
 	evictions     uint64
 	pressureKills uint64
@@ -94,7 +97,7 @@ func newRefAttachment(cert Certification, root []byte) (*refAttachment, error) {
 	if len(cert.UC) == 0 {
 		return nil, fmt.Errorf("%w: missing UC", ErrInvalidPublication)
 	}
-	got, round, _, err := decodeUC(cert.UC)
+	got, round, compat, err := decodeUC(cert.UC)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidPublication, err)
 	}
@@ -104,6 +107,7 @@ func newRefAttachment(cert Certification, root []byte) (*refAttachment, error) {
 	a := &refAttachment{
 		uc:     append([]byte(nil), cert.UC...),
 		digest: sha256.Sum256(cert.UC),
+		compat: compat,
 		round:  round,
 	}
 	if len(cert.PartitionView) > 0 {
@@ -159,7 +163,23 @@ func (c *refCatalog) Publish(ctx context.Context, in PublishInput) error {
 		// is closed by the deferred cleanup.
 		var aerr error
 		toClose, aerr = c.attachLocked(existing, att, toClose)
+		var last *refAttachment
+		if len(existing.atts) > 0 {
+			last = existing.atts[len(existing.atts)-1]
+		}
+		if aerr == nil && c.latestStale && c.curView == nil && existing == c.views[len(c.views)-1] &&
+			c.curNumber != nil && existing.block.Number.Cmp(c.curNumber.Int) == 0 &&
+			last != nil && last.round >= c.curRound && last.round >= att.round && last.compat == att.compat {
+			c.latestStale = false
+			c.curView, c.curRound = existing, last.round
+		}
 		return aerr
+	}
+	if c.latestStale && c.curNumber != nil {
+		order := in.Block.Number.Cmp(c.curNumber.Int)
+		if order < 0 || (order == 0 && att.round < c.curRound) {
+			return fmt.Errorf("%w: publication precedes unavailable head", ErrInvalidPublication)
+		}
 	}
 	v := &refView{
 		block:  in.Block.clone(),
@@ -170,14 +190,25 @@ func (c *refCatalog) Publish(ctx context.Context, in PublishInput) error {
 	if c.viewCostLocked(v) > c.limits.RetentionBudgetBytes {
 		// Cannot retain this view even alone: refuse without disturbing older
 		// history, and make latest unavailable rather than serving an older view.
+		if c.curNumber == nil || in.Block.Number.Cmp(c.curNumber.Int) >= 0 {
+			if c.curNumber == nil || in.Block.Number.Cmp(c.curNumber.Int) > 0 {
+				c.curRound = att.round
+			} else {
+				c.curRound = max(c.curRound, att.round)
+			}
+			c.curNumber = api.NewBigInt(nil)
+			c.curNumber.Set(in.Block.Number.Int)
+		}
 		c.latestStale = true
-		c.curView, c.curRound = nil, att.round
+		c.curView = nil
 		return ErrBudget
 	}
 	c.views = append(c.views, v)
 	toClose = c.enforceLocked(toClose)
 	c.latestStale = false
 	c.curView, c.curRound = v, att.round
+	c.curNumber = api.NewBigInt(nil)
+	c.curNumber.Set(in.Block.Number.Int)
 	owned = true
 	return nil
 }
@@ -242,7 +273,8 @@ func (c *refCatalog) attachLocked(v *refView, att *refAttachment, toClose []back
 
 func (c *refCatalog) enforceAttachLocked(v *refView, att *refAttachment, toClose []backend.ReadView) ([]backend.ReadView, error) {
 	toClose = c.enforceLocked(toClose)
-	isCur := v == c.curView
+	isCur := v == c.curView || (c.curView == nil && len(c.views) > 0 && v == c.views[len(c.views)-1] &&
+		c.curNumber != nil && v.block.Number.Cmp(c.curNumber.Int) == 0)
 	if c.viewCostLocked(v) > c.limits.RetentionBudgetBytes {
 		// The certification does not fit; drop it. If it is (or supersedes)
 		// the current one, latest would otherwise be older material.
@@ -261,6 +293,7 @@ func (c *refCatalog) enforceAttachLocked(v *refView, att *refAttachment, toClose
 	}
 	if isCur && att.round > c.curRound {
 		c.curRound = att.round
+		c.curView = v
 		c.latestStale = false
 	}
 	return toClose, nil

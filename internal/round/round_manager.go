@@ -934,13 +934,13 @@ func (rm *RoundManager) processRound(ctx context.Context, round *Round) error {
 		collectedCount := 0
 
 		for time.Now().Before(deadline) {
+			rm.roundMutex.Lock()
+			if rm.currentRound != round {
+				rm.roundMutex.Unlock()
+				return nil
+			}
 			select {
 			case commitment := <-rm.commitmentStream:
-				rm.roundMutex.Lock()
-				if rm.currentRound != round {
-					rm.roundMutex.Unlock()
-					return nil
-				}
 				round.Commitments = append(round.Commitments, commitment)
 				var dropped []interfaces.CertificationRequestAck
 				if len(round.Commitments)%miniBatchSize == 0 {
@@ -965,8 +965,10 @@ func (rm *RoundManager) processRound(ctx context.Context, round *Round) error {
 				rm.roundMutex.Unlock()
 				ackDroppedCommitments(ctx, rm.logger, rm.commitmentQueue, dropped)
 			case <-ctx.Done():
+				rm.roundMutex.Unlock()
 				return ctx.Err()
 			default:
+				rm.roundMutex.Unlock()
 				time.Sleep(10 * time.Millisecond)
 			}
 		}
@@ -1997,7 +1999,7 @@ func (rm *RoundManager) publishRecoveredBlock(ctx context.Context, blockNumber *
 	if err != nil || block == nil {
 		rm.logger.WithContext(ctx).Warn("Recovered block cannot be loaded for proof view publication",
 			"blockNumber", blockNumber.String())
-		rm.proofPub.InvalidateLatest()
+		rm.proofPub.InvalidateLatest(blockNumber)
 		return
 	}
 	rm.proofPub.PublishFinalized(ctx, block)

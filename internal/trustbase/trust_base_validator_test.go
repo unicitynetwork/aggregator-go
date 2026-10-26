@@ -93,6 +93,11 @@ func TestTrustBaseValidator(t *testing.T) {
 		require.ErrorContains(t, err, "trust base is nil")
 	})
 
+	t.Run("should fail to verify a typed nil trust base", func(t *testing.T) {
+		var trustBase *types.RootTrustBaseV1
+		require.EqualError(t, validator.Verify(t.Context(), trustBase), "trust base is nil")
+	})
+
 	t.Run("should fail to verify trust base if hash does not match", func(t *testing.T) {
 		// Create trust base for epoch 0
 		rootNodes, _ := newRootNodes(t, 3)

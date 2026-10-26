@@ -7,6 +7,19 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
+func TestSession_MissingTrustBase(t *testing.T) {
+	f := newFixture(t, ts())
+	for _, tb := range []types.RootTrustBase{nil, (*types.RootTrustBaseV1)(nil)} {
+		s, err := NewSession(f.policy, func(*types.UnicitySeal) (types.RootTrustBase, error) {
+			return tb, nil
+		})
+		require.NoError(t, err)
+		_, err = s.AuthenticateEvidence(f.defaultEvidence())
+		require.ErrorIs(t, err, types.ErrRootValidatorInfoMissing)
+		require.Zero(t, s.Counters().QuorumChecks)
+	}
+}
+
 // The session snapshots its policy: later changes by the caller change nothing.
 func TestSession_PolicyIsSnapshotted(t *testing.T) {
 	f := newFixture(t, ts())

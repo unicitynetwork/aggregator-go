@@ -29,6 +29,8 @@ func (p *recordingPublisher) PublishFinalized(_ context.Context, b *models.Block
 	p.events = append(p.events, "publish")
 }
 
+func (p *recordingPublisher) RetryLatest(context.Context, *models.Block) bool { return false }
+
 func (p *recordingPublisher) note(e string) {
 	p.mu.Lock()
 	p.events = append(p.events, e)

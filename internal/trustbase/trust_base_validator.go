@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 type TrustBaseValidator struct {
@@ -17,7 +19,7 @@ func NewTrustBaseValidator(storage TrustBaseStore) *TrustBaseValidator {
 }
 
 func (t *TrustBaseValidator) Verify(ctx context.Context, trustBase types.RootTrustBase) error {
-	if trustBase == nil {
+	if api.IsNilTrustBase(trustBase) {
 		return errors.New("trust base is nil")
 	}
 	trustBaseV1, ok := trustBase.(*types.RootTrustBaseV1)

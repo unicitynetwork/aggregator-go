@@ -22,6 +22,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/aggregator-go/internal/smt/backend"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
 )
 
 // Errors map onto the JSON-RPC data.detail values of the batch API (plan §2.4).
@@ -189,15 +190,11 @@ type Catalog struct {
 	// Latest then reports ErrViewNotRetained until a later publication
 	// succeeds; it never falls back to an older view.
 	latestStale bool
-	// curView/curRound identify the current published certification
-	// independently of what is retained: curView is the retained view it
-	// belongs to (nil if that publication was rejected) and curRound its UC
-	// root round. Only a genuinely newer certification on curView, or a newer
-	// published view, clears latestStale; filling in historical material never
-	// does.
-	curView  *view
-	curRound uint64
-	closed   bool
+	// Keep the failed head and certification watermark even when no view is retained.
+	curView   *view
+	curNumber *api.BigInt
+	curRound  uint64
+	closed    bool
 
 	evictions     uint64
 	pressureKills uint64
@@ -441,7 +438,22 @@ func (c *Catalog) Publish(ctx context.Context, in PublishInput) error {
 		retireAccounting(in.Reader)
 		var aerr error
 		toClose, aerr = c.attachLocked(existing, att, toClose)
+		// A retried current-state publication can restore an invalidated view,
+		// but must not mask rejection of a newer certification or revive history.
+		if aerr == nil && c.latestStale && c.curView == nil && existing == c.tail &&
+			c.curNumber != nil && existing.block.Number.Cmp(c.curNumber.Int) == 0 &&
+			existing.attTail != nil && existing.attTail.round >= c.curRound &&
+			existing.attTail.round >= att.round && existing.attTail.compat == att.compat {
+			c.latestStale = false
+			c.curView, c.curRound = existing, existing.attTail.round
+		}
 		return aerr
+	}
+	if c.latestStale && c.curNumber != nil {
+		order := in.Block.Number.Cmp(c.curNumber.Int)
+		if order < 0 || (order == 0 && att.round < c.curRound) {
+			return fmt.Errorf("%w: publication precedes unavailable head", ErrInvalidPublication)
+		}
 	}
 	v := &view{
 		block:    in.Block.clone(),
@@ -457,8 +469,7 @@ func (c *Catalog) Publish(ctx context.Context, in PublishInput) error {
 		// Cannot retain this view even alone: refuse without disturbing older
 		// history, and make latest unavailable rather than serving an older view.
 		retireAccounting(in.Reader)
-		c.latestStale = true
-		c.curView, c.curRound = nil, att.round
+		c.markLatestUnavailableLocked(in.Block.Number, att.round)
 		return ErrBudget
 	}
 	c.pushAttLocked(v, att)
@@ -466,6 +477,8 @@ func (c *Catalog) Publish(ctx context.Context, in PublishInput) error {
 	toClose = c.enforceLocked(toClose)
 	c.latestStale = false
 	c.curView, c.curRound = v, att.round
+	c.curNumber = api.NewBigInt(nil)
+	c.curNumber.Set(in.Block.Number.Int)
 	owned = true
 	return nil
 }
@@ -536,7 +549,8 @@ func (c *Catalog) attachLocked(v *view, att *attachment, toClose []backend.ReadV
 
 func (c *Catalog) enforceAttachLocked(v *view, att *attachment, toClose []backend.ReadView) ([]backend.ReadView, error) {
 	toClose = c.enforceLocked(toClose)
-	isCur := v == c.curView
+	isCur := v == c.curView || (c.curView == nil && v == c.tail &&
+		c.curNumber != nil && v.block.Number.Cmp(c.curNumber.Int) == 0)
 	if viewCost(v, 0) > c.limits.RetentionBudgetBytes {
 		// The certification does not fit; drop it. If it is (or supersedes)
 		// the current one, latest would otherwise be older material.
@@ -551,6 +565,7 @@ func (c *Catalog) enforceAttachLocked(v *view, att *attachment, toClose []backen
 	}
 	if isCur && att.round > c.curRound {
 		c.curRound = att.round
+		c.curView = v
 		c.latestStale = false
 	}
 	return toClose, nil

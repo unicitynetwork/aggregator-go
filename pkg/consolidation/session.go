@@ -160,7 +160,7 @@ func (s *Session) verifySeal(seal *types.UnicitySeal, count func(*Counters)) err
 	if err != nil {
 		return &sealError{fmt.Errorf("resolving trust base: %w", err)}
 	}
-	if tb == nil {
+	if api.IsNilTrustBase(tb) {
 		return &sealError{types.ErrRootValidatorInfoMissing}
 	}
 	authority, err := authorityIdentity(tb)

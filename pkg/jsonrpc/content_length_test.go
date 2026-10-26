@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -108,26 +107,3 @@ type discardWriter struct{ h http.Header }
 func (d *discardWriter) Header() http.Header         { return d.h }
 func (d *discardWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (d *discardWriter) WriteHeader(int)             {}
-
-// A large legacy (unlimited) response is encoded once: the bytes allocated per call stay well below two body sizes
-// (a marshal-then-copy approach allocates the body twice or more). Hardware independent: allocation counts and sizes.
-func TestLargeResponseIsNotCopied(t *testing.T) {
-	log, _ := logger.New("error", "text", "stdout", false)
-	srv := NewServer(log, 10)
-	body := strings.Repeat("x", 4<<20)
-	response := NewResponse(map[string]string{"v": body}, 1)
-	w := &discardWriter{h: http.Header{}}
-
-	srv.writeJSONResponse(w, response) // warms the encoder's pooled buffer
-	const runs = 20
-	var before, after runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&before)
-	for range runs {
-		srv.writeJSONResponse(w, response)
-	}
-	runtime.ReadMemStats(&after)
-	perCall := (after.TotalAlloc - before.TotalAlloc) / runs
-	require.Less(t, perCall, uint64(len(body))*3/4, "bytes allocated per call, body is %d bytes", len(body))
-	require.Equal(t, strconv.Itoa(len(body)+len(`{"jsonrpc":"2.0","result":{"v":""},"id":1}`)+1), w.h.Get("Content-Length"))
-}

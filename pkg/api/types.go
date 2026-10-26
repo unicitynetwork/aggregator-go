@@ -414,7 +414,7 @@ func (p *InclusionProofV2) Verify(v2 *CertificationRequest, vctx *VerifierContex
 	if vctx == nil {
 		return errors.New("nil verifier context")
 	}
-	if vctx.TrustBase == nil {
+	if IsNilTrustBase(vctx.TrustBase) {
 		return errors.New("nil trust base")
 	}
 	if vctx.PartitionID != 0 && vctx.PartitionID != AggregationPartitionID {

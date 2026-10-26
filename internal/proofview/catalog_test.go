@@ -702,12 +702,31 @@ func TestRejectedNewerUCKeepsLatestUnavailableUntilNewerOne(t *testing.T) {
 		Certification{UC: ucFor(t, rootOf(1), 1), PartitionView: []byte("old")}))
 	_, err = c.AcquireLatest(ctx)
 	require.ErrorIs(t, err, ErrViewNotRetained, "filling an older UC must not restore latest")
+	publish(t, c, 1, 1, newFakeReader(1, 100), nil)
+	_, err = c.AcquireLatest(ctx)
+	require.ErrorIs(t, err, ErrViewNotRetained, "republishing the older UC must not mask a rejected newer UC")
 
 	require.NoError(t, c.AttachCertification(ctx, block(1), rootOf(1), Certification{UC: ucFor(t, rootOf(1), 3)}))
 	lease, err := c.AcquireLatest(ctx)
 	require.NoError(t, err)
 	require.Equal(t, ucFor(t, rootOf(1), 3), lease.UC())
 	lease.Release()
+}
+
+func TestRepublishCurrentStateRestoresInvalidatedLatest(t *testing.T) {
+	c := newCatalog(t, testLimits())
+	t.Cleanup(func() { require.NoError(t, c.Close()) })
+	publish(t, c, 1, 1, newFakeReader(1, 10), nil)
+	publish(t, c, 2, 2, newFakeReader(2, 10), nil)
+	c.MarkLatestUnavailable(block(2).Number, 2)
+	publish(t, c, 1, 1, newFakeReader(1, 10), nil)
+	_, err := c.AcquireLatest(t.Context())
+	require.ErrorIs(t, err, ErrViewNotRetained, "a historical retry cannot restore latest")
+	publish(t, c, 2, 2, newFakeReader(2, 10), nil)
+	l, err := c.AcquireLatest(t.Context())
+	require.NoError(t, err)
+	require.EqualValues(t, 2, l.Block().Number.Uint64())
+	l.Release()
 }
 
 // Regression: redelivering a UC whose attachment was evicted must not promote it.

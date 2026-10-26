@@ -1,14 +1,20 @@
 package proofpub_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 
+	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/metrics"
 	"github.com/unicitynetwork/aggregator-go/internal/models"
 	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial"
 	"github.com/unicitynetwork/aggregator-go/internal/proofmaterial/prooftest"
@@ -93,6 +99,81 @@ func Test_PublishFinalized(t *testing.T) {
 	require.Equal(t, f.Raw, l.PartitionView())
 	require.EqualValues(t, 1, l.Block().Number.Uint64())
 	require.Equal(t, []byte(f.UC.ShardConfHash), l.Block().ConfigLineage, "identity comes from the accepted UC, not process startup")
+}
+
+func Test_RetryLatest(t *testing.T) {
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("retry"), 80))
+	root := commit(t, e.b, 1, 0, 20)
+	block, _ := finalizedBlock(t, 1, root, 80, true)
+	require.True(t, e.pub.RetryLatest(t.Context(), block))
+	require.True(t, e.cat.HasLatest(block.Index, block.RootHash, block.UnicityCertificate))
+	require.False(t, e.pub.RetryLatest(t.Context(), block))
+	require.False(t, e.cat.HasLatest(api.NewBigIntFromUint64(2), block.RootHash, block.UnicityCertificate))
+	require.False(t, e.cat.HasLatest(block.Index, prooftest.Hash("different"), block.UnicityCertificate))
+	other, _ := finalizedBlock(t, 1, root, 81, true)
+	require.False(t, e.cat.HasLatest(block.Index, block.RootHash, other.UnicityCertificate))
+
+	e.pub.InvalidateLatest(block.Index)
+	require.False(t, e.cat.HasLatest(block.Index, block.RootHash, block.UnicityCertificate))
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.False(t, e.pub.RetryLatest(cancelled, block))
+	_, err := e.cat.AcquireLatest(t.Context())
+	require.ErrorIs(t, err, proofview.ErrViewNotRetained)
+	require.True(t, e.pub.RetryLatest(t.Context(), block))
+	require.Equal(t, root, latest(t, e.cat).Root())
+
+	var disabled *proofpub.Publisher
+	require.False(t, disabled.RetryLatest(t.Context(), block))
+}
+
+func Test_RetryLatestSuppressesUnchangedWarnings(t *testing.T) {
+	e := newEnv(t, prooftest.New(t, 2, 1, prooftest.Hash("retry-warning"), 80))
+	var logs bytes.Buffer
+	log := &logger.Logger{Logger: slog.New(slog.NewJSONHandler(&logs, nil))}
+	pub := proofpub.New(e.cat, e.b, nil, log)
+	warnings := func() int { return strings.Count(logs.String(), "Not publishing retained proof view") }
+	root := commit(t, e.b, 1, 0, 20)
+	block, _ := finalizedBlock(t, 1, root, 80, false)
+	missing := *block
+	missing.UnicityCertificate = nil
+	counter := metrics.ProofViewPublicationTotal.WithLabelValues(proofpub.ResultNoCert)
+	before := promtest.ToFloat64(counter)
+	pub.PublishFinalized(t.Context(), &missing)
+	require.Equal(t, 1, warnings())
+	for i := 0; i < 5; i++ {
+		require.False(t, pub.RetryLatest(t.Context(), &missing))
+	}
+	require.Equal(t, 1, warnings(), "same-head failures keep their first warning")
+	require.Equal(t, before+6, promtest.ToFloat64(counter), "every failed attempt is counted")
+	var concurrent sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		concurrent.Go(func() { pub.RetryLatest(t.Context(), &missing) })
+	}
+	concurrent.Wait()
+	require.Equal(t, 1, warnings(), "concurrent identical failures share one warning")
+	require.Equal(t, before+22, promtest.ToFloat64(counter))
+
+	invalid := *block
+	invalid.UnicityCertificate = api.HexBytes{0}
+	for i := 0; i < 5; i++ {
+		require.False(t, pub.RetryLatest(t.Context(), &invalid))
+	}
+	require.Equal(t, 2, warnings(), "a changed failure is reported")
+	invalid.UnicityCertificate = api.HexBytes{1}
+	require.False(t, pub.RetryLatest(t.Context(), &invalid))
+	require.Equal(t, 3, warnings(), "a changed certification is a new candidate")
+
+	require.True(t, pub.RetryLatest(t.Context(), block))
+	require.False(t, pub.RetryLatest(t.Context(), block))
+	pub.PublishFinalized(t.Context(), &missing)
+	require.Equal(t, 4, warnings(), "recovery resets warning suppression")
+	missing.Index = api.NewBigIntFromUint64(2)
+	require.False(t, pub.RetryLatest(t.Context(), &missing))
+	require.Equal(t, 5, warnings(), "a changed block is reported")
+	missing.RootHash = api.HexBytes(prooftest.Hash("different"))
+	require.False(t, pub.RetryLatest(t.Context(), &missing))
+	require.Equal(t, 6, warnings(), "a changed root is reported")
 }
 
 func Test_PublishFinalized_WithoutSidecar(t *testing.T) {
@@ -456,12 +537,12 @@ func Test_Notify_OnlyForInvalidationAndLateMaterial(t *testing.T) {
 	require.NoError(t, e.pub.PublishProofMaterial(t.Context(), material(t, proofmaterial.KindFinalized, f, f.Raw, 1, true)))
 	require.Equal(t, 1, n, "a late view turns partition_view_unavailable into a proof")
 
-	e.pub.InvalidateLatest()
+	e.pub.InvalidateLatest(block.Index)
 	require.Equal(t, 1, n, "no wake from inside the caller's lock: the finalizing caller signals after unlocking")
 	_, err := e.cat.AcquireLatest(t.Context())
 	require.Error(t, err)
 
 	var nilPub *proofpub.Publisher
 	nilPub.SetNotify(func() { t.Fatal("nil publisher") })
-	nilPub.InvalidateLatest()
+	nilPub.InvalidateLatest(nil)
 }
