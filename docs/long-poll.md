@@ -119,9 +119,11 @@ admitted the submission:
    expiry on a follower may be noticed late - a wait may then time out as `pending` until local
    evidence changes. The aggregator does not invent replicated expiry facts.
 5. On a role change (promotion or demotion) all current waits end with the then-current ordinary
-   result (each waiter gets its final read, queued for the capacity the budget left, so a long queue
-   of batch waiters is served in sweep order and not answered with `-32006`) and new waits are admitted
-   again once the transition settles.
+   result and new waits are admitted again once the transition settles. Each waiter's final read is queued
+   for admission until the request deadline minus 6 s, so a long queue of batch waiters is served in sweep
+   order. The guarantee depends on getting admission before that cap: if capacity stays unavailable until
+   then, the excess waiters get the retryable `-32006` `busy` / `deadline` answer, which is HTTP 503 with
+   `Retry-After`.
 6. **Load balancer idle timeout.** A held request is an idle connection from the LB's point of view.
    Set the LB's idle / response timeout above `LONG_POLL_MAX_WAIT + 8s` (default 28 s), and for
    cookie-based affinity make sure the cookie outlives the polling session.
