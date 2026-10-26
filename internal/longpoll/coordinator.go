@@ -244,11 +244,18 @@ func (c *Coordinator) RunClass(ctx context.Context, method string, requested uin
 			metrics.LongPollWakesTotal.WithLabelValues("cancel").Inc()
 			return c.finish(method, "cancelled", Result{Err: jsonrpc.NewError(jsonrpc.InternalErrorCode, "Request cancelled", nil)}, waited)
 		}
-		// every resumption, also an early one, queues for at most the resume reserve and never
-		// past the point that leaves the final read and the write their time
+		// A resumption queues for its re-read until the waiter's own wait deadline plus the resume
+		// reserve (an early wake keeps the rest of its wait, so a burst of woken waiters is served
+		// at the class's re-read rate instead of being cut after a fixed reserve), and never past
+		// the point that leaves the final read and the write their time.
 		qStart := time.Now()
-		resumeUntil := qStart.Add(c.resumeReserve())
-		if hasHard && resumeUntil.After(hard.Add(-postResume)) {
+		resumeUntil := qStart
+		if cutoff.After(resumeUntil) {
+			resumeUntil = cutoff
+		}
+		resumeUntil = resumeUntil.Add(c.resumeReserve())
+		if hasHard && (k == WakeDrain || resumeUntil.After(hard.Add(-postResume))) {
+			// a drain owes every waiter its ordinary final read: it may use the whole budget left
 			resumeUntil = hard.Add(-postResume)
 		}
 		g, err := w.ResumeClass(ctx, p, resumeUntil, class)

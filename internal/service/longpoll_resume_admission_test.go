@@ -178,14 +178,28 @@ func TestLongPollBatch_WakeBurstWithProductionBatchConcurrency(t *testing.T) {
 	}
 	req := append([]api.StateID{r.ids[0]}, r.later[:15]...) // L = 16
 
+	// A fresh read that is rejected as busy while the waiters arrive never parked: it retries until
+	// it parks. Once the burst is released every answer counts.
+	var released atomic.Bool
 	results := make(chan string, waiters)
 	for i := 0; i < waiters; i++ {
-		go func() { results <- r.call(t, req, `,"waitMs":15000`) }()
-		if i%4 == 3 { // arrive no faster than the batch admission reads
+		go func() {
+			for {
+				body := r.call(t, req, `,"waitMs":15000`)
+				if strings.Contains(body, `"busy"`) && !released.Load() {
+					time.Sleep(10 * time.Millisecond)
+					continue
+				}
+				results <- body
+				return
+			}
+		}()
+		if i%4 == 3 {
 			time.Sleep(15 * time.Millisecond)
 		}
 	}
 	require.Eventually(t, func() bool { return r.reg.Stats().Reserved == waiters }, 30*time.Second, 10*time.Millisecond)
+	released.Store(true)
 
 	// sample occupancy through the burst
 	var peakSlots, peakPins, peakRunning atomic.Int64
@@ -274,7 +288,97 @@ func TestLongPollBatch_WakeBurstWithProductionBatchConcurrency(t *testing.T) {
 	require.True(t, canReserve)
 }
 
-// Queueing is deadline-bounded: when the burst cannot be served within the resume reserve, the
+// parkBatchWaiters parks n batch waiters (waitMs 15000, production reserves) and returns their results.
+// A fresh read rejected as busy while the waiters arrive never parked: it retries until it parks.
+func parkBatchWaiters(t *testing.T, r *lpBatchRig, n int) chan string {
+	t.Helper()
+	req := append([]api.StateID{r.ids[0]}, r.later[:15]...) // L = 16
+	var parked atomic.Bool
+	results := make(chan string, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			for {
+				body := r.call(t, req, `,"waitMs":15000`)
+				if strings.Contains(body, `"busy"`) && !parked.Load() {
+					time.Sleep(10 * time.Millisecond)
+					continue
+				}
+				results <- body
+				return
+			}
+		}()
+		if i%4 == 3 {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	require.Eventually(t, func() bool { return r.reg.Stats().Reserved == n }, 60*time.Second, 10*time.Millisecond)
+	parked.Store(true)
+	return results
+}
+
+// Reviewer repro of #268: 600 parked batch waiters, class cap 7, 30 ms per re-read (about 2.6 s
+// for one sweep, longer than the 2 s resume reserve). One notification that changes nothing wakes
+// them all: every one is re-read and parks again, none is sent back with -32006.
+func TestLongPollBatch_UnrelatedNotifyDoesNotShedParkedWaiters(t *testing.T) {
+	const waiters = 600
+	r := newLPBatchRig(t, 1024, 100) // global resume quota 25, class cap 7
+	r.e.svc.longPoll.Reserve, r.e.svc.longPoll.ResumeReserveOverride = 0, 0
+	r.e.svc.longPoll.MaxWait = 20 * time.Second
+	admBefore := outcomeCount("busy_admission_deadline")
+	results := parkBatchWaiters(t, r, waiters)
+
+	r.e.recs.delay = 30 * time.Millisecond
+	rechecks := testutil.ToFloat64(metrics.LongPollRechecksTotal.WithLabelValues("get_inclusion_proofs.v1"))
+	r.reg.Notify() // unrelated: no state changed
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(metrics.LongPollRechecksTotal.WithLabelValues("get_inclusion_proofs.v1"))-rechecks >= waiters
+	}, 30*time.Second, 20*time.Millisecond, "every woken waiter was re-read")
+	select {
+	case body := <-results:
+		t.Fatalf("a waiter ended during the sweep: %s", body)
+	default:
+	}
+	require.Equal(t, waiters, r.reg.Stats().Reserved, "all are parked again")
+
+	r.e.recs.delay = 0
+	r.publish() // the states are now included: everyone is served
+	for i := 0; i < waiters; i++ {
+		select {
+		case body := <-results:
+			require.Contains(t, body, `"result"`)
+		case <-time.After(60 * time.Second):
+			t.Fatalf("only %d of %d answered", i, waiters)
+		}
+	}
+	require.Zero(t, outcomeCount("busy_admission_deadline")-admBefore)
+}
+
+// The same burst through Drain(false) (a role change): every waiter gets its ordinary final
+// read (state_pending), none gets -32006 (docs/long-poll.md, HA item 5).
+func TestLongPollBatch_DrainGivesEveryParkedWaiterItsFinalRead(t *testing.T) {
+	const waiters = 600
+	r := newLPBatchRig(t, 1024, 100)
+	r.e.svc.longPoll.Reserve, r.e.svc.longPoll.ResumeReserveOverride = 0, 0
+	r.e.svc.longPoll.MaxWait = 20 * time.Second
+	admBefore := outcomeCount("busy_admission_deadline")
+	results := parkBatchWaiters(t, r, waiters)
+
+	r.e.recs.delay = 30 * time.Millisecond
+	r.reg.Drain(false)
+	for i := 0; i < waiters; i++ {
+		select {
+		case body := <-results:
+			require.Contains(t, body, `"detail":"state_pending"`)
+			require.NotContains(t, body, `"busy"`)
+		case <-time.After(60 * time.Second):
+			t.Fatalf("only %d of %d answered", i, waiters)
+		}
+	}
+	require.Zero(t, outcomeCount("busy_admission_deadline")-admBefore)
+	r.reg.Reopen()
+}
+
+// Queueing is deadline-bounded: when a burst of waiters reaching their wait deadline cannot be served within the resume reserve, the
 // excess gets the busy/deadline outcome from ADMISSION (distinguishable from a downstream busy),
 // resources are all returned, and nothing waits past the shared deadline.
 func TestLongPollBatch_ResumeQueueIsDeadlineBounded(t *testing.T) {
@@ -287,7 +391,7 @@ func TestLongPollBatch_ResumeQueueIsDeadlineBounded(t *testing.T) {
 
 	results := make(chan string, waiters)
 	for i := 0; i < waiters; i++ {
-		go func() { results <- r.call(t, req, `,"waitMs":10000`) }()
+		go func() { results <- r.call(t, req, `,"waitMs":600`) }()
 		if i%4 == 3 {
 			time.Sleep(15 * time.Millisecond)
 		}
@@ -296,7 +400,7 @@ func TestLongPollBatch_ResumeQueueIsDeadlineBounded(t *testing.T) {
 	r.e.recs.delay = 100 * time.Millisecond // every re-read now takes 100 ms: 40 reads / 7 at a time >> 150 ms
 
 	start := time.Now()
-	r.publish()
+	r.e.finalize([]byte("pv2")) // no wake: the waiters reach their wait deadline, all within about 150 ms
 	var ok, busy int
 	for i := 0; i < waiters; i++ {
 		body := <-results

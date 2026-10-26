@@ -6,8 +6,12 @@ pending** (admitted at this node, not yet in a certified, published view), and a
 as the situation changes - or after at most `waitMs`. It saves polling round trips and the
 post-publication polling delay; it does not make certification faster.
 
-Requests **without** `waitMs` get byte-identical responses and behaviour (the released JS SDK
-3.0.1 included). There is no server feature flag: capacity is controlled by resource limits only.
+Requests **without** `waitMs` get the same JSON-RPC results and error codes as before (the released JS SDK
+3.0.1 included): no new member, no wait, no echo. The HTTP envelope of **every** JSON-RPC answer has changed,
+with or without `waitMs`: `-32006` is HTTP 503 with `Retry-After: 1` (was 200), and every response carries
+`Cache-Control: no-store`, a `Content-Length` and the CORS headers of the JSON-RPC route (see
+[Overload signalling](#overload-signalling) and HA item 8). There is no server feature flag: capacity is
+controlled by resource limits only.
 
 ## Wire contract
 
@@ -59,8 +63,10 @@ Wake-ups are published after finalization has made the proof servable, after fol
 publishes its local view, and on expiry, sweep, reset and role-change events. A notification only
 asks for a recheck; unrelated notifications never extend a wait. Rechecks are coalesced and run
 through a FIFO resume queue limited to `max(1, CONCURRENCY_LIMIT/4)` running re-reads, always
-leaving one token for fresh requests. A re-read that cannot get capacity within the resume
-reserve fails with the existing retryable `-32006 busy` / `deadline` error (with the echo).
+leaving one token for fresh requests. A woken waiter queues for its re-read until its own wait deadline plus the 2 s resume reserve (and
+never past the point that leaves the final read and the write their time); a waiter woken by a drain may
+queue for the whole budget that is left. A re-read that cannot get capacity by then fails with the
+existing retryable `-32006 busy` / `deadline` error (with the echo).
 
 ### Overload signalling
 
@@ -84,6 +90,13 @@ validated maximum. Notes for operators:
   keep enough connection and stream capacity for submissions and ordinary reads.
 - Each wake of a publication rechecks every armed waiter once (coalesced): work is O(W) per round.
   Watch `aggregator_longpoll_rechecks_total` against rounds before raising W.
+- Batch re-reads are bounded by the batch class: at most `min(CONCURRENCY_LIMIT/4, B-1, P-1)` run at a
+  time (7 at the defaults), so one sweep of N parked batch waiters takes about `N x t_read / 7`, where
+  t_read is the duration of one batch re-read. Any notification, also an unrelated one, starts a sweep.
+  Keep `N x t_read / 7` below the remaining wait of the waiters plus the 2 s resume reserve (for a burst
+  of waiters that reach their wait deadline together, below the 2 s reserve); the tail of a longer sweep
+  gets the retryable `-32006` / `deadline`. At 30 ms per re-read the 7 lanes serve about 230
+  re-reads per second, so 600 parked batch waiters need about 2.6 s per sweep.
 - Opt-in request bounds (also applied to v2 when it carries `waitMs`): request 64 KiB, params 32 KiB,
   request id 128 bytes; the batch response limit (8 MiB) includes the echo.
 
@@ -106,7 +119,9 @@ admitted the submission:
    expiry on a follower may be noticed late - a wait may then time out as `pending` until local
    evidence changes. The aggregator does not invent replicated expiry facts.
 5. On a role change (promotion or demotion) all current waits end with the then-current ordinary
-   result and new waits are admitted again once the transition settles.
+   result (each waiter gets its final read, queued for the capacity the budget left, so a long queue
+   of batch waiters is served in sweep order and not answered with `-32006`) and new waits are admitted
+   again once the transition settles.
 6. **Load balancer idle timeout.** A held request is an idle connection from the LB's point of view.
    Set the LB's idle / response timeout above `LONG_POLL_MAX_WAIT + 8s` (default 28 s), and for
    cookie-based affinity make sure the cookie outlives the polling session.
@@ -117,7 +132,10 @@ admitted the submission:
 8. **Do not cache.** Every JSON-RPC response carries `Cache-Control: no-store` (proof, status and error answers
    change over time). Pass `Retry-After` through; for browsers the aggregator exposes it
    (`Access-Control-Expose-Headers`) and allows `Content-Type`, `Authorization`, `X-API-Key` and `X-State-ID`.
-   LB-generated errors need the same CORS headers, or browsers cannot read their status.
+   CORS applies to the JSON-RPC route (`/`) only: its answers carry the headers and `ENABLE_CORS` (default on) answers the
+   preflight with `GET, POST, OPTIONS`; `/health`,
+   `/metrics`, the trust base routes and `/docs` carry no CORS headers. LB-generated errors need the same
+   CORS headers, or browsers cannot read their status.
 
 ## Shutdown
 
