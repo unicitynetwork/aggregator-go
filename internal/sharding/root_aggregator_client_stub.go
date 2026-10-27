@@ -24,6 +24,24 @@ type RootAggregatorClientStub struct {
 	// advances by one per returned proof, so a child under this stub pins
 	// distinct, increasing reference times as it does against a live parent.
 	referenceTime uint64
+	// step gives the reference time of the next returned proof from the previous one; nil advances by one per proof (historical
+	// behavior). A step that keeps the previous time reproduces a live parent certifying within one second; equal seconds are valid.
+	step func(previous uint64) uint64
+}
+
+// WithReferenceStep replaces how the stub derives each proof's reference time. Call it before the first proof.
+func (m *RootAggregatorClientStub) WithReferenceStep(step func(previous uint64) uint64) *RootAggregatorClientStub {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.step = step
+	return m
+}
+
+func (m *RootAggregatorClientStub) advance(previous uint64) uint64 {
+	if m.step == nil {
+		return previous + 1
+	}
+	return m.step(previous)
 }
 
 func NewRootAggregatorClientStub() *RootAggregatorClientStub {
@@ -53,8 +71,8 @@ func (m *RootAggregatorClientStub) GetShardProof(ctx context.Context, request *a
 
 	if m.submissions[request.ShardID] != nil {
 		m.returnedProofCount++
-		m.referenceTime++
-		ucBytes, err := stubProofUC(uint64(m.returnedProofCount), uint64(m.returnedProofCount), m.referenceTime, m.submittedRootHash)
+		m.referenceTime = m.advance(m.referenceTime)
+		ucBytes, err := stubProofUC(uint64(m.returnedProofCount), uint64(m.returnedProofCount), m.referenceTime, m.advance(m.referenceTime), m.submittedRootHash)
 		if err != nil {
 			return nil, err
 		}
@@ -106,7 +124,7 @@ func (m *RootAggregatorClientStub) SetSubmissionError(err error) {
 // the reference time the certified round was built under, and the seal records
 // the time the child's next round will pin. Without them the child has no
 // reference time and rejects every request as not ready.
-func stubProofUC(parentRound, rootRound, referenceTime uint64, rootHash api.HexBytes) (api.HexBytes, error) {
+func stubProofUC(parentRound, rootRound, referenceTime, nextReferenceTime uint64, rootHash api.HexBytes) (api.HexBytes, error) {
 	uc := types.UnicityCertificate{
 		InputRecord: &types.InputRecord{
 			RoundNumber: parentRound,
@@ -115,7 +133,7 @@ func stubProofUC(parentRound, rootRound, referenceTime uint64, rootHash api.HexB
 		},
 		UnicitySeal: &types.UnicitySeal{
 			RootChainRoundNumber: rootRound,
-			Timestamp:            referenceTime + 1,
+			Timestamp:            nextReferenceTime,
 		},
 	}
 

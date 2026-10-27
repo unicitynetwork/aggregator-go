@@ -29,6 +29,34 @@ type BFTClientStub struct {
 	// return: it advances by one per stub round, so successive rounds pin
 	// distinct, increasing reference times as they do against a live core.
 	referenceTime uint64
+	// step gives the reference time the next round pins from the one just certified. It is the stub's stand-in for a live core's
+	// max(now, parent): the default advances by one per round (historical behavior, so fixtures stay stable); SameSecondReference keeps
+	// the previous time, as a live core does when two rounds are certified within one second. Equal seconds are valid.
+	step ReferenceStep
+}
+
+// ReferenceStep returns the reference time the next stub round pins, given the previous one.
+type ReferenceStep func(previous uint64) uint64
+
+// AdvanceReference is the default step: one second per round, so successive rounds pin distinct, increasing reference times.
+func AdvanceReference(previous uint64) uint64 { return previous + 1 }
+
+// SameSecondReference keeps the previous reference time: successive rounds share a second, as against a live core at sub-second cadence.
+func SameSecondReference(previous uint64) uint64 { return previous }
+
+// WithReferenceStep replaces how the stub derives each round's reference time. Call it before Start.
+func (n *BFTClientStub) WithReferenceStep(step ReferenceStep) *BFTClientStub {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.step = step
+	return n
+}
+
+func (n *BFTClientStub) advance(previous uint64) uint64 {
+	if n.step == nil {
+		return AdvanceReference(previous)
+	}
+	return n.step(previous)
 }
 
 func NewBFTClientStub(logger *logger.Logger, roundManager RoundManager, nextRoundNumber *api.BigInt, delay time.Duration) *BFTClientStub {
@@ -109,7 +137,7 @@ func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.
 			},
 			UnicitySeal: &types.UnicitySeal{
 				RootChainRoundNumber: roundNumber,
-				Timestamp:            block.ReferenceTime + 1,
+				Timestamp:            n.advance(block.ReferenceTime),
 			},
 		}
 		ucBytes, err := types.Cbor.Marshal(uc)
@@ -135,7 +163,7 @@ func (n *BFTClientStub) CertificationRequest(ctx context.Context, block *models.
 	if nextCtx == nil {
 		nextCtx = ctx
 	}
-	n.referenceTime++
+	n.referenceTime = n.advance(n.referenceTime)
 	referenceTime := n.referenceTime
 	n.wg.Add(1)
 	n.mu.Unlock()
