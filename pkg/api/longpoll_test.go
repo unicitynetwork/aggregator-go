@@ -82,6 +82,8 @@ func TestLongPollParams_V2Scan(t *testing.T) {
 			w, err := ScanWaitMs([]byte(c.Params))
 			if !c.Valid {
 				require.Error(t, err)
+				require.True(t, w.Present, "an invalid waitMs is still a present member")
+				require.Zero(t, w.Value)
 				return
 			}
 			require.NoError(t, err)

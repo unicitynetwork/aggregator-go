@@ -16,7 +16,7 @@ import (
 // SetLongPoll enables the optional waitMs long-poll on get_inclusion_proof.v2 (the batch method
 // is wired through service.NewBatchProofHandlerWithLongPoll with the same coordinator). Call
 // before Start. Without it waitMs is validated and ignored. It also registers what the
-// concurrency layer needs: which requests own their permit (those carrying a valid waitMs), the
+// concurrency layer needs: which requests own their permit (those carrying a waitMs member), the
 // opt-in request bounds (64 KiB request, 32 KiB params, 128 ID bytes) and the resume scheduler hook.
 func (s *Server) SetLongPoll(c *longpoll.Coordinator) {
 	s.longPoll = c
@@ -24,8 +24,9 @@ func (s *Server) SetLongPoll(c *longpoll.Coordinator) {
 		return
 	}
 	hasWait := func(params []byte) bool {
-		w, err := api.ScanWaitMs(params)
-		return err == nil && w.Present
+		// presence, not validity: a present invalid waitMs gets the opt-in request bounds too
+		w, _ := api.ScanWaitMs(params)
+		return w.Present
 	}
 	for _, m := range []string{"get_inclusion_proof.v2", BatchProofsMethod} {
 		s.rpcServer.SetOwnershipPredicate(m, hasWait)

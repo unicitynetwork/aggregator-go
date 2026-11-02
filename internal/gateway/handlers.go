@@ -56,13 +56,14 @@ func (s *Server) parseCertificationRequest(params json.RawMessage) (*api.Certifi
 // v2 requires stateId to be exactly 32 raw bytes with no algorithm prefix.
 func (s *Server) handleGetInclusionProofV2(ctx context.Context, params json.RawMessage) (interface{}, *jsonrpc.Error) {
 	var req api.GetInclusionProofRequestV2
-	// A valid waitMs is recognized independently of the typed fields: every handled error of such
-	// a request - a mistyped stateId or includeStatus included - echoes zero. An invalid waitMs
-	// is not a wait: it gets the legacy bytes.
+	// A waitMs member is recognized independently of its value and of the typed fields: every
+	// handled validation error of such a request - an invalid or duplicate waitMs, a mistyped
+	// stateId or includeStatus included - echoes zero. An invalid waitMs is never a wait: it
+	// does not reach the coordinator.
 	wait, werr := api.ScanWaitMs(params)
-	waited := werr == nil && wait.Present && s.longPoll != nil
+	echo := wait.Present && s.longPoll != nil
 	fail := func(e *jsonrpc.Error) *jsonrpc.Error {
-		if waited {
+		if echo {
 			return e.WithWaited(0)
 		}
 		return e
@@ -71,7 +72,7 @@ func (s *Server) handleGetInclusionProofV2(ctx context.Context, params json.RawM
 		return nil, fail(jsonrpc.NewValidationError("Invalid parameters: " + err.Error()))
 	}
 	if werr != nil {
-		return nil, jsonrpc.NewValidationError("Invalid parameters: " + werr.Error())
+		return nil, fail(jsonrpc.NewValidationError("Invalid parameters: " + werr.Error()))
 	}
 	req.WaitMs = wait
 
@@ -84,7 +85,7 @@ func (s *Server) handleGetInclusionProofV2(ctx context.Context, params json.RawM
 			"stateId must be exactly %d bytes (v2 wire format), got %d",
 			api.StateTreeKeyLengthBytes, len(req.StateID))))
 	}
-	if waited {
+	if echo {
 		return s.serveV2Waited(ctx, &req)
 	}
 

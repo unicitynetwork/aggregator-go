@@ -54,6 +54,11 @@ func ParseWaitMs(raw []byte) (uint64, error) {
 // already been accepted as JSON by the caller's own decoder. It never fails for params without a
 // waitMs member, whatever else they contain, so legacy behaviour is untouched; non-objects have
 // none. The member name is matched exactly (after JSON unescaping).
+//
+// Presence is independent of validity: when a waitMs member exists but its value is invalid, or
+// the member is duplicated, the result still has Present set and the error says why. Callers
+// decorate errors from Present (the server recognizes the extension) and must never wait on a
+// result which carries an error.
 func ScanWaitMs(params []byte) (WaitMs, error) {
 	// Legacy traffic has neither the member nor an escape which could spell it: skip the tokenizer.
 	if !bytes.Contains(params, []byte("waitMs")) && !bytes.Contains(params, []byte(`\u`)) {
@@ -78,11 +83,11 @@ func ScanWaitMs(params []byte) (WaitMs, error) {
 			continue
 		}
 		if w.Present {
-			return WaitMs{}, errDuplicateWaitMs
+			return WaitMs{Present: true}, errDuplicateWaitMs
 		}
 		v, err := ParseWaitMs(raw)
 		if err != nil {
-			return WaitMs{}, err
+			return WaitMs{Present: true}, err
 		}
 		w = WaitMs{Present: true, Value: v}
 	}
