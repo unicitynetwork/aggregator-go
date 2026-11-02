@@ -6,9 +6,11 @@ by the Go server (package A) and consumed by the JS SDK (B) and the Rust SDK / r
 which copy them byte-for-byte into their own test data and check the checksums below.
 
 Source: aggregator-go `origin/non-inclusion` @ `a352752144ec40ae5ab8b2daf1c324013dca8213`
-(the base of the `long-poll` integration branch). `echo.json` was revised on aggregator-go `main`
-@ `4e09b47` (invalid-`waitMs` echo ruling of 2026-11-02, "revision 4"; the sha256 above is the
-revised file). `params.json`, `capability.json` and `golden/` are unchanged by that revision. JS compatibility baseline: npm
+(the base of the `long-poll` integration branch). `echo.json` revision 4 (invalid-`waitMs` echo ruling of 2026-11-02) was made on top of aggregator-go
+`main` @ `4e09b47`, the implementation base, which still has the previous `echo.json`; the source
+of revision 4 is aggregator-go PR #271 (later its merge commit). The sha256 below is the revised
+file. `params.json`, `capability.json` and `golden/` are unchanged by that revision.
+JS compatibility baseline: npm
 `@unicitylabs/state-transition-sdk@3.0.1`, tag `v3.0.1` @ `f5f0737306901215860aa920a6ab570b699efba8`.
 
 ## Files

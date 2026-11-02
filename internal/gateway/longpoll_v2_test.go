@@ -207,8 +207,8 @@ func TestV2Waited_OptInRequestBoundsApplyOnlyToWaitRequests(t *testing.T) {
 	require.Contains(t, body, `"detail":"request_bytes"`)
 }
 
-// Every handled error of a request carrying a valid waitMs echoes zero, whatever else is wrong
-// with its typed fields; an invalid waitMs keeps the legacy bytes.
+// Every handled error of a request carrying a waitMs member echoes zero, whatever else is wrong
+// with its typed fields and whatever the value of waitMs; requests without the member get none.
 func TestV2Waited_TypedFieldErrorsStillEchoWhateverTheWaitMsValue(t *testing.T) {
 	svc := &waitService{}
 	_, _, post := lpServer(t, svc, 8, 8)

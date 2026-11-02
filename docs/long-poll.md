@@ -21,7 +21,7 @@ from absence: it asks for the metadata without waiting. For the batch method `wa
 with `stateRoot` omitted or `"latest"`; with an exact root (any `waitMs`, zero included) the call is
 `-32602 invalid_request / malformed_params`. Invalid `waitMs`: v2 `-32000`, batch `-32602`.
 
-Response, only when `waitMs` was present and valid:
+Response metadata is added to every recognized wait-bearing call that passes preflight (a `waitMs` member is present, valid or not), including its invalid-value validation errors:
 
 | Method | Success | Handled error |
 |---|---|---|
