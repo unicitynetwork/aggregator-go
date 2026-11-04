@@ -21,7 +21,7 @@ from absence: it asks for the metadata without waiting. For the batch method `wa
 with `stateRoot` omitted or `"latest"`; with an exact root (any `waitMs`, zero included) the call is
 `-32602 invalid_request / malformed_params`. Invalid `waitMs`: v2 `-32000`, batch `-32602`.
 
-Response, only when `waitMs` was present and valid:
+Response metadata is added to every recognized wait-bearing call that passes preflight (a `waitMs` member is present, valid or not), including its invalid-value validation errors:
 
 | Method | Success | Handled error |
 |---|---|---|
@@ -29,7 +29,7 @@ Response, only when `waitMs` was present and valid:
 | batch | `result.waitedMs` next to `proofs` / `partitionView` | `error.data.waitedMs` after the existing members |
 
 - Errors with non-object data keep it as `data.originalData`; errors without data get `{"waitedMs":n}`.
-- Validation errors of a request carrying a valid `waitMs` echo `0`. An invalid `waitMs` is not a wait: legacy bytes, no echo.
+- Validation errors of a request carrying a `waitMs` member echo `0`, whatever its value: an invalid or duplicate `waitMs` (escaped spellings and any member order included) is recognized but never a wait, and its error keeps its code and detail and gains the echo. The echo means the server understands `waitMs`, so a client must not retry an echoed rejection without it. Requests rejected before the method looks at `waitMs` (request bytes, params bytes, RPC ID) carry no echo.
 - `waitedMs` is the integer ceiling of the cumulative time spent waiting (monotonic clock), excluding parsing, proof work, writing. **It is unauthenticated metadata**: never trust it for time, state or absence, and never put it into proof verification. `status` is likewise a hint; a present proof is always verified.
 - A timeout is an ordinary final read: v2 returns the empty proof (with `status:"pending"` if asked), batch returns `-32008 state_pending`. Absence is never proof of absence.
 - Zero/full capacity, a drain, no remaining budget, `LONG_POLL_MAX_WAITERS=0` and `CONCURRENCY_LIMIT < 2` all give the ordinary immediate read **with** a zero echo. Admission shedding is never an error.

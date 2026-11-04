@@ -238,15 +238,14 @@ func TestLongPollBatch_ValidationErrorsAndEcho(t *testing.T) {
 	bad := func(extra string) string { return r.call(t, one, extra) }
 
 	malformed := `"detail":"malformed_params","retryable":false`
-	// a recognized wait-bearing object echoes zero, an invalid waitMs does not
+	// a waitMs member echoes zero whether or not its value is valid
 	withEcho := bad(`,"waitMs":1000,"foo":1`)
 	require.Contains(t, withEcho, malformed+`,"waitedMs":0}`)
 	exactRoot := bad(`,"stateRoot":"` + root + `","waitMs":0`)
 	require.Contains(t, exactRoot, malformed+`,"waitedMs":0}`)
 	for _, extra := range []string{`,"waitMs":"5"`, `,"waitMs":-1`, `,"waitMs":1.5`, `,"waitMs":null`, `,"waitMs":1,"waitMs":2`} {
 		b := bad(extra)
-		require.Contains(t, b, malformed, extra)
-		require.NotContains(t, b, "waitedMs", extra)
+		require.Contains(t, b, malformed+`,"waitedMs":0}`, extra)
 	}
 	// invalid state ID with a valid wait: the specific validation error, echoed
 	b := goldenPost(t, r.url, `{"jsonrpc":"2.0","id":5,"method":"get_inclusion_proofs.v1","params":{"stateIds":["abcd"],"waitMs":1000}}`)

@@ -165,12 +165,15 @@ func TestV2Waited_ErrorsEchoInErrorData(t *testing.T) {
 		post(v2req(7, `{"stateId":"abcd","waitMs":1000}`)))
 	require.JSONEq(t, `{"jsonrpc":"2.0","error":{"code":-32000,"message":"stateId is required","data":{"waitedMs":0}},"id":7}`,
 		post(v2req(7, `{"waitMs":1000}`)))
-	// an invalid waitMs is not recognized: the legacy error, no echo
-	bad := post(v2req(7, `{`+sid+`,"waitMs":-1}`))
-	require.Contains(t, bad, `"code":-32000`)
-	require.NotContains(t, bad, "waitedMs")
-	dup := post(v2req(7, `{`+sid+`,"waitMs":1,"waitMs":2}`))
-	require.NotContains(t, dup, "waitedMs")
+	// an invalid waitMs is recognized but never a wait: the validation error echoes zero
+	readsBefore := svc.reads.Load()
+	for _, p := range []string{`{` + sid + `,"waitMs":-1}`, `{"waitMs":"5",` + sid + `}`, `{` + sid + `,"waitMs":1,"waitMs":2}`,
+		`{` + sid + `,"wait\u004Ds":1.5}`, `{"stateId":"abcd","waitMs":null}`} {
+		bad := post(v2req(7, p))
+		require.Contains(t, bad, `"code":-32000`, p)
+		require.Contains(t, bad, `"data":{"waitedMs":0}`, p)
+	}
+	require.Equal(t, readsBefore, svc.reads.Load(), "an invalid wait never reaches the service or the coordinator")
 }
 
 // Without the coordinator (long-poll not wired) the reservation behavior stays: waitMs validated,
@@ -204,9 +207,9 @@ func TestV2Waited_OptInRequestBoundsApplyOnlyToWaitRequests(t *testing.T) {
 	require.Contains(t, body, `"detail":"request_bytes"`)
 }
 
-// Every handled error of a request carrying a valid waitMs echoes zero, whatever else is wrong
-// with its typed fields; an invalid waitMs keeps the legacy bytes.
-func TestV2Waited_TypedFieldErrorsStillEchoWhenWaitMsIsValid(t *testing.T) {
+// Every handled error of a request carrying a waitMs member echoes zero, whatever else is wrong
+// with its typed fields and whatever the value of waitMs; requests without the member get none.
+func TestV2Waited_TypedFieldErrorsStillEchoWhateverTheWaitMsValue(t *testing.T) {
 	svc := &waitService{}
 	_, _, post := lpServer(t, svc, 8, 8)
 	for _, params := range []string{
@@ -214,15 +217,16 @@ func TestV2Waited_TypedFieldErrorsStillEchoWhenWaitMsIsValid(t *testing.T) {
 		`{"stateId":"zz","waitMs":0}`,
 		`{"stateId":"` + stateIDHex + `","includeStatus":"yes","waitMs":5}`,
 		`{"waitMs":5,"stateId":[1]}`,
+		`{"stateId":123,"waitMs":-1}`,
+		`{"stateId":"` + stateIDHex + `","includeStatus":"yes","waitMs":"5"}`,
 	} {
 		body := post(v2req(7, params))
 		require.Contains(t, body, `"code":-32000`, params)
 		require.Contains(t, body, `"data":{"waitedMs":0}`, params)
 	}
 	for _, params := range []string{
-		`{"stateId":123,"waitMs":-1}`,
-		`{"stateId":"` + stateIDHex + `","includeStatus":"yes","waitMs":"5"}`,
 		`{"stateId":123}`,
+		`{"stateId":123,"nested":{"waitMs":-1}}`,
 	} {
 		body := post(v2req(7, params))
 		require.Contains(t, body, `"code":-32000`, params)

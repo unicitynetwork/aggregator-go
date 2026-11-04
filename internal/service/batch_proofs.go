@@ -612,10 +612,10 @@ func (s *BatchProofService) HandleRPC(ctx context.Context, params json.RawMessag
 	if err != nil {
 		rpcErr := ParamsBatchError(err).RPCError()
 		if s.longPoll != nil {
-			// A params object carrying a valid waitMs is a recognized wait-bearing request: its
+			// A params object carrying a waitMs member, valid or not (invalid value, duplicate,
+			// escaped spelling, any member order), is a recognized wait-bearing request: its
 			// validation errors echo zero (and tell the client the server understands waitMs).
-			// An invalid or duplicate waitMs is not recognized: the same bytes as without support.
-			if w, serr := api.ScanWaitMs(params); serr == nil && w.Present {
+			if w, _ := api.ScanWaitMs(params); w.Present {
 				rpcErr = rpcErr.WithWaited(0)
 			}
 		}
