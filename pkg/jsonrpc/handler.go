@@ -372,7 +372,7 @@ func writeBody(w http.ResponseWriter, status int, body []byte) {
 // CORS header values of the JSON-RPC endpoint: the request headers clients send, and the response header browsers
 // need to see to honour an overload answer.
 const (
-	CORSAllowHeaders  = "Content-Type, Authorization, X-API-Key, X-State-ID"
+	CORSAllowHeaders  = "Content-Type, Authorization, X-API-Key, X-State-ID, X-SDK-Version"
 	CORSExposeHeaders = "Retry-After"
 )
 

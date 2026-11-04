@@ -33,7 +33,7 @@ func corsServer(t *testing.T, enabled bool) *Server {
 func requireCORS(t *testing.T, h http.Header) {
 	t.Helper()
 	require.Equal(t, "*", h.Get("Access-Control-Allow-Origin"))
-	for _, name := range []string{"Content-Type", "Authorization", "X-State-ID", "X-API-Key"} {
+	for _, name := range []string{"Content-Type", "Authorization", "X-State-ID", "X-API-Key", "X-SDK-Version"} {
 		require.Contains(t, h.Get("Access-Control-Allow-Headers"), name)
 	}
 	require.Equal(t, "Retry-After", h.Get("Access-Control-Expose-Headers"))
