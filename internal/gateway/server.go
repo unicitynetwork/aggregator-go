@@ -18,6 +18,7 @@ import (
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/logger"
 	"github.com/unicitynetwork/aggregator-go/internal/longpoll"
+	"github.com/unicitynetwork/aggregator-go/internal/trustbase/utb"
 	"github.com/unicitynetwork/aggregator-go/pkg/api"
 	"github.com/unicitynetwork/aggregator-go/pkg/jsonrpc"
 )
@@ -32,7 +33,9 @@ type Server struct {
 	service    Service
 
 	longPoll *longpoll.Coordinator
-	conns    *connTracker
+	// utb, when set, serves the signed trust-base history on GET /api/v1/trustbases (see SetTrustBaseHistory)
+	utb   *utb.Guard
+	conns *connTracker
 
 	// admission gate and in-flight register of the handlers (see trackInflight)
 	admitMu    sync.Mutex
@@ -159,7 +162,7 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/health/leader", s.handleLeaderHealth)
 	s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	s.router.PUT("/api/v1/trustbases", s.handlePutTrustBase)
-	s.router.GET("/api/v1/trustbases", getTrustBaseHandler(s.logger, s.service))
+	s.router.GET("/api/v1/trustbases", s.handleGetTrustBases(getTrustBaseHandler(s.logger, s.service)))
 
 	// JSON-RPC endpoint
 	if s.config.Server.EnableCORS {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -32,6 +33,52 @@ type Config struct {
 	Sharding   ShardingConfig   `mapstructure:"sharding"`
 	Chain      ChainConfig      `mapstructure:"chain"`
 	Signing    SigningConfig    `mapstructure:"signing"`
+	UTB        UTBConfig        `mapstructure:"utb"`
+}
+
+// UTBConfig serves the Unicity Trust Base history (signed record version 2) on GET /api/v1/trustbases from a bundle file. Off unless both the file and
+// the genesis pin are set; then GET serves the history and an invalid configuration stops the start (it never falls back to the version 1 trust bases).
+// PUT /api/v1/trustbases and the aggregator's own version 1 trust base are unchanged and do not update the file: a new authority needs a verified
+// replacement bundle and a restart.
+type UTBConfig struct {
+	// BundleFile is the release bundle (tag 39015), unicity-trustbase.<network>.cbor.
+	BundleFile string `mapstructure:"bundle_file"` // UTB_BUNDLE_FILE
+	// GenesisID is the pinned EntryID of the genesis entry, 0x-prefixed hex, from authenticated operator configuration.
+	GenesisID string `mapstructure:"genesis_id"` // UTB_GENESIS_ID
+	// ExpectedNetwork is the network the bundle must belong to. With BFT enabled it defaults to the shard configuration's network and, if set, must equal
+	// it; without BFT (a mirror) it is required.
+	ExpectedNetwork uint32 `mapstructure:"expected_network"` // UTB_EXPECTED_NETWORK
+}
+
+// Enabled reports whether the V2 history is configured.
+func (c UTBConfig) Enabled() bool { return c.BundleFile != "" || c.GenesisID != "" }
+
+// Pin decodes the genesis pin.
+func (c UTBConfig) Pin() ([32]byte, error) {
+	var pin [32]byte
+	b, err := hex.DecodeString(strings.TrimPrefix(c.GenesisID, "0x"))
+	if err != nil || len(b) != len(pin) {
+		return pin, fmt.Errorf("UTB_GENESIS_ID must be 0x followed by 64 hex digits")
+	}
+	copy(pin[:], b)
+	return pin, nil
+}
+
+// Network is the network the bundle must belong to, from configuration independent of the bundle.
+func (c *Config) UTBNetwork() (types.NetworkID, error) {
+	var bft types.NetworkID
+	if c.BFT.Enabled && c.BFT.ShardConf != nil {
+		bft = c.BFT.ShardConf.NetworkID
+	}
+	switch {
+	case bft != 0 && c.UTB.ExpectedNetwork != 0 && types.NetworkID(c.UTB.ExpectedNetwork) != bft:
+		return 0, fmt.Errorf("UTB_EXPECTED_NETWORK %d differs from the BFT shard configuration's network %d", c.UTB.ExpectedNetwork, bft)
+	case bft != 0:
+		return bft, nil
+	case c.UTB.ExpectedNetwork != 0:
+		return types.NetworkID(c.UTB.ExpectedNetwork), nil
+	}
+	return 0, errors.New("UTB_EXPECTED_NETWORK is required without a BFT shard configuration")
 }
 
 // SigningConfig holds the aggregator's signing key configuration
@@ -534,6 +581,12 @@ func Load() (*Config, error) {
 		}
 	}
 
+	config.UTB = UTBConfig{
+		BundleFile:      getEnvOrDefault("UTB_BUNDLE_FILE", ""),
+		GenesisID:       getEnvOrDefault("UTB_GENESIS_ID", ""),
+		ExpectedNetwork: uint32(getEnvIntOrDefault("UTB_EXPECTED_NETWORK", 0)),
+	}
+
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
@@ -552,6 +605,18 @@ func loadConf(path string, conf any) error {
 func (c *Config) Validate() error {
 	if c.Server.Port == "" {
 		return fmt.Errorf("server port cannot be empty")
+	}
+
+	if c.UTB.Enabled() {
+		if c.UTB.BundleFile == "" || c.UTB.GenesisID == "" {
+			return errors.New("UTB_BUNDLE_FILE and UTB_GENESIS_ID must be set together")
+		}
+		if _, err := c.UTB.Pin(); err != nil {
+			return err
+		}
+		if _, err := c.UTBNetwork(); err != nil {
+			return err
+		}
 	}
 
 	if c.Database.URI == "" {

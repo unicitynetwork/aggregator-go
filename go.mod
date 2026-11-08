@@ -240,3 +240,5 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	lukechampine.com/blake3 v1.3.0 // indirect
 )
+
+replace github.com/unicitynetwork/bft-go-base => github.com/ristik/bft-go-base v1.1.1-0.20261108081557-082b9899a680

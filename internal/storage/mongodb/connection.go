@@ -16,6 +16,7 @@ import (
 
 	"github.com/unicitynetwork/aggregator-go/internal/config"
 	"github.com/unicitynetwork/aggregator-go/internal/storage/interfaces"
+	"github.com/unicitynetwork/aggregator-go/internal/trustbase/utb"
 )
 
 // Storage implements the complete storage interface for MongoDB
@@ -319,6 +320,12 @@ func (s *Storage) SmtStorage() interfaces.SmtStorage {
 // LeadershipStorage returns the leadership storage implementation
 func (s *Storage) LeadershipStorage() interfaces.LeadershipStorage {
 	return s.leadershipStorage
+}
+
+// TrustBaseHistoryStore returns the durable store of the signed trust-base history (record version 2). It is not part of the Storage interface: the
+// history is optional, and cmd/aggregator asks for it only when it is configured.
+func (s *Storage) TrustBaseHistoryStore() utb.Store {
+	return NewTrustBaseHistoryStore(s.database)
 }
 
 // TrustBaseStorage returns the trust base storage implementation
