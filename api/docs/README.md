@@ -142,7 +142,7 @@ Unicity Trust Base history (record version 2) instead; `PUT /api/v1/trustbases` 
 | --- | --- |
 | `UTB_BUNDLE_FILE` | the release bundle, `unicity-trustbase.<network>.cbor` (tag 39015, complete history from the genesis) |
 | `UTB_GENESIS_ID` | `0x` + the genesis EntryID: the pin. It comes from your authenticated configuration; it is never computed from the file |
-| `UTB_EXPECTED_NETWORK` | the network the bundle must belong to. With BFT enabled it defaults to the shard configuration's network (and must equal it if set); without BFT it is required |
+| `UTB_EXPECTED_NETWORK` | the network the bundle must belong to. With BFT enabled it defaults to the shard configuration's network (and must equal it if set); without BFT it is required. A decimal number of at most 65535; a value that is not a number or does not fit is refused at start |
 
 Set both file and pin or neither. The startup bundle budget is 64 MiB and 65,536 entries (`utb.LoadConfig` defaults); served pages have the smaller limits below. At start the file is read within a byte budget, decoded strictly, and verified completely (the genesis is the pin, every later entry is signed by a quorum of its predecessor's members), the network must be the configured one, and the held history must agree with the trust base the aggregator holds: every installed V1 epoch the history covers must have the same network, start round, members (id, key, stake) and quorum threshold. Any failure stops the start; an invalid V2 configuration never falls back to the V1 trust bases.
 

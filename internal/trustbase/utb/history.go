@@ -202,7 +202,15 @@ func Open(ctx context.Context, cfg LoadConfig, store Store) (*History, error) {
 		if present[epoch] {
 			continue
 		}
-		if err := store.Put(ctx, epoch, raw); err != nil && !errors.Is(err, ErrExists) {
+		switch err := store.Put(ctx, epoch, raw); {
+		case err == nil:
+		case errors.Is(err, ErrExists):
+			// another process stored this epoch between our read and our write: it is adopted only if it is the same entry, as in Append; another
+			// entry for an epoch the bundle covers is another history, and it stops the start
+			if err := sameStoredEntry(ctx, store, epoch, h.ids[i]); err != nil {
+				return nil, err
+			}
+		default:
 			return nil, fmt.Errorf("%w: writing epoch %d: %w", ErrStore, epoch, err)
 		}
 	}
@@ -210,6 +218,27 @@ func Open(ctx context.Context, cfg LoadConfig, store Store) (*History, error) {
 		return nil, fmt.Errorf("%w: advancing the tip: %w", ErrStore, err)
 	}
 	return h, nil
+}
+
+// sameStoredEntry reads the entry the store holds for an epoch and checks that it has the expected EntryID. A different one is ErrStore: the store holds
+// another history than the one this process was configured with.
+func sameStoredEntry(ctx context.Context, store Store, epoch uint64, want [types.TrustBaseV2IDLen]byte) error {
+	stored, err := store.Get(ctx, epoch)
+	if err != nil {
+		return fmt.Errorf("%w: reading the stored epoch %d: %w", ErrStore, epoch, err)
+	}
+	se, err := types.DecodeRootTrustBaseV2(stored)
+	if err != nil {
+		return fmt.Errorf("%w: the stored epoch %d does not decode: %v", ErrStore, epoch, err)
+	}
+	sid, err := se.EntryID()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrStore, err)
+	}
+	if sid != want {
+		return fmt.Errorf("%w: the store holds another entry for epoch %d (another history)", ErrStore, epoch)
+	}
+	return nil
 }
 
 // verifyNext checks e is exactly the epoch after the held tip and verifies from it. The caller holds the write lock (or owns h).

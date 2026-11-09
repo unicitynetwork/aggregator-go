@@ -550,3 +550,57 @@ func TestUTBConfig(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestUTBExpectedNetworkIsARangeCheckedNumber(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  uint16
+		err   bool
+	}{
+		{value: "", want: 0},
+		{value: "5", want: 5},
+		{value: "65535", want: 65535},
+		{value: "65536", err: true},
+		{value: "65537", err: true}, // not network 1
+		{value: "65541", err: true}, // not network 5
+		{value: "4294967297", err: true},
+		{value: "-1", err: true},
+		{value: "abc", err: true}, // not a silent 0
+		{value: "1.5", err: true},
+		{value: " 5", err: true},
+		{value: "0x5", err: true},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			got, err := parseExpectedNetwork(tc.value)
+			if tc.err {
+				if err == nil {
+					t.Fatalf("parseExpectedNetwork(%q) = %d, want an error", tc.value, got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("parseExpectedNetwork(%q) = %d, %v, want %d", tc.value, got, err, tc.want)
+			}
+		})
+	}
+}
+
+// Load refuses the value instead of starting with another network.
+func TestLoadRefusesAnUnusableUTBExpectedNetwork(t *testing.T) {
+	t.Setenv("BFT_ENABLED", "false")
+	t.Setenv("DISABLE_HIGH_AVAILABILITY", "true")
+	for _, v := range []string{"65537", "abc"} {
+		t.Setenv("UTB_EXPECTED_NETWORK", v)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "UTB_EXPECTED_NETWORK") {
+			t.Fatalf("Load with UTB_EXPECTED_NETWORK=%q: err = %v, want the variable named", v, err)
+		}
+	}
+	t.Setenv("UTB_EXPECTED_NETWORK", "5")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load with UTB_EXPECTED_NETWORK=5: %v", err)
+	}
+	if cfg.UTB.ExpectedNetwork != 5 {
+		t.Fatalf("ExpectedNetwork = %d, want 5", cfg.UTB.ExpectedNetwork)
+	}
+}

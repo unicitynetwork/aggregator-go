@@ -652,10 +652,20 @@ func TestCheckAuthorityComparesTheFieldsBothRecordsCarry(t *testing.T) {
 		"node id": func(v *types.RootTrustBaseV1) {
 			v.RootNodes[0] = &types.NodeInfo{NodeID: "zzz", SigKey: v.RootNodes[0].SigKey, Stake: v.RootNodes[0].Stake}
 		},
+		// the same count of members, one listed twice and one missing: a per-member lookup by node id would accept it
+		"a duplicated member in place of another": func(v *types.RootTrustBaseV1) {
+			v.RootNodes[1] = v.RootNodes[0]
+		},
 	} {
 		require.ErrorIs(t, edit(f), utb.ErrAuthority, name)
 	}
 	require.ErrorIs(t, h.CheckAuthority(utbtest.NewChain(t, 4, 7, 0).V1(7)), utb.ErrBehind, "an epoch not held yet is behind, not a conflict")
+
+	// the order of the members carries nothing: the same set in another order agrees
+	reordered := c.V1(3)
+	reordered.RootNodes = append([]*types.NodeInfo{}, reordered.RootNodes...)
+	reordered.RootNodes[0], reordered.RootNodes[3] = reordered.RootNodes[3], reordered.RootNodes[0]
+	require.NoError(t, h.CheckAuthority(reordered))
 }
 
 func TestCheckInstalledAtStartup(t *testing.T) {
@@ -753,4 +763,43 @@ func TestARefreshThatCannotReadUpToTheAcknowledgedTipReportsAMissingTail(t *test
 	_, err := b.Refresh(ctx)
 	require.ErrorIs(t, err, utb.ErrStore)
 	require.Contains(t, err.Error(), "missing tail")
+}
+
+// racingStore is a store another process writes to between this process's read and its first write: the first Put of the epoch finds that process's
+// entry there already.
+type racingStore struct {
+	*utbtest.MemStore
+	t     *testing.T
+	epoch uint64
+	other []byte // the entry the other process stores for epoch
+}
+
+func (r *racingStore) Put(ctx context.Context, epoch uint64, raw []byte) error {
+	if epoch == r.epoch && r.other != nil {
+		require.NoError(r.t, r.MemStore.Put(ctx, epoch, r.other))
+		r.other = nil
+	}
+	return r.MemStore.Put(ctx, epoch, raw)
+}
+
+// A process whose bundle forks from what another process stored at the same moment must not adopt that entry: Open compares the stored EntryID, as Append
+// does, and refuses to start on another history (the same entry, written by a process with the same bundle, is adopted).
+func TestOpenWhoseWriteFindsAnotherProcessesEntryComparesItsIdentity(t *testing.T) {
+	c := utbtest.NewChain(t, 4, 5, 0)
+	fork := utbtest.NewChain(t, 4, 5, 1) // shares the genesis, forks at epoch 2
+
+	// the other process stored a different entry for epoch 2: another history
+	store := &racingStore{MemStore: utbtest.NewMemStore(), t: t, epoch: 2, other: fork.Raw[1]}
+	_, err := utb.Open(ctx, cfgOf(t, c, 3), store)
+	require.ErrorIs(t, err, utb.ErrStore)
+	require.ErrorContains(t, err, "another entry for epoch 2")
+
+	// the same entry from a process with the same bundle: adopted, the start succeeds with the bundle's history
+	same := &racingStore{MemStore: utbtest.NewMemStore(), t: t, epoch: 2, other: c.Raw[1]}
+	h, err := utb.Open(ctx, cfgOf(t, c, 3), same)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), tipOf(h))
+	id, err := h.Entry(2).EntryID()
+	require.NoError(t, err)
+	require.Equal(t, c.ID(t, 2), id)
 }

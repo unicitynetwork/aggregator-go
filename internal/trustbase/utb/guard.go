@@ -42,21 +42,29 @@ func (h *History) CheckAuthority(v1 *types.RootTrustBaseV1) error {
 	if e.QuorumThreshold != v1.GetQuorumThreshold() {
 		return fmt.Errorf("%w: epoch %d quorum threshold %d in V1 and %d in the history", ErrAuthority, e.Epoch, v1.GetQuorumThreshold(), e.QuorumThreshold)
 	}
-	have := v1.GetRootNodes()
-	if len(have) != len(e.RootNodes) {
-		return fmt.Errorf("%w: epoch %d has %d members in V1 and %d in the history", ErrAuthority, e.Epoch, len(have), len(e.RootNodes))
+	// the two member sets are compared sorted, member by member: a node id listed twice on one side can never agree with a set that lists it once
+	have, want := sortedMembers(v1.GetRootNodes()), sortedMembers(e.RootNodes)
+	if len(have) != len(want) {
+		return fmt.Errorf("%w: epoch %d has %d members in V1 and %d in the history", ErrAuthority, e.Epoch, len(have), len(want))
 	}
-	byID := make(map[string]*types.NodeInfo, len(e.RootNodes))
-	for _, n := range e.RootNodes {
-		byID[n.NodeID] = n
-	}
-	for _, n := range have {
-		m := byID[n.NodeID]
-		if m == nil || !bytes.Equal(m.SigKey, n.SigKey) || m.Stake != n.Stake {
-			return fmt.Errorf("%w: epoch %d member %q differs (key or stake)", ErrAuthority, e.Epoch, n.NodeID)
+	for i := range have {
+		if have[i].NodeID != want[i].NodeID || !bytes.Equal(have[i].SigKey, want[i].SigKey) || have[i].Stake != want[i].Stake {
+			return fmt.Errorf("%w: epoch %d member %q differs (node id, key or stake)", ErrAuthority, e.Epoch, have[i].NodeID)
 		}
 	}
 	return nil
+}
+
+// sortedMembers is a copy of the members ordered by node id, then key.
+func sortedMembers(nodes []*types.NodeInfo) []*types.NodeInfo {
+	out := append([]*types.NodeInfo(nil), nodes...)
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].NodeID != out[j].NodeID {
+			return out[i].NodeID < out[j].NodeID
+		}
+		return bytes.Compare(out[i].SigKey, out[j].SigKey) < 0
+	})
+	return out
 }
 
 // fingerprint is a canonical identity of the authority a V1 trust base carries, so a same-epoch change is noticed.

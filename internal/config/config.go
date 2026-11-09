@@ -47,7 +47,7 @@ type UTBConfig struct {
 	GenesisID string `mapstructure:"genesis_id"` // UTB_GENESIS_ID
 	// ExpectedNetwork is the network the bundle must belong to. With BFT enabled it defaults to the shard configuration's network and, if set, must equal
 	// it; without BFT (a mirror) it is required.
-	ExpectedNetwork uint32 `mapstructure:"expected_network"` // UTB_EXPECTED_NETWORK
+	ExpectedNetwork uint16 `mapstructure:"expected_network"` // UTB_EXPECTED_NETWORK
 }
 
 // Enabled reports whether the V2 history is configured.
@@ -581,10 +581,14 @@ func Load() (*Config, error) {
 		}
 	}
 
+	expectedNetwork, err := parseExpectedNetwork(os.Getenv("UTB_EXPECTED_NETWORK"))
+	if err != nil {
+		return nil, err
+	}
 	config.UTB = UTBConfig{
 		BundleFile:      getEnvOrDefault("UTB_BUNDLE_FILE", ""),
 		GenesisID:       getEnvOrDefault("UTB_GENESIS_ID", ""),
-		ExpectedNetwork: uint32(getEnvIntOrDefault("UTB_EXPECTED_NETWORK", 0)),
+		ExpectedNetwork: expectedNetwork,
 	}
 
 	if err := config.Validate(); err != nil {
@@ -592,6 +596,19 @@ func Load() (*Config, error) {
 	}
 
 	return config, nil
+}
+
+// parseExpectedNetwork reads UTB_EXPECTED_NETWORK: empty is unset (0); anything else has to be a decimal network id of 16 bits. A value that does not
+// fit is refused rather than truncated (65537 must not become network 1), and so is one that is not a number.
+func parseExpectedNetwork(value string) (uint16, error) {
+	if value == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseUint(value, 10, 16)
+	if err != nil {
+		return 0, fmt.Errorf("UTB_EXPECTED_NETWORK %q must be a network id, a decimal number of at most 65535", value)
+	}
+	return uint16(n), nil
 }
 
 func loadConf(path string, conf any) error {
