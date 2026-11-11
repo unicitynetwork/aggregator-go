@@ -495,3 +495,112 @@ func TestConfigValidateRefusesAnotherPartition(t *testing.T) {
 		t.Fatal("partition 0 accepted")
 	}
 }
+
+func TestUTBConfig(t *testing.T) {
+	pin := "0x" + strings.Repeat("ab", 32)
+	bft := func(network bfttypes.NetworkID) BFTConfig {
+		return BFTConfig{Enabled: true, BootstrapAddresses: []string{"/ip4/127.0.0.1/tcp/26662/p2p/16Uiu2HAm6eQMr2sQVbcWZsPPbpc2Su7AnnMVGHpC23PUzGTAATnp"}, ShardConf: &bfttypes.PartitionDescriptionRecord{NetworkID: network, PartitionID: api.AggregationPartitionID}}
+	}
+	cases := []struct {
+		name    string
+		bft     *BFTConfig
+		utb     UTBConfig
+		network bfttypes.NetworkID
+		err     string
+	}{
+		{name: "off", utb: UTBConfig{}},
+		{name: "file without pin", utb: UTBConfig{BundleFile: "b.cbor", ExpectedNetwork: 5}, err: "must be set together"},
+		{name: "pin without file", utb: UTBConfig{GenesisID: pin, ExpectedNetwork: 5}, err: "must be set together"},
+		{name: "pin not hex", utb: UTBConfig{BundleFile: "b", GenesisID: "0xzz", ExpectedNetwork: 5}, err: "UTB_GENESIS_ID"},
+		{name: "pin too short", utb: UTBConfig{BundleFile: "b", GenesisID: "0xabcd", ExpectedNetwork: 5}, err: "UTB_GENESIS_ID"},
+		{name: "mirror without an expected network", utb: UTBConfig{BundleFile: "b", GenesisID: pin}, err: "UTB_EXPECTED_NETWORK is required"},
+		{name: "mirror with an expected network", utb: UTBConfig{BundleFile: "b", GenesisID: pin, ExpectedNetwork: 5}, network: 5},
+		{name: "the network comes from the BFT shard configuration", bft: ptr(bft(7)), utb: UTBConfig{BundleFile: "b", GenesisID: pin}, network: 7},
+		{name: "an explicit network that agrees", bft: ptr(bft(7)), utb: UTBConfig{BundleFile: "b", GenesisID: pin, ExpectedNetwork: 7}, network: 7},
+		{name: "an explicit network that differs from BFT", bft: ptr(bft(7)), utb: UTBConfig{BundleFile: "b", GenesisID: pin, ExpectedNetwork: 5}, err: "differs"},
+	}
+	for _, c := range cases {
+		cfg := validTestConfig()
+		if c.bft != nil {
+			cfg.BFT = *c.bft
+		}
+		cfg.UTB = c.utb
+		err := cfg.Validate()
+		if c.err != "" {
+			if err == nil || !strings.Contains(err.Error(), c.err) {
+				t.Errorf("%s: got %v, want an error containing %q", c.name, err, c.err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if c.utb.Enabled() {
+			got, err := cfg.UTBNetwork()
+			if err != nil || got != c.network {
+				t.Errorf("%s: network %d, %v; want %d", c.name, got, err, c.network)
+			}
+			p, err := cfg.UTB.Pin()
+			if err != nil || p[0] != 0xab || p[31] != 0xab {
+				t.Errorf("%s: pin %x, %v", c.name, p, err)
+			}
+		}
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+func TestUTBExpectedNetworkIsARangeCheckedNumber(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  uint16
+		err   bool
+	}{
+		{value: "", want: 0},
+		{value: "5", want: 5},
+		{value: "65535", want: 65535},
+		{value: "65536", err: true},
+		{value: "65537", err: true}, // not network 1
+		{value: "65541", err: true}, // not network 5
+		{value: "4294967297", err: true},
+		{value: "-1", err: true},
+		{value: "abc", err: true}, // not a silent 0
+		{value: "1.5", err: true},
+		{value: " 5", err: true},
+		{value: "0x5", err: true},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			got, err := parseExpectedNetwork(tc.value)
+			if tc.err {
+				if err == nil {
+					t.Fatalf("parseExpectedNetwork(%q) = %d, want an error", tc.value, got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("parseExpectedNetwork(%q) = %d, %v, want %d", tc.value, got, err, tc.want)
+			}
+		})
+	}
+}
+
+// Load refuses the value instead of starting with another network.
+func TestLoadRefusesAnUnusableUTBExpectedNetwork(t *testing.T) {
+	t.Setenv("BFT_ENABLED", "false")
+	t.Setenv("DISABLE_HIGH_AVAILABILITY", "true")
+	for _, v := range []string{"65537", "abc"} {
+		t.Setenv("UTB_EXPECTED_NETWORK", v)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "UTB_EXPECTED_NETWORK") {
+			t.Fatalf("Load with UTB_EXPECTED_NETWORK=%q: err = %v, want the variable named", v, err)
+		}
+	}
+	t.Setenv("UTB_EXPECTED_NETWORK", "5")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load with UTB_EXPECTED_NETWORK=5: %v", err)
+	}
+	if cfg.UTB.ExpectedNetwork != 5 {
+		t.Fatalf("ExpectedNetwork = %d, want 5", cfg.UTB.ExpectedNetwork)
+	}
+}

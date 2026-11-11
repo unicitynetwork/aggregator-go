@@ -620,6 +620,10 @@ curl -X PUT -H 'Content-Type: application/json' -d @./bft-config/trust-base.json
 }
 ```
 
+#### `GET /api/v1/trustbases`
+
+Optionally serve the signed V2 trust-base history so clients can verify proofs across root epochs. Configure a complete bundle and an independently authenticated genesis pin; see the [API reference](api/docs/README.md#trust-base-history) for configuration, paging and startup checks.
+
 #### `GET /docs`
 Returns **executable** interactive HTML API documentation page with live testing capabilities (if `ENABLE_DOCS=true`).
 
